@@ -3,6 +3,7 @@
 use std::os::fd::AsFd;
 use std::time::Duration;
 
+use crate::afpacket::tx::TxSlot;
 use crate::error::Error;
 use crate::packet::PacketBatch;
 use crate::stats::CaptureStats;
@@ -33,4 +34,18 @@ pub trait PacketSource: AsFd {
 
     /// Capture statistics since last read. Resets kernel counters.
     fn stats(&self) -> Result<CaptureStats, Error>;
+}
+
+/// A sink for outgoing packets (TX path).
+#[diagnostic::on_unimplemented(
+    message = "`{Self}` cannot be used as a packet sink",
+    label = "this type does not implement `PacketSink`",
+    note = "consider using `AfPacketTx` or implementing this trait for your backend"
+)]
+pub trait PacketSink: AsFd {
+    /// Allocate a mutable frame. Returns `None` if the ring is full.
+    fn allocate(&mut self, len: usize) -> Option<TxSlot<'_>>;
+
+    /// Flush pending frames to the wire. Returns count sent.
+    fn flush(&mut self) -> Result<usize, Error>;
 }

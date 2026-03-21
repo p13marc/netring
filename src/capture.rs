@@ -90,6 +90,18 @@ impl Capture {
     pub fn into_inner(self) -> AfPacketRx {
         self.rx
     }
+
+    /// Attach an eBPF socket filter program.
+    ///
+    /// See [`AfPacketRx::attach_ebpf_filter()`] for details.
+    pub fn attach_ebpf_filter(&self, prog_fd: std::os::fd::RawFd) -> Result<(), Error> {
+        self.rx.attach_ebpf_filter(prog_fd)
+    }
+
+    /// Detach any attached BPF/eBPF filter.
+    pub fn detach_filter(&self) -> Result<(), Error> {
+        self.rx.detach_filter()
+    }
 }
 
 impl AsFd for Capture {

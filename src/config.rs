@@ -17,6 +17,13 @@ pub enum FanoutMode {
     Random,
     /// Based on `skb->queue_mapping`.
     QueueMapping,
+    /// eBPF program selects the target socket.
+    ///
+    /// The program receives the packet and returns the socket index
+    /// (0-based) within the fanout group. Requires attaching an eBPF
+    /// program fd via [`CaptureBuilder::fanout_ebpf()`](crate::CaptureBuilder)
+    /// or [`AfPacketRx::attach_ebpf_filter()`](crate::AfPacketRx).
+    Ebpf,
 }
 
 impl FanoutMode {
@@ -29,6 +36,7 @@ impl FanoutMode {
             Self::Rollover => ffi::PACKET_FANOUT_ROLLOVER,
             Self::Random => ffi::PACKET_FANOUT_RND,
             Self::QueueMapping => ffi::PACKET_FANOUT_QM,
+            Self::Ebpf => ffi::PACKET_FANOUT_EBPF,
         }
     }
 }

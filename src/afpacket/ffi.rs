@@ -95,12 +95,22 @@ pub const TP_STATUS_WRONG_FORMAT: u32 = 4;
 
 // ── Fanout modes ───────────────────────────────────────────────────────────
 
+pub use libc::PACKET_FANOUT_CBPF;
 pub use libc::PACKET_FANOUT_CPU;
+pub use libc::PACKET_FANOUT_EBPF;
 pub use libc::PACKET_FANOUT_HASH;
 pub use libc::PACKET_FANOUT_LB;
 pub use libc::PACKET_FANOUT_QM;
 pub use libc::PACKET_FANOUT_RND;
 pub use libc::PACKET_FANOUT_ROLLOVER;
+
+// ── Fanout data (for attaching eBPF program) ───────────────────────────────
+
+pub use libc::PACKET_FANOUT_DATA;
+
+// ── eBPF socket filter ─────────────────────────────────────────────────────
+
+pub use libc::SO_ATTACH_BPF;
 
 // ── Fanout flags ───────────────────────────────────────────────────────────
 

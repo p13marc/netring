@@ -2,7 +2,7 @@
 
 use std::os::fd::BorrowedFd;
 
-use crate::afpacket::socket::raw_setsockopt;
+use crate::sockopt::raw_setsockopt;
 use crate::config::BpfFilter;
 use crate::error::Error;
 

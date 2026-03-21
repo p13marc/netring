@@ -2,7 +2,7 @@
 //!
 //! - [`PacketSource`] — RX path (batch-oriented, zero-copy)
 //! - [`PacketSink`] — TX path (frame-based)
-//! - [`AsyncPacketSource`] — async RX (feature: `tokio`)
+//! - `AsyncPacketSource` — async RX (feature: `tokio`)
 
 use std::os::fd::AsFd;
 use std::time::Duration;

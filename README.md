@@ -2,9 +2,10 @@
 
 High-performance zero-copy packet I/O for Linux.
 
-`netring` provides packet capture and injection via AF_PACKET with TPACKET_V3
-(block-based mmap ring buffers). It offers both a high-level ergonomic API
-and a low-level batch API for maximum throughput.
+`netring` provides packet capture and injection via AF_PACKET (TPACKET_V3
+block-based mmap ring buffers) and AF_XDP (kernel-bypass via XDP sockets).
+It offers both a high-level ergonomic API and a low-level batch API for
+maximum throughput.
 
 ## Quick Start
 
@@ -42,8 +43,10 @@ while let Some(batch) = rx.next_batch_blocking(Duration::from_millis(100)).unwra
 
 | Feature | Default | Description |
 |---------|---------|-------------|
+| `af-xdp` | off | AF_XDP kernel-bypass packet I/O (pure Rust, no native deps) |
 | `tokio` | off | Async capture via `AsyncFd` (wait_readable + next_batch) |
 | `channel` | off | Thread + bounded channel adapter (runtime-agnostic) |
+| `parse` | off | Packet header parsing via `etherparse` |
 
 ## API Levels
 
@@ -51,6 +54,7 @@ while let Some(batch) = rx.next_batch_blocking(Duration::from_millis(100)).unwra
 |-------|-------|-------------|
 | **High** | `Capture`, `Injector` | Simple capture/inject with iterators and builders |
 | **Low** | `AfPacketRx`, `AfPacketTx` | Batch processing, sequence tracking, custom poll logic |
+| **AF_XDP** | `XdpSocket`, `XdpSocketBuilder` | Kernel-bypass via AF_XDP (feature: `af-xdp`) |
 | **Async** | `AsyncCapture`, `ChannelCapture` | Integration with tokio or any async runtime |
 
 ## Default Configuration
@@ -111,14 +115,14 @@ Reading stats resets the kernel counters — call periodically for rate calculat
 
 ## System Requirements
 
-- **Linux** kernel 3.2+ (for TPACKET_V3)
+- **Linux** kernel 3.2+ (for TPACKET_V3), 5.4+ (for AF_XDP)
 - **Rust** 1.85+ (edition 2024)
 
 ### Capabilities
 
 | Capability | Required For |
 |------------|-------------|
-| `CAP_NET_RAW` | Creating AF_PACKET sockets |
+| `CAP_NET_RAW` | Creating AF_PACKET / AF_XDP sockets |
 | `CAP_IPC_LOCK` | `MAP_LOCKED` (or sufficient `RLIMIT_MEMLOCK`) |
 | `CAP_NET_ADMIN` | Promiscuous mode |
 
@@ -146,6 +150,7 @@ just dpi eth0                # deep packet inspection (HTTP/TLS/DNS/SSH detectio
 just channel eth0            # channel adapter (runtime-agnostic)
 just async eth0              # async capture with tokio
 just ebpf                    # eBPF/aya integration demo (AsFd verification)
+cargo run --example xdp_send --features af-xdp -- lo  # AF_XDP TX-only
 ```
 
 ## Documentation

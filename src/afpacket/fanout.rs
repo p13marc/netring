@@ -6,7 +6,7 @@
 use std::os::fd::BorrowedFd;
 
 use crate::afpacket::ffi;
-use crate::afpacket::socket::raw_setsockopt;
+use crate::sockopt::raw_setsockopt;
 use crate::config::{FanoutFlags, FanoutMode};
 use crate::error::Error;
 

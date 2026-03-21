@@ -15,13 +15,7 @@ pub mod traits;
 pub mod afpacket;
 pub mod afxdp;
 pub mod async_adapters;
-
-// Convenience re-exports for channel feature
-#[cfg(feature = "channel")]
-pub mod channel {
-    //! Convenience re-export of [`ChannelCapture`].
-    pub use crate::async_adapters::channel::ChannelCapture;
-}
+pub(crate) mod sockopt;
 
 // Re-exports
 pub use capture::{Capture, CaptureBuilder};
@@ -35,3 +29,13 @@ pub use traits::{PacketSink, PacketSource};
 
 pub use afpacket::rx::{AfPacketRx, AfPacketRxBuilder};
 pub use afpacket::tx::{AfPacketTx, AfPacketTxBuilder, TxSlot};
+
+pub use afxdp::{XdpSocket, XdpSocketBuilder};
+pub use bridge::{Bridge, BridgeAction, BridgeBuilder, BridgeDirection, BridgeStats};
+
+#[cfg(feature = "tokio")]
+pub use async_adapters::tokio_adapter::AsyncCapture;
+#[cfg(feature = "tokio")]
+pub use traits::AsyncPacketSource;
+#[cfg(feature = "channel")]
+pub use async_adapters::channel::ChannelCapture;

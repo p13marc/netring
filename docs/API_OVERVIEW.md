@@ -104,6 +104,32 @@ let mut tx = AfPacketTxBuilder::default()
 // allocate() + send() + flush()
 ```
 
+## AF_XDP API (feature: `af-xdp`)
+
+Kernel-bypass packet I/O via XDP sockets. Uses pure Rust `libc` syscalls
+(no native C dependencies). TX works without a BPF program; RX requires an
+external XDP program (e.g. via `aya`).
+
+```rust,ignore
+use netring::XdpSocketBuilder;
+
+// TX-only (no BPF program needed)
+let mut xdp = XdpSocketBuilder::default()
+    .interface("eth0")
+    .queue_id(0)
+    .build()?;
+
+// Send raw Ethernet frames
+xdp.send(&frame)?;
+xdp.flush()?;
+
+// RX (requires attached XDP program)
+let packets = xdp.recv()?;
+for pkt in &packets {
+    println!("{} bytes", pkt.data.len());
+}
+```
+
 ## Key Types
 
 | Type | Description |

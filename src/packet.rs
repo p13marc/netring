@@ -429,6 +429,16 @@ impl<'a> IntoIterator for &'a PacketBatch<'a> {
     }
 }
 
+impl std::fmt::Debug for PacketBatch<'_> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("PacketBatch")
+            .field("num_pkts", &self.num_pkts)
+            .field("seq_num", &self.seq_num)
+            .field("timed_out", &self.timed_out())
+            .finish()
+    }
+}
+
 impl Drop for PacketBatch<'_> {
     fn drop(&mut self) {
         // SAFETY: self.block is valid (from construction) and we're done reading.
@@ -447,6 +457,14 @@ pub struct BatchIter<'a> {
     remaining: u32,
     block_end: *const u8,
     _marker: PhantomData<&'a ()>,
+}
+
+impl std::fmt::Debug for BatchIter<'_> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("BatchIter")
+            .field("remaining", &self.remaining)
+            .finish()
+    }
 }
 
 impl<'a> Iterator for BatchIter<'a> {

@@ -4,6 +4,7 @@ use std::os::fd::{AsRawFd, BorrowedFd, FromRawFd, OwnedFd};
 
 use super::ffi;
 use crate::error::Error;
+use crate::sockopt::raw_setsockopt;
 
 // ── Socket creation ──────────────────────────────────────────────────────
 
@@ -28,40 +29,11 @@ pub(crate) fn create_xdp_socket() -> Result<OwnedFd, Error> {
     Ok(unsafe { OwnedFd::from_raw_fd(fd) })
 }
 
-// ── setsockopt helpers ───────────────────────────────────────────────────
-
-/// Generic setsockopt wrapper for XDP options.
-fn raw_setsockopt<T>(
-    fd: BorrowedFd<'_>,
-    optname: libc::c_int,
-    val: &T,
-    option_name: &'static str,
-) -> Result<(), Error> {
-    let ret = unsafe {
-        // SAFETY: fd is valid (borrowed), val points to stack-local T of correct size.
-        libc::setsockopt(
-            fd.as_raw_fd(),
-            ffi::SOL_XDP,
-            optname,
-            (val as *const T).cast(),
-            std::mem::size_of::<T>() as libc::socklen_t,
-        )
-    };
-    if ret == -1 {
-        Err(Error::SockOpt {
-            option: option_name,
-            source: std::io::Error::last_os_error(),
-        })
-    } else {
-        Ok(())
-    }
-}
-
 // ── UMEM registration ────────────────────────────────────────────────────
 
 /// Register a UMEM region with the kernel via `XDP_UMEM_REG`.
 pub(crate) fn register_umem(fd: BorrowedFd<'_>, reg: &ffi::xdp_umem_reg) -> Result<(), Error> {
-    raw_setsockopt(fd, ffi::XDP_UMEM_REG, reg, "XDP_UMEM_REG")
+    raw_setsockopt(fd, ffi::SOL_XDP, ffi::XDP_UMEM_REG, reg, "XDP_UMEM_REG")
 }
 
 // ── Ring size configuration ──────────────────────────────────────────────
@@ -76,7 +48,7 @@ pub(crate) fn set_ring_size(
     size: u32,
     option_name: &'static str,
 ) -> Result<(), Error> {
-    raw_setsockopt(fd, opt, &size, option_name)
+    raw_setsockopt(fd, ffi::SOL_XDP, opt, &size, option_name)
 }
 
 // ── mmap offsets ─────────────────────────────────────────────────────────

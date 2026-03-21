@@ -321,7 +321,7 @@ impl AfPacketTxBuilder {
 
         if self.qdisc_bypass {
             let val: libc::c_int = 1;
-            socket::raw_setsockopt(
+            crate::sockopt::raw_setsockopt(
                 fd.as_fd(),
                 ffi::SOL_PACKET,
                 ffi::PACKET_QDISC_BYPASS,

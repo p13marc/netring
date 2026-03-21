@@ -71,6 +71,7 @@ impl std::fmt::Display for BridgeStats {
 /// Interface A ──RX──→ filter ──TX──→ Interface B
 /// Interface B ──RX──→ filter ──TX──→ Interface A
 /// ```
+#[must_use]
 pub struct Bridge {
     rx_a: AfPacketRx,
     tx_b: AfPacketTx,

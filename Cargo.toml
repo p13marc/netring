@@ -1,11 +1,11 @@
 [package]
 name = "netring"
-version = "0.1.0"
+version = "0.2.0"
 edition = "2024"
 rust-version = "1.85"
 license = "MIT OR Apache-2.0"
-description = "High-performance zero-copy packet I/O for Linux (AF_PACKET TPACKET_V3)"
-keywords = ["packet", "capture", "af_packet", "tpacket", "zero-copy"]
+description = "High-performance zero-copy packet I/O for Linux (AF_PACKET TPACKET_V3 + AF_XDP)"
+keywords = ["packet", "capture", "af_packet", "af_xdp", "zero-copy"]
 categories = ["network-programming", "os::linux-apis"]
 readme = "README.md"
 documentation = "https://docs.rs/netring"

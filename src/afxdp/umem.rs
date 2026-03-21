@@ -208,4 +208,11 @@ mod tests {
         assert!(Umem::new(0, 16).is_err());
         assert!(Umem::new(4096, 0).is_err());
     }
+
+    #[test]
+    fn overflow_rejected() {
+        // frame_size * frame_count would overflow usize
+        let result = Umem::new(usize::MAX, 2);
+        assert!(result.is_err());
+    }
 }

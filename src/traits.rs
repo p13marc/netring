@@ -49,3 +49,12 @@ pub trait PacketSink: AsFd {
     /// Flush pending frames to the wire. Returns count sent.
     fn flush(&mut self) -> Result<usize, Error>;
 }
+
+/// Async packet source using native `async fn` in traits (stable since Rust 1.75).
+#[cfg(feature = "tokio")]
+pub trait AsyncPacketSource: AsFd {
+    /// Await the next packet batch.
+    fn next_batch(
+        &mut self,
+    ) -> impl std::future::Future<Output = Result<PacketBatch<'_>, Error>> + Send;
+}

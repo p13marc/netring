@@ -16,6 +16,14 @@ pub mod stats;
 pub mod traits;
 
 pub mod afpacket;
+pub mod async_adapters;
+
+// Convenience re-exports for channel feature
+#[cfg(feature = "channel")]
+pub mod channel {
+    //! Convenience re-export of [`ChannelCapture`](crate::async_adapters::channel::ChannelCapture).
+    pub use crate::async_adapters::channel::ChannelCapture;
+}
 
 // Re-exports
 pub use capture::{Capture, CaptureBuilder};

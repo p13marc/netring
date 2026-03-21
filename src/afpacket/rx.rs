@@ -1,6 +1,6 @@
 //! AF_PACKET TPACKET_V3 RX path.
 
-use std::os::fd::{AsFd, BorrowedFd, OwnedFd};
+use std::os::fd::{AsFd, AsRawFd, BorrowedFd, OwnedFd};
 use std::time::Duration;
 
 use crate::afpacket::{ffi, filter, fanout, ring, socket};
@@ -118,6 +118,12 @@ impl std::fmt::Debug for AfPacketRx {
 impl AsFd for AfPacketRx {
     fn as_fd(&self) -> BorrowedFd<'_> {
         self.fd.as_fd()
+    }
+}
+
+impl AsRawFd for AfPacketRx {
+    fn as_raw_fd(&self) -> std::os::fd::RawFd {
+        self.fd.as_raw_fd()
     }
 }
 

@@ -3,8 +3,8 @@
 use std::os::fd::{AsFd, AsRawFd, BorrowedFd, OwnedFd};
 use std::time::Duration;
 
-use crate::afpacket::{ffi, filter, fanout, ring, socket};
 use crate::afpacket::ring::MmapRing;
+use crate::afpacket::{fanout, ffi, filter, ring, socket};
 use crate::config::{BpfFilter, BpfInsn, FanoutFlags, FanoutMode, TimestampSource};
 use crate::error::Error;
 use crate::packet::PacketBatch;
@@ -75,10 +75,7 @@ impl PacketSource for AfPacketRx {
         Some(batch)
     }
 
-    fn next_batch_blocking(
-        &mut self,
-        timeout: Duration,
-    ) -> Result<Option<PacketBatch<'_>>, Error> {
+    fn next_batch_blocking(&mut self, timeout: Duration) -> Result<Option<PacketBatch<'_>>, Error> {
         // Check if a batch is already available (non-blocking).
         // We inline the status check rather than calling next_batch() to
         // avoid a borrow conflict with the poll() call below.
@@ -154,7 +151,7 @@ impl Default for AfPacketRxBuilder {
     fn default() -> Self {
         Self {
             interface: None,
-            block_size: 1 << 22,   // 4 MiB
+            block_size: 1 << 22, // 4 MiB
             block_count: 64,
             frame_size: 2048,
             block_timeout_ms: 60,

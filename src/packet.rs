@@ -636,10 +636,7 @@ mod tests {
 
     #[test]
     fn batch_timed_out_flag() {
-        let block = build_synthetic_block(
-            &[b"data"],
-            ffi::TP_STATUS_USER | ffi::TP_STATUS_BLK_TMO,
-        );
+        let block = build_synthetic_block(&[b"data"], ffi::TP_STATUS_USER | ffi::TP_STATUS_BLK_TMO);
         let bd = NonNull::new(block.as_ptr() as *mut ffi::tpacket_block_desc).unwrap();
         let batch = unsafe { PacketBatch::new(bd) };
         assert!(batch.timed_out());

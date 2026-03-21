@@ -33,7 +33,11 @@ fn capture_loopback_basic() {
     while Instant::now() < deadline {
         if let Some(batch) = rx.next_batch_blocking(Duration::from_millis(200)).unwrap() {
             for pkt in &batch {
-                if pkt.data().windows(marker.len()).any(|w| w == marker.as_bytes()) {
+                if pkt
+                    .data()
+                    .windows(marker.len())
+                    .any(|w| w == marker.as_bytes())
+                {
                     found += 1;
                 }
             }
@@ -70,7 +74,11 @@ fn low_level_rx_next_batch() {
         if let Some(batch) = rx.next_batch_blocking(Duration::from_millis(100)).unwrap() {
             assert!(!batch.is_empty());
             for pkt in &batch {
-                if pkt.data().windows(marker.len()).any(|w| w == marker.as_bytes()) {
+                if pkt
+                    .data()
+                    .windows(marker.len())
+                    .any(|w| w == marker.as_bytes())
+                {
                     found = true;
                 }
             }

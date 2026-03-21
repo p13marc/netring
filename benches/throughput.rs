@@ -3,7 +3,7 @@
 //! Benchmarks that don't require CAP_NET_RAW measure iterator and conversion
 //! performance using synthetic data. Network benchmarks require privileges.
 
-use criterion::{criterion_group, criterion_main, Criterion, Throughput};
+use criterion::{Criterion, Throughput, criterion_group, criterion_main};
 use netring::Timestamp;
 
 fn bench_timestamp_conversion(c: &mut Criterion) {
@@ -33,5 +33,9 @@ fn bench_packet_status_decode(c: &mut Criterion) {
     });
 }
 
-criterion_group!(benches, bench_timestamp_conversion, bench_packet_status_decode);
+criterion_group!(
+    benches,
+    bench_timestamp_conversion,
+    bench_packet_status_decode
+);
 criterion_main!(benches);

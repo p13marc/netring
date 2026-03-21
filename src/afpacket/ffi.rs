@@ -12,16 +12,16 @@ use libc::c_int;
 
 // ── Struct re-exports ──────────────────────────────────────────────────────
 
-pub use libc::sockaddr_ll;
 pub use libc::sock_filter;
 pub use libc::sock_fprog;
-pub use libc::tpacket3_hdr;
+pub use libc::sockaddr_ll;
 pub use libc::tpacket_bd_ts;
 pub use libc::tpacket_block_desc;
 pub use libc::tpacket_hdr_v1;
 pub use libc::tpacket_hdr_variant1;
 pub use libc::tpacket_req3;
 pub use libc::tpacket_stats_v3;
+pub use libc::tpacket3_hdr;
 
 // ── Socket level & options ─────────────────────────────────────────────────
 
@@ -51,8 +51,8 @@ pub const TPACKET_V3_INT: c_int = libc::tpacket_versions::TPACKET_V3 as c_int;
 
 // ── Alignment ──────────────────────────────────────────────────────────────
 
-pub use libc::TPACKET3_HDRLEN;
 pub use libc::TPACKET_ALIGNMENT;
+pub use libc::TPACKET3_HDRLEN;
 
 /// Align `x` up to `TPACKET_ALIGNMENT` (16 bytes).
 pub const fn tpacket_align(x: usize) -> usize {
@@ -72,8 +72,8 @@ pub use libc::TP_STATUS_USER;
 // ── Per-packet status flags ────────────────────────────────────────────────
 
 pub use libc::TP_STATUS_COPY;
-pub use libc::TP_STATUS_CSUMNOTREADY;
 pub use libc::TP_STATUS_CSUM_VALID;
+pub use libc::TP_STATUS_CSUMNOTREADY;
 pub use libc::TP_STATUS_LOSING;
 pub use libc::TP_STATUS_VLAN_TPID_VALID;
 pub use libc::TP_STATUS_VLAN_VALID;

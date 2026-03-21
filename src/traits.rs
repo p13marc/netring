@@ -65,10 +65,7 @@ pub trait PacketSource: AsFd {
     /// # Errors
     ///
     /// Returns [`Error::Io`] if the underlying `poll()` syscall fails.
-    fn next_batch_blocking(
-        &mut self,
-        timeout: Duration,
-    ) -> Result<Option<PacketBatch<'_>>, Error>;
+    fn next_batch_blocking(&mut self, timeout: Duration) -> Result<Option<PacketBatch<'_>>, Error>;
 
     /// Capture statistics since last read.
     ///

@@ -3,8 +3,8 @@
 //! Usage: cargo run --example fanout -- [interface] [num_threads]
 
 use netring::{Capture, FanoutFlags, FanoutMode};
-use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::thread;
 
 fn main() -> Result<(), netring::Error> {

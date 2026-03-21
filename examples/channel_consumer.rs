@@ -17,8 +17,10 @@ fn main() -> Result<(), netring::Error> {
     for pkt in &rx {
         println!(
             "[{}.{:09}] {} bytes (wire: {})",
-            pkt.timestamp.sec, pkt.timestamp.nsec,
-            pkt.data.len(), pkt.original_len,
+            pkt.timestamp.sec,
+            pkt.timestamp.nsec,
+            pkt.data.len(),
+            pkt.original_len,
         );
         count += 1;
         if count >= 50 {
@@ -33,5 +35,7 @@ fn main() -> Result<(), netring::Error> {
 
 #[cfg(not(feature = "channel"))]
 fn main() {
-    eprintln!("This example requires the 'channel' feature: cargo run --example channel_consumer --features channel");
+    eprintln!(
+        "This example requires the 'channel' feature: cargo run --example channel_consumer --features channel"
+    );
 }

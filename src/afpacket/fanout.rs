@@ -23,7 +23,13 @@ pub(crate) fn join_fanout(
     let type_flags = mode.as_raw() as u16 | flags.bits();
     let val: u32 = (group_id as u32) | ((type_flags as u32) << 16);
     let val_int = val as libc::c_int;
-    raw_setsockopt(fd, ffi::SOL_PACKET, ffi::PACKET_FANOUT, &val_int, "PACKET_FANOUT")
+    raw_setsockopt(
+        fd,
+        ffi::SOL_PACKET,
+        ffi::PACKET_FANOUT,
+        &val_int,
+        "PACKET_FANOUT",
+    )
 }
 
 #[cfg(test)]

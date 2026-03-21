@@ -341,8 +341,9 @@ impl<'cap> Iterator for PacketIter<'cap> {
                 let data: &'cap [u8] = unsafe { std::slice::from_raw_parts(data_ptr, snaplen) };
 
                 if hdr.tp_next_offset != 0 {
-                    self.current_ptr =
-                        self.current_ptr.map_addr(|a| a + hdr.tp_next_offset as usize);
+                    self.current_ptr = self
+                        .current_ptr
+                        .map_addr(|a| a + hdr.tp_next_offset as usize);
                 }
                 self.remaining -= 1;
 

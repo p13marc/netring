@@ -30,7 +30,11 @@ fn capture_stats_basic() {
     let rx = cap.into_inner();
     let mut rx = rx;
     for _ in 0..10 {
-        if rx.next_batch_blocking(Duration::from_millis(50)).unwrap().is_some() {
+        if rx
+            .next_batch_blocking(Duration::from_millis(50))
+            .unwrap()
+            .is_some()
+        {
             break;
         }
     }
@@ -38,5 +42,8 @@ fn capture_stats_basic() {
     let stats = rx.stats().expect("get stats");
     // We should have received at least some packets (loopback has other traffic too)
     // The exact count depends on timing, so just verify the field is populated.
-    assert_eq!(stats.drops, 0, "no drops expected on loopback with default ring");
+    assert_eq!(
+        stats.drops, 0,
+        "no drops expected on loopback with default ring"
+    );
 }

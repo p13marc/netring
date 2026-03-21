@@ -90,12 +90,24 @@ pub(crate) fn set_packet_version(fd: BorrowedFd<'_>) -> Result<(), Error> {
 
 /// Set up the RX ring via `PACKET_RX_RING`.
 pub(crate) fn set_rx_ring(fd: BorrowedFd<'_>, req: &ffi::tpacket_req3) -> Result<(), Error> {
-    raw_setsockopt(fd, ffi::SOL_PACKET, ffi::PACKET_RX_RING, req, "PACKET_RX_RING")
+    raw_setsockopt(
+        fd,
+        ffi::SOL_PACKET,
+        ffi::PACKET_RX_RING,
+        req,
+        "PACKET_RX_RING",
+    )
 }
 
 /// Set up the TX ring via `PACKET_TX_RING`.
 pub(crate) fn set_tx_ring(fd: BorrowedFd<'_>, req: &ffi::tpacket_req3) -> Result<(), Error> {
-    raw_setsockopt(fd, ffi::SOL_PACKET, ffi::PACKET_TX_RING, req, "PACKET_TX_RING")
+    raw_setsockopt(
+        fd,
+        ffi::SOL_PACKET,
+        ffi::PACKET_TX_RING,
+        req,
+        "PACKET_TX_RING",
+    )
 }
 
 /// Bind the socket to a specific interface.
@@ -152,7 +164,13 @@ pub(crate) fn set_ignore_outgoing(fd: BorrowedFd<'_>) -> Result<(), Error> {
 /// Set `SO_BUSY_POLL` for kernel-side NIC driver polling.
 pub(crate) fn set_busy_poll(fd: BorrowedFd<'_>, us: u32) -> Result<(), Error> {
     let val = us as libc::c_int;
-    raw_setsockopt(fd, libc::SOL_SOCKET, libc::SO_BUSY_POLL, &val, "SO_BUSY_POLL")
+    raw_setsockopt(
+        fd,
+        libc::SOL_SOCKET,
+        libc::SO_BUSY_POLL,
+        &val,
+        "SO_BUSY_POLL",
+    )
 }
 
 /// Set `PACKET_TIMESTAMP` source.

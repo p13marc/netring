@@ -111,10 +111,7 @@ fn format_transport<'a>(parsed: &'a SlicedPacket<'a>) -> (&'static str, u16, u16
         Some(TransportSlice::Icmpv4(icmp)) => ("ICMP", 0, 0, icmp.payload()),
         Some(TransportSlice::Icmpv6(icmp)) => ("ICMPv6", 0, 0, icmp.payload()),
         None => {
-            let payload = parsed
-                .ip_payload()
-                .map(|p| p.payload)
-                .unwrap_or(&[]);
+            let payload = parsed.ip_payload().map(|p| p.payload).unwrap_or(&[]);
             ("???", 0, 0, payload)
         }
     }
@@ -192,15 +189,29 @@ fn format_payload_peek(payload: &[u8]) -> String {
     let preview = &payload[..preview_len];
 
     // If mostly printable ASCII, show as text
-    let printable = preview.iter().filter(|b| b.is_ascii_graphic() || **b == b' ').count();
+    let printable = preview
+        .iter()
+        .filter(|b| b.is_ascii_graphic() || **b == b' ')
+        .count();
     if printable > preview_len / 2 {
         let s: String = preview
             .iter()
-            .map(|&b| if b.is_ascii_graphic() || b == b' ' { b as char } else { '.' })
+            .map(|&b| {
+                if b.is_ascii_graphic() || b == b' ' {
+                    b as char
+                } else {
+                    '.'
+                }
+            })
             .collect();
         format!(" | {s}")
     } else {
-        let hex: String = preview.iter().take(16).map(|b| format!("{b:02x}")).collect::<Vec<_>>().join(" ");
+        let hex: String = preview
+            .iter()
+            .take(16)
+            .map(|b| format!("{b:02x}"))
+            .collect::<Vec<_>>()
+            .join(" ");
         format!(" | {hex}")
     }
 }

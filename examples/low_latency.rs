@@ -31,7 +31,10 @@ fn main() -> Result<(), netring::Error> {
             let delta_us = (now_nsec.saturating_sub(prev)) as f64 / 1000.0;
             println!(
                 "[{}.{:09}] {} bytes  Δ={:.1}µs",
-                ts.sec, ts.nsec, pkt.len(), delta_us,
+                ts.sec,
+                ts.nsec,
+                pkt.len(),
+                delta_us,
             );
         } else {
             println!("[{}.{:09}] {} bytes  (first)", ts.sec, ts.nsec, pkt.len());

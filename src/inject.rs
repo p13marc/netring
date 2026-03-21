@@ -59,9 +59,7 @@ impl AsFd for Injector {
 
 impl std::fmt::Debug for Injector {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("Injector")
-            .field("tx", &self.tx)
-            .finish()
+        f.debug_struct("Injector").field("tx", &self.tx).finish()
     }
 }
 

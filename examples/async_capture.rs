@@ -5,8 +5,8 @@
 #[cfg(feature = "tokio")]
 #[tokio::main]
 async fn main() -> Result<(), netring::Error> {
-    use netring::{AfPacketRxBuilder, PacketSource};
     use netring::async_adapters::tokio_adapter::AsyncCapture;
+    use netring::{AfPacketRxBuilder, PacketSource};
 
     let iface = std::env::args().nth(1).unwrap_or_else(|| "lo".into());
     eprintln!("Async capture on {iface}...");
@@ -43,5 +43,7 @@ async fn main() -> Result<(), netring::Error> {
 
 #[cfg(not(feature = "tokio"))]
 fn main() {
-    eprintln!("This example requires the 'tokio' feature: cargo run --example async_capture --features tokio");
+    eprintln!(
+        "This example requires the 'tokio' feature: cargo run --example async_capture --features tokio"
+    );
 }

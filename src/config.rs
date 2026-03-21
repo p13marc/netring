@@ -193,8 +193,18 @@ mod tests {
     #[test]
     fn bpf_filter_accessors() {
         let insns = vec![
-            BpfInsn { code: 0x28, jt: 0, jf: 0, k: 12 },
-            BpfInsn { code: 0x06, jt: 0, jf: 0, k: 0xFFFF },
+            BpfInsn {
+                code: 0x28,
+                jt: 0,
+                jf: 0,
+                k: 12,
+            },
+            BpfInsn {
+                code: 0x06,
+                jt: 0,
+                jf: 0,
+                k: 0xFFFF,
+            },
         ];
         let filter = BpfFilter::new(insns.clone());
         assert_eq!(filter.len(), 2);

@@ -35,7 +35,8 @@ impl MmapRing {
     ) -> Result<Self, Error> {
         debug_assert_eq!(size, block_size * block_count);
 
-        let length = NonZeroUsize::new(size).ok_or_else(|| Error::Config("ring size is 0".into()))?;
+        let length =
+            NonZeroUsize::new(size).ok_or_else(|| Error::Config("ring size is 0".into()))?;
 
         let prot = ProtFlags::PROT_READ | ProtFlags::PROT_WRITE;
         let flags = MapFlags::MAP_SHARED | MapFlags::MAP_LOCKED | MapFlags::MAP_POPULATE;
@@ -52,9 +53,7 @@ impl MmapRing {
             | Err(nix::errno::Errno::EAGAIN) => {
                 // MAP_LOCKED may fail without CAP_IPC_LOCK or when RLIMIT_MEMLOCK
                 // is exceeded (EAGAIN). Retry without it.
-                log::warn!(
-                    "mmap with MAP_LOCKED failed, retrying without (consider CAP_IPC_LOCK)"
-                );
+                log::warn!("mmap with MAP_LOCKED failed, retrying without (consider CAP_IPC_LOCK)");
                 let flags_no_lock = MapFlags::MAP_SHARED | MapFlags::MAP_POPULATE;
                 unsafe { nix::sys::mman::mmap(None, length, prot, flags_no_lock, &fd, 0) }
                     .map_err(|e| Error::Mmap(e.into()))?
@@ -76,7 +75,11 @@ impl MmapRing {
     ///
     /// Panics if `index >= block_count`.
     pub(crate) fn block_ptr(&self, index: usize) -> NonNull<ffi::tpacket_block_desc> {
-        assert!(index < self.block_count, "block index {index} out of range (count: {})", self.block_count);
+        assert!(
+            index < self.block_count,
+            "block index {index} out of range (count: {})",
+            self.block_count
+        );
         let offset = index * self.block_size;
         let ptr = self.base.as_ptr().map_addr(|a| a + offset);
         // SAFETY: base is non-null, offset is within the mmap region.
@@ -129,9 +132,8 @@ unsafe impl Send for MmapRing {}
 pub(crate) unsafe fn read_block_status(bd: NonNull<ffi::tpacket_block_desc>) -> u32 {
     // SAFETY: caller guarantees bd is valid. We use addr_of! to avoid
     // creating a reference to the union, then cast to AtomicU32.
-    let status_ptr = unsafe {
-        core::ptr::addr_of!((*bd.as_ptr()).hdr.bh1.block_status) as *const AtomicU32
-    };
+    let status_ptr =
+        unsafe { core::ptr::addr_of!((*bd.as_ptr()).hdr.bh1.block_status) as *const AtomicU32 };
     // SAFETY: block_status is a naturally-aligned u32. AtomicU32 has the
     // same size and alignment.
     unsafe { &*status_ptr }.load(Ordering::Acquire)
@@ -147,9 +149,8 @@ pub(crate) unsafe fn read_block_status(bd: NonNull<ffi::tpacket_block_desc>) -> 
 /// `bd` must point to a valid `tpacket_block_desc` within an mmap'd region.
 pub(crate) unsafe fn release_block(bd: NonNull<ffi::tpacket_block_desc>) {
     // SAFETY: same as read_block_status — valid pointer, aligned u32.
-    let status_ptr = unsafe {
-        core::ptr::addr_of!((*bd.as_ptr()).hdr.bh1.block_status) as *const AtomicU32
-    };
+    let status_ptr =
+        unsafe { core::ptr::addr_of!((*bd.as_ptr()).hdr.bh1.block_status) as *const AtomicU32 };
     // SAFETY: AtomicU32 reference is valid for the mmap region lifetime.
     unsafe { &*status_ptr }.store(ffi::TP_STATUS_KERNEL, Ordering::Release);
 }

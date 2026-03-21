@@ -11,7 +11,7 @@ use std::time::Duration;
 fn capture_stats_basic() {
     let port = helpers::unique_port();
 
-    let mut cap = Capture::builder()
+    let cap = Capture::builder()
         .interface(helpers::LOOPBACK)
         .block_timeout_ms(10)
         .build()

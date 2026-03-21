@@ -23,12 +23,12 @@ impl FanoutMode {
     /// Kernel constant for this mode.
     pub(crate) const fn as_raw(self) -> u32 {
         match self {
-            Self::Hash => ffi::PACKET_FANOUT_HASH as u32,
-            Self::LoadBalance => ffi::PACKET_FANOUT_LB as u32,
-            Self::Cpu => ffi::PACKET_FANOUT_CPU as u32,
-            Self::Rollover => ffi::PACKET_FANOUT_ROLLOVER as u32,
-            Self::Random => ffi::PACKET_FANOUT_RND as u32,
-            Self::QueueMapping => ffi::PACKET_FANOUT_QM as u32,
+            Self::Hash => ffi::PACKET_FANOUT_HASH,
+            Self::LoadBalance => ffi::PACKET_FANOUT_LB,
+            Self::Cpu => ffi::PACKET_FANOUT_CPU,
+            Self::Rollover => ffi::PACKET_FANOUT_ROLLOVER,
+            Self::Random => ffi::PACKET_FANOUT_RND,
+            Self::QueueMapping => ffi::PACKET_FANOUT_QM,
         }
     }
 }

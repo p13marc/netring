@@ -262,7 +262,7 @@ impl AfPacketTxBuilder {
             .interface
             .ok_or_else(|| Error::Config("interface is required".into()))?;
 
-        let align = ffi::TPACKET_ALIGNMENT as usize;
+        let align = ffi::TPACKET_ALIGNMENT;
         if self.frame_size % align != 0 {
             return Err(Error::Config(format!(
                 "frame_size {} is not a multiple of TPACKET_ALIGNMENT ({})",
@@ -270,7 +270,7 @@ impl AfPacketTxBuilder {
             )));
         }
 
-        let hdrlen = ffi::TPACKET3_HDRLEN as usize;
+        let hdrlen = ffi::TPACKET3_HDRLEN;
         if self.frame_size < hdrlen {
             return Err(Error::Config(format!(
                 "frame_size {} is less than TPACKET3_HDRLEN ({})",
@@ -298,8 +298,7 @@ impl AfPacketTxBuilder {
         }
 
         let frames_per_block = block_size / self.frame_size;
-        let block_count =
-            (self.frame_count + frames_per_block - 1) / frames_per_block;
+        let block_count = self.frame_count.div_ceil(frames_per_block);
         let actual_frame_count = block_count * frames_per_block;
 
         let mut req: ffi::tpacket_req3 = unsafe { std::mem::zeroed() };

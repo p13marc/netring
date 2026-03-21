@@ -4,7 +4,7 @@
 
 mod helpers;
 
-use netring::{Capture, FanoutFlags, FanoutMode, PacketSource};
+use netring::{Capture, FanoutFlags, FanoutMode};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 use std::thread;

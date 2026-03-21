@@ -57,7 +57,7 @@ mod tests {
 
     #[test]
     fn from_io_error() {
-        let io_err = std::io::Error::new(std::io::ErrorKind::Other, "test");
+        let io_err = std::io::Error::other("test");
         let err: Error = io_err.into();
         assert!(matches!(err, Error::Io(_)));
     }
@@ -73,7 +73,7 @@ mod tests {
         let e = Error::PermissionDenied;
         assert!(e.to_string().contains("CAP_NET_RAW"));
 
-        let io_err = std::io::Error::new(std::io::ErrorKind::Other, "fail");
+        let io_err = std::io::Error::other("fail");
         let e = Error::SockOpt {
             option: "PACKET_VERSION",
             source: io_err,

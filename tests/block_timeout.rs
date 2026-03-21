@@ -26,7 +26,7 @@ fn block_timeout_triggers() {
         .expect("poll")
         .expect("should get a batch via timeout");
 
-    assert!(batch.len() > 0);
+    assert!(!batch.is_empty());
     // With a 10ms timeout and only 1 packet, the block was likely
     // retired via timeout. Note: on a busy loopback, the block might
     // fill with other traffic before the timeout fires.

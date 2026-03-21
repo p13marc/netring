@@ -1,5 +1,7 @@
 //! Shared test helpers for integration tests.
 
+#![allow(dead_code)]
+
 use std::net::UdpSocket;
 use std::sync::atomic::{AtomicU16, Ordering};
 

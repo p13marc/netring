@@ -64,7 +64,7 @@ fn low_level_rx_next_batch() {
     let mut found = false;
     for _ in 0..50 {
         if let Some(batch) = rx.next_batch_blocking(Duration::from_millis(100)).unwrap() {
-            assert!(batch.len() > 0);
+            assert!(!batch.is_empty());
             for pkt in &batch {
                 if pkt.data().windows(marker.len()).any(|w| w == marker.as_bytes()) {
                     found = true;

@@ -265,7 +265,7 @@ impl AfPacketRxBuilder {
             )));
         }
 
-        let align = ffi::TPACKET_ALIGNMENT as usize;
+        let align = ffi::TPACKET_ALIGNMENT;
         if self.frame_size % align != 0 {
             return Err(Error::Config(format!(
                 "frame_size {} is not a multiple of TPACKET_ALIGNMENT ({})",
@@ -273,7 +273,7 @@ impl AfPacketRxBuilder {
             )));
         }
 
-        let hdrlen = ffi::TPACKET3_HDRLEN as usize;
+        let hdrlen = ffi::TPACKET3_HDRLEN;
         if self.frame_size < hdrlen {
             return Err(Error::Config(format!(
                 "frame_size {} is less than TPACKET3_HDRLEN ({})",

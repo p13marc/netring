@@ -67,16 +67,9 @@ impl std::fmt::Debug for Injector {
 
 /// Builder for [`Injector`].
 #[must_use]
+#[derive(Default)]
 pub struct InjectorBuilder {
     inner: AfPacketTxBuilder,
-}
-
-impl Default for InjectorBuilder {
-    fn default() -> Self {
-        Self {
-            inner: AfPacketTxBuilder::default(),
-        }
-    }
 }
 
 impl InjectorBuilder {

@@ -56,7 +56,7 @@ pub use libc::TPACKET_ALIGNMENT;
 
 /// Align `x` up to `TPACKET_ALIGNMENT` (16 bytes).
 pub const fn tpacket_align(x: usize) -> usize {
-    (x + (TPACKET_ALIGNMENT as usize) - 1) & !((TPACKET_ALIGNMENT as usize) - 1)
+    (x + TPACKET_ALIGNMENT - 1) & !(TPACKET_ALIGNMENT - 1)
 }
 
 // ── Feature request flags ──────────────────────────────────────────────────

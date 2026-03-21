@@ -70,7 +70,7 @@ impl PacketSource for AfPacketRx {
         self.expected_seq = seq + 1;
 
         // SAFETY: block is user-owned, bd is valid, block_size is correct.
-        let batch = unsafe { PacketBatch::new(bd, self.ring.block_size()) };
+        let batch = unsafe { PacketBatch::new(bd) };
         self.current_block = (self.current_block + 1) % self.ring.block_count();
         Some(batch)
     }
@@ -91,7 +91,7 @@ impl PacketSource for AfPacketRx {
         }
 
         // No batch ready — block on poll(2).
-        let mut pfd = nix::poll::PollFd::new(self.fd.as_fd(), nix::poll::PollFlags::POLLIN);
+        let pfd = nix::poll::PollFd::new(self.fd.as_fd(), nix::poll::PollFlags::POLLIN);
         let poll_timeout =
             nix::poll::PollTimeout::try_from(timeout).unwrap_or(nix::poll::PollTimeout::MAX);
         nix::poll::poll(&mut [pfd], poll_timeout).map_err(|e| Error::Io(e.into()))?;

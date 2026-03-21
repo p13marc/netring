@@ -330,7 +330,7 @@ impl<'cap> Iterator for PacketIter<'cap> {
 
             // Drop exhausted batch
             if let Some(batch) = self.batch.take() {
-                unsafe { ManuallyDrop::into_inner(batch) };
+                let _ = ManuallyDrop::into_inner(batch);
             }
 
             // Get next batch
@@ -362,7 +362,7 @@ impl<'cap> Iterator for PacketIter<'cap> {
 impl Drop for PacketIter<'_> {
     fn drop(&mut self) {
         if let Some(batch) = self.batch.take() {
-            unsafe { ManuallyDrop::into_inner(batch) };
+            let _ = ManuallyDrop::into_inner(batch);
         }
     }
 }

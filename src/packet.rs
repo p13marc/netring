@@ -183,7 +183,6 @@ impl<'a> Packet<'a> {
 /// (enforced by `&mut self` on [`next_batch()`](crate::traits::PacketSource::next_batch)).
 pub struct PacketBatch<'a> {
     block: NonNull<ffi::tpacket_block_desc>,
-    block_size: usize,
     // Cached from block header
     num_pkts: u32,
     block_status: u32,
@@ -203,10 +202,7 @@ impl<'a> PacketBatch<'a> {
     /// - `block` must point to a valid `tpacket_block_desc` in an mmap'd region.
     /// - The block must have been read with `Acquire` ordering before calling this.
     /// - The caller must ensure the block is not released while this batch exists.
-    pub(crate) unsafe fn new(
-        block: NonNull<ffi::tpacket_block_desc>,
-        block_size: usize,
-    ) -> Self {
+    pub(crate) unsafe fn new(block: NonNull<ffi::tpacket_block_desc>) -> Self {
         // SAFETY: caller guarantees block is valid and user-owned.
         let bd = unsafe { &*block.as_ptr() };
         let bh1 = unsafe { &bd.hdr.bh1 };
@@ -220,7 +216,6 @@ impl<'a> PacketBatch<'a> {
 
         Self {
             block,
-            block_size,
             num_pkts: bh1.num_pkts,
             block_status: bh1.block_status,
             seq_num: bh1.seq_num,
@@ -536,7 +531,7 @@ mod tests {
 
     /// Create a BatchIter directly from a synthetic block buffer.
     fn iter_from_block(block: &[u8], num_pkts: u32) -> BatchIter<'_> {
-        let bd = block.as_ptr().cast::<ffi::tpacket_block_desc>();
+        let _bd = block.as_ptr().cast::<ffi::tpacket_block_desc>();
         let bd_size = std::mem::size_of::<ffi::tpacket_block_desc>();
 
         let first = block[bd_size..].as_ptr();
@@ -646,7 +641,7 @@ mod tests {
             ffi::TP_STATUS_USER | ffi::TP_STATUS_BLK_TMO,
         );
         let bd = NonNull::new(block.as_ptr() as *mut ffi::tpacket_block_desc).unwrap();
-        let batch = unsafe { PacketBatch::new(bd, block.len()) };
+        let batch = unsafe { PacketBatch::new(bd) };
         assert!(batch.timed_out());
         // Prevent Drop from writing to the block (it's stack memory)
         std::mem::forget(batch);
@@ -656,7 +651,7 @@ mod tests {
     fn batch_not_timed_out() {
         let block = build_synthetic_block(&[b"data"], ffi::TP_STATUS_USER);
         let bd = NonNull::new(block.as_ptr() as *mut ffi::tpacket_block_desc).unwrap();
-        let batch = unsafe { PacketBatch::new(bd, block.len()) };
+        let batch = unsafe { PacketBatch::new(bd) };
         assert!(!batch.timed_out());
         std::mem::forget(batch);
     }
@@ -665,7 +660,7 @@ mod tests {
     fn batch_seq_num() {
         let block = build_synthetic_block(&[b"data"], ffi::TP_STATUS_USER);
         let bd = NonNull::new(block.as_ptr() as *mut ffi::tpacket_block_desc).unwrap();
-        let batch = unsafe { PacketBatch::new(bd, block.len()) };
+        let batch = unsafe { PacketBatch::new(bd) };
         assert_eq!(batch.seq_num(), 1);
         std::mem::forget(batch);
     }
@@ -674,14 +669,14 @@ mod tests {
     fn batch_len_and_is_empty() {
         let block_with = build_synthetic_block(&[b"a", b"b"], ffi::TP_STATUS_USER);
         let bd = NonNull::new(block_with.as_ptr() as *mut ffi::tpacket_block_desc).unwrap();
-        let batch = unsafe { PacketBatch::new(bd, block_with.len()) };
+        let batch = unsafe { PacketBatch::new(bd) };
         assert_eq!(batch.len(), 2);
         assert!(!batch.is_empty());
         std::mem::forget(batch);
 
         let block_empty = build_synthetic_block(&[], ffi::TP_STATUS_USER);
         let bd = NonNull::new(block_empty.as_ptr() as *mut ffi::tpacket_block_desc).unwrap();
-        let batch = unsafe { PacketBatch::new(bd, block_empty.len()) };
+        let batch = unsafe { PacketBatch::new(bd) };
         assert_eq!(batch.len(), 0);
         assert!(batch.is_empty());
         std::mem::forget(batch);

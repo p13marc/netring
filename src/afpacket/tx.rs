@@ -189,6 +189,16 @@ impl AsFd for AfPacketTx {
     }
 }
 
+impl crate::traits::PacketSink for AfPacketTx {
+    fn allocate(&mut self, len: usize) -> Option<TxSlot<'_>> {
+        self.allocate(len)
+    }
+
+    fn flush(&mut self) -> Result<usize, Error> {
+        self.flush()
+    }
+}
+
 impl Drop for AfPacketTx {
     fn drop(&mut self) {
         // Best-effort flush before unmapping.

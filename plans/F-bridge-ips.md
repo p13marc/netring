@@ -8,7 +8,14 @@ This is the "IPS mode" that Suricata and network taps need.
 
 ## Depends on
 
-Phase A (code quality) — particularly the TX block_size fix.
+- Phase A (code quality) — TX block_size fix
+- Phase B (ring presets) — BridgeBuilder uses RingProfile
+
+## Limitations
+
+- Bridge uses `AfPacketRx` / `AfPacketTx` directly (requires `PacketSource` trait)
+- **Not compatible with AF_XDP backend** (Phase G) until a future GAT-based
+  `PacketSource` trait redesign. AF_XDP uses a different batch/buffer model.
 
 ## Architecture
 

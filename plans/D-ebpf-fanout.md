@@ -106,13 +106,13 @@ pub(crate) fn attach_ebpf_socket_filter(fd: BorrowedFd<'_>, prog_fd: RawFd) -> R
 }
 ```
 
-## 3. Constants check
+## 3. Constants (all in libc 0.2.183 — re-export only)
 
-Verify in `ffi.rs`:
-- `PACKET_FANOUT_EBPF` = 7 (check if libc exports it, else define)
-- `PACKET_FANOUT_CBPF` = 6 (for completeness)
-- `PACKET_FANOUT_DATA` (for attaching the eBPF program to fanout)
-- `SO_ATTACH_BPF` (should be in libc)
+Add to `ffi.rs` (re-export, NOT define):
+- `pub use libc::PACKET_FANOUT_CBPF;` (= 6)
+- `pub use libc::PACKET_FANOUT_EBPF;` (= 7)
+- `pub use libc::PACKET_FANOUT_DATA;` (= 22, SOL_PACKET option for attaching eBPF fd)
+- `pub use libc::SO_ATTACH_BPF;` (= 50)
 
 ## Tests
 

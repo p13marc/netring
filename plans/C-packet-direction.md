@@ -12,22 +12,17 @@ The `sll_pkttype` field indicates:
 
 | Value | Constant | Meaning |
 |-------|----------|---------|
-| 0 | `PACKET_HOST` | Addressed to this host |
-| 1 | `PACKET_BROADCAST` | Broadcast frame |
-| 2 | `PACKET_MULTICAST` | Multicast frame |
-| 3 | `PACKET_OTHERHOST` | Destined for another host (promiscuous mode) |
-| 4 | `PACKET_OUTGOING` | Originated from this host |
+| 0 | `libc::PACKET_HOST` | Addressed to this host |
+| 1 | `libc::PACKET_BROADCAST` | Broadcast frame |
+| 2 | `libc::PACKET_MULTICAST` | Multicast frame |
+| 3 | `libc::PACKET_OTHERHOST` | Destined for another host (promiscuous mode) |
+| 4 | `libc::PACKET_OUTGOING` | Originated from this host |
 
-The `sockaddr_ll` is located at offset `tp_mac - sizeof(sockaddr_ll)` from the
-`tpacket3_hdr`, or more precisely, between the `tpacket3_hdr` and the actual
-packet data at `tp_mac`.
+All constants are in `libc 0.2.183` (type `c_uchar`). Re-export in `ffi.rs`.
 
-Actually, in TPACKET_V3, the `sockaddr_ll` is placed right after `tpacket3_hdr`
-(at `tpacket3_hdr + TPACKET_ALIGN(sizeof(tpacket3_hdr))`). The field
-`tp_net - tp_mac` gives the link-layer header size, and `sll_pkttype` is in the
-`sockaddr_ll` that precedes `tp_mac`.
-
-We can access it via the gap between the tpacket3_hdr and tp_mac offset.
+The `sockaddr_ll` is placed after `tpacket3_hdr` at offset
+`TPACKET_ALIGN(sizeof(tpacket3_hdr))` from the packet header start.
+We access it via the gap between the tpacket3_hdr and `tp_mac`.
 
 ## Implementation
 
@@ -93,10 +88,17 @@ pub fn protocol(&self) -> u16;
 
 These come from `sll_addr` and `sll_protocol` respectively.
 
-### 4. Update BatchIter bounds checking
+### 4. Bounds checking for sockaddr_ll
 
-When constructing a `Packet`, verify that the `sockaddr_ll` also fits within the
-block bounds (it's between tpacket3_hdr and tp_mac).
+The `Packet` struct doesn't hold `block_end`, so it can't validate sockaddr_ll
+bounds in `direction()`. Two approaches:
+
+**Preferred**: Validate in `BatchIter::next()` before constructing the Packet.
+Add a bounds check: `hdr_ptr + sll_offset + sizeof(sockaddr_ll) <= block_end`.
+If it fails, skip the packet (same as existing tp_snaplen check).
+
+**Alternative**: Store `block_end` in `Packet` (adds 8 bytes per packet, slightly
+less clean but allows lazy bounds checking in `direction()`).
 
 ## Tests
 

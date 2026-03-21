@@ -1,14 +1,21 @@
-pub fn add(left: u64, right: u64) -> u64 {
-    left + right
-}
+//! High-performance zero-copy packet I/O for Linux.
+//!
+//! `netring` provides packet capture and injection via AF_PACKET with TPACKET_V3
+//! (block-based mmap ring buffers). It offers both a high-level ergonomic API
+//! and a low-level batch API for maximum throughput.
 
-#[cfg(test)]
-mod tests {
-    use super::*;
+#![deny(unsafe_op_in_unsafe_fn)]
+#![warn(missing_docs)]
 
-    #[test]
-    fn it_works() {
-        let result = add(2, 2);
-        assert_eq!(result, 4);
-    }
-}
+pub mod config;
+pub mod error;
+pub mod packet;
+pub mod stats;
+
+pub(crate) mod afpacket;
+
+// Re-exports
+pub use config::{BpfFilter, BpfInsn, FanoutFlags, FanoutMode, TimestampSource};
+pub use error::Error;
+pub use packet::{OwnedPacket, PacketStatus, Timestamp};
+pub use stats::CaptureStats;

@@ -1,9 +1,11 @@
-//! Packet types: timestamps, status flags, and owned packets.
-//!
-//! Zero-copy `Packet<'a>` and `PacketBatch<'a>` will be added in Phase 3.
+//! Packet types: zero-copy views, batch iteration, timestamps, and owned packets.
+
+use std::marker::PhantomData;
+use std::ptr::NonNull;
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use crate::afpacket::ffi;
-use std::time::{Duration, SystemTime, UNIX_EPOCH};
+use crate::afpacket::ring::{self, MmapRing};
 
 /// Nanosecond-precision kernel timestamp.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Default)]
@@ -85,7 +87,7 @@ impl PacketStatus {
 
 /// An owned copy of a captured packet, independent of the ring buffer.
 ///
-/// Created via [`Packet::to_owned()`] (available in Phase 3).
+/// Created via [`Packet::to_owned()`].
 #[derive(Debug, Clone)]
 pub struct OwnedPacket {
     /// Raw packet bytes (from MAC header).
@@ -95,6 +97,269 @@ pub struct OwnedPacket {
     /// Original packet length on the wire.
     pub original_len: usize,
 }
+
+// ── Zero-copy Packet ───────────────────────────────────────────────────────
+
+/// Zero-copy view of a received packet.
+///
+/// Borrows from the mmap ring via its parent [`PacketBatch`].
+/// The borrow checker enforces that this reference cannot outlive the batch.
+///
+/// Call [`to_owned()`](Packet::to_owned) to copy data out of the ring.
+pub struct Packet<'a> {
+    data: &'a [u8],
+    hdr: &'a ffi::tpacket3_hdr,
+}
+
+impl<'a> Packet<'a> {
+    /// Raw packet bytes starting from the MAC header.
+    pub fn data(&self) -> &'a [u8] {
+        self.data
+    }
+
+    /// Kernel timestamp (nanosecond precision).
+    pub fn timestamp(&self) -> Timestamp {
+        Timestamp::new(self.hdr.tp_sec, self.hdr.tp_nsec)
+    }
+
+    /// Captured length (may be < [`original_len()`](Packet::original_len) if truncated).
+    pub fn len(&self) -> usize {
+        self.hdr.tp_snaplen as usize
+    }
+
+    /// Whether the captured data is empty.
+    pub fn is_empty(&self) -> bool {
+        self.hdr.tp_snaplen == 0
+    }
+
+    /// Original packet length on the wire.
+    pub fn original_len(&self) -> usize {
+        self.hdr.tp_len as usize
+    }
+
+    /// Per-packet status flags.
+    pub fn status(&self) -> PacketStatus {
+        PacketStatus::from_raw(self.hdr.tp_status)
+    }
+
+    /// RX flow hash (requires `fill_rxhash` — enabled by default).
+    pub fn rxhash(&self) -> u32 {
+        self.hdr.hv1.tp_rxhash
+    }
+
+    /// Raw VLAN TCI from kernel header. Check `status().vlan_valid` first.
+    pub fn vlan_tci(&self) -> u16 {
+        self.hdr.hv1.tp_vlan_tci as u16
+    }
+
+    /// Raw VLAN TPID from kernel header. Check `status().vlan_tpid_valid` first.
+    pub fn vlan_tpid(&self) -> u16 {
+        self.hdr.hv1.tp_vlan_tpid
+    }
+
+    /// Copy packet data out of the ring for long-lived storage.
+    pub fn to_owned(&self) -> OwnedPacket {
+        OwnedPacket {
+            data: self.data.to_vec(),
+            timestamp: self.timestamp(),
+            original_len: self.original_len(),
+        }
+    }
+}
+
+// ── PacketBatch ────────────────────────────────────────────────────────────
+
+/// A batch of packets from a single retired kernel block.
+///
+/// **RAII**: dropping the batch returns the block to the kernel by writing
+/// `TP_STATUS_KERNEL` with `Release` ordering.
+///
+/// Only one batch can be live at a time per [`AfPacketRx`](crate::afpacket::rx::AfPacketRx)
+/// (enforced by `&mut self` on [`next_batch()`](crate::traits::PacketSource::next_batch)).
+pub struct PacketBatch<'a> {
+    block: NonNull<ffi::tpacket_block_desc>,
+    block_size: usize,
+    // Cached from block header
+    num_pkts: u32,
+    block_status: u32,
+    seq_num: u64,
+    offset_to_first_pkt: u32,
+    blk_len: u32,
+    ts_first: Timestamp,
+    ts_last: Timestamp,
+    _marker: PhantomData<&'a MmapRing>,
+}
+
+impl<'a> PacketBatch<'a> {
+    /// Create a batch from a block pointer. The block must be in `TP_STATUS_USER` state.
+    ///
+    /// # Safety
+    ///
+    /// - `block` must point to a valid `tpacket_block_desc` in an mmap'd region.
+    /// - The block must have been read with `Acquire` ordering before calling this.
+    /// - The caller must ensure the block is not released while this batch exists.
+    pub(crate) unsafe fn new(
+        block: NonNull<ffi::tpacket_block_desc>,
+        block_size: usize,
+    ) -> Self {
+        // SAFETY: caller guarantees block is valid and user-owned.
+        let bd = unsafe { &*block.as_ptr() };
+        let bh1 = unsafe { &bd.hdr.bh1 };
+
+        let ts_first = Timestamp::new(
+            bh1.ts_first_pkt.ts_sec,
+            // libc uses ts_usec but TPACKET_V3 provides nanoseconds
+            bh1.ts_first_pkt.ts_usec,
+        );
+        let ts_last = Timestamp::new(bh1.ts_last_pkt.ts_sec, bh1.ts_last_pkt.ts_usec);
+
+        Self {
+            block,
+            block_size,
+            num_pkts: bh1.num_pkts,
+            block_status: bh1.block_status,
+            seq_num: bh1.seq_num,
+            offset_to_first_pkt: bh1.offset_to_first_pkt,
+            blk_len: bh1.blk_len,
+            ts_first,
+            ts_last,
+            _marker: PhantomData,
+        }
+    }
+
+    /// Number of packets in this block.
+    pub fn len(&self) -> usize {
+        self.num_pkts as usize
+    }
+
+    /// Whether the batch is empty.
+    pub fn is_empty(&self) -> bool {
+        self.num_pkts == 0
+    }
+
+    /// Whether the block was retired via timeout (partially filled).
+    pub fn timed_out(&self) -> bool {
+        self.block_status & ffi::TP_STATUS_BLK_TMO != 0
+    }
+
+    /// Monotonic block sequence number. Gaps indicate dropped blocks.
+    pub fn seq_num(&self) -> u64 {
+        self.seq_num
+    }
+
+    /// Timestamp of the first packet (or block open time).
+    pub fn ts_first(&self) -> Timestamp {
+        self.ts_first
+    }
+
+    /// Timestamp of the last packet (or block close time).
+    pub fn ts_last(&self) -> Timestamp {
+        self.ts_last
+    }
+
+    /// Iterate over packets in the batch.
+    pub fn iter(&self) -> BatchIter<'a> {
+        if self.num_pkts == 0 {
+            return BatchIter {
+                current: std::ptr::null(),
+                remaining: 0,
+                block_end: std::ptr::null(),
+                _marker: PhantomData,
+            };
+        }
+
+        let base = self.block.as_ptr().cast::<u8>();
+        let first = base.map_addr(|a| a + self.offset_to_first_pkt as usize);
+        let end = base.map_addr(|a| a + self.blk_len as usize);
+
+        BatchIter {
+            current: first,
+            remaining: self.num_pkts,
+            block_end: end,
+            _marker: PhantomData,
+        }
+    }
+}
+
+impl<'a> IntoIterator for &'a PacketBatch<'a> {
+    type Item = Packet<'a>;
+    type IntoIter = BatchIter<'a>;
+
+    fn into_iter(self) -> BatchIter<'a> {
+        self.iter()
+    }
+}
+
+impl Drop for PacketBatch<'_> {
+    fn drop(&mut self) {
+        // SAFETY: self.block is valid (from construction) and we're done reading.
+        unsafe { ring::release_block(self.block) };
+    }
+}
+
+// ── BatchIter ──────────────────────────────────────────────────────────────
+
+/// Iterator over packets within a [`PacketBatch`].
+///
+/// Walks the `tpacket3_hdr` linked list within a block, performing bounds
+/// checks before constructing each packet reference.
+pub struct BatchIter<'a> {
+    current: *const u8,
+    remaining: u32,
+    block_end: *const u8,
+    _marker: PhantomData<&'a ()>,
+}
+
+impl<'a> Iterator for BatchIter<'a> {
+    type Item = Packet<'a>;
+
+    fn next(&mut self) -> Option<Packet<'a>> {
+        if self.remaining == 0 {
+            return None;
+        }
+
+        let hdr_size = std::mem::size_of::<ffi::tpacket3_hdr>();
+
+        // Bounds check: header must fit within block
+        if (self.current as usize) + hdr_size > self.block_end as usize {
+            log::warn!("BatchIter: tpacket3_hdr extends past block boundary, stopping");
+            self.remaining = 0;
+            return None;
+        }
+
+        // SAFETY: bounds-checked above, TPACKET_ALIGNMENT guarantees alignment.
+        let hdr = unsafe { &*(self.current as *const ffi::tpacket3_hdr) };
+
+        let data_offset = hdr.tp_mac as usize;
+        let snaplen = hdr.tp_snaplen as usize;
+        let data_ptr = self.current.map_addr(|a| a + data_offset);
+
+        // Bounds check: packet data must fit within block
+        if (data_ptr as usize) + snaplen > self.block_end as usize {
+            log::warn!("BatchIter: packet data extends past block boundary, stopping");
+            self.remaining = 0;
+            return None;
+        }
+
+        // SAFETY: bounds-checked, data is within the mmap region.
+        let data = unsafe { std::slice::from_raw_parts(data_ptr, snaplen) };
+
+        // Advance to next packet
+        if hdr.tp_next_offset != 0 {
+            self.current = self.current.map_addr(|a| a + hdr.tp_next_offset as usize);
+        }
+        self.remaining -= 1;
+
+        Some(Packet { data, hdr })
+    }
+
+    fn size_hint(&self) -> (usize, Option<usize>) {
+        let r = self.remaining as usize;
+        (r, Some(r))
+    }
+}
+
+impl ExactSizeIterator for BatchIter<'_> {}
 
 #[cfg(test)]
 mod tests {

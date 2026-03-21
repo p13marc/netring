@@ -11,11 +11,15 @@ pub mod config;
 pub mod error;
 pub mod packet;
 pub mod stats;
+pub mod traits;
 
-pub(crate) mod afpacket;
+pub mod afpacket;
 
 // Re-exports
 pub use config::{BpfFilter, BpfInsn, FanoutFlags, FanoutMode, TimestampSource};
 pub use error::Error;
-pub use packet::{OwnedPacket, PacketStatus, Timestamp};
+pub use packet::{OwnedPacket, Packet, PacketBatch, PacketStatus, Timestamp};
 pub use stats::CaptureStats;
+pub use traits::PacketSource;
+
+pub use afpacket::rx::{AfPacketRx, AfPacketRxBuilder};

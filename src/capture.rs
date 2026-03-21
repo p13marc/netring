@@ -7,7 +7,7 @@ use std::time::Duration;
 
 use crate::afpacket::ffi;
 use crate::afpacket::rx::{AfPacketRx, AfPacketRxBuilder};
-use crate::config::{BpfInsn, FanoutFlags, FanoutMode, TimestampSource};
+use crate::config::{BpfInsn, FanoutFlags, FanoutMode, RingProfile, TimestampSource};
 use crate::error::Error;
 use crate::packet::{Packet, PacketBatch};
 use crate::stats::CaptureStats;
@@ -155,6 +155,31 @@ impl CaptureBuilder {
     /// Set the network interface name (required).
     pub fn interface(mut self, name: &str) -> Self {
         self.interface = Some(name.to_string());
+        self
+    }
+
+    /// Apply a ring buffer profile. Sets block_size, block_count, frame_size,
+    /// and block_timeout_ms in one call. Individual settings can be overridden
+    /// after calling this.
+    pub fn profile(mut self, profile: RingProfile) -> Self {
+        let (bs, bc, fs, timeout) = profile.params();
+        self.block_size = bs;
+        self.block_count = bc;
+        self.frame_size = fs;
+        self.block_timeout_ms = timeout;
+        self
+    }
+
+    /// Capture only the first `len` bytes of each packet (snap length).
+    ///
+    /// Reduces memory pressure and increases batch density when full payload
+    /// isn't needed. Packets larger than `len` will have
+    /// `original_len() > len()`.
+    ///
+    /// Internally sets `frame_size` to `snap_len + TPACKET3_HDRLEN` (aligned).
+    pub fn snap_len(mut self, len: u32) -> Self {
+        let frame = ffi::tpacket_align(ffi::TPACKET3_HDRLEN + len as usize);
+        self.frame_size = frame;
         self
     }
 

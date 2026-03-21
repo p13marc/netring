@@ -5,7 +5,7 @@ use std::time::Duration;
 
 use crate::afpacket::ring::MmapRing;
 use crate::afpacket::{fanout, ffi, filter, ring, socket};
-use crate::config::{BpfFilter, BpfInsn, FanoutFlags, FanoutMode, TimestampSource};
+use crate::config::{BpfFilter, BpfInsn, FanoutFlags, FanoutMode, RingProfile, TimestampSource};
 use crate::error::Error;
 use crate::packet::PacketBatch;
 use crate::stats::CaptureStats;
@@ -171,6 +171,16 @@ impl AfPacketRxBuilder {
     /// Set the network interface name (required).
     pub fn interface(mut self, name: &str) -> Self {
         self.interface = Some(name.to_string());
+        self
+    }
+
+    /// Apply a ring buffer profile.
+    pub fn profile(mut self, profile: RingProfile) -> Self {
+        let (bs, bc, fs, timeout) = profile.params();
+        self.block_size = bs;
+        self.block_count = bc;
+        self.frame_size = fs;
+        self.block_timeout_ms = timeout;
         self
     }
 

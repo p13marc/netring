@@ -22,7 +22,7 @@ pub mod channel {
 
 // Re-exports
 pub use capture::{Capture, CaptureBuilder};
-pub use config::{BpfFilter, BpfInsn, FanoutFlags, FanoutMode, TimestampSource};
+pub use config::{BpfFilter, BpfInsn, FanoutFlags, FanoutMode, RingProfile, TimestampSource};
 pub use error::Error;
 pub use inject::{Injector, InjectorBuilder};
 pub use packet::{OwnedPacket, Packet, PacketBatch, PacketStatus, Timestamp};

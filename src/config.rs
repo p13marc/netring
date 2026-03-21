@@ -140,6 +140,62 @@ impl BpfFilter {
     }
 }
 
+// ── Ring Profiles ──────────────────────────────────────────────────────────
+
+/// Pre-configured ring buffer profiles for common workloads.
+///
+/// Use with [`CaptureBuilder::profile()`](crate::CaptureBuilder::profile)
+/// to set block_size, block_count, frame_size, and block_timeout_ms in one call.
+/// Individual settings can be overridden after applying a profile.
+///
+/// # Examples
+///
+/// ```no_run
+/// use netring::{Capture, RingProfile};
+///
+/// let cap = Capture::builder()
+///     .interface("eth0")
+///     .profile(RingProfile::LowLatency)
+///     .build()
+///     .unwrap();
+/// ```
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum RingProfile {
+    /// Balanced defaults. 4 MiB blocks × 64 (256 MiB), 60ms timeout.
+    /// Good for general-purpose capture up to ~500 Kpps.
+    Default,
+
+    /// Maximum throughput. 4 MiB blocks × 256 (1 GiB), 60ms timeout.
+    /// Pair with [`FanoutMode::Cpu`] for multi-core capture.
+    HighThroughput,
+
+    /// Minimal latency. 256 KiB blocks × 64 (16 MiB), 1ms timeout.
+    /// Smaller blocks retire faster. Pair with `busy_poll_us()`.
+    LowLatency,
+
+    /// Minimal memory. 1 MiB blocks × 16 (16 MiB), 100ms timeout.
+    /// For memory-constrained environments.
+    LowMemory,
+
+    /// Large frames / jumbo MTU. 4 MiB blocks × 64, frame_size=65536.
+    /// For interfaces with MTU > 1500 or GRO/GSO enabled.
+    JumboFrames,
+}
+
+impl RingProfile {
+    /// Returns `(block_size, block_count, frame_size, block_timeout_ms)`.
+    #[inline]
+    pub(crate) fn params(self) -> (usize, usize, usize, u32) {
+        match self {
+            Self::Default => (1 << 22, 64, 2048, 60),
+            Self::HighThroughput => (1 << 22, 256, 2048, 60),
+            Self::LowLatency => (1 << 18, 64, 2048, 1),
+            Self::LowMemory => (1 << 20, 16, 2048, 100),
+            Self::JumboFrames => (1 << 22, 64, 65536, 60),
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -210,5 +266,25 @@ mod tests {
         assert_eq!(filter.len(), 2);
         assert!(!filter.is_empty());
         assert_eq!(filter.instructions(), &insns);
+    }
+
+    #[test]
+    fn ring_profile_params_valid() {
+        for profile in [
+            RingProfile::Default,
+            RingProfile::HighThroughput,
+            RingProfile::LowLatency,
+            RingProfile::LowMemory,
+            RingProfile::JumboFrames,
+        ] {
+            let (block_size, block_count, frame_size, timeout_ms) = profile.params();
+            assert!(block_size.is_power_of_two(), "{profile:?} block_size");
+            assert!(block_size % 4096 == 0, "{profile:?} page-aligned");
+            assert!(block_count > 0, "{profile:?} block_count");
+            assert!(frame_size >= 68, "{profile:?} frame_size >= TPACKET3_HDRLEN");
+            assert!(frame_size % 16 == 0, "{profile:?} frame_size aligned");
+            assert!(frame_size <= block_size, "{profile:?} frame_size <= block_size");
+            let _ = timeout_ms;
+        }
     }
 }

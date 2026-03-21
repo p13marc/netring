@@ -2,9 +2,8 @@
 # Requires: just (https://github.com/casey/just)
 #
 # Integration tests and examples need AF_PACKET (CAP_NET_RAW).
-# On bare metal: `just test` uses sudo setcap.
-# In containers: AF_PACKET may be blocked — use `just test-unit` instead,
-# or run the container with `--cap-add=NET_RAW --cap-add=NET_ADMIN`.
+# `just setcap` grants capabilities on compiled binaries via sudo,
+# then tests/examples run as the current user (no sudo).
 
 set shell := ["bash", "-euo", "pipefail", "-c"]
 
@@ -25,45 +24,68 @@ build-release:
 build-examples:
     cargo build --examples --features tokio,channel
 
+# ── Capabilities ────────────────────────────────────────────────────────────
+
+# Grant CAP_NET_RAW+CAP_NET_ADMIN on all test and example binaries (requires sudo)
+setcap:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    # Build everything first
+    cargo test --features "integration-tests,tokio,channel" --no-run 2>&1 | tail -1
+    cargo build --examples --features tokio,channel 2>&1 | tail -1
+    # Collect all binary paths
+    bins=()
+    while IFS= read -r bin; do
+        [ -f "$bin" ] && bins+=("$bin")
+    done < <(
+        cargo test --features "integration-tests,tokio,channel" --no-run --message-format=json 2>/dev/null \
+            | jq -r 'select(.executable != null) | .executable'
+        cargo build --examples --features tokio,channel --message-format=json 2>/dev/null \
+            | jq -r 'select(.executable != null) | .executable'
+    )
+    if [ ${#bins[@]} -eq 0 ]; then
+        echo "No binaries found to setcap"
+        exit 1
+    fi
+    echo "Setting CAP_NET_RAW,CAP_NET_ADMIN on ${#bins[@]} binaries..."
+    sudo setcap cap_net_raw,cap_net_admin+ep "${bins[@]}"
+    echo "✓ Capabilities set. Run tests/examples without sudo."
+
+# Check if AF_PACKET is available (useful in containers)
+check-afpacket:
+    #!/usr/bin/env bash
+    python3 -c "import socket; socket.socket(socket.AF_PACKET, socket.SOCK_RAW, socket.htons(3)).close()" 2>/dev/null \
+        && echo "✓ AF_PACKET available" \
+        || { echo "✗ AF_PACKET not available"; \
+             echo "  Run: just setcap  (bare metal, needs sudo once)"; \
+             echo "  Or:  podman run --cap-add=NET_RAW --cap-add=NET_ADMIN ..."; \
+             exit 1; }
+
 # ── Test ────────────────────────────────────────────────────────────────────
 
 # Run unit tests only (no privileges needed)
 test-unit:
     cargo test
 
-# Run ALL tests including integration tests
-# On bare metal: uses sudo for CAP_NET_RAW
-# In containers: needs --cap-add=NET_RAW,NET_ADMIN
+# Run ALL tests including integration (run `just setcap` first)
 test:
-    sudo -E cargo test --features "integration-tests,tokio,channel" -- --test-threads=1
+    cargo test --features "integration-tests,tokio,channel" -- --test-threads=1
 
 # Run a specific test by name
 test-one name:
-    sudo -E cargo test --features "integration-tests,tokio,channel" -- --test-threads=1 "{{name}}"
+    cargo test --features "integration-tests,tokio,channel" -- --test-threads=1 "{{name}}"
 
 # Run integration tests only
 test-integration:
-    sudo -E cargo test --features "integration-tests,tokio,channel" --test '*' -- --test-threads=1
-
-# Check if AF_PACKET is available (useful in containers)
-check-afpacket:
-    #!/usr/bin/env bash
-    if sudo python3 -c "import socket; socket.socket(socket.AF_PACKET, socket.SOCK_RAW, socket.htons(3)).close()" 2>/dev/null; then
-        echo "✓ AF_PACKET available"
-    else
-        echo "✗ AF_PACKET not available"
-        echo "  If in a container, run with: --cap-add=NET_RAW --cap-add=NET_ADMIN"
-        echo "  If on bare metal, check: sudo capsh --print | grep net_raw"
-        exit 1
-    fi
+    cargo test --features "integration-tests,tokio,channel" --test '*' -- --test-threads=1
 
 # ── Examples ────────────────────────────────────────────────────────────────
 
-# Run an example with sudo (needs CAP_NET_RAW)
+# Run an example (run `just setcap` first for AF_PACKET access)
 example name *args:
-    sudo -E cargo run --example "{{name}}" --features tokio,channel -- {{args}}
+    cargo run --example "{{name}}" --features tokio,channel -- {{args}}
 
-# Shorthand recipes for each example
+# Shorthand recipes
 capture *args:      (example "capture" args)
 batch *args:        (example "batch_processing" args)
 inject *args:       (example "inject" args)
@@ -72,6 +94,7 @@ stats *args:        (example "stats_monitor" args)
 low-latency *args:  (example "low_latency" args)
 async *args:        (example "async_capture" args)
 channel *args:      (example "channel_consumer" args)
+ebpf *args:         (example "ebpf_filter" args)
 
 # ── Lint & Format ───────────────────────────────────────────────────────────
 
@@ -113,8 +136,8 @@ bench-check:
 ci: clippy test-unit doc bench-check
     @echo "✓ CI checks passed"
 
-# Full CI (needs sudo/CAP_NET_RAW): lint + ALL tests + docs + bench
-ci-full: clippy test doc bench-check
+# Full CI: setcap + lint + ALL tests + docs + bench
+ci-full: setcap clippy test doc bench-check
     @echo "✓ Full CI checks passed"
 
 # ── Utility ─────────────────────────────────────────────────────────────────

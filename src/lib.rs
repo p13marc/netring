@@ -25,7 +25,7 @@ pub use capture::{Capture, CaptureBuilder};
 pub use config::{BpfFilter, BpfInsn, FanoutFlags, FanoutMode, RingProfile, TimestampSource};
 pub use error::Error;
 pub use inject::{Injector, InjectorBuilder};
-pub use packet::{OwnedPacket, Packet, PacketBatch, PacketStatus, Timestamp};
+pub use packet::{OwnedPacket, Packet, PacketBatch, PacketDirection, PacketStatus, Timestamp};
 pub use stats::CaptureStats;
 pub use traits::{PacketSink, PacketSource};
 

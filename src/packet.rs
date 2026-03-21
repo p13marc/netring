@@ -102,6 +102,42 @@ pub struct OwnedPacket {
     pub original_len: usize,
 }
 
+// ── Packet Direction ───────────────────────────────────────────────────────
+
+/// Direction of a captured packet relative to the capturing host.
+///
+/// Decoded from `sockaddr_ll.sll_pkttype` in the TPACKET_V3 ring buffer.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum PacketDirection {
+    /// Addressed to this host.
+    Host,
+    /// Link-layer broadcast.
+    Broadcast,
+    /// Link-layer multicast.
+    Multicast,
+    /// Destined for another host (captured in promiscuous mode).
+    OtherHost,
+    /// Originated from this host.
+    Outgoing,
+    /// Unknown direction value.
+    Unknown(u8),
+}
+
+impl PacketDirection {
+    /// Decode from raw `sll_pkttype` value.
+    #[inline]
+    pub(crate) fn from_raw(pkttype: u8) -> Self {
+        match pkttype {
+            ffi::PACKET_HOST => Self::Host,
+            ffi::PACKET_BROADCAST => Self::Broadcast,
+            ffi::PACKET_MULTICAST => Self::Multicast,
+            ffi::PACKET_OTHERHOST => Self::OtherHost,
+            ffi::PACKET_OUTGOING => Self::Outgoing,
+            v => Self::Unknown(v),
+        }
+    }
+}
+
 // ── Zero-copy Packet ───────────────────────────────────────────────────────
 
 /// Zero-copy view of a received packet.
@@ -174,6 +210,44 @@ impl<'a> Packet<'a> {
     #[inline]
     pub fn vlan_tpid(&self) -> u16 {
         self.hdr.hv1.tp_vlan_tpid
+    }
+
+    /// Packet direction relative to the capturing host.
+    ///
+    /// Decoded from `sockaddr_ll.sll_pkttype` in the ring buffer metadata.
+    /// The `sockaddr_ll` is located after the `tpacket3_hdr` at offset
+    /// `TPACKET_ALIGN(sizeof(tpacket3_hdr))`.
+    #[inline]
+    pub fn direction(&self) -> PacketDirection {
+        let sll_offset = ffi::tpacket_align(std::mem::size_of::<ffi::tpacket3_hdr>());
+        let hdr_ptr = self.hdr as *const ffi::tpacket3_hdr as *const u8;
+        let sll_ptr = hdr_ptr.map_addr(|a| a + sll_offset);
+        // SAFETY: sockaddr_ll is placed right after tpacket3_hdr in the ring.
+        // The BatchIter bounds-checks the full header + sockaddr_ll region
+        // before constructing a Packet.
+        let sll = unsafe { &*(sll_ptr as *const ffi::sockaddr_ll) };
+        PacketDirection::from_raw(sll.sll_pkttype)
+    }
+
+    /// Source link-layer address (typically MAC address) from ring metadata.
+    #[inline]
+    pub fn source_ll_addr(&self) -> &[u8] {
+        let sll_offset = ffi::tpacket_align(std::mem::size_of::<ffi::tpacket3_hdr>());
+        let hdr_ptr = self.hdr as *const ffi::tpacket3_hdr as *const u8;
+        let sll_ptr = hdr_ptr.map_addr(|a| a + sll_offset);
+        let sll = unsafe { &*(sll_ptr as *const ffi::sockaddr_ll) };
+        let len = sll.sll_halen as usize;
+        &sll.sll_addr[..len.min(8)]
+    }
+
+    /// EtherType / protocol from link-layer metadata (network byte order).
+    #[inline]
+    pub fn ll_protocol(&self) -> u16 {
+        let sll_offset = ffi::tpacket_align(std::mem::size_of::<ffi::tpacket3_hdr>());
+        let hdr_ptr = self.hdr as *const ffi::tpacket3_hdr as *const u8;
+        let sll_ptr = hdr_ptr.map_addr(|a| a + sll_offset);
+        let sll = unsafe { &*(sll_ptr as *const ffi::sockaddr_ll) };
+        u16::from_be(sll.sll_protocol)
     }
 
     /// Copy packet data out of the ring for long-lived storage.
@@ -384,10 +458,12 @@ impl<'a> Iterator for BatchIter<'a> {
             return None;
         }
 
-        let hdr_size = std::mem::size_of::<ffi::tpacket3_hdr>();
+        // Header + sockaddr_ll must fit within block (sockaddr_ll is used by direction())
+        let hdr_plus_sll = ffi::tpacket_align(std::mem::size_of::<ffi::tpacket3_hdr>())
+            + std::mem::size_of::<ffi::sockaddr_ll>();
 
-        // Bounds check: header must fit within block
-        if (self.current as usize) + hdr_size > self.block_end as usize {
+        // Bounds check: header + sockaddr_ll must fit within block
+        if (self.current as usize) + hdr_plus_sll > self.block_end as usize {
             tracing::warn!("BatchIter: tpacket3_hdr extends past block boundary, stopping");
             self.remaining = 0;
             return None;

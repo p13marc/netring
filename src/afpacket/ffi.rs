@@ -109,6 +109,14 @@ pub use libc::PACKET_FANOUT_FLAG_IGNORE_OUTGOING;
 pub use libc::PACKET_FANOUT_FLAG_ROLLOVER;
 pub use libc::PACKET_FANOUT_FLAG_UNIQUEID;
 
+// ── Packet direction (sll_pkttype) ─────────────────────────────────────────
+
+pub use libc::PACKET_BROADCAST;
+pub use libc::PACKET_HOST;
+pub use libc::PACKET_MULTICAST;
+pub use libc::PACKET_OTHERHOST;
+pub use libc::PACKET_OUTGOING;
+
 // ── Timestamp note ─────────────────────────────────────────────────────────
 //
 // `tpacket_bd_ts` in libc has field `ts_usec`, not `ts_nsec`. The kernel

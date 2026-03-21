@@ -47,8 +47,11 @@ impl MmapRing {
 
         let ptr = match result {
             Ok(p) => p,
-            Err(nix::errno::Errno::EPERM) | Err(nix::errno::Errno::ENOMEM) => {
-                // MAP_LOCKED may fail without CAP_IPC_LOCK. Retry without it.
+            Err(nix::errno::Errno::EPERM)
+            | Err(nix::errno::Errno::ENOMEM)
+            | Err(nix::errno::Errno::EAGAIN) => {
+                // MAP_LOCKED may fail without CAP_IPC_LOCK or when RLIMIT_MEMLOCK
+                // is exceeded (EAGAIN). Retry without it.
                 log::warn!(
                     "mmap with MAP_LOCKED failed, retrying without (consider CAP_IPC_LOCK)"
                 );

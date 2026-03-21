@@ -99,6 +99,7 @@ low-latency *args:  (example "low_latency" args)
 async *args:        (example "async_capture" args)
 channel *args:      (example "channel_consumer" args)
 ebpf *args:         (example "ebpf_filter" args)
+dpi *args:          (example "dpi" args)
 
 # ── Lint & Format ───────────────────────────────────────────────────────────
 

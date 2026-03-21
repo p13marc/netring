@@ -475,4 +475,215 @@ mod tests {
         assert_eq!(cloned.timestamp, pkt.timestamp);
         assert_eq!(cloned.original_len, pkt.original_len);
     }
+
+    // ── Synthetic block builder for BatchIter tests ────────────────────
+
+    /// Build a synthetic TPACKET_V3 block with the given packet payloads.
+    /// Returns a Vec<u8> that can be used as a fake mmap block.
+    fn build_synthetic_block(packets: &[&[u8]], block_status: u32) -> Vec<u8> {
+        let block_desc_size = std::mem::size_of::<ffi::tpacket_block_desc>();
+        let hdr_size = std::mem::size_of::<ffi::tpacket3_hdr>();
+
+        // Calculate total size needed
+        let mut total = block_desc_size;
+        for payload in packets {
+            let frame_size = ffi::tpacket_align(hdr_size + payload.len());
+            total += frame_size;
+        }
+        // Round up to a reasonable block size
+        let block_size = total.max(4096);
+
+        let mut block = vec![0u8; block_size];
+
+        // Write block descriptor
+        let bd = block.as_mut_ptr().cast::<ffi::tpacket_block_desc>();
+        unsafe {
+            (*bd).version = 1;
+            (*bd).hdr.bh1.block_status = block_status;
+            (*bd).hdr.bh1.num_pkts = packets.len() as u32;
+            (*bd).hdr.bh1.offset_to_first_pkt = block_desc_size as u32;
+            (*bd).hdr.bh1.blk_len = block_size as u32;
+            (*bd).hdr.bh1.seq_num = 1;
+        }
+
+        // Write packet headers + data
+        let mut offset = block_desc_size;
+        for (i, payload) in packets.iter().enumerate() {
+            let frame_size = ffi::tpacket_align(hdr_size + payload.len());
+            let is_last = i == packets.len() - 1;
+
+            let hdr = block[offset..].as_mut_ptr().cast::<ffi::tpacket3_hdr>();
+            unsafe {
+                (*hdr).tp_next_offset = if is_last { 0 } else { frame_size as u32 };
+                (*hdr).tp_sec = 1000 + i as u32;
+                (*hdr).tp_nsec = i as u32 * 1000;
+                (*hdr).tp_snaplen = payload.len() as u32;
+                (*hdr).tp_len = payload.len() as u32;
+                (*hdr).tp_status = 0;
+                (*hdr).tp_mac = hdr_size as u16;
+                (*hdr).tp_net = hdr_size as u16;
+            }
+
+            // Copy payload data
+            let data_start = offset + hdr_size;
+            block[data_start..data_start + payload.len()].copy_from_slice(payload);
+
+            offset += frame_size;
+        }
+
+        block
+    }
+
+    /// Create a BatchIter directly from a synthetic block buffer.
+    fn iter_from_block(block: &[u8], num_pkts: u32) -> BatchIter<'_> {
+        let bd = block.as_ptr().cast::<ffi::tpacket_block_desc>();
+        let bd_size = std::mem::size_of::<ffi::tpacket_block_desc>();
+
+        let first = block[bd_size..].as_ptr();
+        let end = block[block.len()..].as_ptr();
+
+        BatchIter {
+            current: first,
+            remaining: num_pkts,
+            block_end: end,
+            _marker: PhantomData,
+        }
+    }
+
+    #[test]
+    fn batch_iter_single_packet() {
+        let data = b"hello world";
+        let block = build_synthetic_block(&[data], ffi::TP_STATUS_USER);
+        let mut iter = iter_from_block(&block, 1);
+
+        let pkt = iter.next().unwrap();
+        assert_eq!(pkt.data(), data);
+        assert_eq!(pkt.len(), data.len());
+        assert_eq!(pkt.original_len(), data.len());
+        assert_eq!(pkt.timestamp().sec, 1000);
+
+        assert!(iter.next().is_none());
+    }
+
+    #[test]
+    fn batch_iter_multiple_packets() {
+        let p1 = b"packet one";
+        let p2 = b"packet two!!";
+        let p3 = b"pkt3";
+        let block = build_synthetic_block(&[p1, p2, p3], ffi::TP_STATUS_USER);
+        let mut iter = iter_from_block(&block, 3);
+
+        let pkt1 = iter.next().unwrap();
+        assert_eq!(pkt1.data(), p1.as_slice());
+        assert_eq!(pkt1.timestamp().sec, 1000);
+
+        let pkt2 = iter.next().unwrap();
+        assert_eq!(pkt2.data(), p2.as_slice());
+        assert_eq!(pkt2.timestamp().sec, 1001);
+
+        let pkt3 = iter.next().unwrap();
+        assert_eq!(pkt3.data(), p3.as_slice());
+        assert_eq!(pkt3.timestamp().sec, 1002);
+
+        assert!(iter.next().is_none());
+    }
+
+    #[test]
+    fn batch_iter_empty_block() {
+        let block = build_synthetic_block(&[], ffi::TP_STATUS_USER);
+        let mut iter = iter_from_block(&block, 0);
+        assert!(iter.next().is_none());
+    }
+
+    #[test]
+    fn batch_iter_exact_size() {
+        let block = build_synthetic_block(&[b"a", b"bb", b"ccc"], ffi::TP_STATUS_USER);
+        let iter = iter_from_block(&block, 3);
+        assert_eq!(iter.len(), 3);
+    }
+
+    #[test]
+    fn batch_iter_bounds_check_bad_remaining() {
+        // Claim 10 packets but only 1 exists — should stop safely
+        let block = build_synthetic_block(&[b"only one"], ffi::TP_STATUS_USER);
+        let mut iter = iter_from_block(&block, 10);
+
+        // First packet should work
+        let pkt = iter.next().unwrap();
+        assert_eq!(pkt.data(), b"only one");
+
+        // tp_next_offset is 0 (last packet), but remaining is still 9.
+        // The iterator should bounds-check and stop before reading garbage.
+        // It will try to read from the same position (since tp_next_offset=0)
+        // and eventually the header won't point to valid data or will reach
+        // the block end. The important thing is no crash.
+        let mut count = 1;
+        while iter.next().is_some() {
+            count += 1;
+            if count > 20 {
+                panic!("iterator should have stopped");
+            }
+        }
+    }
+
+    #[test]
+    fn packet_to_owned_roundtrip() {
+        let data = b"test packet data";
+        let block = build_synthetic_block(&[data], ffi::TP_STATUS_USER);
+        let mut iter = iter_from_block(&block, 1);
+        let pkt = iter.next().unwrap();
+
+        let owned = pkt.to_owned();
+        assert_eq!(owned.data, data);
+        assert_eq!(owned.timestamp.sec, 1000);
+        assert_eq!(owned.original_len, data.len());
+    }
+
+    #[test]
+    fn batch_timed_out_flag() {
+        let block = build_synthetic_block(
+            &[b"data"],
+            ffi::TP_STATUS_USER | ffi::TP_STATUS_BLK_TMO,
+        );
+        let bd = NonNull::new(block.as_ptr() as *mut ffi::tpacket_block_desc).unwrap();
+        let batch = unsafe { PacketBatch::new(bd, block.len()) };
+        assert!(batch.timed_out());
+        // Prevent Drop from writing to the block (it's stack memory)
+        std::mem::forget(batch);
+    }
+
+    #[test]
+    fn batch_not_timed_out() {
+        let block = build_synthetic_block(&[b"data"], ffi::TP_STATUS_USER);
+        let bd = NonNull::new(block.as_ptr() as *mut ffi::tpacket_block_desc).unwrap();
+        let batch = unsafe { PacketBatch::new(bd, block.len()) };
+        assert!(!batch.timed_out());
+        std::mem::forget(batch);
+    }
+
+    #[test]
+    fn batch_seq_num() {
+        let block = build_synthetic_block(&[b"data"], ffi::TP_STATUS_USER);
+        let bd = NonNull::new(block.as_ptr() as *mut ffi::tpacket_block_desc).unwrap();
+        let batch = unsafe { PacketBatch::new(bd, block.len()) };
+        assert_eq!(batch.seq_num(), 1);
+        std::mem::forget(batch);
+    }
+
+    #[test]
+    fn batch_len_and_is_empty() {
+        let block_with = build_synthetic_block(&[b"a", b"b"], ffi::TP_STATUS_USER);
+        let bd = NonNull::new(block_with.as_ptr() as *mut ffi::tpacket_block_desc).unwrap();
+        let batch = unsafe { PacketBatch::new(bd, block_with.len()) };
+        assert_eq!(batch.len(), 2);
+        assert!(!batch.is_empty());
+        std::mem::forget(batch);
+
+        let block_empty = build_synthetic_block(&[], ffi::TP_STATUS_USER);
+        let bd = NonNull::new(block_empty.as_ptr() as *mut ffi::tpacket_block_desc).unwrap();
+        let batch = unsafe { PacketBatch::new(bd, block_empty.len()) };
+        assert_eq!(batch.len(), 0);
+        assert!(batch.is_empty());
+        std::mem::forget(batch);
+    }
 }

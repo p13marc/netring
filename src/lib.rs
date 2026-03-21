@@ -13,6 +13,7 @@ pub mod stats;
 pub mod traits;
 
 pub mod afpacket;
+pub mod afxdp;
 pub mod async_adapters;
 
 // Convenience re-exports for channel feature

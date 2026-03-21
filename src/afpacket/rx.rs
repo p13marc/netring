@@ -244,6 +244,15 @@ impl AfPacketRxBuilder {
     }
 
     /// Validate configuration and create the [`AfPacketRx`].
+    ///
+    /// # Errors
+    ///
+    /// - [`Error::Config`] if parameters are invalid (block_size not power of 2,
+    ///   frame_size not aligned, etc.)
+    /// - [`Error::PermissionDenied`] without `CAP_NET_RAW`
+    /// - [`Error::InterfaceNotFound`] if the interface doesn't exist
+    /// - [`Error::SockOpt`] if a socket option fails
+    /// - [`Error::Mmap`] if ring buffer mmap fails
     pub fn build(self) -> Result<AfPacketRx, Error> {
         // Validate
         let interface = self

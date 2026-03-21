@@ -60,6 +60,12 @@ pub struct AsyncCapture<S: PacketSource + AsRawFd> {
 
 impl<S: PacketSource + AsRawFd> AsyncCapture<S> {
     /// Wrap a packet source in an async adapter.
+    ///
+    /// Registers the source's fd with tokio's reactor for `POLLIN` readiness.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`Error::Io`] if `AsyncFd` registration fails.
     pub fn new(source: S) -> Result<Self, Error> {
         let fd = AsyncFd::new(source).map_err(Error::Io)?;
         Ok(Self { inner: fd })
@@ -98,12 +104,15 @@ impl<S: PacketSource + AsRawFd> AsyncCapture<S> {
         }
     }
 
-    /// Access the inner source.
+    /// Shared access to the inner source.
     pub fn get_ref(&self) -> &S {
         self.inner.get_ref()
     }
 
-    /// Mutable access to the inner source for calling `next_batch()`.
+    /// Mutable access to the inner source.
+    ///
+    /// Use this after [`wait_readable()`](AsyncCapture::wait_readable) to
+    /// call [`next_batch()`](PacketSource::next_batch) for zero-copy access.
     pub fn get_mut(&mut self) -> &mut S {
         self.inner.get_mut()
     }

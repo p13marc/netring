@@ -36,8 +36,15 @@ pub struct ChannelCapture {
 impl ChannelCapture {
     /// Spawn a capture thread on the given interface.
     ///
-    /// `capacity` is the bounded channel size. The thread copies packets via
-    /// `to_owned()` and sends them over the channel.
+    /// Creates an `AfPacketRx` in the current thread (so errors propagate),
+    /// then spawns a background thread that captures packets and sends
+    /// [`OwnedPacket`]s over a bounded channel of the given `capacity`.
+    ///
+    /// # Errors
+    ///
+    /// - [`Error::InterfaceNotFound`] if the interface doesn't exist
+    /// - [`Error::PermissionDenied`] without `CAP_NET_RAW`
+    /// - [`Error::Mmap`] if ring buffer allocation fails
     pub fn spawn(interface: &str, capacity: usize) -> Result<Self, Error> {
         // Create the RX handle in the current thread so errors propagate.
         let rx = AfPacketRxBuilder::default().interface(interface).build()?;
@@ -72,11 +79,18 @@ impl ChannelCapture {
     }
 
     /// Blocking receive of the next packet.
+    ///
+    /// Blocks until a packet is available or the capture thread stops
+    /// (returns `Err(RecvError)` when the channel disconnects).
     pub fn recv(&self) -> Result<OwnedPacket, crossbeam_channel::RecvError> {
         self.receiver.recv()
     }
 
     /// Non-blocking receive attempt.
+    ///
+    /// Returns `Err(TryRecvError::Empty)` immediately if no packet is
+    /// available, or `Err(TryRecvError::Disconnected)` if the capture
+    /// thread has stopped.
     pub fn try_recv(&self) -> Result<OwnedPacket, TryRecvError> {
         self.receiver.try_recv()
     }

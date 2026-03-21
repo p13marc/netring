@@ -28,6 +28,10 @@ pub struct TxSlot<'a> {
 
 impl<'a> TxSlot<'a> {
     /// Mutable access to the packet data buffer.
+    ///
+    /// Returns a slice of `max_len` bytes. Write your Ethernet frame
+    /// starting at offset 0 (destination MAC). Call [`set_len()`](TxSlot::set_len)
+    /// to specify the actual packet length before [`send()`](TxSlot::send).
     pub fn data_mut(&mut self) -> &mut [u8] {
         let ptr = self.frame_ptr.as_ptr().map_addr(|a| a + self.data_offset);
         // SAFETY: frame is user-owned, ptr is within mmap region, max_len is valid.
@@ -36,9 +40,12 @@ impl<'a> TxSlot<'a> {
 
     /// Set the actual packet length to send.
     ///
+    /// Must be called before [`send()`](TxSlot::send). Only the first
+    /// `len` bytes of [`data_mut()`](TxSlot::data_mut) will be transmitted.
+    ///
     /// # Panics
     ///
-    /// Panics if `len > max_len`.
+    /// Panics if `len` exceeds the frame capacity.
     pub fn set_len(&mut self, len: usize) {
         assert!(
             len <= self.max_len,
@@ -48,7 +55,11 @@ impl<'a> TxSlot<'a> {
         self.len = len;
     }
 
-    /// Mark this frame for transmission and release the slot.
+    /// Mark this frame for transmission and consume the slot.
+    ///
+    /// The frame is queued in the TX ring. Call
+    /// [`flush()`](crate::traits::PacketSink::flush) to trigger
+    /// kernel transmission of all queued frames.
     pub fn send(mut self) {
         // Write tp_len, tp_snaplen, tp_mac into the tpacket_hdr at frame start
         let hdr = self.frame_ptr.as_ptr().cast::<libc::tpacket_hdr>();
@@ -127,7 +138,13 @@ impl AfPacketTx {
         unsafe { &*ptr }.load(Ordering::Acquire)
     }
 
-    /// Allocate a TX frame. Returns `None` if the ring is full.
+    /// Allocate a TX frame for a packet of up to `len` bytes.
+    ///
+    /// Returns `None` if the packet is too large for the frame or if
+    /// the TX ring is full (all frames pending kernel transmission).
+    ///
+    /// The returned [`TxSlot`] must have [`send()`](TxSlot::send) called
+    /// to queue it. Dropping without `send()` discards the frame.
     pub fn allocate(&mut self, len: usize) -> Option<TxSlot<'_>> {
         if len > self.frame_size - self.data_offset {
             return None; // frame can't hold this packet
@@ -151,10 +168,15 @@ impl AfPacketTx {
         Some(slot)
     }
 
-    /// Flush all pending frames to the wire.
+    /// Flush all frames queued via [`TxSlot::send()`] to the wire.
     ///
-    /// Calls `sendto(fd, NULL, 0, 0, NULL, 0)` to kick the kernel.
+    /// Triggers kernel transmission by calling `sendto(fd, NULL, 0, ...)`.
     /// Returns the number of frames that were pending.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`Error::Io`] if the `sendto` syscall fails (e.g., `ENOBUFS`
+    /// if the kernel cannot transmit).
     pub fn flush(&mut self) -> Result<usize, Error> {
         if self.pending == 0 {
             return Ok(0);

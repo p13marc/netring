@@ -34,6 +34,14 @@ pub struct Capture {
 
 impl Capture {
     /// Open capture on the named interface with default settings.
+    ///
+    /// Equivalent to `Capture::builder().interface(name).build()`.
+    ///
+    /// # Errors
+    ///
+    /// - [`Error::InterfaceNotFound`] if the interface doesn't exist
+    /// - [`Error::PermissionDenied`] without `CAP_NET_RAW`
+    /// - [`Error::Mmap`] if ring buffer allocation fails
     pub fn new(interface: &str) -> Result<Self, Error> {
         Self::builder().interface(interface).build()
     }
@@ -45,9 +53,18 @@ impl Capture {
 
     /// Blocking iterator over received packets.
     ///
-    /// Handles block advancement and retirement automatically.
-    /// Each [`Packet`] is a zero-copy view — valid until the iterator
-    /// advances past its block.
+    /// Handles block advancement and retirement automatically. Each
+    /// [`Packet`] is a zero-copy view into the mmap ring buffer.
+    ///
+    /// The iterator blocks when no packets are available (using
+    /// [`poll_timeout`](CaptureBuilder::poll_timeout)) and retries
+    /// indefinitely. It only stops on I/O error.
+    ///
+    /// # Note
+    ///
+    /// For tests or bounded loops, use the low-level
+    /// [`next_batch_blocking()`](crate::PacketSource::next_batch_blocking)
+    /// with a deadline instead — this iterator never returns `None` on timeout.
     pub fn packets(&mut self) -> PacketIter<'_> {
         PacketIter {
             rx: &mut self.rx as *mut AfPacketRx,
@@ -60,7 +77,11 @@ impl Capture {
         }
     }
 
-    /// Capture statistics. Resets kernel counters on read.
+    /// Capture statistics. **Resets kernel counters on each read.**
+    ///
+    /// # Errors
+    ///
+    /// Returns [`Error::SockOpt`] if `getsockopt(PACKET_STATISTICS)` fails.
     pub fn stats(&self) -> Result<CaptureStats, Error> {
         self.rx.stats()
     }

@@ -142,3 +142,25 @@ TPACKET_V3 TX uses **V1 frame-based semantics** (not block-based):
 - Status: `AVAILABLE → SEND_REQUEST → kernel sends → AVAILABLE`
 - `sendto(fd, NULL, 0, 0, NULL, 0)` triggers kernel transmission
 - `TxSlot::send()` marks frame; `TxSlot::Drop` discards if not sent
+
+## AF_XDP Backend (feature: `af-xdp`)
+
+Uses direct AF_XDP syscalls (`socket`, `setsockopt`, `mmap`, `bind`) via `libc`.
+Same pure Rust approach as AF_PACKET — no C library dependencies.
+
+```
+src/afxdp/
+  ├── mod.rs      XdpSocket + XdpSocketBuilder (public API)
+  ├── ffi.rs      libc re-exports (XDP constants/structs)
+  ├── socket.rs   socket(AF_XDP), setsockopt, getsockopt, bind
+  ├── umem.rs     UMEM mmap + frame allocator (free list)
+  └── ring.rs     4 ring types: Fill, RX, TX, Completion
+                  Producer/consumer protocol with AtomicU32
+```
+
+Ring model: 4 shared rings (Fill, RX, TX, Completion) over UMEM.
+Producer/consumer protocol with `AtomicU32` (`Acquire`/`Release` ordering).
+Uses `store(Release)`, not `fetch_add` — single producer/consumer per ring.
+
+Requires: Linux 5.4+, XDP-capable NIC driver, external XDP BPF program for RX.
+TX works without a BPF program.

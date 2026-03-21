@@ -38,13 +38,17 @@ default = []
 tokio = ["dep:tokio"]
 channel = ["dep:crossbeam-channel"]
 parse = ["dep:etherparse"]
-af-xdp = []  # requires xsk-rs + libxdp native library; see docs/AF_XDP.md
+af-xdp = []  # AF_XDP kernel-bypass packet I/O (pure Rust, no native deps)
 nightly = []
 integration-tests = []
 
 [package.metadata.docs.rs]
 all-features = true
 rustdoc-args = ["--cfg", "docsrs"]
+
+[[example]]
+name = "xdp_send"
+required-features = ["af-xdp"]
 
 [[bench]]
 name = "throughput"

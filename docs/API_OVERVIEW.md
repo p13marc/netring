@@ -116,6 +116,8 @@ let mut tx = AfPacketTxBuilder::default()
 | `PacketBatch<'a>` | Block of packets (RAII: returns block on drop) |
 | `OwnedPacket` | Owned copy (heap-allocated, no lifetime) |
 | `TxSlot<'a>` | Mutable TX frame (send or discard on drop) |
+| `XdpSocket` | AF_XDP socket (feature: `af-xdp`) |
+| `XdpSocketBuilder` | Builder for AF_XDP sockets |
 | `CaptureStats` | Packets received, dropped, frozen |
 | `Timestamp` | Nanosecond kernel timestamp |
 

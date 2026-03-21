@@ -3,10 +3,11 @@
 ## Project Overview
 
 netring is a pure Rust library for zero-copy packet capture and injection on Linux,
-built on AF_PACKET with TPACKET_V3 (block-based mmap ring buffers).
+built on AF_PACKET with TPACKET_V3 (block-based mmap ring buffers) and AF_XDP.
 
 - Edition 2024, MSRV 1.85, Linux only
 - Two API levels: high-level `Capture`/`Injector` and low-level `AfPacketRx`/`AfPacketTx`
+- AF_XDP backend via `XdpSocket` (feature: `af-xdp`) for kernel-bypass packet I/O
 - Zero-copy via mmap with lifetime-enforced safety
 - Async adapters: tokio (`AsyncCapture`) and channel (`ChannelCapture`)
 
@@ -49,6 +50,11 @@ just ci-full         # setcap + full test suite
 - `src/afpacket/ring.rs` — MmapRing (NonNull, strict provenance, AtomicU32)
 - `src/afpacket/socket.rs` — All setsockopt wrappers
 - `src/afpacket/ffi.rs` — libc re-exports + supplemental constants
+- `src/afxdp/mod.rs` — XdpSocket + XdpSocketBuilder (AF_XDP public API)
+- `src/afxdp/ffi.rs` — libc re-exports for XDP constants/structs
+- `src/afxdp/socket.rs` — AF_XDP socket/setsockopt/bind wrappers
+- `src/afxdp/umem.rs` — UMEM mmap + frame allocator
+- `src/afxdp/ring.rs` — 4 XDP ring types (Fill, RX, TX, Completion)
 - `src/async_adapters/` — tokio and channel adapters
 
 ## Architecture

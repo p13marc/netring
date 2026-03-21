@@ -478,11 +478,7 @@ pub struct PacketStatus {
 }
 ```
 
----
-
-## 5. Low-Level API
-
-### 5.1 `PacketBatch` — Block-Level Access
+### 5.3 `PacketBatch` — Block-Level Access
 
 ```rust
 /// A batch of packets from a single retired kernel block.
@@ -539,7 +535,7 @@ impl Drop for PacketBatch<'_> {
 }
 ```
 
-### 5.2 TX Slot
+### 5.4 TX Slot
 
 ```rust
 /// A mutable frame in the TX ring.
@@ -557,7 +553,7 @@ impl<'a> TxSlot<'a> {
 }
 ```
 
-### 5.3 Backend Types
+### 5.5 Backend Types
 
 ```rust
 /// AF_PACKET TPACKET_V3 RX ring.
@@ -612,52 +608,68 @@ unsafe impl Send for AfPacketTx {}
 
 Uses native `async fn` in traits — no `#[async_trait]` proc macro.
 
+**Zero-copy pattern** (two-step — avoids `AsyncFd` borrow-checker limitation):
+
 ```rust
-use netring::{Capture, r#async::AsyncCapture};
+use netring::{AfPacketRxBuilder, PacketSource};
+use netring::async_adapters::tokio_adapter::AsyncCapture;
 
 #[tokio::main]
 async fn main() -> Result<(), netring::Error> {
-    let cap = Capture::builder().interface("eth0").build()?;
-    let mut async_cap = AsyncCapture::new(cap)?;
+    let rx = AfPacketRxBuilder::default().interface("eth0").build()?;
+    let mut async_cap = AsyncCapture::new(rx)?;
 
     loop {
-        let batch = async_cap.recv().await?;
-        for pkt in &batch {
-            handle(pkt.data()).await;
+        async_cap.wait_readable().await?;
+        if let Some(batch) = async_cap.get_mut().next_batch() {
+            for pkt in &batch {
+                handle(pkt.data()).await;
+            }
         }
     }
 }
+# async fn handle(_: &[u8]) {}
+```
+
+**Owned pattern** (single call, copies data out of ring):
+
+```rust
+# use netring::AfPacketRxBuilder;
+# use netring::async_adapters::tokio_adapter::AsyncCapture;
+# async fn example() -> Result<(), netring::Error> {
+let rx = AfPacketRxBuilder::default().interface("eth0").build()?;
+let mut async_cap = AsyncCapture::new(rx)?;
+
+let packets = async_cap.recv().await?;  // Vec<OwnedPacket>
+for pkt in &packets {
+    println!("{} bytes", pkt.data.len());
+}
+# Ok(()) }
 ```
 
 ```rust
 /// Async capture using tokio [`AsyncFd`].
 ///
-/// Wraps a [`Capture`] (or any [`PacketSource`]) and provides async batch retrieval.
-pub struct AsyncCapture<S: PacketSource = AfPacketRx> {
+/// Due to Rust's borrow checker, `AsyncFd`'s guard-based API cannot return
+/// a lending `PacketBatch<'_>`. Two patterns are provided:
+/// - **Zero-copy**: `wait_readable()` + `get_mut().next_batch()`
+/// - **Owned**: `recv()` returns `Vec<OwnedPacket>` (copies data)
+pub struct AsyncCapture<S: PacketSource + AsRawFd> {
     inner: AsyncFd<S>,
 }
 
-impl<S: PacketSource> AsyncCapture<S> {
+impl<S: PacketSource + AsRawFd> AsyncCapture<S> {
     pub fn new(source: S) -> Result<Self, Error>;
 
-    /// Await the next packet batch.
-    pub async fn recv(&mut self) -> Result<PacketBatch<'_>, Error> {
-        loop {
-            if let Some(batch) = self.inner.get_mut().next_batch() {
-                return Ok(batch);
-            }
-            let mut guard = self.inner.readable().await?;
-            guard.clear_ready();
-        }
-    }
-}
+    /// Wait for the socket to become readable (epoll-based).
+    pub async fn wait_readable(&self) -> Result<(), Error>;
 
-// Also implements AsyncPacketSource
-#[cfg(feature = "tokio")]
-impl<S: PacketSource> AsyncPacketSource for AsyncCapture<S> {
-    async fn next_batch(&mut self) -> Result<PacketBatch<'_>, Error> {
-        self.recv().await
-    }
+    /// Receive next batch as owned packets (copies data out of ring).
+    pub async fn recv(&mut self) -> Result<Vec<OwnedPacket>, Error>;
+
+    pub fn get_ref(&self) -> &S;
+    pub fn get_mut(&mut self) -> &mut S;
+    pub fn into_inner(self) -> S;
 }
 ```
 

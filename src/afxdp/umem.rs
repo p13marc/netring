@@ -69,6 +69,12 @@ impl Umem {
         self.free_list.push_back(addr);
     }
 
+    /// Return multiple frames to the free list.
+    #[inline]
+    pub(crate) fn free_frames(&mut self, addrs: &[u64]) {
+        self.free_list.extend(addrs);
+    }
+
     /// Number of frames currently available for allocation.
     #[inline]
     pub(crate) fn available(&self) -> usize {

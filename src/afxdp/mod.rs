@@ -438,10 +438,11 @@ impl XdpSocket {
             return;
         }
         let base = self.comp.consumer_index();
+        let mut addrs = [0u64; 64];
         for i in 0..n {
-            let addr: u64 = unsafe { self.comp.read_desc(base + i) };
-            self.umem.free_frame(addr);
+            addrs[i as usize] = unsafe { self.comp.read_desc(base + i) };
         }
+        self.umem.free_frames(&addrs[..n as usize]);
         self.comp.consumer_release(n);
     }
 

@@ -272,7 +272,7 @@ impl CaptureBuilder {
                 }
                 Err(Error::Mmap(ref e)) if is_enomem(e) && current_count > min_count => {
                     current_count = (current_count * 3 / 4).max(min_count);
-                    log::warn!(
+                    tracing::warn!(
                         "ENOMEM: retrying with {current_count} blocks (was {})",
                         self.block_count
                     );
@@ -281,7 +281,7 @@ impl CaptureBuilder {
                     if is_enomem(source) && current_count > min_count =>
                 {
                     current_count = (current_count * 3 / 4).max(min_count);
-                    log::warn!(
+                    tracing::warn!(
                         "ENOMEM: retrying with {current_count} blocks (was {})",
                         self.block_count
                     );
@@ -370,7 +370,25 @@ impl<'cap> Iterator for PacketIter<'cap> {
                     self.current_ptr = base.map_addr(|a| a + batch.offset_to_first_pkt() as usize);
                     self.block_end = base.map_addr(|a| a + batch.blk_len() as usize);
 
-                    // SAFETY: mmap region valid for 'cap.
+                    // SAFETY: Lifetime erasure from PacketBatch<'_> to PacketBatch<'static>.
+                    //
+                    // This is sound because:
+                    // 1. The mmap ring is valid for 'cap (owned by Capture, which
+                    //    PacketIter borrows via PhantomData<&'cap mut Capture>).
+                    // 2. The block is only released when we explicitly call
+                    //    ManuallyDrop::into_inner (in the drop-exhausted-batch
+                    //    branch above or in PacketIter::drop).
+                    // 3. We never dereference self.rx while a batch is live
+                    //    (checked by the if/else structure of next()).
+                    //
+                    // This exists because Rust's LendingIterator / StreamingIterator
+                    // is not stabilized — standard Iterator cannot express a
+                    // lifetime tied to the iterator itself.
+                    //
+                    // WARNING: collecting Packets across block boundaries (e.g.,
+                    // iter.collect::<Vec<_>>()) is unsound because earlier blocks
+                    // may be returned to the kernel. This iterator is designed
+                    // for for-loop consumption only.
                     let erased: PacketBatch<'static> = unsafe { std::mem::transmute(batch) };
                     self.batch = Some(ManuallyDrop::new(erased));
                 }

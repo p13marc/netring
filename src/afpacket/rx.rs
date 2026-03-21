@@ -60,11 +60,11 @@ impl PacketSource for AfPacketRx {
         // SAFETY: block is user-owned (Acquire fence done in read_block_status).
         let seq = unsafe { (*bd.as_ptr()).hdr.bh1.seq_num };
         if seq != self.expected_seq && self.expected_seq != 0 {
-            log::warn!(
-                "block sequence gap: expected {}, got {} (dropped {} blocks)",
-                self.expected_seq,
-                seq,
-                seq.saturating_sub(self.expected_seq)
+            tracing::warn!(
+                expected = self.expected_seq,
+                actual = seq,
+                dropped = seq.saturating_sub(self.expected_seq),
+                "block sequence gap"
             );
         }
         self.expected_seq = seq + 1;
@@ -271,21 +271,7 @@ impl AfPacketRxBuilder {
             )));
         }
 
-        let align = ffi::TPACKET_ALIGNMENT;
-        if self.frame_size % align != 0 {
-            return Err(Error::Config(format!(
-                "frame_size {} is not a multiple of TPACKET_ALIGNMENT ({})",
-                self.frame_size, align
-            )));
-        }
-
-        let hdrlen = ffi::TPACKET3_HDRLEN;
-        if self.frame_size < hdrlen {
-            return Err(Error::Config(format!(
-                "frame_size {} is less than TPACKET3_HDRLEN ({})",
-                self.frame_size, hdrlen
-            )));
-        }
+        crate::afpacket::validate_frame_size(self.frame_size)?;
 
         if self.frame_size > self.block_size {
             return Err(Error::Config(format!(

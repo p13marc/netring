@@ -55,6 +55,7 @@ pub use libc::TPACKET_ALIGNMENT;
 pub use libc::TPACKET3_HDRLEN;
 
 /// Align `x` up to `TPACKET_ALIGNMENT` (16 bytes).
+#[inline]
 pub const fn tpacket_align(x: usize) -> usize {
     (x + TPACKET_ALIGNMENT - 1) & !(TPACKET_ALIGNMENT - 1)
 }

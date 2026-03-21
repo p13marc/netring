@@ -18,16 +18,19 @@ pub struct Timestamp {
 
 impl Timestamp {
     /// Create a new timestamp.
+    #[inline]
     pub const fn new(sec: u32, nsec: u32) -> Self {
         Self { sec, nsec }
     }
 
     /// Convert to [`SystemTime`].
+    #[inline]
     pub fn to_system_time(self) -> SystemTime {
         UNIX_EPOCH + Duration::new(self.sec as u64, self.nsec)
     }
 
     /// Convert to [`Duration`] since epoch.
+    #[inline]
     pub fn to_duration(self) -> Duration {
         Duration::new(self.sec as u64, self.nsec)
     }
@@ -72,6 +75,7 @@ pub struct PacketStatus {
 
 impl PacketStatus {
     /// Decode status flags from the raw `tp_status` bitmask.
+    #[inline]
     pub fn from_raw(status: u32) -> Self {
         Self {
             truncated: status & ffi::TP_STATUS_COPY != 0,
@@ -113,51 +117,61 @@ pub struct Packet<'a> {
 
 impl<'a> Packet<'a> {
     /// Construct from raw references. Used internally by iterators.
+    #[inline]
     pub(crate) fn from_raw(data: &'a [u8], hdr: &'a ffi::tpacket3_hdr) -> Self {
         Self { data, hdr }
     }
 
     /// Raw packet bytes starting from the MAC header.
+    #[inline]
     pub fn data(&self) -> &'a [u8] {
         self.data
     }
 
     /// Kernel timestamp (nanosecond precision).
+    #[inline]
     pub fn timestamp(&self) -> Timestamp {
         Timestamp::new(self.hdr.tp_sec, self.hdr.tp_nsec)
     }
 
     /// Captured length (may be < [`original_len()`](Packet::original_len) if truncated).
+    #[inline]
     pub fn len(&self) -> usize {
         self.hdr.tp_snaplen as usize
     }
 
     /// Whether the captured data is empty.
+    #[inline]
     pub fn is_empty(&self) -> bool {
         self.hdr.tp_snaplen == 0
     }
 
     /// Original packet length on the wire.
+    #[inline]
     pub fn original_len(&self) -> usize {
         self.hdr.tp_len as usize
     }
 
     /// Per-packet status flags.
+    #[inline]
     pub fn status(&self) -> PacketStatus {
         PacketStatus::from_raw(self.hdr.tp_status)
     }
 
     /// RX flow hash (requires `fill_rxhash` — enabled by default).
+    #[inline]
     pub fn rxhash(&self) -> u32 {
         self.hdr.hv1.tp_rxhash
     }
 
     /// Raw VLAN TCI from kernel header. Check `status().vlan_valid` first.
+    #[inline]
     pub fn vlan_tci(&self) -> u16 {
         self.hdr.hv1.tp_vlan_tci as u16
     }
 
     /// Raw VLAN TPID from kernel header. Check `status().vlan_tpid_valid` first.
+    #[inline]
     pub fn vlan_tpid(&self) -> u16 {
         self.hdr.hv1.tp_vlan_tpid
     }
@@ -169,6 +183,40 @@ impl<'a> Packet<'a> {
             timestamp: self.timestamp(),
             original_len: self.original_len(),
         }
+    }
+
+    /// Parse Ethernet/IP/TCP/UDP headers from packet data (feature: `parse`).
+    ///
+    /// Uses [`etherparse::SlicedPacket`] for zero-copy parsing directly
+    /// from the mmap ring buffer — no data is copied.
+    ///
+    /// # Examples
+    ///
+    /// ```no_run
+    /// # fn example(pkt: &netring::Packet<'_>) {
+    /// #[cfg(feature = "parse")]
+    /// if let Ok(parsed) = pkt.parse() {
+    ///     // Access headers without copying
+    /// }
+    /// # }
+    /// ```
+    #[cfg(feature = "parse")]
+    #[inline]
+    pub fn parse(
+        &self,
+    ) -> Result<etherparse::SlicedPacket<'a>, etherparse::err::packet::SliceError> {
+        etherparse::SlicedPacket::from_ethernet(self.data)
+    }
+}
+
+impl OwnedPacket {
+    /// Parse Ethernet/IP/TCP/UDP headers from owned packet data (feature: `parse`).
+    #[cfg(feature = "parse")]
+    #[inline]
+    pub fn parse(
+        &self,
+    ) -> Result<etherparse::SlicedPacket<'_>, etherparse::err::packet::SliceError> {
+        etherparse::SlicedPacket::from_ethernet(&self.data)
     }
 }
 
@@ -228,11 +276,13 @@ impl<'a> PacketBatch<'a> {
     }
 
     /// Number of packets in this block.
+    #[inline]
     pub fn len(&self) -> usize {
         self.num_pkts as usize
     }
 
     /// Whether the batch is empty.
+    #[inline]
     pub fn is_empty(&self) -> bool {
         self.num_pkts == 0
     }
@@ -328,6 +378,7 @@ pub struct BatchIter<'a> {
 impl<'a> Iterator for BatchIter<'a> {
     type Item = Packet<'a>;
 
+    #[inline]
     fn next(&mut self) -> Option<Packet<'a>> {
         if self.remaining == 0 {
             return None;
@@ -337,7 +388,7 @@ impl<'a> Iterator for BatchIter<'a> {
 
         // Bounds check: header must fit within block
         if (self.current as usize) + hdr_size > self.block_end as usize {
-            log::warn!("BatchIter: tpacket3_hdr extends past block boundary, stopping");
+            tracing::warn!("BatchIter: tpacket3_hdr extends past block boundary, stopping");
             self.remaining = 0;
             return None;
         }
@@ -351,7 +402,7 @@ impl<'a> Iterator for BatchIter<'a> {
 
         // Bounds check: packet data must fit within block
         if (data_ptr as usize) + snaplen > self.block_end as usize {
-            log::warn!("BatchIter: packet data extends past block boundary, stopping");
+            tracing::warn!("BatchIter: packet data extends past block boundary, stopping");
             self.remaining = 0;
             return None;
         }

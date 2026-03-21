@@ -26,6 +26,13 @@ fn main() -> Result<(), netring::Error> {
             let counter = Arc::clone(&counters[i]);
 
             thread::spawn(move || {
+                // Pin thread to CPU for NUMA-aware capture
+                if let Some(core_ids) = core_affinity::get_core_ids() {
+                    if let Some(core) = core_ids.get(i % core_ids.len()) {
+                        core_affinity::set_for_current(*core);
+                    }
+                }
+
                 let mut cap = Capture::builder()
                     .interface(&iface)
                     .fanout(FanoutMode::Cpu, 42)

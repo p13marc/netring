@@ -45,7 +45,9 @@ impl<'a> TxSlot<'a> {
     ///
     /// # Panics
     ///
-    /// Panics if `len` exceeds the frame capacity.
+    /// Panics if `len` exceeds the frame capacity. This is intentional:
+    /// the frame capacity is known at [`allocate()`](crate::AfPacketTx::allocate)
+    /// time, so exceeding it is a programming error (like indexing past a Vec).
     pub fn set_len(&mut self, len: usize) {
         assert!(
             len <= self.max_len,
@@ -284,40 +286,17 @@ impl AfPacketTxBuilder {
             .interface
             .ok_or_else(|| Error::Config("interface is required".into()))?;
 
-        let align = ffi::TPACKET_ALIGNMENT;
-        if self.frame_size % align != 0 {
-            return Err(Error::Config(format!(
-                "frame_size {} is not a multiple of TPACKET_ALIGNMENT ({})",
-                self.frame_size, align
-            )));
-        }
-
-        let hdrlen = ffi::TPACKET3_HDRLEN;
-        if self.frame_size < hdrlen {
-            return Err(Error::Config(format!(
-                "frame_size {} is less than TPACKET3_HDRLEN ({})",
-                self.frame_size, hdrlen
-            )));
-        }
+        crate::afpacket::validate_frame_size(self.frame_size)?;
 
         if self.frame_count == 0 {
             return Err(Error::Config("frame_count must be > 0".into()));
         }
 
-        // Compute block_size: smallest power-of-2 >= PAGE_SIZE that is a
-        // multiple of frame_size, with at least 1 frame per block.
+        // Compute block_size: smallest power-of-2 >= PAGE_SIZE and >= frame_size.
+        // Each "block" holds 1+ frames. The kernel requires block_size to be a
+        // power of 2 and a multiple of PAGE_SIZE.
         let page_size = 4096usize;
-        let mut block_size = page_size.max(self.frame_size);
-        if !block_size.is_power_of_two() {
-            block_size = block_size.next_power_of_two();
-        }
-        // Ensure block_size is a multiple of frame_size
-        if block_size % self.frame_size != 0 {
-            block_size = self.frame_size * (block_size / self.frame_size + 1);
-            if !block_size.is_power_of_two() {
-                block_size = block_size.next_power_of_two();
-            }
-        }
+        let block_size = self.frame_size.max(page_size).next_power_of_two();
 
         let frames_per_block = block_size / self.frame_size;
         let block_count = self.frame_count.div_ceil(frames_per_block);

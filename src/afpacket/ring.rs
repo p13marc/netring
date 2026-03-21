@@ -53,7 +53,7 @@ impl MmapRing {
             | Err(nix::errno::Errno::EAGAIN) => {
                 // MAP_LOCKED may fail without CAP_IPC_LOCK or when RLIMIT_MEMLOCK
                 // is exceeded (EAGAIN). Retry without it.
-                log::warn!("mmap with MAP_LOCKED failed, retrying without (consider CAP_IPC_LOCK)");
+                tracing::warn!("mmap with MAP_LOCKED failed, retrying without (consider CAP_IPC_LOCK)");
                 let flags_no_lock = MapFlags::MAP_SHARED | MapFlags::MAP_POPULATE;
                 unsafe { nix::sys::mman::mmap(None, length, prot, flags_no_lock, &fd, 0) }
                     .map_err(|e| Error::Mmap(e.into()))?
@@ -74,6 +74,7 @@ impl MmapRing {
     /// # Panics
     ///
     /// Panics if `index >= block_count`.
+    #[inline]
     pub(crate) fn block_ptr(&self, index: usize) -> NonNull<ffi::tpacket_block_desc> {
         assert!(
             index < self.block_count,
@@ -129,6 +130,7 @@ unsafe impl Send for MmapRing {}
 /// # Safety
 ///
 /// `bd` must point to a valid `tpacket_block_desc` within an mmap'd region.
+#[inline]
 pub(crate) unsafe fn read_block_status(bd: NonNull<ffi::tpacket_block_desc>) -> u32 {
     // SAFETY: caller guarantees bd is valid. We use addr_of! to avoid
     // creating a reference to the union, then cast to AtomicU32.
@@ -147,6 +149,7 @@ pub(crate) unsafe fn read_block_status(bd: NonNull<ffi::tpacket_block_desc>) -> 
 /// # Safety
 ///
 /// `bd` must point to a valid `tpacket_block_desc` within an mmap'd region.
+#[inline]
 pub(crate) unsafe fn release_block(bd: NonNull<ffi::tpacket_block_desc>) {
     // SAFETY: same as read_block_status — valid pointer, aligned u32.
     let status_ptr =

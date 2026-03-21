@@ -48,8 +48,12 @@ setcap:
         exit 1
     fi
     echo "Setting CAP_NET_RAW,CAP_NET_ADMIN on ${#bins[@]} binaries..."
-    sudo setcap cap_net_raw,cap_net_admin+ep "${bins[@]}"
-    echo "✓ Capabilities set. Run tests/examples without sudo."
+    for bin in "${bins[@]}"; do
+        sudo setcap cap_net_raw,cap_net_admin+ep "$bin" && \
+            echo "  ✓ $(basename "$bin")" || \
+            echo "  ✗ $(basename "$bin") (failed)"
+    done
+    echo "✓ Done. Run tests/examples without sudo."
 
 # Check if AF_PACKET is available (useful in containers)
 check-afpacket:

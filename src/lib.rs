@@ -2,6 +2,7 @@
 #![deny(unsafe_op_in_unsafe_fn)]
 #![warn(missing_docs)]
 
+pub mod bridge;
 pub mod capture;
 pub mod config;
 pub mod error;

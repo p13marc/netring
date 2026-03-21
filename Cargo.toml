@@ -9,9 +9,8 @@ keywords = ["packet", "capture", "af_packet", "tpacket", "zero-copy"]
 categories = ["network-programming", "os::linux-apis"]
 readme = "README.md"
 documentation = "https://docs.rs/netring"
-# TODO: uncomment when repo is created
-# repository = "https://github.com/user/netring"
-# homepage = "https://github.com/user/netring"
+repository = "https://github.com/p13marc/netring"
+homepage = "https://github.com/p13marc/netring"
 exclude = ["CLAUDE.md", "SPEC.md", "justfile", "plans/"]
 
 [dependencies]

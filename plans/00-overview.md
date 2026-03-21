@@ -1,56 +1,42 @@
-# Implementation Plans — v0.2 Roadmap
+# AF_XDP Implementation Plan — v0.4
+
+## Goal
+
+Replace the AF_XDP stub with a full pure Rust implementation using `libc`
+syscalls (same approach as AF_PACKET). No new dependencies.
 
 ## Phases
 
-| Phase | Name | Effort | Dependencies |
-|-------|------|--------|-------------|
-| A | Code Quality + New Dependencies | Small | None |
-| B | Ring Presets & Snap Length | Small | None |
-| C | Per-Packet Direction | Small | A (inline) |
-| D | eBPF Fanout & Socket Filter | Medium | A (ffi constants) |
-| E | Interface Capability Detection | Medium | B (RingProfile) |
-| F | Bridge / IPS Mode | Large | A, B |
-| G | AF_XDP Backend | Large | A |
+| Phase | Name | Effort | Depends On |
+|-------|------|--------|-----------|
+| G.1 | FFI constants + socket setup | Small | — |
+| G.2 | UMEM allocation + registration | Small | G.1 |
+| G.3 | Ring mmap + producer/consumer protocol | Medium | G.1, G.2 |
+| G.4 | XdpSocket API (recv/send/flush) | Medium | G.1–G.3 |
+| G.5 | Tests, example, docs | Small | G.4 |
 
-## Dependency Graph
+## Architecture
 
 ```
-Phase A ──→ Phase C (inline + bounds check interaction)
-       ──→ Phase D (ffi constants for PACKET_FANOUT_EBPF)
-       ──→ Phase F (TX block_size fix)
-       ──→ Phase G (clean trait abstraction)
-
-Phase B ──→ Phase E (InterfaceInfo::suggest_profile() returns RingProfile)
-       ──→ Phase F (BridgeBuilder::profile() uses RingProfile)
-
-Phases C and D are independent of each other.
+src/afxdp/
+  ├── mod.rs          # Public API, XdpSocket + XdpSocketBuilder
+  ├── ffi.rs          # Re-export libc XDP constants/structs
+  ├── socket.rs       # socket(AF_XDP), setsockopt, getsockopt, bind
+  ├── umem.rs         # UMEM mmap + frame allocator (free list)
+  └── ring.rs         # 4 ring types: Fill, RX, TX, Completion
+                      # Producer/consumer protocol with AtomicU32
 ```
 
-## Versioning
+## Key Design Decisions
 
-- Phases A–E → **v0.2.0**
-- Phase F (bridge) → **v0.3.0**
-- Phase G (AF_XDP) → **v0.4.0** (behind `af-xdp` feature flag)
+1. **Pure Rust**: `libc` for structs/constants, `nix` for mmap/poll — same as AF_PACKET
+2. **Standalone API**: `XdpSocket` does NOT implement `PacketSource` (different ring model)
+3. **No BPF loading**: Users bring `aya` + `AsFd` for RX program (existing pattern)
+4. **TX works without BPF**: No XDP program needed for send-only use cases
+5. **Copy-based recv**: Returns `Vec<OwnedPacket>` — true zero-copy deferred to future GAT redesign
 
-## New Dependencies Summary
+## Reference
 
-| Crate | Type | Feature Flag | Phase |
-|-------|------|-------------|-------|
-| `tracing` 0.1 | Required (replaces `log`) | — | A |
-| `etherparse` 0.16 | Optional | `parse` | A |
-| `core_affinity` 0.8 | Dev-dependency | — | A |
-| `nlink` 0.9 | Optional | `nlink` | E |
-| `xsk-rs` 0.8 | Optional | `af-xdp` | G |
-
-## Verified Constants (libc 0.2.183)
-
-All needed constants are exported by libc — no manual definitions needed:
-- `PACKET_FANOUT_CBPF` (6), `PACKET_FANOUT_EBPF` (7), `PACKET_FANOUT_DATA` (22)
-- `SO_ATTACH_BPF` (50)
-- `PACKET_HOST` (0), `PACKET_BROADCAST` (1), `PACKET_MULTICAST` (2), `PACKET_OTHERHOST` (3), `PACKET_OUTGOING` (4)
-
-## Known Limitations
-
-- **Plan G (AF_XDP)**: `XdpRx` will NOT implement `PacketSource` in v0.4 (standalone API).
-  Bridge (Plan F) requires `PacketSource` — AF_XDP + Bridge is not supported until
-  a future GAT-based trait redesign.
+- Kernel docs: `Documentation/networking/af_xdp.rst`
+- `xdp` crate 0.7.3 source (https://codeberg.org/ca1ne/xdp) as correctness reference
+- `docs/AF_XDP_EVALUATION.md` for full syscall interface details

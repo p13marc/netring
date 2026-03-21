@@ -72,7 +72,7 @@ pub struct PacketStatus {
 
 impl PacketStatus {
     /// Decode status flags from the raw `tp_status` bitmask.
-    pub(crate) fn from_raw(status: u32) -> Self {
+    pub fn from_raw(status: u32) -> Self {
         Self {
             truncated: status & ffi::TP_STATUS_COPY != 0,
             losing: status & ffi::TP_STATUS_LOSING != 0,

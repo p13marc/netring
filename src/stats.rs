@@ -5,7 +5,7 @@ use std::fmt;
 
 /// Capture statistics from the kernel.
 ///
-/// Reading stats via [`PacketSource::stats()`] resets the kernel counters.
+/// Reading stats via [`stats()`](crate::traits::PacketSource::stats) resets the kernel counters.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct CaptureStats {
     /// Total packets received (passed filter).

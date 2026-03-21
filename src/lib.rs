@@ -1,9 +1,4 @@
-//! High-performance zero-copy packet I/O for Linux.
-//!
-//! `netring` provides packet capture and injection via AF_PACKET with TPACKET_V3
-//! (block-based mmap ring buffers). It offers both a high-level ergonomic API
-//! and a low-level batch API for maximum throughput.
-
+#![doc = include_str!("../README.md")]
 #![deny(unsafe_op_in_unsafe_fn)]
 #![warn(missing_docs)]
 
@@ -21,7 +16,7 @@ pub mod async_adapters;
 // Convenience re-exports for channel feature
 #[cfg(feature = "channel")]
 pub mod channel {
-    //! Convenience re-export of [`ChannelCapture`](crate::async_adapters::channel::ChannelCapture).
+    //! Convenience re-export of [`ChannelCapture`].
     pub use crate::async_adapters::channel::ChannelCapture;
 }
 

@@ -112,7 +112,7 @@ impl From<libc::sock_filter> for BpfInsn {
 /// A classic BPF filter program for kernel-level packet filtering.
 ///
 /// Generate instructions with `tcpdump -dd "expression"`.
-/// For eBPF, use `aya` and attach to the socket fd via [`AsFd`].
+/// For eBPF, use `aya` and attach to the socket fd via `AsFd`.
 #[derive(Debug, Clone)]
 pub struct BpfFilter {
     instructions: Vec<BpfInsn>,

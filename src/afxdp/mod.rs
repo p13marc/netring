@@ -166,8 +166,18 @@ impl XdpSocketBuilder {
 
         // 4. Configure ring sizes (each power of 2, independent)
         let ring_size = (self.frame_count as u32).next_power_of_two();
-        socket::set_ring_size(fd.as_fd(), ffi::XDP_UMEM_FILL_RING, ring_size, "XDP_UMEM_FILL_RING")?;
-        socket::set_ring_size(fd.as_fd(), ffi::XDP_UMEM_COMPLETION_RING, ring_size, "XDP_UMEM_COMPLETION_RING")?;
+        socket::set_ring_size(
+            fd.as_fd(),
+            ffi::XDP_UMEM_FILL_RING,
+            ring_size,
+            "XDP_UMEM_FILL_RING",
+        )?;
+        socket::set_ring_size(
+            fd.as_fd(),
+            ffi::XDP_UMEM_COMPLETION_RING,
+            ring_size,
+            "XDP_UMEM_COMPLETION_RING",
+        )?;
         socket::set_ring_size(fd.as_fd(), ffi::XDP_RX_RING, ring_size, "XDP_RX_RING")?;
         socket::set_ring_size(fd.as_fd(), ffi::XDP_TX_RING, ring_size, "XDP_TX_RING")?;
 
@@ -390,8 +400,7 @@ impl XdpSocket {
         if ret == -1 {
             let err = std::io::Error::last_os_error();
             // EAGAIN/ENOBUFS are transient — not errors
-            if err.raw_os_error() != Some(libc::EAGAIN)
-                && err.raw_os_error() != Some(libc::ENOBUFS)
+            if err.raw_os_error() != Some(libc::EAGAIN) && err.raw_os_error() != Some(libc::ENOBUFS)
             {
                 return Err(Error::Io(err));
             }

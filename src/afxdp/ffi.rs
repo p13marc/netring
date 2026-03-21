@@ -12,11 +12,11 @@ pub use libc::SOL_XDP; // 283
 // setsockopt/getsockopt options
 pub use libc::XDP_MMAP_OFFSETS; // 1
 pub use libc::XDP_RX_RING; // 2
+pub use libc::XDP_STATISTICS;
 pub use libc::XDP_TX_RING; // 3
-pub use libc::XDP_UMEM_REG; // 4
-pub use libc::XDP_UMEM_FILL_RING; // 5
 pub use libc::XDP_UMEM_COMPLETION_RING; // 6
-pub use libc::XDP_STATISTICS; // 7
+pub use libc::XDP_UMEM_FILL_RING; // 5
+pub use libc::XDP_UMEM_REG; // 4 // 7
 
 // mmap page offsets
 // NOTE: RX/TX are off_t (i64), FILL/COMPLETION are c_ulonglong (u64)
@@ -35,8 +35,8 @@ pub use libc::XDP_ZEROCOPY; // 4
 pub use libc::sockaddr_xdp; // sxdp_family(u16), sxdp_flags(u16), sxdp_ifindex(u32), sxdp_queue_id(u32), sxdp_shared_umem_fd(u32)
 pub use libc::xdp_desc; // addr(u64), len(u32), options(u32)
 pub use libc::xdp_mmap_offsets; // rx, tx, fr, cr (each xdp_ring_offset)
-                                // NOTE: fill ring field is .fr (NOT .fill)
-                                // NOTE: completion ring field is .cr (NOT .completion)
+// NOTE: fill ring field is .fr (NOT .fill)
+// NOTE: completion ring field is .cr (NOT .completion)
 pub use libc::xdp_ring_offset; // producer(u64), consumer(u64), desc(u64), flags(u64)
 pub use libc::xdp_statistics;
 pub use libc::xdp_umem_reg; // addr, len, chunk_size, headroom, flags, tx_metadata_len

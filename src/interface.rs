@@ -117,11 +117,7 @@ fn count_sysfs_queues(iface: &str) -> Option<u32> {
     let entries = std::fs::read_dir(format!("/sys/class/net/{iface}/queues")).ok()?;
     let count = entries
         .filter_map(|e| e.ok())
-        .filter(|e| {
-            e.file_name()
-                .to_str()
-                .is_some_and(|n| n.starts_with("rx-"))
-        })
+        .filter(|e| e.file_name().to_str().is_some_and(|n| n.starts_with("rx-")))
         .count();
     Some(count.max(1) as u32)
 }

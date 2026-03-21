@@ -6,9 +6,9 @@
 use std::os::fd::BorrowedFd;
 
 use crate::afpacket::ffi;
-use crate::sockopt::raw_setsockopt;
 use crate::config::{FanoutFlags, FanoutMode};
 use crate::error::Error;
+use crate::sockopt::raw_setsockopt;
 
 /// Join a fanout group.
 ///

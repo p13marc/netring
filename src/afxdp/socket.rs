@@ -12,11 +12,7 @@ use crate::sockopt::raw_setsockopt;
 pub(crate) fn create_xdp_socket() -> Result<OwnedFd, Error> {
     let fd = unsafe {
         // SAFETY: standard socket() syscall with valid constants.
-        libc::socket(
-            ffi::AF_XDP,
-            libc::SOCK_RAW | libc::SOCK_CLOEXEC,
-            0,
-        )
+        libc::socket(ffi::AF_XDP, libc::SOCK_RAW | libc::SOCK_CLOEXEC, 0)
     };
     if fd == -1 {
         let err = std::io::Error::last_os_error();

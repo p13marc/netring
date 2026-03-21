@@ -2,9 +2,9 @@
 
 use std::os::fd::BorrowedFd;
 
-use crate::sockopt::raw_setsockopt;
 use crate::config::BpfFilter;
 use crate::error::Error;
+use crate::sockopt::raw_setsockopt;
 
 /// Maximum number of classic BPF instructions (kernel limit).
 const BPF_MAXINSNS: usize = 4096;

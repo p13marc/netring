@@ -44,9 +44,7 @@ impl Umem {
         };
 
         // Initialize free list: [0, frame_size, 2*frame_size, ...]
-        let free_list: VecDeque<u64> = (0..frame_count)
-            .map(|i| (i * frame_size) as u64)
-            .collect();
+        let free_list: VecDeque<u64> = (0..frame_count).map(|i| (i * frame_size) as u64).collect();
 
         Ok(Self {
             base: base.cast(),

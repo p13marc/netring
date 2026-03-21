@@ -289,9 +289,15 @@ mod tests {
             assert!(block_size.is_power_of_two(), "{profile:?} block_size");
             assert!(block_size % 4096 == 0, "{profile:?} page-aligned");
             assert!(block_count > 0, "{profile:?} block_count");
-            assert!(frame_size >= 68, "{profile:?} frame_size >= TPACKET3_HDRLEN");
+            assert!(
+                frame_size >= 68,
+                "{profile:?} frame_size >= TPACKET3_HDRLEN"
+            );
             assert!(frame_size % 16 == 0, "{profile:?} frame_size aligned");
-            assert!(frame_size <= block_size, "{profile:?} frame_size <= block_size");
+            assert!(
+                frame_size <= block_size,
+                "{profile:?} frame_size <= block_size"
+            );
             let _ = timeout_ms;
         }
     }

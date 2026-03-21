@@ -56,9 +56,8 @@ impl<T: Copy> XdpRing<T> {
         let base = unsafe {
             nix::sys::mman::mmap(
                 None,
-                NonZeroUsize::new(mmap_size).ok_or_else(|| {
-                    Error::Config("ring mmap size is 0".into())
-                })?,
+                NonZeroUsize::new(mmap_size)
+                    .ok_or_else(|| Error::Config("ring mmap size is 0".into()))?,
                 ProtFlags::PROT_READ | ProtFlags::PROT_WRITE,
                 MapFlags::MAP_SHARED | MapFlags::MAP_POPULATE,
                 fd,
@@ -68,9 +67,15 @@ impl<T: Copy> XdpRing<T> {
         };
 
         let base_ptr = base.as_ptr().cast::<u8>();
-        let producer = base_ptr.map_addr(|a| a + offsets.producer as usize).cast::<AtomicU32>();
-        let consumer = base_ptr.map_addr(|a| a + offsets.consumer as usize).cast::<AtomicU32>();
-        let flags = base_ptr.map_addr(|a| a + offsets.flags as usize).cast::<u32>();
+        let producer = base_ptr
+            .map_addr(|a| a + offsets.producer as usize)
+            .cast::<AtomicU32>();
+        let consumer = base_ptr
+            .map_addr(|a| a + offsets.consumer as usize)
+            .cast::<AtomicU32>();
+        let flags = base_ptr
+            .map_addr(|a| a + offsets.flags as usize)
+            .cast::<u32>();
         let descs = base_ptr.map_addr(|a| a + offsets.desc as usize).cast::<T>();
 
         Ok(Self {

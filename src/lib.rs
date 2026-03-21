@@ -22,7 +22,7 @@ pub use capture::{Capture, CaptureBuilder};
 pub use config::{BpfFilter, BpfInsn, FanoutFlags, FanoutMode, RingProfile, TimestampSource};
 pub use error::Error;
 pub use inject::{Injector, InjectorBuilder};
-pub use interface::{interface_info, InterfaceInfo};
+pub use interface::{InterfaceInfo, interface_info};
 pub use packet::{OwnedPacket, Packet, PacketBatch, PacketDirection, PacketStatus, Timestamp};
 pub use stats::CaptureStats;
 pub use traits::{PacketSink, PacketSource};
@@ -33,9 +33,9 @@ pub use afpacket::tx::{AfPacketTx, AfPacketTxBuilder, TxSlot};
 pub use afxdp::{XdpSocket, XdpSocketBuilder};
 pub use bridge::{Bridge, BridgeAction, BridgeBuilder, BridgeDirection, BridgeStats};
 
+#[cfg(feature = "channel")]
+pub use async_adapters::channel::ChannelCapture;
 #[cfg(feature = "tokio")]
 pub use async_adapters::tokio_adapter::AsyncCapture;
 #[cfg(feature = "tokio")]
 pub use traits::AsyncPacketSource;
-#[cfg(feature = "channel")]
-pub use async_adapters::channel::ChannelCapture;

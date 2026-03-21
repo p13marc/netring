@@ -53,7 +53,9 @@ impl MmapRing {
             | Err(nix::errno::Errno::EAGAIN) => {
                 // MAP_LOCKED may fail without CAP_IPC_LOCK or when RLIMIT_MEMLOCK
                 // is exceeded (EAGAIN). Retry without it.
-                tracing::warn!("mmap with MAP_LOCKED failed, retrying without (consider CAP_IPC_LOCK)");
+                tracing::warn!(
+                    "mmap with MAP_LOCKED failed, retrying without (consider CAP_IPC_LOCK)"
+                );
                 let flags_no_lock = MapFlags::MAP_SHARED | MapFlags::MAP_POPULATE;
                 unsafe { nix::sys::mman::mmap(None, length, prot, flags_no_lock, &fd, 0) }
                     .map_err(|e| Error::Mmap(e.into()))?

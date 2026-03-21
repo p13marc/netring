@@ -1,0 +1,109 @@
+name: CI
+
+on:
+  push:
+    branches: [main, master]
+  pull_request:
+    branches: [main, master]
+
+env:
+  CARGO_TERM_COLOR: always
+  RUST_BACKTRACE: 1
+
+jobs:
+  # ── Quick checks (no privileges) ──────────────────────────────────────────
+  check:
+    name: Check & Clippy
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - name: cargo check
+        run: cargo check --all-features
+      - name: clippy
+        run: cargo clippy --all-targets --all-features -- --deny warnings
+
+  fmt:
+    name: Format
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt
+      - run: cargo fmt -- --check
+
+  doc:
+    name: Documentation
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - name: Build docs
+        run: cargo doc --all-features --no-deps
+        env:
+          RUSTDOCFLAGS: "-D warnings"
+
+  # ── Unit tests (no privileges) ────────────────────────────────────────────
+  test-unit:
+    name: Unit Tests
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        rust: [stable, "1.85"]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: ${{ matrix.rust }}
+      - uses: Swatinem/rust-cache@v2
+      - name: Unit tests
+        run: cargo test --features tokio,channel
+
+  # ── Integration tests (need CAP_NET_RAW) ──────────────────────────────────
+  test-integration:
+    name: Integration Tests
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+
+      - name: Build test binaries
+        run: cargo test --features "integration-tests,tokio,channel" --no-run
+
+      - name: Grant CAP_NET_RAW to test binaries
+        run: |
+          for bin in $(cargo test --features "integration-tests,tokio,channel" \
+              --no-run --message-format=json 2>/dev/null \
+              | jq -r 'select(.executable != null) | .executable'); do
+            if [ -f "$bin" ]; then
+              sudo setcap cap_net_raw,cap_net_admin+ep "$bin"
+              echo "setcap: $(basename "$bin")"
+            fi
+          done
+
+      - name: Run integration tests
+        run: cargo test --features "integration-tests,tokio,channel" -- --test-threads=1
+
+  # ── Benchmarks compile ────────────────────────────────────────────────────
+  bench:
+    name: Benchmarks compile
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - run: cargo bench --no-run
+
+  # ── Examples compile ──────────────────────────────────────────────────────
+  examples:
+    name: Examples compile
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - run: cargo build --examples --features tokio,channel

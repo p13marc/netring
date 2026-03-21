@@ -7,6 +7,7 @@
 #![deny(unsafe_op_in_unsafe_fn)]
 #![warn(missing_docs)]
 
+pub mod capture;
 pub mod config;
 pub mod error;
 pub mod inject;
@@ -17,6 +18,7 @@ pub mod traits;
 pub mod afpacket;
 
 // Re-exports
+pub use capture::{Capture, CaptureBuilder};
 pub use config::{BpfFilter, BpfInsn, FanoutFlags, FanoutMode, TimestampSource};
 pub use error::Error;
 pub use inject::{Injector, InjectorBuilder};

@@ -1,60 +1,38 @@
 # Phase G.3: Ring mmap + Producer/Consumer Protocol
 
-## Goal
+## Critical: Use `store`, NOT `fetch_add`
 
-Implement the 4 AF_XDP ring types (Fill, RX, TX, Completion) with mmap
-and atomic producer/consumer protocol. This is the core of AF_XDP.
+The kernel uses **plain `store` with Release ordering** for ring index updates.
+Each ring has a single producer and single consumer — no contention on the same side.
 
-## Background
+```rust
+// CORRECT — matches kernel smp_store_release():
+producer_ptr.store(cached_prod + n, Ordering::Release);
 
-Each ring is mmap'd from the socket fd at a specific page offset. The kernel
-populates `xdp_mmap_offsets` (via getsockopt) with byte offsets to the
-producer index, consumer index, flags, and descriptor array within each
-mmap region.
-
+// WRONG — unnecessary atomic RMW:
+producer_ptr.fetch_add(n, Ordering::Release);
 ```
-Ring mmap region:
-  [offset.producer] → AtomicU32 (producer index)
-  [offset.consumer] → AtomicU32 (consumer index)
-  [offset.flags]    → u32 (XDP_RING_NEED_WAKEUP)
-  [offset.desc]     → T[ring_size]  (descriptors)
-```
-
-Descriptor types:
-- **Fill ring**: `u64` (UMEM addresses to fill)
-- **Completion ring**: `u64` (UMEM addresses of completed TX)
-- **RX ring**: `xdp_desc` (16 bytes: addr, len, options)
-- **TX ring**: `xdp_desc` (16 bytes: addr, len, options)
 
 ## File: `src/afxdp/ring.rs`
 
-### Ring struct (generic over descriptor type)
+### Generic XdpRing
 
 ```rust
 pub(crate) struct XdpRing<T: Copy> {
-    /// Base pointer to the mmap'd ring region.
     base: NonNull<u8>,
-    /// Total mmap size (for munmap).
     mmap_size: usize,
-    /// Number of entries (must be power of 2).
     size: u32,
-    /// Bitmask: size - 1.
-    mask: u32,
-    /// Pointer to producer index (AtomicU32).
+    mask: u32,  // size - 1
     producer: *const AtomicU32,
-    /// Pointer to consumer index (AtomicU32).
     consumer: *const AtomicU32,
-    /// Pointer to flags (u32, contains XDP_RING_NEED_WAKEUP).
     flags: *const u32,
-    /// Pointer to descriptor array start.
     descs: *mut T,
-    /// Cached local index (avoids atomic reads on every operation).
     cached_prod: u32,
     cached_cons: u32,
 }
 ```
 
-### Construction from mmap offsets
+### Construction from mmap
 
 ```rust
 impl<T: Copy> XdpRing<T> {
@@ -62,111 +40,154 @@ impl<T: Copy> XdpRing<T> {
         fd: BorrowedFd<'_>,
         size: u32,
         offsets: &xdp_ring_offset,
-        pgoff: u64,  // e.g., XDP_PGOFF_RX_RING
+        pgoff: u64,
     ) -> Result<Self, Error> {
-        // Calculate mmap size = offsets.desc + size * sizeof(T)
-        let mmap_size = offsets.desc as usize + (size as usize) * std::mem::size_of::<T>();
+        let desc_end = offsets.desc as usize + (size as usize) * std::mem::size_of::<T>();
+        let mmap_size = desc_end;
 
-        // mmap(NULL, mmap_size, PROT_READ|PROT_WRITE, MAP_SHARED|MAP_POPULATE, fd, pgoff)
-        let base = nix::sys::mman::mmap(...)?;
+        // Cast pgoff (u64/c_ulonglong) to off_t (i64) — safe on 64-bit
+        let offset = pgoff as libc::off_t;
 
-        // Compute pointers using strict provenance
-        let producer = base.map_addr(|a| a + offsets.producer as usize) as *const AtomicU32;
-        let consumer = base.map_addr(|a| a + offsets.consumer as usize) as *const AtomicU32;
-        let flags = base.map_addr(|a| a + offsets.flags as usize) as *const u32;
-        let descs = base.map_addr(|a| a + offsets.desc as usize) as *mut T;
+        let base = unsafe {
+            nix::sys::mman::mmap(
+                None,
+                NonZeroUsize::new(mmap_size).unwrap(),
+                ProtFlags::PROT_READ | ProtFlags::PROT_WRITE,
+                MapFlags::MAP_SHARED | MapFlags::MAP_POPULATE,
+                &fd,
+                offset,
+            ).map_err(|e| Error::Mmap(e.into()))?
+        };
 
-        Ok(Self { base, mmap_size, size, mask: size - 1, producer, consumer, flags, descs,
-                  cached_prod: 0, cached_cons: 0 })
+        let base_ptr = base.as_ptr().cast::<u8>();
+        let producer = base_ptr.map_addr(|a| a + offsets.producer as usize).cast::<AtomicU32>();
+        let consumer = base_ptr.map_addr(|a| a + offsets.consumer as usize).cast::<AtomicU32>();
+        let flags = base_ptr.map_addr(|a| a + offsets.flags as usize).cast::<u32>();
+        let descs = base_ptr.map_addr(|a| a + offsets.desc as usize).cast::<T>() as *mut T;
+
+        Ok(Self {
+            base: NonNull::new_unchecked(base_ptr),
+            mmap_size,
+            size,
+            mask: size - 1,
+            producer,
+            consumer,
+            flags,
+            descs,
+            cached_prod: 0,
+            cached_cons: 0,
+        })
     }
 }
-
-impl<T: Copy> Drop for XdpRing<T> {
-    fn drop(&mut self) { /* munmap(self.base, self.mmap_size) */ }
-}
-
-unsafe impl<T: Copy + Send> Send for XdpRing<T> {}
 ```
 
-### Producer protocol (Fill ring, TX ring — userspace writes)
+### Producer protocol (Fill ring, TX ring)
+
+Userspace writes descriptors, kernel reads.
 
 ```rust
 impl<T: Copy> XdpRing<T> {
-    /// Reserve `n` slots for writing. Returns the start index, or None if full.
+    /// Reserve n slots. Returns start index, or None if ring is full.
+    #[inline]
     pub(crate) fn producer_reserve(&mut self, n: u32) -> Option<u32> {
-        // Refresh cached consumer if space appears insufficient
-        if self.cached_prod - self.cached_cons + n > self.size {
+        if self.free_slots() < n {
+            // Refresh cached consumer from kernel
             self.cached_cons = unsafe { &*self.consumer }.load(Ordering::Acquire);
         }
-        if self.cached_prod - self.cached_cons + n > self.size {
-            return None; // truly full
+        if self.free_slots() < n {
+            return None;
         }
         let idx = self.cached_prod;
         self.cached_prod += n;
         Some(idx)
     }
 
-    /// Write a descriptor at `idx`.
+    #[inline]
+    fn free_slots(&self) -> u32 {
+        self.size - (self.cached_prod - self.cached_cons)
+    }
+
+    /// Write descriptor at index.
+    #[inline]
     pub(crate) unsafe fn write_desc(&mut self, idx: u32, val: T) {
-        let slot = self.descs.add((idx & self.mask) as usize);
-        slot.write(val);
+        unsafe { self.descs.add((idx & self.mask) as usize).write(val) };
     }
 
-    /// Submit `n` previously reserved descriptors to the kernel.
+    /// Submit n reserved entries to kernel.
+    /// Uses store(Release) — NOT fetch_add.
+    #[inline]
     pub(crate) fn producer_submit(&self, n: u32) {
-        // Release fence ensures descriptor writes are visible before producer advance
-        unsafe { &*self.producer }.fetch_add(n, Ordering::Release);
+        unsafe { &*self.producer }.store(self.cached_prod, Ordering::Release);
+        // Note: cached_prod was already advanced in reserve()
+        // The store makes it visible to the kernel
     }
 
-    /// Check if kernel needs a wakeup (XDP_RING_NEED_WAKEUP flag).
+    /// Check if kernel needs a wakeup.
+    #[inline]
     pub(crate) fn needs_wakeup(&self) -> bool {
-        let flags = unsafe { std::ptr::read_volatile(self.flags) };
-        flags & XDP_RING_NEED_WAKEUP != 0
+        unsafe { std::ptr::read_volatile(self.flags) } & super::ffi::XDP_RING_NEED_WAKEUP != 0
     }
 }
 ```
 
-### Consumer protocol (RX ring, Completion ring — userspace reads)
+### Consumer protocol (RX ring, Completion ring)
+
+Kernel writes descriptors, userspace reads.
 
 ```rust
 impl<T: Copy> XdpRing<T> {
-    /// Peek up to `n` available descriptors. Returns count available.
+    /// Peek up to n available entries. Returns count available.
+    #[inline]
     pub(crate) fn consumer_peek(&mut self, n: u32) -> u32 {
-        let available = self.cached_prod - self.cached_cons;
+        let mut available = self.cached_prod.wrapping_sub(self.cached_cons);
         if available == 0 {
             self.cached_prod = unsafe { &*self.producer }.load(Ordering::Acquire);
+            available = self.cached_prod.wrapping_sub(self.cached_cons);
         }
-        let available = self.cached_prod - self.cached_cons;
         available.min(n)
     }
 
-    /// Read a descriptor at `idx`.
+    /// Read descriptor at index.
+    #[inline]
     pub(crate) unsafe fn read_desc(&self, idx: u32) -> T {
-        let slot = self.descs.add((idx & self.mask) as usize);
-        slot.read()
+        unsafe { self.descs.add((idx & self.mask) as usize).read() }
     }
 
-    /// Release `n` consumed descriptors back to the kernel.
+    /// Release n consumed entries.
+    /// Uses store(Release) — NOT fetch_add.
+    #[inline]
     pub(crate) fn consumer_release(&mut self, n: u32) {
         self.cached_cons += n;
-        unsafe { &*self.consumer }.fetch_add(n, Ordering::Release);
+        unsafe { &*self.consumer }.store(self.cached_cons, Ordering::Release);
     }
 }
 ```
 
-### Type aliases
+### Drop + Send + type aliases
 
 ```rust
-pub(crate) type FillRing = XdpRing<u64>;         // UMEM addresses
-pub(crate) type CompletionRing = XdpRing<u64>;    // UMEM addresses
-pub(crate) type RxRing = XdpRing<xdp_desc>;       // packet descriptors
-pub(crate) type TxRing = XdpRing<xdp_desc>;       // packet descriptors
+impl<T: Copy> Drop for XdpRing<T> {
+    fn drop(&mut self) {
+        let _ = unsafe { nix::sys::mman::munmap(self.base.cast(), self.mmap_size) };
+    }
+}
+
+unsafe impl<T: Copy + Send> Send for XdpRing<T> {}
+
+pub(crate) type FillRing = XdpRing<u64>;
+pub(crate) type CompletionRing = XdpRing<u64>;
+pub(crate) type RxRing = XdpRing<libc::xdp_desc>;
+pub(crate) type TxRing = XdpRing<libc::xdp_desc>;
 ```
 
 ## Tests
 
-- Ring construction from synthetic offsets (mock mmap with Vec<u8>)
-- Producer: reserve → write → submit, verify producer index advances
-- Consumer: peek → read → release, verify consumer index advances
-- Full ring: reserve returns None
-- Mask wrapping: verify indices wrap at ring_size
+Unit tests use a `Vec<u8>` as a mock mmap region to test the
+producer/consumer logic without actual AF_XDP sockets:
+
+- `producer_reserve(1)` returns Some, advances cached_prod
+- `producer_reserve(n)` returns None when full (free_slots < n)
+- `consumer_peek(n)` returns 0 when empty
+- `consumer_peek(n)` returns available after simulated kernel write
+- Index wrapping: verify `idx & mask` wraps at ring_size
+- `producer_submit` does `store(Release)` (verify via consumer `load(Acquire)`)

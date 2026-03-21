@@ -123,24 +123,29 @@ Reading stats resets the kernel counters — call periodically for rate calculat
 | `CAP_NET_ADMIN` | Promiscuous mode |
 
 ```bash
-# Option 1: run as root
-sudo cargo run --example capture
+# Recommended: use justfile (sudo only once for setcap)
+just setcap          # grants CAP_NET_RAW on all binaries
+just test            # runs without sudo
+just capture eth0    # runs without sudo
 
-# Option 2: set capability on binary
+# Manual alternative
 sudo setcap cap_net_raw+ep target/release/examples/capture
 ```
 
 ## Examples
 
 ```bash
-cargo run --example capture -- eth0           # basic capture
-cargo run --example batch_processing -- eth0  # low-level batch API
-cargo run --example fanout -- eth0 4          # multi-threaded fanout
-cargo run --example inject -- lo              # packet injection
-cargo run --example stats_monitor -- eth0     # live statistics
-cargo run --example low_latency -- eth0       # low-latency tuning
-cargo run --example channel_consumer --features channel -- eth0
-cargo run --example async_capture --features tokio -- eth0
+just setcap                  # grant capabilities once (needs sudo)
+just capture eth0            # basic packet capture
+just batch eth0              # low-level batch API with sequence gap detection
+just fanout eth0 4           # multi-threaded fanout capture
+just inject lo               # packet injection
+just stats eth0              # live statistics monitor (pkt/s, drops)
+just low-latency eth0        # low-latency tuning demo
+just dpi eth0                # deep packet inspection (HTTP/TLS/DNS/SSH detection)
+just channel eth0            # channel adapter (runtime-agnostic)
+just async eth0              # async capture with tokio
+just ebpf                    # eBPF/aya integration demo (AsFd verification)
 ```
 
 ## Documentation

@@ -12,39 +12,40 @@ built on AF_PACKET with TPACKET_V3 (block-based mmap ring buffers).
 
 ## Implementation Status
 
-**Complete.** All 7 phases implemented:
-1. FFI foundations (libc re-exports, config, error, value types)
-2. Socket setup, MmapRing, BPF filter, fanout
-3. RX path (PacketSource, Packet, PacketBatch, BatchIter, AfPacketRx)
-4. TX path (PacketSink, TxSlot, AfPacketTx, Injector)
-5. High-level API (Capture, CaptureBuilder, flat iterator, ENOMEM retry)
-6. Async adapters (tokio AsyncFd, crossbeam channel)
-7. Tests, benchmarks, examples, documentation
-
-68 tests pass. Zero warnings. Zero doc warnings.
+**Complete.** All 7 phases implemented. 71 tests, 10 examples, zero warnings.
 
 ## Build & Test
 
 ```bash
-cargo build                                              # build
-cargo test                                               # unit tests (no privileges)
-cargo test --features integration-tests                  # + integration (needs CAP_NET_RAW)
-cargo test --features "integration-tests,tokio,channel"  # + async/channel tests
-cargo bench --no-run                                     # verify benchmarks compile
-cargo doc --all-features --no-deps                       # build docs
+# Unit tests (no privileges)
+cargo test
+
+# Full tests (need CAP_NET_RAW — use justfile)
+just setcap          # sudo once — grants capabilities on all binaries
+just test            # runs all tests without sudo
+just test-unit       # unit tests only
+just test-one <name> # run specific test
+
+# Examples
+just capture eth0    # basic capture
+just dpi eth0        # deep packet inspection
+just stats eth0      # live statistics
+
+# Lint
+just ci              # clippy + unit tests + docs + bench compile
+just ci-full         # setcap + full test suite
 ```
 
 ## Key Files
 
 - `SPEC.md` — Complete specification (source of truth for design)
-- `plans/` — 8 phased implementation plans (completed)
 - `docs/` — Architecture, API overview, tuning guide, troubleshooting
 - `src/capture.rs` — High-level Capture + CaptureBuilder
 - `src/inject.rs` — High-level Injector
 - `src/traits.rs` — PacketSource, PacketSink, AsyncPacketSource traits
 - `src/packet.rs` — Packet, PacketBatch, BatchIter, Timestamp, PacketStatus
 - `src/afpacket/rx.rs` — AfPacketRx + builder
-- `src/afpacket/tx.rs` — AfPacketTx + builder
+- `src/afpacket/tx.rs` — AfPacketTx + builder (V1 frame-based TX)
 - `src/afpacket/ring.rs` — MmapRing (NonNull, strict provenance, AtomicU32)
 - `src/afpacket/socket.rs` — All setsockopt wrappers
 - `src/afpacket/ffi.rs` — libc re-exports + supplemental constants
@@ -61,8 +62,10 @@ cargo doc --all-features --no-deps                       # build docs
 
 ## Design Constraints
 
-- `LendingIterator` not stabilized — flat `packets()` iterator uses unsafe (raw pointer + lifetime erasure)
+- `LendingIterator` not stabilized — flat `packets()` iterator uses unsafe (raw pointer + lifetime erasure via transmute)
 - `gen` blocks not stabilized — `nightly` feature reserved for future
 - TX uses V1 frame-based semantics (not V3 blocks)
 - `tpacket_bd_ts.ts_usec` in libc — read as nanoseconds for TPACKET_V3
-- `AsyncCapture` uses `wait_readable()` + `get_mut().next_batch()` pattern due to borrow-checker limitations with `AsyncFd` + lending returns
+- `AsyncCapture` uses `wait_readable()` + `get_mut().next_batch()` for zero-copy, or `recv()` for owned packets, due to borrow-checker limitations with AsyncFd + lending returns
+- `MAP_LOCKED` fallback: catches EPERM, ENOMEM, and EAGAIN, retries without MAP_LOCKED
+- Integration tests must use deadline-based loops with `next_batch_blocking()`, NOT `packets()` (which blocks forever on timeout)

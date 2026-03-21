@@ -8,6 +8,11 @@ description = "High-performance zero-copy packet I/O for Linux (AF_PACKET TPACKE
 keywords = ["packet", "capture", "af_packet", "tpacket", "zero-copy"]
 categories = ["network-programming", "os::linux-apis"]
 readme = "README.md"
+documentation = "https://docs.rs/netring"
+# TODO: uncomment when repo is created
+# repository = "https://github.com/user/netring"
+# homepage = "https://github.com/user/netring"
+exclude = ["CLAUDE.md", "SPEC.md", "justfile", "plans/"]
 
 [dependencies]
 libc = "0.2"

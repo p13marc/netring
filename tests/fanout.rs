@@ -4,11 +4,11 @@
 
 mod helpers;
 
-use netring::{Capture, FanoutFlags, FanoutMode};
+use netring::{AfPacketRxBuilder, FanoutFlags, FanoutMode, PacketSource};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 use std::thread;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 #[test]
 fn fanout_two_sockets() {
@@ -23,22 +23,27 @@ fn fanout_two_sockets() {
             let marker = marker.clone();
 
             thread::spawn(move || {
-                let mut cap = Capture::builder()
+                let mut rx = AfPacketRxBuilder::default()
                     .interface(helpers::LOOPBACK)
                     .fanout(FanoutMode::Hash, 9999)
                     .fanout_flags(FanoutFlags::ROLLOVER)
                     .block_timeout_ms(10)
-                    .poll_timeout(Duration::from_millis(100))
                     .build()
-                    .expect("build fanout capture");
+                    .expect("build fanout rx");
 
-                for pkt in cap.packets().take(200) {
-                    if pkt
-                        .data()
-                        .windows(marker.len())
-                        .any(|w| w == marker.as_bytes())
+                let deadline = Instant::now() + Duration::from_secs(3);
+                while Instant::now() < deadline {
+                    if let Some(batch) = rx.next_batch_blocking(Duration::from_millis(100)).unwrap()
                     {
-                        counter.fetch_add(1, Ordering::Relaxed);
+                        for pkt in &batch {
+                            if pkt
+                                .data()
+                                .windows(marker.len())
+                                .any(|w| w == marker.as_bytes())
+                            {
+                                counter.fetch_add(1, Ordering::Relaxed);
+                            }
+                        }
                     }
                 }
             })
@@ -46,7 +51,7 @@ fn fanout_two_sockets() {
         .collect();
 
     // Send packets with varying src ports to distribute across hash buckets
-    thread::sleep(Duration::from_millis(100));
+    thread::sleep(Duration::from_millis(200));
     for i in 0..50 {
         let payload = format!("{marker}_{i}");
         helpers::send_udp_to_loopback(port, payload.as_bytes(), 1);
@@ -57,5 +62,8 @@ fn fanout_two_sockets() {
     }
 
     let total: u64 = counters.iter().map(|c| c.load(Ordering::Relaxed)).sum();
-    assert!(total > 0, "at least some packets should be captured across fanout group");
+    assert!(
+        total > 0,
+        "at least some packets should be captured across fanout group"
+    );
 }

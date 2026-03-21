@@ -4,8 +4,8 @@
 
 mod helpers;
 
-use netring::{AfPacketRxBuilder, PacketSource};
 use netring::async_adapters::tokio_adapter::AsyncCapture;
+use netring::{AfPacketRxBuilder, PacketSource};
 use std::time::Duration;
 
 #[tokio::test]
@@ -28,17 +28,23 @@ async fn async_capture_recv() {
         helpers::send_udp_to_loopback(port, marker_clone.as_bytes(), 10);
     });
 
-    // Wait and capture
+    // Wait and capture with a deadline
     let mut found = false;
-    for _ in 0..50 {
-        async_cap.wait_readable().await.expect("wait_readable");
-        if let Some(batch) = async_cap.get_mut().next_batch() {
-            for pkt in &batch {
-                if pkt.data().windows(marker.len()).any(|w| w == marker.as_bytes()) {
-                    found = true;
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(3);
+    loop {
+        tokio::select! {
+            result = async_cap.wait_readable() => {
+                result.expect("wait_readable");
+                if let Some(batch) = async_cap.get_mut().next_batch() {
+                    for pkt in &batch {
+                        if pkt.data().windows(marker.len()).any(|w| w == marker.as_bytes()) {
+                            found = true;
+                        }
+                    }
+                    if found { break; }
                 }
             }
-            if found {
+            _ = tokio::time::sleep_until(deadline) => {
                 break;
             }
         }

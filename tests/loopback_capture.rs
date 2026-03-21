@@ -7,20 +7,18 @@
 mod helpers;
 
 use netring::{AfPacketRxBuilder, Capture, PacketSource};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 #[test]
 fn capture_loopback_basic() {
     let port = helpers::unique_port();
     let marker = format!("netring_test_{port}");
 
-    let mut cap = Capture::builder()
+    let mut rx = AfPacketRxBuilder::default()
         .interface(helpers::LOOPBACK)
         .block_timeout_ms(10)
-        .poll_timeout(Duration::from_millis(200))
-        .ignore_outgoing(false)
         .build()
-        .expect("build capture");
+        .expect("build rx");
 
     // Send packets in a background thread
     let marker_clone = marker.clone();
@@ -29,14 +27,19 @@ fn capture_loopback_basic() {
         helpers::send_udp_to_loopback(port, marker_clone.as_bytes(), 10);
     });
 
-    // Capture until we see our marker or timeout
+    // Capture until we see our marker or deadline
     let mut found = 0;
-    for pkt in cap.packets().take(500) {
-        if pkt.data().windows(marker.len()).any(|w| w == marker.as_bytes()) {
-            found += 1;
-        }
-        if found >= 5 {
-            break;
+    let deadline = Instant::now() + Duration::from_secs(3);
+    while Instant::now() < deadline {
+        if let Some(batch) = rx.next_batch_blocking(Duration::from_millis(200)).unwrap() {
+            for pkt in &batch {
+                if pkt.data().windows(marker.len()).any(|w| w == marker.as_bytes()) {
+                    found += 1;
+                }
+            }
+            if found >= 5 {
+                break;
+            }
         }
     }
 
@@ -62,7 +65,8 @@ fn low_level_rx_next_batch() {
     });
 
     let mut found = false;
-    for _ in 0..50 {
+    let deadline = Instant::now() + Duration::from_secs(3);
+    while Instant::now() < deadline {
         if let Some(batch) = rx.next_batch_blocking(Duration::from_millis(100)).unwrap() {
             assert!(!batch.is_empty());
             for pkt in &batch {

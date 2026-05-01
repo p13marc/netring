@@ -121,8 +121,8 @@ impl Capture {
     /// Attach an eBPF socket filter program.
     ///
     /// See [`AfPacketRx::attach_ebpf_filter()`] for details.
-    pub fn attach_ebpf_filter(&self, prog_fd: std::os::fd::RawFd) -> Result<(), Error> {
-        self.rx.attach_ebpf_filter(prog_fd)
+    pub fn attach_ebpf_filter<F: AsFd>(&self, prog: F) -> Result<(), Error> {
+        self.rx.attach_ebpf_filter(prog)
     }
 
     /// Attach an eBPF program to govern fanout distribution.

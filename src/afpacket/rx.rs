@@ -54,13 +54,15 @@ impl AfPacketRx {
     /// must be `BPF_PROG_TYPE_SOCKET_FILTER`. Packets not accepted by
     /// the program are dropped before reaching the ring.
     ///
-    /// `prog_fd` is the fd of a loaded eBPF program (e.g., from `aya`).
+    /// `prog` is borrowed for the call only — the kernel keeps its own
+    /// reference until you detach or close the socket. Pass an
+    /// [`AsFd`]-implementing handle (`aya::Program::fd()` provides this).
     ///
     /// # Errors
     ///
     /// Returns [`Error::SockOpt`] if the program attachment fails.
-    pub fn attach_ebpf_filter(&self, prog_fd: std::os::fd::RawFd) -> Result<(), Error> {
-        filter::attach_ebpf_socket_filter(self.fd.as_fd(), prog_fd)
+    pub fn attach_ebpf_filter<F: AsFd>(&self, prog: F) -> Result<(), Error> {
+        filter::attach_ebpf_socket_filter(self.fd.as_fd(), prog.as_fd())
     }
 
     /// Attach an eBPF program to govern fanout distribution.

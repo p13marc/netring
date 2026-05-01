@@ -224,6 +224,16 @@ impl<'a> Packet<'a> {
     }
 
     /// Source link-layer address (typically MAC address) from ring metadata.
+    ///
+    /// Returns up to 8 bytes — the size of `sockaddr_ll::sll_addr` in the
+    /// Linux kernel. For 6-byte Ethernet MAC this is sufficient. For
+    /// link-layer types with longer addresses (e.g., InfiniBand's 20-byte
+    /// LLE), the kernel itself truncates to 8; netring just exposes what
+    /// the kernel provides. Use `RTM_GETLINK` netlink for the full address
+    /// if needed.
+    ///
+    /// The returned slice's length matches `sockaddr_ll::sll_halen`,
+    /// clamped to the `[u8; 8]` field size.
     #[inline]
     pub fn source_ll_addr(&self) -> &[u8] {
         let sll_offset = ffi::tpacket_align(std::mem::size_of::<ffi::tpacket3_hdr>());

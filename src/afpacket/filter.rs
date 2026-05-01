@@ -41,16 +41,19 @@ pub(crate) fn attach_bpf_filter(fd: BorrowedFd<'_>, filter: &BpfFilter) -> Resul
 /// Attach an eBPF socket filter program.
 ///
 /// Replaces any existing filter. The program must be `BPF_PROG_TYPE_SOCKET_FILTER`.
-/// `prog_fd` is the fd of a loaded eBPF program (e.g., from `aya`).
+/// `prog` is borrowed for the call only; the kernel keeps its own reference
+/// until the filter is detached or the socket closes.
 pub(crate) fn attach_ebpf_socket_filter(
-    fd: BorrowedFd<'_>,
-    prog_fd: std::os::fd::RawFd,
+    sock: BorrowedFd<'_>,
+    prog: BorrowedFd<'_>,
 ) -> Result<(), Error> {
+    use std::os::fd::AsRawFd;
+    let prog_raw: libc::c_int = prog.as_raw_fd();
     raw_setsockopt(
-        fd,
+        sock,
         libc::SOL_SOCKET,
         libc::SO_ATTACH_BPF,
-        &prog_fd,
+        &prog_raw,
         "SO_ATTACH_BPF",
     )
 }

@@ -150,7 +150,7 @@ just dpi eth0                # deep packet inspection (HTTP/TLS/DNS/SSH detectio
 just channel eth0            # channel adapter (runtime-agnostic)
 just async eth0              # async capture with tokio
 just ebpf                    # eBPF/aya integration demo (AsFd verification)
-cargo run --example xdp_send --features af-xdp -- lo  # AF_XDP TX-only
+cargo run --example xdp_send --features af-xdp -- lo  # AF_XDP TX-only (uses XdpMode::Tx)
 ```
 
 ## Documentation

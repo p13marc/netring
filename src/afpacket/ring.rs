@@ -107,12 +107,6 @@ impl MmapRing {
         self.size
     }
 
-    /// Size of each block in bytes.
-    #[allow(dead_code)]
-    pub(crate) fn block_size(&self) -> usize {
-        self.block_size
-    }
-
     /// Number of blocks in the ring.
     pub(crate) fn block_count(&self) -> usize {
         self.block_count

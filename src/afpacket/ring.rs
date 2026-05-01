@@ -48,13 +48,21 @@ impl MmapRing {
 
         let ptr = match result {
             Ok(p) => p,
-            Err(nix::errno::Errno::EPERM)
-            | Err(nix::errno::Errno::ENOMEM)
-            | Err(nix::errno::Errno::EAGAIN) => {
-                // MAP_LOCKED may fail without CAP_IPC_LOCK or when RLIMIT_MEMLOCK
-                // is exceeded (EAGAIN). Retry without it.
+            Err(e @ (nix::errno::Errno::EPERM
+            | nix::errno::Errno::ENOMEM
+            | nix::errno::Errno::EAGAIN)) => {
+                // MAP_LOCKED has a few distinct failure modes; surface the
+                // likely cause so users can pick the right remediation.
+                let hint = match e {
+                    nix::errno::Errno::EPERM => "missing CAP_IPC_LOCK",
+                    nix::errno::Errno::ENOMEM => "RLIMIT_MEMLOCK exhausted or genuine OOM",
+                    nix::errno::Errno::EAGAIN => "RLIMIT_MEMLOCK exhausted",
+                    _ => unreachable!(),
+                };
                 tracing::warn!(
-                    "mmap with MAP_LOCKED failed, retrying without (consider CAP_IPC_LOCK)"
+                    error = %e,
+                    hint,
+                    "mmap MAP_LOCKED failed; retrying without MAP_LOCKED"
                 );
                 let flags_no_lock = MapFlags::MAP_SHARED | MapFlags::MAP_POPULATE;
                 unsafe { nix::sys::mman::mmap(None, length, prot, flags_no_lock, &fd, 0) }

@@ -180,6 +180,18 @@ impl<T: Copy> XdpRing<T> {
 
     // ── Consumer protocol (RX ring, Completion ring) ─────────────────────
 
+    /// Cached available count without refreshing the kernel-side producer.
+    ///
+    /// Cheap (no atomics, no syscall). Returns 0 when our cached view says
+    /// the ring is empty; may under-report if the kernel just pushed new
+    /// entries we haven't observed. Use as a non-blocking fast-path probe;
+    /// always follow with a real [`consumer_peek`](Self::consumer_peek)
+    /// for correctness.
+    #[inline]
+    pub(crate) fn cached_count(&self) -> u32 {
+        self.cached_prod.wrapping_sub(self.cached_cons)
+    }
+
     /// Peek up to `max` available entries.
     ///
     /// Returns a [`PeekToken`] carrying the start index and actual count, or

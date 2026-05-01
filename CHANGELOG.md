@@ -1,5 +1,85 @@
 # Changelog
 
+## 0.4.0 — API redesign
+
+The 0.3.0 surface had two parallel layers per direction: a high-level
+wrapper (`Capture`/`Injector`) and a low-level type
+(`AfPacketRx`/`AfPacketTx`). The wrappers added almost nothing — duplicated
+builders, two `stats()`, two `attach_ebpf_filter()`, two ENOMEM-retry paths
+to keep in sync. 0.4.0 collapses them.
+
+### Breaking
+
+- **`AfPacketRx` / `Capture` (wrapper) → merged into `Capture`**.
+  - The `packets()` flat iterator, `poll_timeout` field, and ENOMEM retry
+    move directly onto `Capture` / `CaptureBuilder`.
+  - `Capture::into_inner()` is gone (no inner — Capture *is* the source).
+  - `Capture::new(iface)` renamed to `Capture::open(iface)` to match
+    `File::open` / `TcpStream::connect`.
+- **`AfPacketTx` / `Injector` (wrapper) → merged into `Injector`** with
+  the same shape; `Injector::open(iface)` is the new shortcut.
+- **`AfPacketRxBuilder` / `CaptureBuilder` (wrapper)** → merged into
+  `CaptureBuilder`. Same for `InjectorBuilder`.
+- **`XdpSocket::recv_batch` → renamed to `XdpSocket::next_batch`** to
+  match `Capture::next_batch` (kept as `#[deprecated]` alias for one
+  release).
+- **`XdpSocket::next_batch` no longer returns `Result`** — `Option`
+  matches the AF_PACKET signature; nothing in `recv_batch` could ever
+  return `Err` anyway.
+- **`AsyncCapture::wait_readable` removed** — was deprecated in 0.3.0;
+  use `readable().await?.next_batch()`.
+- **`PacketStream::new(cap)` is still available** but `cap.into_stream()`
+  is the new fluent shortcut.
+
+### Migration
+
+Old names ship as `#[deprecated]` type aliases so 0.3.0 code keeps
+compiling for one release:
+
+```rust
+#[deprecated] pub type AfPacketRx        = Capture;
+#[deprecated] pub type AfPacketRxBuilder = CaptureBuilder;
+#[deprecated] pub type AfPacketTx        = Injector;
+#[deprecated] pub type AfPacketTxBuilder = InjectorBuilder;
+```
+
+Source-level migration:
+
+```diff
+- let mut rx = AfPacketRxBuilder::default().interface("eth0").build()?;
++ let mut rx = Capture::builder().interface("eth0").build()?;
+
+- let mut cap = Capture::new("eth0")?;
++ let mut cap = Capture::open("eth0")?;
+
+- let batch = xdp.recv_batch()?;
++ let batch = xdp.next_batch();
+
+- cap.wait_readable().await?;
+- if let Some(b) = cap.get_mut().next_batch() { ... }
++ let mut g = cap.readable().await?;
++ if let Some(b) = g.next_batch() { ... }
+```
+
+### Added
+
+- `Capture::open(iface)` / `Injector::open(iface)` / `XdpSocket::open(iface)` —
+  one-liner shortcuts.
+- `Capture` exposes `next_batch` and `next_batch_blocking` as inherent
+  methods so users don't need `use PacketSource;` for the common case.
+  `PacketSource` is still implemented and useful for generic code.
+- `XdpSocket::next_batch_blocking(timeout)` — blocking RX with poll(2),
+  EINTR-safe. Brings AF_XDP to feature parity with AF_PACKET on the
+  blocking-receive surface.
+- `AsyncCapture::into_stream()` fluent helper (same as `PacketStream::new`).
+
+### Internal
+
+- ~425 net lines removed by collapsing the wrapper layer (1041 deletions
+  vs 616 insertions).
+- ENOMEM retry logic moved from `CaptureBuilder` (wrapper) to the merged
+  `CaptureBuilder` (now uses a private `build_inner` helper).
+
 ## 0.3.0
 
 ### Breaking

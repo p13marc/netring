@@ -28,7 +28,6 @@ use crate::config::RingProfile;
 use crate::error::Error;
 use crate::packet::Packet;
 use crate::stats::CaptureStats;
-use crate::traits::PacketSource;
 
 /// Action returned by a bridge filter callback.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]

@@ -7,7 +7,7 @@
 
 mod helpers;
 
-use netring::{CaptureBuilder, PacketSource};
+use netring::CaptureBuilder;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, Instant};

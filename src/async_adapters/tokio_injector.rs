@@ -9,12 +9,9 @@
 //!
 //! ```no_run
 //! # async fn _ex() -> Result<(), netring::Error> {
-//! use netring::Injector;
-//! use netring::async_adapters::tokio_injector::AsyncInjector;
+//! use netring::{AsyncInjector, Injector};
 //!
-//! let tx = Injector::builder().interface("lo").build()?.into_inner();
-//! let mut atx = AsyncInjector::new(tx)?;
-//!
+//! let mut atx = AsyncInjector::new(Injector::open("lo")?)?;
 //! atx.send(&[0xff; 64]).await?;
 //! atx.flush().await?;
 //! # Ok(()) }

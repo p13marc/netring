@@ -3,14 +3,14 @@
 //! Usage: cargo run --example stats_monitor -- [interface]
 //! Shows packets/sec, drops, and freeze count every second.
 
-use netring::{CaptureBuilder, PacketSource};
+use netring::Capture;
 use std::time::{Duration, Instant};
 
 fn main() -> Result<(), netring::Error> {
     let iface = std::env::args().nth(1).unwrap_or_else(|| "lo".into());
     eprintln!("Monitoring {iface}... (Ctrl-C to stop)");
 
-    let mut rx = CaptureBuilder::default()
+    let mut rx = Capture::builder()
         .interface(&iface)
         .ignore_outgoing(true)
         .block_timeout_ms(100)

@@ -2,7 +2,7 @@
 //!
 //! Usage: cargo run --example batch_processing -- [interface]
 
-use netring::{CaptureBuilder, PacketSource};
+use netring::Capture;
 use std::time::Duration;
 
 fn main() -> Result<(), netring::Error> {
@@ -11,7 +11,7 @@ fn main() -> Result<(), netring::Error> {
     let iface = std::env::args().nth(1).unwrap_or_else(|| "lo".into());
     eprintln!("Batch capture on {iface}...");
 
-    let mut rx = CaptureBuilder::default()
+    let mut rx = Capture::builder()
         .interface(&iface)
         .block_size(1 << 20) // 1 MiB
         .block_count(16)

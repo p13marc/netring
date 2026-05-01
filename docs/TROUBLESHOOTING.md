@@ -122,7 +122,7 @@ but if using the low-level socket API directly, ensure ordering.
 Use the loopback interface (`lo`) — it always exists:
 
 ```rust
-let cap = Capture::new("lo")?;
+let cap = Capture::open("lo")?;
 ```
 
 Generate test traffic:

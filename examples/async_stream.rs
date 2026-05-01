@@ -9,7 +9,7 @@
 #[cfg(feature = "tokio")]
 #[tokio::main]
 async fn main() -> Result<(), netring::Error> {
-    use netring::CaptureBuilder;
+    use netring::Capture;
     use netring::async_adapters::tokio_adapter::{AsyncCapture, PacketStream};
     use std::time::{Duration, Instant};
 
@@ -20,7 +20,7 @@ async fn main() -> Result<(), netring::Error> {
         .unwrap_or(5);
     eprintln!("Streaming on {iface} for {secs}s...");
 
-    let rx = CaptureBuilder::default()
+    let rx = Capture::builder()
         .interface(&iface)
         .block_timeout_ms(50)
         .build()?;

@@ -10,7 +10,6 @@ use crossbeam_channel::{Receiver, TryRecvError};
 use crate::afpacket::rx::CaptureBuilder;
 use crate::error::Error;
 use crate::packet::OwnedPacket;
-use crate::traits::PacketSource;
 
 /// Spawns a capture thread, sends owned packets over a bounded channel.
 ///

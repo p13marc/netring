@@ -5,12 +5,15 @@
 //! - **Guarded zero-copy** ([`AsyncCapture::readable`] + [`ReadableGuard::next_batch`]):
 //!   single await, zero-copy view, ready-flag managed for you. Recommended
 //!   for new code.
+//! - **Single-call zero-copy** ([`AsyncCapture::try_recv_batch`]): same
+//!   thing without the explicit guard.
 //! - **Owned** ([`AsyncCapture::recv`]): single await, returns
-//!   `Vec<OwnedPacket>`. Simpler when you want to fan packets out across
-//!   tasks or store them.
-//! - **Two-step zero-copy** ([`AsyncCapture::wait_readable`] +
-//!   `get_mut().next_batch()`): the original pattern; deprecated in favor
-//!   of `readable()` because eager `clear_ready()` opens a race window.
+//!   `Vec<OwnedPacket>`. Use this when the resulting future must be `Send`
+//!   (e.g. `tokio::spawn`, `mpsc::Sender::send().await`) — `PacketBatch`
+//!   is `!Send` because it borrows from the mmap ring.
+//! - **Stream** ([`AsyncCapture::into_stream`]): consumes the capture and
+//!   returns a [`PacketStream`] yielding `Vec<OwnedPacket>` per retired
+//!   block.
 
 use std::os::fd::{AsFd, AsRawFd};
 
@@ -22,19 +25,17 @@ use crate::traits::PacketSource;
 
 /// Async wrapper around any [`PacketSource`] using tokio's [`AsyncFd`].
 ///
-/// Provides two async receive patterns:
+/// Three reception entry points (in order of recommended use):
 ///
-/// ## Zero-copy (two-step)
+/// ## Guarded zero-copy
 ///
 /// ```no_run
-/// # use netring::{CaptureBuilder, PacketSource};
-/// # use netring::async_adapters::tokio_adapter::AsyncCapture;
+/// # use netring::{Capture, AsyncCapture};
 /// # async fn example() -> Result<(), netring::Error> {
-/// let rx = CaptureBuilder::default().interface("lo").build()?;
-/// let mut cap = AsyncCapture::new(rx)?;
+/// let mut cap = AsyncCapture::new(Capture::open("lo")?)?;
 /// loop {
-///     cap.wait_readable().await?;
-///     if let Some(batch) = cap.get_mut().next_batch() {
+///     let mut guard = cap.readable().await?;
+///     if let Some(batch) = guard.next_batch() {
 ///         for pkt in &batch {
 ///             println!("{} bytes", pkt.len());
 ///         }
@@ -43,14 +44,25 @@ use crate::traits::PacketSource;
 /// # }
 /// ```
 ///
-/// ## Owned (single call, copies data)
+/// ## Single-call zero-copy
 ///
 /// ```no_run
-/// # use netring::{CaptureBuilder};
-/// # use netring::async_adapters::tokio_adapter::AsyncCapture;
+/// # use netring::{Capture, AsyncCapture};
 /// # async fn example() -> Result<(), netring::Error> {
-/// let rx = CaptureBuilder::default().interface("lo").build()?;
-/// let mut cap = AsyncCapture::new(rx)?;
+/// let mut cap = AsyncCapture::new(Capture::open("lo")?)?;
+/// let batch = cap.try_recv_batch().await?;
+/// for pkt in &batch {
+///     println!("{} bytes", pkt.len());
+/// }
+/// # Ok(()) }
+/// ```
+///
+/// ## Owned (use when the future must be `Send`, e.g. `tokio::spawn`)
+///
+/// ```no_run
+/// # use netring::{Capture, AsyncCapture};
+/// # async fn example() -> Result<(), netring::Error> {
+/// let mut cap = AsyncCapture::new(Capture::open("lo")?)?;
 /// let packets = cap.recv().await?;
 /// for pkt in &packets {
 ///     println!("{} bytes", pkt.data.len());
@@ -82,8 +94,6 @@ impl<S: PacketSource + AsRawFd> AsyncCapture<S> {
     /// also clears tokio's readiness flag so the next `readable()` call
     /// re-arms via epoll.
     ///
-    /// Preferred over [`wait_readable`](Self::wait_readable) — same
-    /// efficiency, no race window between waiting and reading.
     ///
     /// # Cancel safety
     ///
@@ -114,24 +124,6 @@ impl<S: PacketSource + AsRawFd> AsyncCapture<S> {
     pub async fn readable(&mut self) -> Result<ReadableGuard<'_, S>, Error> {
         let guard = self.inner.readable_mut().await.map_err(Error::Io)?;
         Ok(ReadableGuard { guard })
-    }
-
-    /// Wait until the socket becomes readable (kernel retires a block).
-    ///
-    /// After this returns, call [`get_mut().next_batch()`](PacketSource::next_batch)
-    /// to retrieve the batch as a zero-copy view.
-    ///
-    /// Deprecated: `clear_ready()` is called eagerly here, before the user
-    /// performs any I/O. If a new block arrives between this method
-    /// returning and the user calling `next_batch()`, tokio's reactor has
-    /// already been re-armed; the wakeup is not lost but the user-side
-    /// cycle adds latency. Use [`readable()`](Self::readable) instead — it
-    /// only clears readiness when `next_batch()` returns `None`.
-    #[deprecated(since = "0.3.0", note = "Use `readable().await?.next_batch()` instead")]
-    pub async fn wait_readable(&self) -> Result<(), Error> {
-        let mut guard = self.inner.readable().await.map_err(Error::Io)?;
-        guard.clear_ready();
-        Ok(())
     }
 
     /// Wait until readable and return the next batch as a zero-copy view.
@@ -237,7 +229,8 @@ impl<S: PacketSource + AsRawFd> AsyncCapture<S> {
 
     /// Mutable access to the inner source.
     ///
-    /// Use this after [`wait_readable()`](AsyncCapture::wait_readable) to
+    /// Borrow the inner source mutably (e.g. for stats accessors). Most
+    /// users want [`readable()`](AsyncCapture::readable) to
     /// call [`next_batch()`](PacketSource::next_batch) for zero-copy access.
     pub fn get_mut(&mut self) -> &mut S {
         self.inner.get_mut()
@@ -246,6 +239,25 @@ impl<S: PacketSource + AsRawFd> AsyncCapture<S> {
     /// Unwrap into the inner source.
     pub fn into_inner(self) -> S {
         self.inner.into_inner()
+    }
+
+    /// Convert this capture into a [`Stream`](futures_core::Stream).
+    ///
+    /// Yields one `Vec<OwnedPacket>` per retired block — see
+    /// [`PacketStream`] for the `Stream::Item` type and cancel-safety
+    /// details. Equivalent to `PacketStream::new(self)` but reads more
+    /// fluently in builder-style chains:
+    ///
+    /// ```no_run
+    /// # async fn _ex() -> Result<(), netring::Error> {
+    /// use netring::{AsyncCapture, Capture};
+    ///
+    /// let stream = AsyncCapture::new(Capture::open("eth0")?)?.into_stream();
+    /// # let _ = stream;
+    /// # Ok(()) }
+    /// ```
+    pub fn into_stream(self) -> PacketStream<S> {
+        PacketStream::new(self)
     }
 
     /// Capture statistics — passthrough to [`PacketSource::stats`].

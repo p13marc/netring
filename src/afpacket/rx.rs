@@ -206,10 +206,14 @@ impl Capture {
     pub fn ring_len(&self) -> usize {
         self.ring.size()
     }
-}
 
-impl PacketSource for Capture {
-    fn next_batch(&mut self) -> Option<PacketBatch<'_>> {
+    // ── Batch reception (inherent — no PacketSource import required) ────
+
+    /// Take the next retired block as a [`PacketBatch`] (non-blocking).
+    ///
+    /// Returns `None` if the kernel hasn't retired a block yet. The batch
+    /// borrows `&mut self`; only one batch can be live at a time.
+    pub fn next_batch(&mut self) -> Option<PacketBatch<'_>> {
         let bd = self.ring.block_ptr(self.current_block);
 
         // SAFETY: bd points to a valid block descriptor in our mmap region.
@@ -238,10 +242,15 @@ impl PacketSource for Capture {
         Some(batch)
     }
 
-    fn next_batch_blocking(&mut self, timeout: Duration) -> Result<Option<PacketBatch<'_>>, Error> {
+    /// Block until a batch is available, or `timeout` elapses.
+    ///
+    /// EINTR is handled internally — callers see `Ok(None)` on timeout, not
+    /// a spurious error from a signal interrupting the underlying `poll(2)`.
+    pub fn next_batch_blocking(
+        &mut self,
+        timeout: Duration,
+    ) -> Result<Option<PacketBatch<'_>>, Error> {
         // Check if a batch is already available (non-blocking).
-        // We inline the status check rather than calling next_batch() to
-        // avoid a borrow conflict with the poll() call below.
         {
             let bd = self.ring.block_ptr(self.current_block);
             let status = unsafe { ring::read_block_status(bd) };
@@ -250,8 +259,6 @@ impl PacketSource for Capture {
             }
         }
 
-        // No batch ready — block on poll(2). EINTR-safe wrapper retries on
-        // signals so callers don't have to.
         let mut pfds = [nix::poll::PollFd::new(
             self.fd.as_fd(),
             nix::poll::PollFlags::POLLIN,
@@ -259,6 +266,19 @@ impl PacketSource for Capture {
         crate::syscall::poll_eintr_safe(&mut pfds, timeout).map_err(Error::Io)?;
 
         Ok(self.next_batch())
+    }
+}
+
+// PacketSource trait impl — delegates to the inherent methods. The trait is
+// useful for generic code (AsyncCapture<S>, custom backends); inherent
+// methods are useful so users don't need an extra `use PacketSource;`.
+impl PacketSource for Capture {
+    fn next_batch(&mut self) -> Option<PacketBatch<'_>> {
+        Capture::next_batch(self)
+    }
+
+    fn next_batch_blocking(&mut self, timeout: Duration) -> Result<Option<PacketBatch<'_>>, Error> {
+        Capture::next_batch_blocking(self, timeout)
     }
 
     fn stats(&self) -> Result<CaptureStats, Error> {

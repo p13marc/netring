@@ -392,16 +392,32 @@ pub struct XdpSocket {
 }
 
 impl XdpSocket {
-    /// Receive a batch of packets as a zero-copy view.
+    /// Open an XDP socket on `interface` with default settings.
     ///
-    /// Returns `Ok(Some(batch))` borrowing from the UMEM region, or
-    /// `Ok(None)` if no packets are available. The batch holds `&mut self`
-    /// — only one batch can be live per socket at a time. Dropping the
-    /// batch returns its frames to the free list, releases the RX
-    /// descriptors back to the kernel, and refills the fill ring.
+    /// Equivalent to `XdpSocketBuilder::default().interface(interface).build()`.
+    /// Default mode is [`XdpMode::RxTx`] — for TX-only workloads use
+    /// [`XdpSocketBuilder`] with [`XdpMode::Tx`].
+    #[cfg(feature = "af-xdp")]
+    pub fn open(interface: &str) -> Result<Self, Error> {
+        XdpSocketBuilder::default().interface(interface).build()
+    }
+
+    /// Start building a configured XDP socket.
+    #[cfg(feature = "af-xdp")]
+    pub fn builder() -> XdpSocketBuilder {
+        XdpSocketBuilder::default()
+    }
+
+    /// Take the next batch of packets as a zero-copy view (non-blocking).
     ///
-    /// Prefer this over [`recv()`](Self::recv) for high pps — it skips
-    /// the per-packet `Vec<u8>` copy that `recv` performs.
+    /// Returns `Some(batch)` borrowing from the UMEM region, or `None` if
+    /// no packets are available right now. Pairs with
+    /// [`Capture::next_batch`](crate::Capture) on the AF_PACKET side —
+    /// same name, same semantics, same `Send`/`Sync` rules.
+    ///
+    /// The batch holds `&mut self`; only one batch can be live at a time.
+    /// Dropping it returns its frames to the free list, releases the RX
+    /// descriptors, and refills the fill ring.
     ///
     /// # Soundness — only one batch live at a time
     ///
@@ -410,19 +426,68 @@ impl XdpSocket {
     /// ```compile_fail
     /// # #[cfg(feature = "af-xdp")] {
     /// # async fn _ex(mut s: netring::XdpSocket) -> Result<(), netring::Error> {
-    /// let b1 = s.recv_batch()?;
-    /// let b2 = s.recv_batch()?;  // ERROR: two mutable borrows
+    /// let b1 = s.next_batch();
+    /// let b2 = s.next_batch();  // ERROR: two mutable borrows
     /// drop(b1);
     /// drop(b2);
     /// # Ok(()) }}
     /// ```
     #[cfg(feature = "af-xdp")]
-    pub fn recv_batch(&mut self) -> Result<Option<XdpBatch<'_>>, Error> {
+    pub fn next_batch(&mut self) -> Option<XdpBatch<'_>> {
         self.recycle_completed();
-        match self.rx.consumer_peek(64) {
-            Some(tok) => Ok(Some(XdpBatch::new(self, tok))),
-            None => Ok(None),
+        self.rx
+            .consumer_peek(64)
+            .map(|tok| XdpBatch::new(self, tok))
+    }
+
+    /// Block until a batch is available, or `timeout` elapses.
+    ///
+    /// Mirrors [`PacketSource::next_batch_blocking`](crate::PacketSource)
+    /// for the AF_XDP backend. Internally polls `POLLIN` (EINTR-safe) and
+    /// retries [`next_batch`](Self::next_batch).
+    #[cfg(feature = "af-xdp")]
+    pub fn next_batch_blocking(
+        &mut self,
+        timeout: Duration,
+    ) -> Result<Option<XdpBatch<'_>>, Error> {
+        // Fast path: try non-blocking first. If a batch is already there
+        // we skip the syscall entirely.
+        //
+        // We can't actually return early with `Some(batch)` without
+        // re-entering the borrow checker — `self.next_batch()` borrows
+        // `&mut self` for the lifetime of the returned XdpBatch, and we
+        // can't both return that and fall through to poll if it was None.
+        // Standard NLL workaround: separate paths.
+        if !self.rx_is_empty() {
+            return Ok(self.next_batch());
         }
+
+        // No batch ready — poll.
+        let mut pfds = [nix::poll::PollFd::new(
+            self.fd.as_fd(),
+            nix::poll::PollFlags::POLLIN,
+        )];
+        crate::syscall::poll_eintr_safe(&mut pfds, timeout).map_err(Error::Io)?;
+
+        Ok(self.next_batch())
+    }
+
+    /// Internal: probe whether the RX ring has anything we could peek.
+    /// Uses the cached producer index (no kernel sync) — false positives
+    /// are fine (we'll just loop), false negatives just mean we go through
+    /// poll() once unnecessarily on a fresh batch.
+    #[cfg(feature = "af-xdp")]
+    fn rx_is_empty(&self) -> bool {
+        self.rx.cached_count() == 0
+    }
+
+    /// Deprecated alias for [`next_batch`](Self::next_batch).
+    ///
+    /// Renamed in 0.4.0 to align naming with [`Capture::next_batch`](crate::Capture).
+    #[cfg(feature = "af-xdp")]
+    #[deprecated(since = "0.4.0", note = "renamed to `next_batch`")]
+    pub fn recv_batch(&mut self) -> Result<Option<XdpBatch<'_>>, Error> {
+        Ok(self.next_batch())
     }
 
     /// Receive packets (non-blocking) as owned copies.

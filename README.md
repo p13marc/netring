@@ -4,31 +4,30 @@ High-performance zero-copy packet I/O for Linux.
 
 `netring` provides packet capture and injection via AF_PACKET (TPACKET_V3
 block-based mmap ring buffers) and AF_XDP (kernel-bypass via XDP sockets).
-It offers both a high-level ergonomic API and a low-level batch API for
-maximum throughput.
+One type per role — use it directly, no wrappers, no extra layers.
 
 ## Quick Start
 
 ```rust,no_run
-// High-level: flat packet iterator
-let mut cap = netring::Capture::new("eth0").unwrap();
+// Flat packet iterator — the simplest path.
+let mut cap = netring::Capture::open("eth0").unwrap();
 for pkt in cap.packets().take(100) {
     println!("[{}] {} bytes", pkt.timestamp(), pkt.len());
 }
 ```
 
 ```rust,no_run
-// Low-level: batch processing with sequence gap detection
-use netring::{AfPacketRxBuilder, PacketSource};
+// Batch processing with sequence-gap detection.
+use netring::Capture;
 use std::time::Duration;
 
-let mut rx = AfPacketRxBuilder::default()
+let mut cap = Capture::builder()
     .interface("eth0")
     .block_size(1 << 22)
     .build()
     .unwrap();
 
-while let Some(batch) = rx.next_batch_blocking(Duration::from_millis(100)).unwrap() {
+while let Some(batch) = cap.next_batch_blocking(Duration::from_millis(100)).unwrap() {
     println!("seq={} pkts={} timed_out={}",
         batch.seq_num(), batch.len(), batch.timed_out());
     for pkt in &batch {
@@ -40,12 +39,11 @@ while let Some(batch) = rx.next_batch_blocking(Duration::from_millis(100)).unwra
 ```
 
 ```rust,no_run
-// Async with tokio: zero-copy zero-overhead readiness via AsyncFd
+// Async with tokio: zero-copy zero-overhead readiness via AsyncFd.
 # async fn _ex() -> Result<(), netring::Error> {
-use netring::{AfPacketRxBuilder, async_adapters::tokio_adapter::AsyncCapture};
+use netring::{AsyncCapture, Capture};
 
-let rx = AfPacketRxBuilder::default().interface("eth0").build()?;
-let mut cap = AsyncCapture::new(rx)?;
+let mut cap = AsyncCapture::new(Capture::open("eth0")?)?;
 
 loop {
     let mut guard = cap.readable().await?;
@@ -68,14 +66,23 @@ loop {
 | `channel` | off | Thread + bounded channel adapter (runtime-agnostic) |
 | `parse` | off | Packet header parsing via `etherparse` |
 
-## API Levels
+## Public API
 
-| Level | Types | When to Use |
-|-------|-------|-------------|
-| **High** | `Capture`, `Injector` | Simple capture/inject with iterators and builders |
-| **Low** | `AfPacketRx`, `AfPacketTx` | Batch processing, sequence tracking, custom poll logic |
-| **AF_XDP** | `XdpSocket`, `XdpSocketBuilder` | Kernel-bypass via AF_XDP (feature: `af-xdp`) |
-| **Async** | `AsyncCapture`, `AsyncInjector`, `PacketStream`, `ChannelCapture` | Integration with tokio or any async runtime |
+One type per role:
+
+| Concept | Type | Backend |
+|---------|------|---------|
+| Receive packets | `Capture` | AF_PACKET |
+| Inject packets | `Injector` | AF_PACKET |
+| Receive + inject (single fd) | `XdpSocket` | AF_XDP (feature: `af-xdp`) |
+| Bridge two interfaces | `Bridge` | AF_PACKET |
+| Async capture | `AsyncCapture<S>` | any (feature: `tokio`) |
+| Async inject | `AsyncInjector` | AF_PACKET (feature: `tokio`) |
+| Async stream | `PacketStream` | wraps `AsyncCapture` (feature: `tokio`) |
+| Channel adapter | `ChannelCapture` | AF_PACKET (feature: `channel`) |
+
+Each type has both a `::open(iface)` shortcut and a `::builder()` for full
+configuration.
 
 ## Default Configuration
 
@@ -125,7 +132,7 @@ let cap = Capture::builder()
 ## Statistics
 
 ```rust,no_run
-# let cap = netring::Capture::new("lo").unwrap();
+# let cap = netring::Capture::open("lo").unwrap();
 let stats = cap.stats().unwrap();
 println!("received: {}, dropped: {}, frozen: {}",
     stats.packets, stats.drops, stats.freeze_count);

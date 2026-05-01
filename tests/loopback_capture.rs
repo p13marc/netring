@@ -6,7 +6,7 @@
 
 mod helpers;
 
-use netring::{Capture, CaptureBuilder, PacketSource};
+use netring::{Capture, CaptureBuilder};
 use std::time::{Duration, Instant};
 
 #[test]

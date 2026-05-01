@@ -5,8 +5,8 @@
 #[cfg(feature = "tokio")]
 #[tokio::main]
 async fn main() -> Result<(), netring::Error> {
+    use netring::AfPacketRxBuilder;
     use netring::async_adapters::tokio_adapter::AsyncCapture;
-    use netring::{AfPacketRxBuilder, PacketSource};
 
     let iface = std::env::args().nth(1).unwrap_or_else(|| "lo".into());
     eprintln!("Async capture on {iface}...");
@@ -20,8 +20,8 @@ async fn main() -> Result<(), netring::Error> {
     let mut count = 0;
 
     loop {
-        async_cap.wait_readable().await?;
-        if let Some(batch) = async_cap.get_mut().next_batch() {
+        let mut guard = async_cap.readable().await?;
+        if let Some(batch) = guard.next_batch() {
             for pkt in &batch {
                 println!(
                     "[{}.{:09}] {} bytes",

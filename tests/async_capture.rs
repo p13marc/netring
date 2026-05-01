@@ -4,8 +4,8 @@
 
 mod helpers;
 
+use netring::AfPacketRxBuilder;
 use netring::async_adapters::tokio_adapter::AsyncCapture;
-use netring::{AfPacketRxBuilder, PacketSource};
 use std::time::Duration;
 
 #[tokio::test]
@@ -33,9 +33,9 @@ async fn async_capture_recv() {
     let deadline = tokio::time::Instant::now() + Duration::from_secs(3);
     loop {
         tokio::select! {
-            result = async_cap.wait_readable() => {
-                result.expect("wait_readable");
-                if let Some(batch) = async_cap.get_mut().next_batch() {
+            result = async_cap.readable() => {
+                let mut guard = result.expect("readable");
+                if let Some(batch) = guard.next_batch() {
                     for pkt in &batch {
                         if pkt.data().windows(marker.len()).any(|w| w == marker.as_bytes()) {
                             found = true;

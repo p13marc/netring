@@ -39,6 +39,6 @@ pub use bridge::{Bridge, BridgeAction, BridgeBuilder, BridgeDirection, BridgeHan
 #[cfg(feature = "channel")]
 pub use async_adapters::channel::ChannelCapture;
 #[cfg(feature = "tokio")]
-pub use async_adapters::tokio_adapter::AsyncCapture;
+pub use async_adapters::tokio_adapter::{AsyncCapture, ReadableGuard};
 #[cfg(feature = "tokio")]
 pub use traits::AsyncPacketSource;

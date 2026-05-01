@@ -1,20 +1,23 @@
 //! Async capture using tokio [`AsyncFd`].
 //!
-//! # Design Note
+//! Three reception patterns, in order of preference:
 //!
-//! The spec originally defined `AsyncCapture::recv() -> PacketBatch<'_>`, but
-//! Rust's borrow checker prevents returning a lending reference through
-//! `AsyncFd`'s guard-based API. Instead, this module provides two patterns:
-//!
-//! - **Zero-copy**: `wait_readable()` + `get_mut().next_batch()` (two calls)
-//! - **Owned**: `recv()` returns `Vec<OwnedPacket>` (copies, but simpler)
+//! - **Guarded zero-copy** ([`AsyncCapture::readable`] + [`ReadableGuard::next_batch`]):
+//!   single await, zero-copy view, ready-flag managed for you. Recommended
+//!   for new code.
+//! - **Owned** ([`AsyncCapture::recv`]): single await, returns
+//!   `Vec<OwnedPacket>`. Simpler when you want to fan packets out across
+//!   tasks or store them.
+//! - **Two-step zero-copy** ([`AsyncCapture::wait_readable`] +
+//!   `get_mut().next_batch()`): the original pattern; deprecated in favor
+//!   of `readable()` because eager `clear_ready()` opens a race window.
 
 use std::os::fd::{AsFd, AsRawFd};
 
 use tokio::io::unix::AsyncFd;
 
 use crate::error::Error;
-use crate::packet::OwnedPacket;
+use crate::packet::{OwnedPacket, PacketBatch};
 use crate::traits::PacketSource;
 
 /// Async wrapper around any [`PacketSource`] using tokio's [`AsyncFd`].
@@ -71,11 +74,52 @@ impl<S: PacketSource + AsRawFd> AsyncCapture<S> {
         Ok(Self { inner: fd })
     }
 
+    /// Wait until readable and return a guard for zero-copy batch retrieval.
+    ///
+    /// The guard borrows `&mut self` and exposes a single
+    /// [`next_batch()`](ReadableGuard::next_batch) entry that returns the
+    /// batch as a zero-copy view. If `next_batch` returns `None`, the guard
+    /// also clears tokio's readiness flag so the next `readable()` call
+    /// re-arms via epoll.
+    ///
+    /// Preferred over [`wait_readable`](Self::wait_readable) — same
+    /// efficiency, no race window between waiting and reading.
+    ///
+    /// # Examples
+    ///
+    /// ```no_run
+    /// # use netring::AfPacketRxBuilder;
+    /// # use netring::async_adapters::tokio_adapter::AsyncCapture;
+    /// # async fn _ex() -> Result<(), netring::Error> {
+    /// let rx = AfPacketRxBuilder::default().interface("lo").build()?;
+    /// let mut cap = AsyncCapture::new(rx)?;
+    /// loop {
+    ///     let mut guard = cap.readable().await?;
+    ///     if let Some(batch) = guard.next_batch() {
+    ///         for pkt in &batch {
+    ///             let _ = pkt.len();
+    ///         }
+    ///     }
+    /// }
+    /// # }
+    /// ```
+    pub async fn readable(&mut self) -> Result<ReadableGuard<'_, S>, Error> {
+        let guard = self.inner.readable_mut().await.map_err(Error::Io)?;
+        Ok(ReadableGuard { guard })
+    }
+
     /// Wait until the socket becomes readable (kernel retires a block).
     ///
     /// After this returns, call [`get_mut().next_batch()`](PacketSource::next_batch)
-    /// to retrieve the batch as a zero-copy view. Spurious wakeups are possible —
-    /// `next_batch()` may return `None`.
+    /// to retrieve the batch as a zero-copy view.
+    ///
+    /// Deprecated: `clear_ready()` is called eagerly here, before the user
+    /// performs any I/O. If a new block arrives between this method
+    /// returning and the user calling `next_batch()`, tokio's reactor has
+    /// already been re-armed; the wakeup is not lost but the user-side
+    /// cycle adds latency. Use [`readable()`](Self::readable) instead — it
+    /// only clears readiness when `next_batch()` returns `None`.
+    #[deprecated(since = "0.3.0", note = "Use `readable().await?.next_batch()` instead")]
     pub async fn wait_readable(&self) -> Result<(), Error> {
         let mut guard = self.inner.readable().await.map_err(Error::Io)?;
         guard.clear_ready();
@@ -126,5 +170,53 @@ impl<S: PacketSource + AsRawFd> AsyncCapture<S> {
 impl<S: PacketSource + AsRawFd> AsFd for AsyncCapture<S> {
     fn as_fd(&self) -> std::os::fd::BorrowedFd<'_> {
         self.inner.get_ref().as_fd()
+    }
+}
+
+/// Guard returned by [`AsyncCapture::readable`].
+///
+/// Holds tokio's readiness flag and exposes `next_batch()` as the single
+/// extraction point. If `next_batch()` reports no batch (spurious wakeup),
+/// the guard clears tokio's readiness so the next `readable()` re-arms via
+/// epoll. Otherwise the readiness stays set, and the next `readable()`
+/// returns immediately to attempt another drain — matching the AsyncFd
+/// idiom for level-triggered fds.
+pub struct ReadableGuard<'a, S: PacketSource + AsRawFd> {
+    guard: tokio::io::unix::AsyncFdReadyMutGuard<'a, S>,
+}
+
+impl<'a, S: PacketSource + AsRawFd> ReadableGuard<'a, S> {
+    /// Try to take the next batch from the underlying source.
+    ///
+    /// Returns `Some(batch)` when a block has been retired, or `None` for
+    /// a spurious wakeup. On `None`, clears tokio's readiness so the next
+    /// [`AsyncCapture::readable`] call awaits epoll.
+    pub fn next_batch(&mut self) -> Option<PacketBatch<'_>> {
+        // The natural form of this is:
+        //   match self.guard.get_inner_mut().next_batch() {
+        //       Some(b) => Some(b),
+        //       None => { self.guard.clear_ready(); None }
+        //   }
+        // …but stable's NLL can't see that the Some-branch's borrow doesn't
+        // outlive the None-branch's clear_ready. Polonius would handle this;
+        // until then, split the borrow through a raw pointer. Sound because:
+        //   - guard is owned exclusively by self (no aliases)
+        //   - inner_mut and clear_ready never run concurrently
+        let guard_ptr: *mut tokio::io::unix::AsyncFdReadyMutGuard<'a, S> = &raw mut self.guard;
+        // SAFETY: guard_ptr came from &mut self.guard; reborrowing once for
+        // get_inner_mut() and once for clear_ready() is sequential, not
+        // overlapping. The returned batch borrows transitively from
+        // self.guard, satisfying the function's `&mut self` borrow.
+        let batch = unsafe { (*guard_ptr).get_inner_mut().next_batch() };
+        if batch.is_none() {
+            // SAFETY: no live borrow of *guard_ptr at this point.
+            unsafe { (*guard_ptr).clear_ready() };
+        }
+        batch
+    }
+
+    /// Borrow the inner source mutably (for `stats()` and similar).
+    pub fn get_inner_mut(&mut self) -> &mut S {
+        self.guard.get_inner_mut()
     }
 }

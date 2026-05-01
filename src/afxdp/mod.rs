@@ -385,13 +385,24 @@ impl XdpSocket {
 
         for i in 0..n {
             let desc: libc::xdp_desc = unsafe { self.rx.read_desc(base_idx + i) };
-            let data = unsafe { self.umem.data(desc.addr, desc.len as usize) };
-            packets.push(OwnedPacket {
-                data: data.to_vec(),
-                timestamp: Timestamp::default(),
-                original_len: desc.len as usize,
-            });
-            // Return frame to free list (will be refilled below)
+            match self.umem.data_checked(desc.addr, desc.len as usize) {
+                Some(data) => packets.push(OwnedPacket {
+                    data: data.to_vec(),
+                    timestamp: Timestamp::default(),
+                    original_len: desc.len as usize,
+                }),
+                None => {
+                    // Defense in depth: a kernel that's misbehaving (or a
+                    // shared-UMEM peer that wrote a corrupt desc) shouldn't
+                    // panic the consumer.
+                    tracing::warn!(
+                        addr = desc.addr,
+                        len = desc.len,
+                        "AF_XDP: malformed RX descriptor; skipping"
+                    );
+                }
+            }
+            // Return frame to free list (will be refilled below) regardless.
             self.umem.free_frame(desc.addr);
         }
 
@@ -427,11 +438,14 @@ impl XdpSocket {
             None => return Ok(false),
         };
 
-        // Copy data into UMEM frame
-        unsafe {
-            let buf = self.umem.data_mut(addr, data.len());
-            buf.copy_from_slice(data);
-        }
+        // Copy data into UMEM frame.
+        // The frame_size check at the top of send() ensures data.len() fits;
+        // expect() here is for an internal invariant that should never fail.
+        let buf = self
+            .umem
+            .data_mut_checked(addr, data.len())
+            .expect("send: frame_size pre-check guarantees fit");
+        buf.copy_from_slice(data);
 
         // Submit TX descriptor
         let idx = match self.tx.producer_reserve(1) {

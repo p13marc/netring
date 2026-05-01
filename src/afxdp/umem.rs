@@ -85,26 +85,42 @@ impl Umem {
         self.frame_size
     }
 
-    /// Read packet data from UMEM at the given byte offset.
+    /// Read packet data from UMEM at the given byte offset, with bounds validation.
     ///
-    /// # Safety
-    ///
-    /// `addr + len` must be within the UMEM region.
+    /// Returns `None` if `addr + len` overflows, exceeds the UMEM region, or
+    /// `len` exceeds the per-frame size. Use this on any descriptor read from
+    /// the kernel (RX ring); the kernel won't normally produce out-of-bounds
+    /// values, but defense in depth is cheap.
     #[inline]
-    pub(crate) unsafe fn data(&self, addr: u64, len: usize) -> &[u8] {
+    pub(crate) fn data_checked(&self, addr: u64, len: usize) -> Option<&[u8]> {
+        if len > self.frame_size {
+            return None;
+        }
+        let end = (addr as usize).checked_add(len)?;
+        if end > self.size {
+            return None;
+        }
         let ptr = self.base.as_ptr().map_addr(|a| a + addr as usize);
-        unsafe { std::slice::from_raw_parts(ptr, len) }
+        // SAFETY: bounds verified above; the mmap region is valid for
+        // `self.size` bytes; `ptr..ptr+len` lies within it.
+        Some(unsafe { std::slice::from_raw_parts(ptr, len) })
     }
 
-    /// Get a mutable slice into UMEM at the given byte offset.
+    /// Mutable view into UMEM at the given byte offset, with bounds validation.
     ///
-    /// # Safety
-    ///
-    /// `addr + len` must be within the UMEM region.
+    /// Same constraints as [`data_checked`](Self::data_checked).
     #[inline]
-    pub(crate) unsafe fn data_mut(&mut self, addr: u64, len: usize) -> &mut [u8] {
+    pub(crate) fn data_mut_checked(&mut self, addr: u64, len: usize) -> Option<&mut [u8]> {
+        if len > self.frame_size {
+            return None;
+        }
+        let end = (addr as usize).checked_add(len)?;
+        if end > self.size {
+            return None;
+        }
         let ptr = self.base.as_ptr().map_addr(|a| a + addr as usize);
-        unsafe { std::slice::from_raw_parts_mut(ptr, len) }
+        // SAFETY: bounds verified; we have &mut self so no aliasing.
+        Some(unsafe { std::slice::from_raw_parts_mut(ptr, len) })
     }
 
     /// Build an `xdp_umem_reg` for kernel registration.
@@ -190,15 +206,35 @@ mod tests {
         let mut umem = Umem::new(4096, 2).unwrap();
         let addr = umem.alloc_frame().unwrap();
 
-        // Write some data
-        unsafe {
-            let buf = umem.data_mut(addr, 4);
-            buf.copy_from_slice(&[0xDE, 0xAD, 0xBE, 0xEF]);
-        }
+        let buf = umem.data_mut_checked(addr, 4).unwrap();
+        buf.copy_from_slice(&[0xDE, 0xAD, 0xBE, 0xEF]);
 
-        // Read it back
-        let data = unsafe { umem.data(addr, 4) };
+        let data = umem.data_checked(addr, 4).unwrap();
         assert_eq!(data, &[0xDE, 0xAD, 0xBE, 0xEF]);
+    }
+
+    #[test]
+    fn data_checked_rejects_oversize_len() {
+        let umem = Umem::new(4096, 4).unwrap();
+        // Exactly frame_size — OK.
+        assert!(umem.data_checked(0, 4096).is_some());
+        // One byte past frame_size — rejected.
+        assert!(umem.data_checked(0, 4097).is_none());
+    }
+
+    #[test]
+    fn data_checked_rejects_past_umem_end() {
+        let umem = Umem::new(4096, 4).unwrap(); // 16 KiB total
+        // Reads ending exactly at UMEM end — OK.
+        assert!(umem.data_checked(16384 - 200, 200).is_some());
+        // Reads past end — rejected.
+        assert!(umem.data_checked(16384 - 100, 200).is_none());
+    }
+
+    #[test]
+    fn data_checked_rejects_overflow_addr() {
+        let umem = Umem::new(4096, 4).unwrap();
+        assert!(umem.data_checked(u64::MAX, 1).is_none());
     }
 
     #[test]

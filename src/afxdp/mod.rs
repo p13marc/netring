@@ -33,6 +33,8 @@
 
 pub(crate) mod ffi;
 #[cfg(feature = "af-xdp")]
+mod batch;
+#[cfg(feature = "af-xdp")]
 mod ring;
 #[cfg(feature = "af-xdp")]
 mod socket;
@@ -40,6 +42,8 @@ mod stats;
 #[cfg(feature = "af-xdp")]
 mod umem;
 
+#[cfg(feature = "af-xdp")]
+pub use batch::{XdpBatch, XdpBatchIter, XdpPacket};
 pub use stats::XdpStats;
 
 #[cfg(feature = "af-xdp")]
@@ -388,10 +392,44 @@ pub struct XdpSocket {
 }
 
 impl XdpSocket {
-    /// Receive packets (non-blocking).
+    /// Receive a batch of packets as a zero-copy view.
     ///
-    /// Returns owned copies of received packets. The underlying UMEM frames
-    /// are recycled automatically to the fill ring.
+    /// Returns `Ok(Some(batch))` borrowing from the UMEM region, or
+    /// `Ok(None)` if no packets are available. The batch holds `&mut self`
+    /// — only one batch can be live per socket at a time. Dropping the
+    /// batch returns its frames to the free list, releases the RX
+    /// descriptors back to the kernel, and refills the fill ring.
+    ///
+    /// Prefer this over [`recv()`](Self::recv) for high pps — it skips
+    /// the per-packet `Vec<u8>` copy that `recv` performs.
+    ///
+    /// # Soundness — only one batch live at a time
+    ///
+    /// The batch's `&mut self` borrow is enforced by the compiler:
+    ///
+    /// ```compile_fail
+    /// # #[cfg(feature = "af-xdp")] {
+    /// # async fn _ex(mut s: netring::XdpSocket) -> Result<(), netring::Error> {
+    /// let b1 = s.recv_batch()?;
+    /// let b2 = s.recv_batch()?;  // ERROR: two mutable borrows
+    /// drop(b1);
+    /// drop(b2);
+    /// # Ok(()) }}
+    /// ```
+    #[cfg(feature = "af-xdp")]
+    pub fn recv_batch(&mut self) -> Result<Option<XdpBatch<'_>>, Error> {
+        self.recycle_completed();
+        match self.rx.consumer_peek(64) {
+            Some(tok) => Ok(Some(XdpBatch::new(self, tok))),
+            None => Ok(None),
+        }
+    }
+
+    /// Receive packets (non-blocking) as owned copies.
+    ///
+    /// Returns owned copies of received packets — convenient but allocates
+    /// a `Vec<u8>` per packet plus the outer `Vec`. For zero-copy access
+    /// use [`recv_batch()`](Self::recv_batch) instead.
     ///
     /// Returns an empty `Vec` if no packets are available.
     #[cfg(feature = "af-xdp")]

@@ -100,6 +100,14 @@ impl Drop for TxSlot<'_> {
 /// AF_PACKET TX ring (V1 frame-based semantics).
 ///
 /// Implements [`PacketSink`](crate::traits::PacketSink) and [`AsFd`].
+///
+/// # Drop semantics
+///
+/// `Drop` performs a best-effort [`flush()`](Self::flush) to push any pending
+/// frames to the kernel before unmapping the ring. Errors from this final
+/// flush are logged at `warn` level via `tracing` but cannot be returned —
+/// call [`flush()`](Self::flush) explicitly before dropping if you need to
+/// observe transmission failures.
 pub struct AfPacketTx {
     // Drop order: ring (munmap) before fd (close).
     ring: MmapRing,
@@ -138,6 +146,38 @@ impl AfPacketTx {
         let ptr = self.frame_ptr(index).as_ptr().cast::<AtomicU32>();
         // SAFETY: points to tp_status at start of tpacket_hdr.
         unsafe { &*ptr }.load(Ordering::Acquire)
+    }
+
+    /// Maximum payload bytes that fit in a single TX frame.
+    ///
+    /// Equal to `frame_size - data_offset` where `data_offset` is the
+    /// `tpacket_align(sizeof(tpacket_hdr))` reservation at the start of
+    /// each frame.
+    #[inline]
+    pub fn frame_capacity(&self) -> usize {
+        self.frame_size - self.data_offset
+    }
+
+    /// Number of slots currently in `TP_STATUS_AVAILABLE` (reclaimed by kernel).
+    ///
+    /// Useful after [`flush()`](Self::flush) to estimate transmission progress —
+    /// the count grows as the kernel finishes transmitting each frame and
+    /// returns its slot to the user. O(frame_count); avoid in hot paths.
+    pub fn available_slots(&self) -> usize {
+        (0..self.frame_count)
+            .filter(|&i| self.read_frame_status(i) == ffi::TP_STATUS_AVAILABLE)
+            .count()
+    }
+
+    /// Number of slots currently in `TP_STATUS_WRONG_FORMAT` (kernel rejection).
+    ///
+    /// A non-zero value indicates the kernel rejected one or more frames —
+    /// typically because of a malformed header or unsupported feature flag.
+    /// O(frame_count); avoid in hot paths.
+    pub fn rejected_slots(&self) -> usize {
+        (0..self.frame_count)
+            .filter(|&i| self.read_frame_status(i) == ffi::TP_STATUS_WRONG_FORMAT)
+            .count()
     }
 
     /// Allocate a TX frame for a packet of up to `len` bytes.
@@ -219,8 +259,13 @@ impl crate::traits::PacketSink for AfPacketTx {
 
 impl Drop for AfPacketTx {
     fn drop(&mut self) {
-        // Best-effort flush before unmapping.
-        let _ = self.flush();
+        // Best-effort flush before unmapping. Errors are logged at warn
+        // level rather than discarded silently — explicit `flush()` before
+        // drop remains the only way to observe transmission failures
+        // (Drop can't return Result).
+        if let Err(e) = self.flush() {
+            tracing::warn!(error = %e, "AfPacketTx::drop final flush failed");
+        }
     }
 }
 
@@ -374,5 +419,18 @@ mod tests {
         assert_eq!(b.frame_size, 2048);
         assert_eq!(b.frame_count, 256);
         assert!(!b.qdisc_bypass);
+    }
+
+    /// frame_capacity should equal frame_size minus the tpacket_hdr alignment.
+    /// Verified arithmetically since we can't construct a real AfPacketTx
+    /// without a privileged socket.
+    #[test]
+    fn frame_capacity_arithmetic() {
+        let hdr_aligned = ffi::tpacket_align(std::mem::size_of::<libc::tpacket_hdr>());
+        // For default 2048 frame_size, capacity = 2048 - aligned(sizeof(tpacket_hdr))
+        // tpacket_hdr is small (about 32 B on 64-bit), so capacity should be > 1500.
+        let capacity = 2048 - hdr_aligned;
+        assert!(capacity > 1500);
+        assert!(capacity < 2048);
     }
 }

@@ -504,22 +504,25 @@ impl<'a> Iterator for BatchIter<'a> {
         // SAFETY: bounds-checked, data is within the mmap region.
         let data = unsafe { std::slice::from_raw_parts(data_ptr, snaplen) };
 
-        // Advance to next packet
+        // Advance to next packet. tp_next_offset == 0 is the kernel's marker
+        // for the last packet in the block — terminate iteration regardless of
+        // the claimed `remaining` count.
         if hdr.tp_next_offset != 0 {
             self.current = self.current.map_addr(|a| a + hdr.tp_next_offset as usize);
+            self.remaining -= 1;
+        } else {
+            self.remaining = 0;
         }
-        self.remaining -= 1;
 
         Some(Packet { data, hdr })
     }
 
     fn size_hint(&self) -> (usize, Option<usize>) {
-        let r = self.remaining as usize;
-        (r, Some(r))
+        // `remaining` is an upper bound — a corrupt or truncated block may
+        // terminate earlier when `tp_next_offset == 0` is observed.
+        (0, Some(self.remaining as usize))
     }
 }
-
-impl ExactSizeIterator for BatchIter<'_> {}
 
 #[cfg(test)]
 mod tests {
@@ -736,34 +739,43 @@ mod tests {
     }
 
     #[test]
-    fn batch_iter_exact_size() {
+    fn batch_iter_size_hint_is_upper_bound() {
         let block = build_synthetic_block(&[b"a", b"bb", b"ccc"], ffi::TP_STATUS_USER);
         let iter = iter_from_block(&block, 3);
-        assert_eq!(iter.len(), 3);
+        // size_hint is an upper bound; lower bound is 0 because tp_next_offset
+        // can terminate the walk before consuming `remaining`.
+        assert_eq!(iter.size_hint(), (0, Some(3)));
+        assert_eq!(iter.count(), 3);
     }
 
     #[test]
-    fn batch_iter_bounds_check_bad_remaining() {
-        // Claim 10 packets but only 1 exists — should stop safely
+    fn batch_iter_terminates_on_last_packet_marker() {
+        // Claim 10 packets but only 1 exists. The iterator must observe the
+        // last-packet marker (tp_next_offset == 0) and stop after exactly one
+        // emission rather than re-emitting the same packet.
         let block = build_synthetic_block(&[b"only one"], ffi::TP_STATUS_USER);
         let mut iter = iter_from_block(&block, 10);
 
-        // First packet should work
         let pkt = iter.next().unwrap();
         assert_eq!(pkt.data(), b"only one");
+        assert!(
+            iter.next().is_none(),
+            "iterator must terminate on tp_next_offset == 0 marker"
+        );
+        assert!(iter.next().is_none(), "subsequent calls remain None");
+    }
 
-        // tp_next_offset is 0 (last packet), but remaining is still 9.
-        // The iterator should bounds-check and stop before reading garbage.
-        // It will try to read from the same position (since tp_next_offset=0)
-        // and eventually the header won't point to valid data or will reach
-        // the block end. The important thing is no crash.
-        let mut count = 1;
-        while iter.next().is_some() {
-            count += 1;
-            if count > 20 {
-                panic!("iterator should have stopped");
-            }
-        }
+    #[test]
+    fn batch_iter_walks_three_then_stops() {
+        // Well-formed three-packet block: walk all three, stop on the third's
+        // tp_next_offset == 0 marker.
+        let block = build_synthetic_block(&[b"a", b"bb", b"ccc"], ffi::TP_STATUS_USER);
+        let mut iter = iter_from_block(&block, 3);
+
+        assert_eq!(iter.next().unwrap().data(), b"a");
+        assert_eq!(iter.next().unwrap().data(), b"bb");
+        assert_eq!(iter.next().unwrap().data(), b"ccc");
+        assert!(iter.next().is_none());
     }
 
     #[test]

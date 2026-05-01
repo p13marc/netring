@@ -3,7 +3,7 @@
 use std::marker::PhantomData;
 use std::mem::ManuallyDrop;
 use std::os::fd::{AsFd, BorrowedFd};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use crate::afpacket::ffi;
 use crate::afpacket::rx::{AfPacketRx, AfPacketRxBuilder};
@@ -83,11 +83,37 @@ impl Capture {
         PacketIter {
             rx: &mut self.rx as *mut AfPacketRx,
             timeout: self.timeout,
+            deadline: None,
             batch: None,
             iter: None,
             last_error: None,
             _marker: PhantomData,
         }
+    }
+
+    /// Iterator that stops at `deadline`.
+    ///
+    /// Each `next()` clamps its inner poll timeout to `min(poll_timeout,
+    /// deadline - now)`. Once the deadline elapses with no packet, the
+    /// iterator yields `None` and subsequent calls also return `None`.
+    pub fn packets_until(&mut self, deadline: Instant) -> PacketIter<'_> {
+        PacketIter {
+            rx: &mut self.rx as *mut AfPacketRx,
+            timeout: self.timeout,
+            deadline: Some(deadline),
+            batch: None,
+            iter: None,
+            last_error: None,
+            _marker: PhantomData,
+        }
+    }
+
+    /// Iterator that runs for at most `total` from now.
+    ///
+    /// Convenience wrapper over [`packets_until`](Self::packets_until):
+    /// `cap.packets_for(d)` is `cap.packets_until(Instant::now() + d)`.
+    pub fn packets_for(&mut self, total: Duration) -> PacketIter<'_> {
+        self.packets_until(Instant::now() + total)
     }
 
     /// Capture statistics. **Resets kernel counters on each read.**
@@ -392,6 +418,10 @@ fn is_enomem(e: &std::io::Error) -> bool {
 pub struct PacketIter<'cap> {
     rx: *mut AfPacketRx,
     timeout: Duration,
+    /// Optional deadline; `next()` returns `None` once the deadline has
+    /// passed. Set by [`Capture::packets_until`] / [`Capture::packets_for`];
+    /// always `None` for the unbounded [`Capture::packets`].
+    deadline: Option<Instant>,
     /// Active batch with `'static` lifetime erasure. The actual lifetime is tied
     /// to `'cap` via the `PhantomData<&'cap mut Capture>` marker; `'static` is a
     /// placeholder so we can store `batch` and `iter` in the same struct without
@@ -448,7 +478,16 @@ impl<'cap> Iterator for PacketIter<'cap> {
             // SAFETY: `rx` is valid for `'cap`; no batch is live (we just dropped
             // it). The pointer dereference is guarded by `&mut self` on next().
             let rx = unsafe { &mut *self.rx };
-            match rx.next_batch_blocking(self.timeout) {
+            // Effective timeout = min(self.timeout, deadline - now). When the
+            // deadline has elapsed, return None immediately.
+            let effective_timeout = match self.deadline {
+                Some(d) => match d.checked_duration_since(Instant::now()) {
+                    Some(remaining) => remaining.min(self.timeout),
+                    None => return None,
+                },
+                None => self.timeout,
+            };
+            match rx.next_batch_blocking(effective_timeout) {
                 Ok(Some(batch)) => {
                     if batch.is_empty() {
                         drop(batch);

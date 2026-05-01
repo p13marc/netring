@@ -10,8 +10,8 @@
 #[cfg(feature = "tokio")]
 #[tokio::main]
 async fn main() -> Result<(), netring::Error> {
+    use netring::AfPacketTxBuilder;
     use netring::async_adapters::tokio_injector::AsyncInjector;
-    use netring::{AfPacketTxBuilder, Injector};
     use std::time::Duration;
 
     let iface = std::env::args().nth(1).unwrap_or_else(|| "lo".into());
@@ -31,10 +31,6 @@ async fn main() -> Result<(), netring::Error> {
         .frame_count(64)
         .qdisc_bypass(true)
         .build()?;
-
-    // The Injector wrapper isn't required — AsyncInjector takes AfPacketTx
-    // directly. The `Injector` builder is just a convenience.
-    let _ = Injector::builder; // suppress unused-import warning if any
 
     let mut atx = AsyncInjector::new(tx)?;
     let mut sent = 0u64;

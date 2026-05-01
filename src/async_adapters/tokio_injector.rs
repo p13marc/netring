@@ -159,6 +159,44 @@ impl AsyncInjector {
     pub fn into_inner(self) -> AfPacketTx {
         self.inner.into_inner()
     }
+
+    // ── Inherent passthroughs to AfPacketTx ─────────────────────────────
+    //
+    // Saves a `use netring::PacketSink;` (or direct field access via
+    // `get_ref()`) at the call site for the most common observability
+    // accessors.
+
+    /// Maximum payload bytes that fit in a single TX frame.
+    /// See [`AfPacketTx::frame_capacity`].
+    #[inline]
+    pub fn frame_capacity(&self) -> usize {
+        self.inner.get_ref().frame_capacity()
+    }
+
+    /// Total number of frames in the TX ring.
+    /// See [`AfPacketTx::frame_count`].
+    #[inline]
+    pub fn frame_count(&self) -> usize {
+        self.inner.get_ref().frame_count()
+    }
+
+    /// Slots currently `TP_STATUS_AVAILABLE` (reclaimed by kernel).
+    /// See [`AfPacketTx::available_slots`].
+    pub fn available_slots(&self) -> usize {
+        self.inner.get_ref().available_slots()
+    }
+
+    /// Slots currently `TP_STATUS_WRONG_FORMAT` (kernel-rejected).
+    /// See [`AfPacketTx::rejected_slots`].
+    pub fn rejected_slots(&self) -> usize {
+        self.inner.get_ref().rejected_slots()
+    }
+
+    /// Slots in `TP_STATUS_SEND_REQUEST` / `TP_STATUS_SENDING`.
+    /// See [`AfPacketTx::pending_count`].
+    pub fn pending_count(&self) -> usize {
+        self.inner.get_ref().pending_count()
+    }
 }
 
 impl AsFd for AsyncInjector {

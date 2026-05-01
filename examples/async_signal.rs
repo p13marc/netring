@@ -11,8 +11,8 @@
 #[cfg(feature = "tokio")]
 #[tokio::main]
 async fn main() -> Result<(), netring::Error> {
+    use netring::AfPacketRxBuilder;
     use netring::async_adapters::tokio_adapter::AsyncCapture;
-    use netring::{AfPacketRxBuilder, PacketSource};
 
     let iface = std::env::args().nth(1).unwrap_or_else(|| "lo".into());
     eprintln!("Capturing on {iface} (Ctrl-C to stop)...");
@@ -49,8 +49,9 @@ async fn main() -> Result<(), netring::Error> {
     }
 
     // Final stats — read after we've stopped capturing so the totals
-    // include everything we observed.
-    let stats = cap.get_ref().cumulative_stats()?;
+    // include everything we observed. AsyncCapture exposes a direct
+    // passthrough so we don't need `use netring::PacketSource;`.
+    let stats = cap.cumulative_stats()?;
     eprintln!("packets seen: {packets}, bytes: {bytes}");
     eprintln!(
         "kernel stats:  packets: {}, drops: {}, freezes: {}",

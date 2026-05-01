@@ -201,6 +201,21 @@ impl<S: PacketSource + AsRawFd> AsyncCapture<S> {
     /// may return `None` even after readability fires; we re-arm and
     /// re-wait). For zero-copy access without the per-packet `Vec<u8>`
     /// copy, use [`try_recv_batch`](Self::try_recv_batch) instead.
+    ///
+    /// # When to use this vs `try_recv_batch`
+    ///
+    /// `recv` returns `Vec<OwnedPacket>` (`Send + 'static`), so the future
+    /// it produces is `Send`. Use this when you want to:
+    /// - `tokio::spawn` the await, or
+    /// - cross await points that involve sending packets through a
+    ///   `tokio::sync::mpsc::Sender` (or any other `Send`-requiring sink).
+    ///
+    /// [`try_recv_batch`](Self::try_recv_batch) yields `PacketBatch<'_>`,
+    /// which is `!Send` because it borrows from the mmap ring (whose
+    /// `NonNull<u8>` base is not `Sync`). That makes the surrounding
+    /// future `!Send` and incompatible with `tokio::spawn`. Use
+    /// `try_recv_batch` only when staying on a single task / runtime
+    /// thread (or when using `LocalSet` / `tokio::task::spawn_local`).
     pub async fn recv(&mut self) -> Result<Vec<OwnedPacket>, Error> {
         loop {
             {
@@ -231,6 +246,22 @@ impl<S: PacketSource + AsRawFd> AsyncCapture<S> {
     /// Unwrap into the inner source.
     pub fn into_inner(self) -> S {
         self.inner.into_inner()
+    }
+
+    /// Capture statistics — passthrough to [`PacketSource::stats`].
+    ///
+    /// Saves `use netring::PacketSource;` at the call site. **Resets kernel
+    /// counters on each read** — see [`PacketSource::stats`] for the full
+    /// contract or [`cumulative_stats`](Self::cumulative_stats) for monotonic
+    /// totals.
+    pub fn stats(&self) -> Result<crate::stats::CaptureStats, Error> {
+        self.inner.get_ref().stats()
+    }
+
+    /// Accumulated statistics since the source was created — passthrough to
+    /// [`PacketSource::cumulative_stats`].
+    pub fn cumulative_stats(&self) -> Result<crate::stats::CaptureStats, Error> {
+        self.inner.get_ref().cumulative_stats()
     }
 }
 
@@ -267,6 +298,31 @@ impl<S: PacketSource + AsRawFd + Send> crate::traits::AsyncPacketSource for Asyn
 /// `Stream::poll_next` is cancel-safe: dropping the future between polls
 /// abandons the in-flight readiness wait without losing data (the next
 /// poll will re-arm via tokio's reactor).
+///
+/// # Idiomatic consumption
+///
+/// netring re-exports only `futures_core::Stream` (the trait). To use the
+/// usual `.next().await`, `.filter()`, `.take()`, etc. combinators, add
+/// `futures` (or `tokio_stream`) to your `Cargo.toml`:
+///
+/// ```toml
+/// futures = "0.3"
+/// ```
+///
+/// then:
+///
+/// ```ignore
+/// use futures::StreamExt;
+///
+/// let cap = netring::AsyncCapture::new(rx)?;
+/// let mut stream = netring::PacketStream::new(cap);
+/// while let Some(batch) = stream.next().await {
+///     for pkt in batch? { /* ... */ }
+/// }
+/// ```
+///
+/// Hand-polling without `StreamExt` is also possible — see
+/// `examples/async_stream.rs` for that variant.
 ///
 /// # Examples
 ///

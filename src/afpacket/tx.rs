@@ -182,32 +182,80 @@ impl AfPacketTx {
 
     /// Allocate a TX frame for a packet of up to `len` bytes.
     ///
-    /// Returns `None` if the packet is too large for the frame or if
-    /// the TX ring is full (all frames pending kernel transmission).
+    /// Returns `None` if the packet is too large for the frame or if every
+    /// slot in the ring is currently in `TP_STATUS_SEND_REQUEST` /
+    /// `TP_STATUS_SENDING` (all frames pending kernel transmission).
     ///
-    /// The returned [`TxSlot`] must have [`send()`](TxSlot::send) called
-    /// to queue it. Dropping without `send()` discards the frame.
+    /// Implementation notes — for two latent issues this method works around:
+    ///
+    /// 1. A `TxSlot` dropped without `send()` resets its frame status to
+    ///    AVAILABLE but the cursor has already advanced past it. To reuse
+    ///    the gap, this scans forward up to `frame_count` slots looking
+    ///    for the next AVAILABLE.
+    /// 2. Slots in `TP_STATUS_WRONG_FORMAT` (kernel-rejected frames) are
+    ///    treated as available: we reset them back to AVAILABLE and reuse
+    ///    them. Without this the only signal a user gets is "ring full"
+    ///    forever — diagnose via [`rejected_slots()`](Self::rejected_slots).
+    ///
+    /// Worst-case O(N) scan but typical O(1) on the happy path.
     pub fn allocate(&mut self, len: usize) -> Option<TxSlot<'_>> {
         if len > self.frame_size - self.data_offset {
             return None; // frame can't hold this packet
         }
 
-        let status = self.read_frame_status(self.current_frame);
-        if status != ffi::TP_STATUS_AVAILABLE {
-            return None; // ring full at this position
+        // Scan up to frame_count slots from current_frame.
+        let mut wrong_format_seen = 0u32;
+        for _ in 0..self.frame_count {
+            let status = self.read_frame_status(self.current_frame);
+            match status {
+                ffi::TP_STATUS_AVAILABLE => {
+                    let slot = TxSlot {
+                        frame_ptr: self.frame_ptr(self.current_frame),
+                        data_offset: self.data_offset,
+                        max_len: self.frame_size - self.data_offset,
+                        len: 0,
+                        sent: false,
+                        pending: &mut self.pending,
+                    };
+                    self.current_frame = (self.current_frame + 1) % self.frame_count;
+                    return Some(slot);
+                }
+                ffi::TP_STATUS_WRONG_FORMAT => {
+                    // Kernel rejected this slot; reset it and continue
+                    // scanning. We do not reuse the slot in this allocate()
+                    // call because the caller didn't ask to retry — they
+                    // called allocate() once and we should give them a
+                    // genuinely-available frame, not a recovered-rejected
+                    // one (which might trick them into thinking nothing
+                    // went wrong).
+                    self.reset_slot(self.current_frame);
+                    wrong_format_seen += 1;
+                    self.current_frame = (self.current_frame + 1) % self.frame_count;
+                }
+                _ => {
+                    // SEND_REQUEST or SENDING — kernel hasn't reclaimed.
+                    // Keep scanning in case a later slot is AVAILABLE
+                    // (happens when a previous allocate() saw a Drop
+                    // without send(), then rolled the cursor past it).
+                    self.current_frame = (self.current_frame + 1) % self.frame_count;
+                }
+            }
         }
 
-        let slot = TxSlot {
-            frame_ptr: self.frame_ptr(self.current_frame),
-            data_offset: self.data_offset,
-            max_len: self.frame_size - self.data_offset,
-            len: 0,
-            sent: false,
-            pending: &mut self.pending,
-        };
+        if wrong_format_seen > 0 {
+            tracing::warn!(
+                count = wrong_format_seen,
+                "AF_PACKET TX: kernel rejected frames (WRONG_FORMAT) — check packet contents"
+            );
+        }
+        None
+    }
 
-        self.current_frame = (self.current_frame + 1) % self.frame_count;
-        Some(slot)
+    fn reset_slot(&self, idx: usize) {
+        let ptr = self.frame_ptr(idx).as_ptr().cast::<AtomicU32>();
+        // SAFETY: ptr points to the tp_status u32 at the start of a
+        // tpacket_hdr in the mmap region; AtomicU32 has the same layout.
+        unsafe { &*ptr }.store(ffi::TP_STATUS_AVAILABLE, Ordering::Release);
     }
 
     /// Kick the kernel to transmit all frames queued via [`TxSlot::send()`].

@@ -142,25 +142,18 @@ impl Bridge {
         Ok(())
     }
 
-    /// Wait for either RX socket to become readable, with EINTR retry.
+    /// Wait for either RX socket to become readable.
     ///
     /// Returns `[a_ready, b_ready]`. Both `false` indicates the timeout
-    /// elapsed with no traffic.
+    /// elapsed with no traffic. EINTR is handled by [`crate::syscall::poll_eintr_safe`].
     fn poll_both(&self, timeout: Duration) -> Result<[bool; 2], Error> {
-        use nix::poll::{PollFd, PollFlags, PollTimeout};
+        use nix::poll::{PollFd, PollFlags};
 
         let mut pfds = [
             PollFd::new(self.rx_a.as_fd(), PollFlags::POLLIN),
             PollFd::new(self.rx_b.as_fd(), PollFlags::POLLIN),
         ];
-        let pt = PollTimeout::try_from(timeout).unwrap_or(PollTimeout::MAX);
-        loop {
-            match nix::poll::poll(&mut pfds, pt) {
-                Ok(_) => break,
-                Err(nix::errno::Errno::EINTR) => continue,
-                Err(e) => return Err(Error::Io(e.into())),
-            }
-        }
+        crate::syscall::poll_eintr_safe(&mut pfds, timeout).map_err(Error::Io)?;
         Ok([
             pfds[0]
                 .revents()

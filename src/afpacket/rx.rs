@@ -111,11 +111,13 @@ impl PacketSource for AfPacketRx {
             }
         }
 
-        // No batch ready — block on poll(2).
-        let pfd = nix::poll::PollFd::new(self.fd.as_fd(), nix::poll::PollFlags::POLLIN);
-        let poll_timeout =
-            nix::poll::PollTimeout::try_from(timeout).unwrap_or(nix::poll::PollTimeout::MAX);
-        nix::poll::poll(&mut [pfd], poll_timeout).map_err(|e| Error::Io(e.into()))?;
+        // No batch ready — block on poll(2). EINTR-safe wrapper retries on
+        // signals so callers don't have to.
+        let mut pfds = [nix::poll::PollFd::new(
+            self.fd.as_fd(),
+            nix::poll::PollFlags::POLLIN,
+        )];
+        crate::syscall::poll_eintr_safe(&mut pfds, timeout).map_err(Error::Io)?;
 
         Ok(self.next_batch())
     }

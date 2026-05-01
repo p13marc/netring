@@ -460,48 +460,26 @@ impl XdpSocket {
     ///
     /// Uses `sendto(fd, NULL, 0, MSG_DONTWAIT, NULL, 0)`.
     /// `MSG_DONTWAIT` is **mandatory** — kernel returns `EOPNOTSUPP` without it.
+    /// EINTR is retried; transient `EAGAIN`/`ENOBUFS` are reported as success.
     #[cfg(feature = "af-xdp")]
     pub fn flush(&self) -> Result<(), Error> {
         // Always kick for simplicity. Could check self.tx.needs_wakeup()
         // to only kick when kernel signals NEED_WAKEUP.
-        let ret = unsafe {
-            libc::sendto(
-                self.fd.as_raw_fd(),
-                std::ptr::null(),
-                0,
-                libc::MSG_DONTWAIT,
-                std::ptr::null(),
-                0,
-            )
-        };
-        if ret == -1 {
-            let err = std::io::Error::last_os_error();
-            // EAGAIN/ENOBUFS are transient — not errors
-            if err.raw_os_error() != Some(libc::EAGAIN) && err.raw_os_error() != Some(libc::ENOBUFS)
-            {
-                return Err(Error::Io(err));
-            }
-        }
-        Ok(())
+        crate::syscall::sendto_kick_eintr_safe(self.fd.as_raw_fd(), libc::MSG_DONTWAIT)
+            .map_err(Error::Io)
     }
 
     /// Poll for readability (incoming packets) with a timeout.
     ///
-    /// Returns `true` if packets may be available.
+    /// Returns `true` if packets may be available. EINTR is handled internally.
     #[cfg(feature = "af-xdp")]
     pub fn poll(&self, timeout: Duration) -> Result<bool, Error> {
-        let mut pfd = libc::pollfd {
-            fd: self.fd.as_raw_fd(),
-            events: libc::POLLIN,
-            revents: 0,
-        };
-        let timeout_ms = timeout.as_millis().min(i32::MAX as u128) as i32;
-        let n = unsafe { libc::poll(&mut pfd, 1, timeout_ms) };
-        if n == -1 {
-            Err(Error::Io(std::io::Error::last_os_error()))
-        } else {
-            Ok(n > 0)
-        }
+        // SAFETY: BorrowedFd is valid for the call; we only use it within the
+        // duration of poll_eintr_safe.
+        let fd = self.fd.as_fd();
+        let mut pfds = [nix::poll::PollFd::new(fd, nix::poll::PollFlags::POLLIN)];
+        let n = crate::syscall::poll_eintr_safe(&mut pfds, timeout).map_err(Error::Io)?;
+        Ok(n > 0)
     }
 
     /// Get XDP socket statistics from the kernel.

@@ -170,36 +170,30 @@ impl AfPacketTx {
         Some(slot)
     }
 
-    /// Flush all frames queued via [`TxSlot::send()`] to the wire.
+    /// Kick the kernel to transmit all frames queued via [`TxSlot::send()`].
     ///
-    /// Triggers kernel transmission by calling `sendto(fd, NULL, 0, ...)`.
-    /// Returns the number of frames that were pending.
+    /// Returns the number of frames that were *queued* (had
+    /// `TP_STATUS_SEND_REQUEST` set) when this call started. **This is not
+    /// necessarily the number of frames transmitted** — the kernel may take
+    /// additional time to process them, may reject frames with malformed
+    /// headers (`TP_STATUS_WRONG_FORMAT`), or may not yet have reclaimed
+    /// their slots (`TP_STATUS_SENDING`). Inspect slot status afterward to
+    /// distinguish queued from transmitted.
+    ///
+    /// EINTR is handled internally; transient `EAGAIN` and `ENOBUFS` are
+    /// reported as success since the kernel will absorb the kick on the
+    /// next attempt.
     ///
     /// # Errors
     ///
-    /// Returns [`Error::Io`] if the `sendto` syscall fails (e.g., `ENOBUFS`
-    /// if the kernel cannot transmit).
+    /// Returns [`Error::Io`] if the underlying `sendto` syscall fails with
+    /// a non-transient error.
     pub fn flush(&mut self) -> Result<usize, Error> {
         if self.pending == 0 {
             return Ok(0);
         }
 
-        let ret = unsafe {
-            // SAFETY: fd is valid. NULL buffer with 0 length is the standard
-            // TPACKET TX kick mechanism.
-            libc::sendto(
-                self.fd.as_raw_fd(),
-                std::ptr::null(),
-                0,
-                0,
-                std::ptr::null(),
-                0,
-            )
-        };
-
-        if ret == -1 {
-            return Err(Error::Io(std::io::Error::last_os_error()));
-        }
+        crate::syscall::sendto_kick_eintr_safe(self.fd.as_raw_fd(), 0).map_err(Error::Io)?;
 
         let count = self.pending as usize;
         self.pending = 0;

@@ -16,6 +16,7 @@ pub mod afpacket;
 pub mod afxdp;
 pub mod async_adapters;
 pub(crate) mod sockopt;
+pub(crate) mod syscall;
 
 // Re-exports
 pub use capture::{Capture, CaptureBuilder};

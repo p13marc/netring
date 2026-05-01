@@ -91,15 +91,44 @@ impl PacketStatus {
 
 /// An owned copy of a captured packet, independent of the ring buffer.
 ///
-/// Created via [`Packet::to_owned()`].
+/// Created via [`Packet::to_owned()`]. Carries enough metadata for DPI,
+/// flow tracking, and PCAP-style export — the trade-off is ~50 bytes per
+/// owned packet vs the bare-data minimum.
 #[derive(Debug, Clone)]
 pub struct OwnedPacket {
     /// Raw packet bytes (from MAC header).
     pub data: Vec<u8>,
     /// Kernel timestamp.
     pub timestamp: Timestamp,
-    /// Original packet length on the wire.
+    /// Original packet length on the wire (may exceed `data.len()` if truncated).
     pub original_len: usize,
+    /// Decoded per-packet status flags from `tp_status`.
+    pub status: PacketStatus,
+    /// Direction relative to the capturing host.
+    pub direction: PacketDirection,
+    /// Kernel-supplied flow hash (`tp_rxhash`); 0 if `fill_rxhash` was disabled.
+    pub rxhash: u32,
+    /// Raw VLAN TCI; check `status.vlan_valid`.
+    pub vlan_tci: u16,
+    /// Raw VLAN TPID; check `status.vlan_tpid_valid`.
+    pub vlan_tpid: u16,
+    /// EtherType / link-layer protocol (host byte order).
+    pub ll_protocol: u16,
+    /// Source link-layer address (up to 8 bytes — the kernel's
+    /// `sockaddr_ll::sll_addr` capacity).
+    pub source_ll_addr: [u8; 8],
+    /// Valid bytes in `source_ll_addr` (matches kernel `sll_halen`,
+    /// clamped to 8).
+    pub source_ll_addr_len: u8,
+}
+
+impl OwnedPacket {
+    /// Source link-layer address as a slice of the valid portion.
+    #[inline]
+    pub fn source_ll_addr(&self) -> &[u8] {
+        let n = (self.source_ll_addr_len as usize).min(self.source_ll_addr.len());
+        &self.source_ll_addr[..n]
+    }
 }
 
 // ── Packet Direction ───────────────────────────────────────────────────────
@@ -254,12 +283,31 @@ impl<'a> Packet<'a> {
         u16::from_be(sll.sll_protocol)
     }
 
-    /// Copy packet data out of the ring for long-lived storage.
+    /// Copy packet data and metadata out of the ring for long-lived storage.
+    ///
+    /// Captures every metadata field the ring exposes — see [`OwnedPacket`]
+    /// for the full set. Costs one heap allocation (the data Vec) plus
+    /// a fixed-size struct copy.
     pub fn to_owned(&self) -> OwnedPacket {
+        let sll_offset = ffi::tpacket_align(std::mem::size_of::<ffi::tpacket3_hdr>());
+        let hdr_ptr = self.hdr as *const ffi::tpacket3_hdr as *const u8;
+        let sll_ptr = hdr_ptr.map_addr(|a| a + sll_offset);
+        // SAFETY: BatchIter's bounds check ensured sockaddr_ll fits within
+        // the block before constructing this Packet.
+        let sll = unsafe { &*(sll_ptr as *const ffi::sockaddr_ll) };
+
         OwnedPacket {
             data: self.data.to_vec(),
             timestamp: self.timestamp(),
             original_len: self.original_len(),
+            status: self.status(),
+            direction: PacketDirection::from_raw(sll.sll_pkttype),
+            rxhash: self.hdr.hv1.tp_rxhash,
+            vlan_tci: self.hdr.hv1.tp_vlan_tci as u16,
+            vlan_tpid: self.hdr.hv1.tp_vlan_tpid,
+            ll_protocol: u16::from_be(sll.sll_protocol),
+            source_ll_addr: sll.sll_addr,
+            source_ll_addr_len: sll.sll_halen.min(8),
         }
     }
 
@@ -601,11 +649,21 @@ mod tests {
             data: vec![0xDE, 0xAD],
             timestamp: Timestamp::new(1, 2),
             original_len: 100,
+            status: PacketStatus::default(),
+            direction: PacketDirection::Host,
+            rxhash: 0xCAFE,
+            vlan_tci: 100,
+            vlan_tpid: 0x8100,
+            ll_protocol: 0x0800,
+            source_ll_addr: [1, 2, 3, 4, 5, 6, 0, 0],
+            source_ll_addr_len: 6,
         };
         let cloned = pkt.clone();
         assert_eq!(cloned.data, pkt.data);
         assert_eq!(cloned.timestamp, pkt.timestamp);
         assert_eq!(cloned.original_len, pkt.original_len);
+        assert_eq!(cloned.rxhash, 0xCAFE);
+        assert_eq!(cloned.source_ll_addr(), &[1, 2, 3, 4, 5, 6]);
     }
 
     // ── Synthetic block builder for BatchIter tests ────────────────────

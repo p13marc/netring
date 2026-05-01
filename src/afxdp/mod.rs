@@ -452,6 +452,16 @@ impl XdpSocket {
                     data: data.to_vec(),
                     timestamp: Timestamp::default(),
                     original_len: desc.len as usize,
+                    // AF_XDP doesn't surface AF_PACKET-style metadata; the
+                    // RX metadata BPF extension would, but is not yet wired.
+                    status: crate::packet::PacketStatus::default(),
+                    direction: crate::packet::PacketDirection::Unknown(0),
+                    rxhash: 0,
+                    vlan_tci: 0,
+                    vlan_tpid: 0,
+                    ll_protocol: 0,
+                    source_ll_addr: [0u8; 8],
+                    source_ll_addr_len: 0,
                 }),
                 None => {
                     // Defense in depth: a kernel that's misbehaving (or a

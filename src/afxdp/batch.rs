@@ -71,11 +71,25 @@ impl<'a> XdpPacket<'a> {
     }
 
     /// Copy packet data out for long-lived storage.
+    ///
+    /// AF_XDP does not currently surface AF_PACKET-style per-packet
+    /// metadata (status flags, VLAN, direction, flow hash) — those
+    /// `OwnedPacket` fields are zero / `Unknown` for AF_XDP origin. The
+    /// XDP RX metadata BPF extension would populate them; tracked for
+    /// future work.
     pub fn to_owned(&self) -> crate::OwnedPacket {
         crate::OwnedPacket {
             data: self.data.to_vec(),
             timestamp: crate::Timestamp::default(),
             original_len: self.len(),
+            status: crate::packet::PacketStatus::default(),
+            direction: crate::packet::PacketDirection::Unknown(0),
+            rxhash: 0,
+            vlan_tci: 0,
+            vlan_tpid: 0,
+            ll_protocol: 0,
+            source_ll_addr: [0u8; 8],
+            source_ll_addr_len: 0,
         }
     }
 }

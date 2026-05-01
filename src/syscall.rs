@@ -43,16 +43,7 @@ pub(crate) fn sendto_kick_eintr_safe(fd: RawFd, flags: i32) -> Result<(), std::i
         // SAFETY: standard sendto() syscall with NULL buffer and NULL addr —
         // the conventional TPACKET TX kick. `fd` validity is the caller's
         // contract.
-        let ret = unsafe {
-            libc::sendto(
-                fd,
-                std::ptr::null(),
-                0,
-                flags,
-                std::ptr::null(),
-                0,
-            )
-        };
+        let ret = unsafe { libc::sendto(fd, std::ptr::null(), 0, flags, std::ptr::null(), 0) };
         if ret >= 0 {
             return Ok(());
         }

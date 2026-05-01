@@ -48,9 +48,11 @@ impl MmapRing {
 
         let ptr = match result {
             Ok(p) => p,
-            Err(e @ (nix::errno::Errno::EPERM
-            | nix::errno::Errno::ENOMEM
-            | nix::errno::Errno::EAGAIN)) => {
+            Err(
+                e @ (nix::errno::Errno::EPERM
+                | nix::errno::Errno::ENOMEM
+                | nix::errno::Errno::EAGAIN),
+            ) => {
                 // MAP_LOCKED has a few distinct failure modes; surface the
                 // likely cause so users can pick the right remediation.
                 let hint = match e {

@@ -31,9 +31,9 @@
 //! Requires the `af-xdp` feature. Without it, only the builder types are
 //! available (for downstream crates to compile against).
 
-pub(crate) mod ffi;
 #[cfg(feature = "af-xdp")]
 mod batch;
+pub(crate) mod ffi;
 #[cfg(feature = "af-xdp")]
 mod ring;
 #[cfg(feature = "af-xdp")]

@@ -37,10 +37,7 @@ pub(crate) fn join_fanout(
 /// Must be called after [`join_fanout()`] on a socket whose builder used
 /// [`FanoutMode::Ebpf`](crate::FanoutMode::Ebpf). The program receives packets
 /// and returns the socket index (0-based) within the fanout group.
-pub(crate) fn attach_fanout_ebpf(
-    sock: BorrowedFd<'_>,
-    prog: BorrowedFd<'_>,
-) -> Result<(), Error> {
+pub(crate) fn attach_fanout_ebpf(sock: BorrowedFd<'_>, prog: BorrowedFd<'_>) -> Result<(), Error> {
     use std::os::fd::AsRawFd;
     let prog_raw: libc::c_int = prog.as_raw_fd();
     raw_setsockopt(

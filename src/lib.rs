@@ -31,10 +31,12 @@ pub use traits::{PacketSink, PacketSource};
 pub use afpacket::rx::{AfPacketRx, AfPacketRxBuilder};
 pub use afpacket::tx::{AfPacketTx, AfPacketTxBuilder, TxSlot};
 
-pub use afxdp::{XdpMode, XdpSocket, XdpSocketBuilder, XdpStats};
 #[cfg(feature = "af-xdp")]
 pub use afxdp::{XdpBatch, XdpBatchIter, XdpPacket};
-pub use bridge::{Bridge, BridgeAction, BridgeBuilder, BridgeDirection, BridgeHandles, BridgeStats};
+pub use afxdp::{XdpMode, XdpSocket, XdpSocketBuilder, XdpStats};
+pub use bridge::{
+    Bridge, BridgeAction, BridgeBuilder, BridgeDirection, BridgeHandles, BridgeStats,
+};
 
 #[cfg(feature = "channel")]
 pub use async_adapters::channel::ChannelCapture;

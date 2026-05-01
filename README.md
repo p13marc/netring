@@ -168,7 +168,12 @@ just stats eth0              # live statistics monitor (pkt/s, drops)
 just low-latency eth0        # low-latency tuning demo
 just dpi eth0                # deep packet inspection (HTTP/TLS/DNS/SSH detection)
 just channel eth0            # channel adapter (runtime-agnostic)
-just async eth0              # async capture with tokio
+just async eth0              # async capture with tokio (readable() pattern)
+just async-stream eth0       # async capture as a futures::Stream
+just async-inject lo 1000    # async TX with backpressure (AsyncInjector)
+just async-signal eth0       # async capture with Ctrl-C graceful shutdown
+just async-pipeline eth0 4   # async capture → tokio::mpsc → 4 worker tasks
+just async-bridge eth0 eth1  # async transparent bridge (Bridge::run_async)
 just ebpf                    # eBPF/aya integration demo (AsFd verification)
 cargo run --example xdp_send --features af-xdp -- lo  # AF_XDP TX-only (uses XdpMode::Tx)
 ```

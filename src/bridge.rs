@@ -245,16 +245,12 @@ impl Bridge {
             }
         }
 
-        let async_a = AsyncFd::with_interest(
-            FdHolder(self.rx_a.as_fd().as_raw_fd()),
-            Interest::READABLE,
-        )
-        .map_err(Error::Io)?;
-        let async_b = AsyncFd::with_interest(
-            FdHolder(self.rx_b.as_fd().as_raw_fd()),
-            Interest::READABLE,
-        )
-        .map_err(Error::Io)?;
+        let async_a =
+            AsyncFd::with_interest(FdHolder(self.rx_a.as_fd().as_raw_fd()), Interest::READABLE)
+                .map_err(Error::Io)?;
+        let async_b =
+            AsyncFd::with_interest(FdHolder(self.rx_b.as_fd().as_raw_fd()), Interest::READABLE)
+                .map_err(Error::Io)?;
 
         loop {
             tokio::select! {
@@ -295,16 +291,12 @@ impl Bridge {
             }
         }
 
-        let async_a = AsyncFd::with_interest(
-            FdHolder(self.rx_a.as_fd().as_raw_fd()),
-            Interest::READABLE,
-        )
-        .map_err(Error::Io)?;
-        let async_b = AsyncFd::with_interest(
-            FdHolder(self.rx_b.as_fd().as_raw_fd()),
-            Interest::READABLE,
-        )
-        .map_err(Error::Io)?;
+        let async_a =
+            AsyncFd::with_interest(FdHolder(self.rx_a.as_fd().as_raw_fd()), Interest::READABLE)
+                .map_err(Error::Io)?;
+        let async_b =
+            AsyncFd::with_interest(FdHolder(self.rx_b.as_fd().as_raw_fd()), Interest::READABLE)
+                .map_err(Error::Io)?;
 
         for _ in 0..iterations {
             // Bound each iteration with poll_timeout so a quiet bridge still
@@ -380,7 +372,10 @@ impl Bridge {
                     }
                     None => {
                         *ring_full += 1;
-                        tracing::debug!(pkt_len = pkt.len(), "Bridge: dropping packet — TX ring full");
+                        tracing::debug!(
+                            pkt_len = pkt.len(),
+                            "Bridge: dropping packet — TX ring full"
+                        );
                     }
                 }
             }

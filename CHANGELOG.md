@@ -67,6 +67,13 @@
 - **Cancel safety** documented on `readable`, `try_recv_batch`,
   `PacketStream::poll_next`, and all `AsyncInjector` methods.
 - New `examples/async_stream.rs` demonstrating the Stream API.
+- New `examples/async_inject.rs` — `AsyncInjector` with backpressure.
+- New `examples/async_signal.rs` — Ctrl-C graceful shutdown via
+  `tokio::signal::ctrl_c` + `tokio::select!`.
+- New `examples/async_pipeline.rs` — capture → `tokio::sync::mpsc` →
+  N worker tasks, the canonical fan-out pattern.
+- New `examples/async_bridge.rs` — `Bridge::run_async` racing against
+  Ctrl-C for graceful shutdown.
 - **`PacketSource::cumulative_stats`** — monotonic running totals
   (default impl falls back to `stats()`; AF_PACKET overrides to accumulate
   deltas internally). Mirrored on `Capture` and `Bridge`.

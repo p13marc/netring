@@ -478,7 +478,11 @@ impl std::fmt::Debug for Bridge {
 
 /// Builder for [`Bridge`].
 ///
-/// Creates paired RX+TX handles on two interfaces with matching configuration.
+/// Creates paired RX+TX handles on two interfaces. By default both sides
+/// inherit a single [`RingProfile`] and share `promiscuous` / `qdisc_bypass`
+/// flags. Per-direction overrides exist for asymmetric setups (e.g., capture
+/// jumbo on A, retransmit standard MTU on B).
+///
 /// Promiscuous mode and qdisc bypass are enabled by default (optimal for
 /// transparent bridging).
 #[must_use]
@@ -489,6 +493,19 @@ pub struct BridgeBuilder {
     promiscuous: bool,
     qdisc_bypass: bool,
     poll_timeout: Duration,
+    // Per-direction overrides; None = inherit from profile / global setting.
+    a_block_size: Option<usize>,
+    a_block_count: Option<usize>,
+    a_frame_size: Option<usize>,
+    a_block_timeout_ms: Option<u32>,
+    b_block_size: Option<usize>,
+    b_block_count: Option<usize>,
+    b_frame_size: Option<usize>,
+    b_block_timeout_ms: Option<u32>,
+    tx_a_frame_size: Option<usize>,
+    tx_b_frame_size: Option<usize>,
+    tx_a_frame_count: Option<usize>,
+    tx_b_frame_count: Option<usize>,
 }
 
 impl Default for BridgeBuilder {
@@ -500,6 +517,18 @@ impl Default for BridgeBuilder {
             promiscuous: true,
             qdisc_bypass: true,
             poll_timeout: Duration::from_millis(100),
+            a_block_size: None,
+            a_block_count: None,
+            a_frame_size: None,
+            a_block_timeout_ms: None,
+            b_block_size: None,
+            b_block_count: None,
+            b_frame_size: None,
+            b_block_timeout_ms: None,
+            tx_a_frame_size: None,
+            tx_b_frame_size: None,
+            tx_a_frame_count: None,
+            tx_b_frame_count: None,
         }
     }
 }
@@ -544,6 +573,72 @@ impl BridgeBuilder {
         self
     }
 
+    // ── Per-direction RX overrides ──────────────────────────────────────
+
+    /// Override RX block size on interface A. None = inherit from profile.
+    pub fn a_block_size(mut self, bytes: usize) -> Self {
+        self.a_block_size = Some(bytes);
+        self
+    }
+    /// Override RX block count on interface A.
+    pub fn a_block_count(mut self, n: usize) -> Self {
+        self.a_block_count = Some(n);
+        self
+    }
+    /// Override RX frame size on interface A.
+    pub fn a_frame_size(mut self, bytes: usize) -> Self {
+        self.a_frame_size = Some(bytes);
+        self
+    }
+    /// Override RX block-retire timeout on interface A.
+    pub fn a_block_timeout_ms(mut self, ms: u32) -> Self {
+        self.a_block_timeout_ms = Some(ms);
+        self
+    }
+    /// Override RX block size on interface B.
+    pub fn b_block_size(mut self, bytes: usize) -> Self {
+        self.b_block_size = Some(bytes);
+        self
+    }
+    /// Override RX block count on interface B.
+    pub fn b_block_count(mut self, n: usize) -> Self {
+        self.b_block_count = Some(n);
+        self
+    }
+    /// Override RX frame size on interface B.
+    pub fn b_frame_size(mut self, bytes: usize) -> Self {
+        self.b_frame_size = Some(bytes);
+        self
+    }
+    /// Override RX block-retire timeout on interface B.
+    pub fn b_block_timeout_ms(mut self, ms: u32) -> Self {
+        self.b_block_timeout_ms = Some(ms);
+        self
+    }
+
+    // ── Per-direction TX overrides ──────────────────────────────────────
+
+    /// Override TX frame size on interface A (B→A direction). None = inherit RX frame_size.
+    pub fn tx_a_frame_size(mut self, bytes: usize) -> Self {
+        self.tx_a_frame_size = Some(bytes);
+        self
+    }
+    /// Override TX frame size on interface B (A→B direction). None = inherit RX frame_size.
+    pub fn tx_b_frame_size(mut self, bytes: usize) -> Self {
+        self.tx_b_frame_size = Some(bytes);
+        self
+    }
+    /// Override TX frame count on interface A.
+    pub fn tx_a_frame_count(mut self, n: usize) -> Self {
+        self.tx_a_frame_count = Some(n);
+        self
+    }
+    /// Override TX frame count on interface B.
+    pub fn tx_b_frame_count(mut self, n: usize) -> Self {
+        self.tx_b_frame_count = Some(n);
+        self
+    }
+
     /// Validate and create the [`Bridge`].
     ///
     /// Creates 4 handles: RX on A, TX on B, RX on B, TX on A.
@@ -563,35 +658,59 @@ impl BridgeBuilder {
 
         let (bs, bc, fs, timeout) = self.profile.params();
 
+        // Per-direction effective values (override or inherit from profile).
+        let a_bs = self.a_block_size.unwrap_or(bs);
+        let a_bc = self.a_block_count.unwrap_or(bc);
+        let a_fs = self.a_frame_size.unwrap_or(fs);
+        let a_to = self.a_block_timeout_ms.unwrap_or(timeout);
+        let b_bs = self.b_block_size.unwrap_or(bs);
+        let b_bc = self.b_block_count.unwrap_or(bc);
+        let b_fs = self.b_frame_size.unwrap_or(fs);
+        let b_to = self.b_block_timeout_ms.unwrap_or(timeout);
+
+        // TX frame_size defaults to the RX frame_size on the *destination*
+        // side so a captured packet is guaranteed to fit:
+        //   A→B: TX on B, defaults to b_fs (matches what A receives & resends)
+        //   B→A: TX on A, defaults to a_fs
+        // Users with asymmetric needs use tx_*_frame_size to override.
+        let tx_b_fs = self.tx_b_frame_size.unwrap_or(b_fs);
+        let tx_a_fs = self.tx_a_frame_size.unwrap_or(a_fs);
+
         let rx_a = AfPacketRxBuilder::default()
             .interface(&iface_a)
-            .block_size(bs)
-            .block_count(bc)
-            .frame_size(fs)
-            .block_timeout_ms(timeout)
+            .block_size(a_bs)
+            .block_count(a_bc)
+            .frame_size(a_fs)
+            .block_timeout_ms(a_to)
             .promiscuous(self.promiscuous)
             .build()?;
 
-        let tx_b = AfPacketTxBuilder::default()
+        let mut tx_b_builder = AfPacketTxBuilder::default()
             .interface(&iface_b)
-            .frame_size(fs)
-            .qdisc_bypass(self.qdisc_bypass)
-            .build()?;
+            .frame_size(tx_b_fs)
+            .qdisc_bypass(self.qdisc_bypass);
+        if let Some(n) = self.tx_b_frame_count {
+            tx_b_builder = tx_b_builder.frame_count(n);
+        }
+        let tx_b = tx_b_builder.build()?;
 
         let rx_b = AfPacketRxBuilder::default()
             .interface(&iface_b)
-            .block_size(bs)
-            .block_count(bc)
-            .frame_size(fs)
-            .block_timeout_ms(timeout)
+            .block_size(b_bs)
+            .block_count(b_bc)
+            .frame_size(b_fs)
+            .block_timeout_ms(b_to)
             .promiscuous(self.promiscuous)
             .build()?;
 
-        let tx_a = AfPacketTxBuilder::default()
+        let mut tx_a_builder = AfPacketTxBuilder::default()
             .interface(&iface_a)
-            .frame_size(fs)
-            .qdisc_bypass(self.qdisc_bypass)
-            .build()?;
+            .frame_size(tx_a_fs)
+            .qdisc_bypass(self.qdisc_bypass);
+        if let Some(n) = self.tx_a_frame_count {
+            tx_a_builder = tx_a_builder.frame_count(n);
+        }
+        let tx_a = tx_a_builder.build()?;
 
         Ok(Bridge {
             rx_a,
@@ -639,6 +758,29 @@ mod tests {
     fn builder_poll_timeout_setter() {
         let b = BridgeBuilder::default().poll_timeout(Duration::from_millis(25));
         assert_eq!(b.poll_timeout, Duration::from_millis(25));
+    }
+
+    #[test]
+    fn builder_per_direction_overrides_stored() {
+        let b = BridgeBuilder::default()
+            .a_block_size(1 << 20)
+            .a_block_count(8)
+            .a_frame_size(4096)
+            .a_block_timeout_ms(20)
+            .b_block_size(1 << 21)
+            .b_frame_size(8192)
+            .tx_a_frame_size(2048)
+            .tx_b_frame_size(65536)
+            .tx_b_frame_count(512);
+        assert_eq!(b.a_block_size, Some(1 << 20));
+        assert_eq!(b.a_block_count, Some(8));
+        assert_eq!(b.a_frame_size, Some(4096));
+        assert_eq!(b.a_block_timeout_ms, Some(20));
+        assert_eq!(b.b_block_size, Some(1 << 21));
+        assert_eq!(b.b_frame_size, Some(8192));
+        assert_eq!(b.tx_a_frame_size, Some(2048));
+        assert_eq!(b.tx_b_frame_size, Some(65536));
+        assert_eq!(b.tx_b_frame_count, Some(512));
     }
 
     #[test]

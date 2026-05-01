@@ -10,6 +10,12 @@
 //!
 //! Uses plain `store(Release)` / `load(Acquire)` — NOT `fetch_add`.
 //! Each ring has a single producer and single consumer (no contention).
+//!
+//! `XdpRing<T>` is intentionally `Send` but not `Sync`: the cached producer
+//! and consumer indices are plain (non-atomic) `u32` fields, so concurrent
+//! access from multiple threads to the same ring would race. The owning
+//! [`XdpSocket`](crate::XdpSocket) enforces exclusion via `&mut self` on
+//! every operation.
 
 use std::num::NonZeroUsize;
 use std::os::fd::BorrowedFd;
@@ -194,8 +200,30 @@ impl<T: Copy> Drop for XdpRing<T> {
     }
 }
 
-// SAFETY: Access is mediated by the owning XdpSocket which holds &mut self.
+// SAFETY: XdpRing owns its mmap region exclusively. The raw pointers
+// (producer, consumer, flags, descs) all reference this single mmap that is
+// freed on Drop, so they cannot outlive the ring. The mmap is shared with
+// the kernel, but kernel access is synchronized via Acquire/Release atomic
+// loads/stores on the producer/consumer indices.
+//
+// Send is sound: moving the ring transfers exclusive ownership of all four
+// pointers and the mmap region; the kernel side does not change.
+//
+// Sync is intentionally NOT implemented: the cached_prod / cached_cons
+// fields are plain u32 (not atomics), so concurrent calls from multiple
+// threads on the same XdpRing would race. Raw pointers are !Sync by default,
+// which gives us !Sync here automatically — the SPEC notes the intent and
+// the static assertion below locks in the Send-but-not-Sync property.
 unsafe impl<T: Copy + Send> Send for XdpRing<T> {}
+
+// Static assertions: XdpRing<u64> is Send but not Sync.
+// If a future change breaks either property, this fails to compile.
+#[cfg(test)]
+const _: () = {
+    const fn assert_send<T: Send>() {}
+    assert_send::<XdpRing<u64>>();
+    assert_send::<XdpRing<libc::xdp_desc>>();
+};
 
 /// Fill ring: userspace produces frame addrs, kernel consumes for RX.
 pub(crate) type FillRing = XdpRing<u64>;

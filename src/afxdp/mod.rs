@@ -348,6 +348,16 @@ impl XdpSocketBuilder {
 /// region and 4 XDP rings (fill, RX, TX, completion).
 ///
 /// Requires the `af-xdp` feature to construct via [`XdpSocketBuilder::build`].
+///
+/// `XdpSocket` is `Send` but **not** `Sync`. Pass it across threads if you
+/// like, but only one thread at a time may call any method on it.
+///
+/// ```compile_fail
+/// # #[cfg(feature = "af-xdp")] {
+/// fn assert_sync<T: Sync>() {}
+/// assert_sync::<netring::XdpSocket>();
+/// # }
+/// ```
 pub struct XdpSocket {
     #[cfg(feature = "af-xdp")]
     fd: OwnedFd,

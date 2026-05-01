@@ -333,7 +333,12 @@ impl Bridge {
 
     /// Get forwarding statistics for both directions.
     ///
-    /// **Resets kernel counters on each read.**
+    /// # Reads are destructive
+    ///
+    /// Each call invokes [`AfPacketRx::stats()`] on both RX sockets, which
+    /// performs a `getsockopt(PACKET_STATISTICS)` — a destructive read that
+    /// resets kernel counters. To accumulate over time, sum the result of
+    /// periodic calls.
     ///
     /// # Errors
     ///
@@ -342,6 +347,19 @@ impl Bridge {
         Ok(BridgeStats {
             a_to_b: self.rx_a.stats()?,
             b_to_a: self.rx_b.stats()?,
+        })
+    }
+
+    /// Accumulated forwarding statistics since this bridge was created.
+    ///
+    /// Each direction's counters are monotonically non-decreasing across
+    /// calls (deltas accumulated via the underlying [`AfPacketRx::cumulative_stats`]).
+    /// **Do not mix with [`stats()`](Self::stats)** — see that method's
+    /// docstring for the reason.
+    pub fn cumulative_stats(&self) -> Result<BridgeStats, Error> {
+        Ok(BridgeStats {
+            a_to_b: self.rx_a.cumulative_stats()?,
+            b_to_a: self.rx_b.cumulative_stats()?,
         })
     }
 }

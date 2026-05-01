@@ -71,12 +71,34 @@ pub trait PacketSource: AsFd {
     ///
     /// Returns packet counts, drop counts, and freeze counts from the kernel.
     /// **Reading resets the kernel counters** — call periodically for rate
-    /// calculations.
+    /// calculations, or use [`cumulative_stats`](Self::cumulative_stats)
+    /// for monotonic totals.
     ///
     /// # Errors
     ///
     /// Returns [`Error::SockOpt`] if `getsockopt(PACKET_STATISTICS)` fails.
     fn stats(&self) -> Result<CaptureStats, Error>;
+
+    /// Accumulated stats since the source was created.
+    ///
+    /// Internally calls [`stats()`](Self::stats) (which resets kernel
+    /// counters) and adds the delta to a running total stored on the
+    /// source. The result is monotonically non-decreasing across calls.
+    ///
+    /// **Do not mix with `stats()` calls on the same source** — each
+    /// `stats()` invocation resets the kernel counters and bypasses the
+    /// running total, so deltas are lost. Pick one accessor per source.
+    ///
+    /// Default implementation just calls `stats()` (no accumulation —
+    /// suitable for backends that already report monotonic totals).
+    /// Backends with destructive stats reads should override.
+    ///
+    /// # Errors
+    ///
+    /// Same as [`stats()`](Self::stats).
+    fn cumulative_stats(&self) -> Result<CaptureStats, Error> {
+        self.stats()
+    }
 }
 
 /// A sink for outgoing packets (TX path).

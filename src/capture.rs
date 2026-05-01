@@ -92,11 +92,25 @@ impl Capture {
 
     /// Capture statistics. **Resets kernel counters on each read.**
     ///
+    /// For monotonic totals (no kernel-counter reset surface), use
+    /// [`cumulative_stats()`](Self::cumulative_stats) instead.
+    ///
     /// # Errors
     ///
     /// Returns [`Error::SockOpt`] if `getsockopt(PACKET_STATISTICS)` fails.
     pub fn stats(&self) -> Result<CaptureStats, Error> {
         self.rx.stats()
+    }
+
+    /// Accumulated statistics since this capture was created.
+    ///
+    /// Same kernel call as [`stats()`](Self::stats) but the delta is added
+    /// to a running total kept on the capture, so the returned counters
+    /// are monotonically non-decreasing across calls. **Do not mix with
+    /// `stats()` calls on the same capture** — each `stats()` call also
+    /// resets the kernel counter and bypasses the running total.
+    pub fn cumulative_stats(&self) -> Result<CaptureStats, Error> {
+        self.rx.cumulative_stats()
     }
 
     /// Unwrap into the low-level [`AfPacketRx`].

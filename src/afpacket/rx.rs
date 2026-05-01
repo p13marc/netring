@@ -1,5 +1,6 @@
 //! AF_PACKET TPACKET_V3 RX path.
 
+use std::cell::Cell;
 use std::os::fd::{AsFd, AsRawFd, BorrowedFd, OwnedFd};
 use std::time::Duration;
 
@@ -21,6 +22,9 @@ pub struct AfPacketRx {
     fd: OwnedFd,
     current_block: usize,
     expected_seq: u64,
+    /// Running totals across calls to [`cumulative_stats`](Self::cumulative_stats).
+    /// `stats()` (the destructive variant) does not touch this.
+    cumulative: Cell<CaptureStats>,
 }
 
 impl AfPacketRx {
@@ -145,6 +149,18 @@ impl PacketSource for AfPacketRx {
     fn stats(&self) -> Result<CaptureStats, Error> {
         let raw = socket::get_packet_stats(self.fd.as_fd())?;
         Ok(CaptureStats::from(raw))
+    }
+
+    fn cumulative_stats(&self) -> Result<CaptureStats, Error> {
+        let delta = socket::get_packet_stats(self.fd.as_fd())?;
+        let total = self.cumulative.get();
+        let new_total = CaptureStats {
+            packets: total.packets.saturating_add(delta.tp_packets),
+            drops: total.drops.saturating_add(delta.tp_drops),
+            freeze_count: total.freeze_count.saturating_add(delta.tp_freeze_q_cnt),
+        };
+        self.cumulative.set(new_total);
+        Ok(new_total)
     }
 }
 
@@ -419,6 +435,7 @@ impl AfPacketRxBuilder {
             fd,
             current_block: 0,
             expected_seq: 0,
+            cumulative: Cell::new(CaptureStats::default()),
         })
     }
 }

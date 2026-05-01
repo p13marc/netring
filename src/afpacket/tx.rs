@@ -359,6 +359,10 @@ impl AfPacketTxBuilder {
         socket::bind_to_interface(fd.as_fd(), ifindex)?;
 
         if self.qdisc_bypass {
+            // PACKET_QDISC_BYPASS sets a function pointer on the packet_sock
+            // (kernel chooses packet_direct_xmit vs dev_queue_xmit). It has no
+            // ordering dependency on bind() — netsniff-ng sets it earlier, but
+            // the kernel handler in net/packet/af_packet.c does not care.
             let val: libc::c_int = 1;
             crate::sockopt::raw_setsockopt(
                 fd.as_fd(),

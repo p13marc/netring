@@ -47,7 +47,13 @@ pub struct InterfaceInfo {
 /// Returns [`Error::InterfaceNotFound`] if the interface doesn't exist.
 pub fn interface_info(name: &str) -> Result<InterfaceInfo, Error> {
     let index = crate::afpacket::socket::resolve_interface(name)? as u32;
-    let mtu = read_sysfs_u32(name, "mtu").unwrap_or(1500);
+    // sysfs reads are best-effort: virtual interfaces (lo, veth, tap, dummy)
+    // omit speed and driver. Log at debug level when an attribute fails so
+    // operators can diagnose unexpected gaps.
+    let mtu = read_sysfs_u32(name, "mtu").unwrap_or_else(|| {
+        tracing::debug!(iface = name, "no MTU in sysfs; defaulting to 1500");
+        1500
+    });
     let speed = read_sysfs_u32(name, "speed").unwrap_or(0);
     let carrier = read_sysfs_u32(name, "carrier").unwrap_or(0) == 1;
     let flags = read_sysfs_u32(name, "flags").unwrap_or(0);

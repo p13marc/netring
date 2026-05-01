@@ -126,14 +126,65 @@ impl<S: PacketSource + AsRawFd> AsyncCapture<S> {
         Ok(())
     }
 
+    /// Wait until readable and return the next batch as a zero-copy view.
+    ///
+    /// Sugar over `self.readable().await?.next_batch()` plus a spurious-
+    /// wakeup retry loop. Equivalent to:
+    ///
+    /// ```ignore
+    /// loop {
+    ///     let mut guard = self.readable().await?;
+    ///     if let Some(batch) = guard.next_batch() {
+    ///         return Ok(batch);
+    ///     }
+    /// }
+    /// ```
+    ///
+    /// Borrows `&mut self` for the lifetime of the returned batch — same
+    /// "one batch live at a time" rule as [`PacketSource::next_batch`].
+    pub async fn try_recv_batch(&mut self) -> Result<PacketBatch<'_>, Error> {
+        loop {
+            // SAFETY: same polonius workaround as ReadableGuard::next_batch.
+            // We need to call self.inner.readable_mut() multiple times across
+            // loop iterations, but the borrow checker can't tell that the
+            // returned batch on success doesn't outlive the next iteration's
+            // call. Split via raw pointer; access is sequential, never aliased.
+            let self_ptr: *mut Self = self;
+            // SAFETY: self_ptr is derived from &mut self for the duration of
+            // the call; only one reborrow is live at any instant.
+            let guard = unsafe { (*self_ptr).inner.readable_mut() }
+                .await
+                .map_err(Error::Io)?;
+            // Move the guard into a stack slot so we can either return its
+            // batch or drop it before re-looping.
+            let mut guard = guard;
+            if let Some(batch) = guard.get_inner_mut().next_batch() {
+                // SAFETY: the batch borrows from the inner source through
+                // the guard. Returning extends the borrow over `'_` of the
+                // function — the same lifetime as `&mut self`. The guard
+                // itself drops at function return, releasing tokio's
+                // readiness flag (PacketBatch's Drop returns the kernel
+                // block; tokio's guard sees no I/O so it stays "ready",
+                // which is correct for level-triggered fds).
+                let batch: PacketBatch<'_> = unsafe { std::mem::transmute(batch) };
+                return Ok(batch);
+            }
+            // Spurious wakeup — clear ready and try again.
+            guard.clear_ready();
+            // guard drops here; next iteration re-arms via readable_mut().
+        }
+    }
+
     /// Receive the next batch of packets as owned copies.
     ///
     /// Waits for the socket to become readable, then returns all packets
     /// from the next retired block as [`OwnedPacket`]s. The block is
     /// returned to the kernel before this method returns.
     ///
-    /// This is simpler than the two-step `wait_readable()` + `next_batch()`
-    /// pattern but involves copying packet data out of the ring.
+    /// Internally retries on spurious wakeups (the inner `next_batch()`
+    /// may return `None` even after readability fires; we re-arm and
+    /// re-wait). For zero-copy access without the per-packet `Vec<u8>`
+    /// copy, use [`try_recv_batch`](Self::try_recv_batch) instead.
     pub async fn recv(&mut self) -> Result<Vec<OwnedPacket>, Error> {
         loop {
             {

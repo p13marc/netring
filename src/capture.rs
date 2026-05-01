@@ -199,6 +199,9 @@ pub struct CaptureBuilder {
     promiscuous: bool,
     ignore_outgoing: bool,
     busy_poll_us: Option<u32>,
+    reuseport: bool,
+    rcvbuf: Option<usize>,
+    rcvbuf_force: bool,
     timestamp_source: TimestampSource,
     poll_timeout: Duration,
     fanout: Option<(FanoutMode, u16)>,
@@ -218,6 +221,9 @@ impl Default for CaptureBuilder {
             promiscuous: false,
             ignore_outgoing: false,
             busy_poll_us: None,
+            reuseport: false,
+            rcvbuf: None,
+            rcvbuf_force: false,
             timestamp_source: TimestampSource::default(),
             poll_timeout: Duration::from_millis(100),
             fanout: None,
@@ -310,6 +316,24 @@ impl CaptureBuilder {
         self
     }
 
+    /// Enable `SO_REUSEPORT`. See [`AfPacketRxBuilder::reuseport`].
+    pub fn reuseport(mut self, enable: bool) -> Self {
+        self.reuseport = enable;
+        self
+    }
+
+    /// Set socket receive buffer size. See [`AfPacketRxBuilder::rcvbuf`].
+    pub fn rcvbuf(mut self, bytes: usize) -> Self {
+        self.rcvbuf = Some(bytes);
+        self
+    }
+
+    /// Use `SO_RCVBUFFORCE`. See [`AfPacketRxBuilder::rcvbuf_force`].
+    pub fn rcvbuf_force(mut self, enable: bool) -> Self {
+        self.rcvbuf_force = enable;
+        self
+    }
+
     /// Set the kernel timestamp source.
     pub fn timestamp_source(mut self, source: TimestampSource) -> Self {
         self.timestamp_source = source;
@@ -350,7 +374,12 @@ impl CaptureBuilder {
             .fill_rxhash(self.fill_rxhash)
             .promiscuous(self.promiscuous)
             .ignore_outgoing(self.ignore_outgoing)
+            .reuseport(self.reuseport)
+            .rcvbuf_force(self.rcvbuf_force)
             .timestamp_source(self.timestamp_source);
+        if let Some(bytes) = self.rcvbuf {
+            b = b.rcvbuf(bytes);
+        }
 
         if let Some(name) = &self.interface {
             b = b.interface(name);

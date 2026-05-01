@@ -139,6 +139,38 @@ pub(crate) fn set_busy_poll(fd: BorrowedFd<'_>, us: u32) -> Result<(), Error> {
     )
 }
 
+/// Set `SO_REUSEPORT` to allow multiple sockets on the same iface.
+pub(crate) fn set_reuseport(fd: BorrowedFd<'_>, enable: bool) -> Result<(), Error> {
+    let val: libc::c_int = if enable { 1 } else { 0 };
+    raw_setsockopt(
+        fd,
+        libc::SOL_SOCKET,
+        libc::SO_REUSEPORT,
+        &val,
+        "SO_REUSEPORT",
+    )
+}
+
+/// Set `SO_RCVBUF`. The kernel doubles the requested value internally
+/// (legacy behavior). Capped at `net.core.rmem_max` unless `SO_RCVBUFFORCE`
+/// is used.
+pub(crate) fn set_rcvbuf(fd: BorrowedFd<'_>, bytes: usize) -> Result<(), Error> {
+    let val: libc::c_int = bytes.min(libc::c_int::MAX as usize) as libc::c_int;
+    raw_setsockopt(fd, libc::SOL_SOCKET, libc::SO_RCVBUF, &val, "SO_RCVBUF")
+}
+
+/// Set `SO_RCVBUFFORCE` (bypasses `net.core.rmem_max`; requires CAP_NET_ADMIN).
+pub(crate) fn set_rcvbuf_force(fd: BorrowedFd<'_>, bytes: usize) -> Result<(), Error> {
+    let val: libc::c_int = bytes.min(libc::c_int::MAX as usize) as libc::c_int;
+    raw_setsockopt(
+        fd,
+        libc::SOL_SOCKET,
+        libc::SO_RCVBUFFORCE,
+        &val,
+        "SO_RCVBUFFORCE",
+    )
+}
+
 /// Set `PACKET_TIMESTAMP` source.
 pub(crate) fn set_timestamp_source(
     fd: BorrowedFd<'_>,

@@ -180,6 +180,63 @@ impl AfPacketTx {
             .count()
     }
 
+    /// Number of slots currently held by the kernel (`TP_STATUS_SEND_REQUEST`
+    /// or `TP_STATUS_SENDING`) — i.e., still pending transmission.
+    ///
+    /// Reaches zero once every queued frame has been fully transmitted (or
+    /// rejected). O(frame_count); avoid in hot paths.
+    pub fn pending_count(&self) -> usize {
+        (0..self.frame_count)
+            .filter(|&i| {
+                let s = self.read_frame_status(i);
+                s == ffi::TP_STATUS_SEND_REQUEST || s == ffi::TP_STATUS_SENDING
+            })
+            .count()
+    }
+
+    /// Block until [`pending_count`](Self::pending_count) reaches zero or
+    /// `timeout` elapses.
+    ///
+    /// Useful before [`Drop`](Self::drop): the destructor's best-effort
+    /// flush returns immediately after `sendto` succeeds, so frames may
+    /// still be in flight when the ring is unmapped. Calling
+    /// `wait_drained(...)` first ensures the kernel has finished.
+    ///
+    /// Internally polls `POLLOUT` (re-arms when slots become available) and
+    /// re-checks `pending_count`. Polling is bounded by the remaining
+    /// timeout slice each iteration so wakeups don't oversleep.
+    ///
+    /// # Errors
+    ///
+    /// - [`Error::Io`] with `ErrorKind::TimedOut` if the timeout elapses
+    ///   with frames still pending.
+    /// - [`Error::Io`] for any underlying poll failure.
+    pub fn wait_drained(&mut self, timeout: std::time::Duration) -> Result<(), Error> {
+        use std::time::Instant;
+        let deadline = Instant::now() + timeout;
+        loop {
+            if self.pending_count() == 0 {
+                return Ok(());
+            }
+            let remaining = match deadline.checked_duration_since(Instant::now()) {
+                Some(r) => r,
+                None => {
+                    return Err(Error::Io(std::io::Error::from(
+                        std::io::ErrorKind::TimedOut,
+                    )));
+                }
+            };
+            // Cap each poll at 10ms so we re-check pending_count even if
+            // POLLOUT triggers spuriously on a partial drain.
+            let slice = remaining.min(std::time::Duration::from_millis(10));
+            let mut pfds = [nix::poll::PollFd::new(
+                self.fd.as_fd(),
+                nix::poll::PollFlags::POLLOUT,
+            )];
+            crate::syscall::poll_eintr_safe(&mut pfds, slice).map_err(Error::Io)?;
+        }
+    }
+
     /// Allocate a TX frame for a packet of up to `len` bytes.
     ///
     /// Returns `None` if the packet is too large for the frame or if every

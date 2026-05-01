@@ -205,6 +205,9 @@ pub struct AfPacketRxBuilder {
     promiscuous: bool,
     ignore_outgoing: bool,
     busy_poll_us: Option<u32>,
+    reuseport: bool,
+    rcvbuf: Option<usize>,
+    rcvbuf_force: bool,
     timestamp_source: TimestampSource,
     fanout: Option<(FanoutMode, u16)>,
     fanout_flags: FanoutFlags,
@@ -223,6 +226,9 @@ impl Default for AfPacketRxBuilder {
             promiscuous: false,
             ignore_outgoing: false,
             busy_poll_us: None,
+            reuseport: false,
+            rcvbuf: None,
+            rcvbuf_force: false,
             timestamp_source: TimestampSource::default(),
             fanout: None,
             fanout_flags: FanoutFlags::empty(),
@@ -298,6 +304,36 @@ impl AfPacketRxBuilder {
     /// Enable SO_BUSY_POLL with the given microsecond timeout.
     pub fn busy_poll_us(mut self, us: u32) -> Self {
         self.busy_poll_us = Some(us);
+        self
+    }
+
+    /// Enable `SO_REUSEPORT`. Default: false.
+    ///
+    /// Lets multiple sockets bind to the same `(ifindex, protocol)` —
+    /// useful when running cooperating capture processes on the same
+    /// interface outside of a fanout group.
+    pub fn reuseport(mut self, enable: bool) -> Self {
+        self.reuseport = enable;
+        self
+    }
+
+    /// Set the socket receive buffer size via `SO_RCVBUF`.
+    ///
+    /// Capped at `net.core.rmem_max` (sysctl). The kernel doubles the
+    /// requested value internally — pass the desired ceiling unhalved.
+    /// Use [`rcvbuf_force()`](Self::rcvbuf_force) to bypass `rmem_max`.
+    pub fn rcvbuf(mut self, bytes: usize) -> Self {
+        self.rcvbuf = Some(bytes);
+        self
+    }
+
+    /// Use `SO_RCVBUFFORCE` instead of `SO_RCVBUF`. Default: false.
+    ///
+    /// Bypasses the `net.core.rmem_max` ceiling but requires
+    /// `CAP_NET_ADMIN`. Has no effect unless [`rcvbuf()`](Self::rcvbuf)
+    /// is also set.
+    pub fn rcvbuf_force(mut self, enable: bool) -> Self {
+        self.rcvbuf_force = enable;
         self
     }
 
@@ -414,6 +450,22 @@ impl AfPacketRxBuilder {
         // Optional: busy poll
         if let Some(us) = self.busy_poll_us {
             socket::set_busy_poll(fd.as_fd(), us)?;
+        }
+
+        // Optional: SO_REUSEPORT (must be set before bind in some kernels;
+        // bind has already happened above, but SO_REUSEPORT on AF_PACKET
+        // affects fanout-related sharing semantics, not bind itself).
+        if self.reuseport {
+            socket::set_reuseport(fd.as_fd(), true)?;
+        }
+
+        // Optional: receive buffer sizing
+        if let Some(bytes) = self.rcvbuf {
+            if self.rcvbuf_force {
+                socket::set_rcvbuf_force(fd.as_fd(), bytes)?;
+            } else {
+                socket::set_rcvbuf(fd.as_fd(), bytes)?;
+            }
         }
 
         // Optional: timestamp source

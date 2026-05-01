@@ -111,6 +111,15 @@ impl Capture {
         self.rx.attach_ebpf_filter(prog_fd)
     }
 
+    /// Attach an eBPF program to govern fanout distribution.
+    ///
+    /// See [`AfPacketRx::attach_fanout_ebpf()`] for details. Use this when
+    /// the builder was configured with
+    /// `.fanout(FanoutMode::Ebpf, group_id)`.
+    pub fn attach_fanout_ebpf<F: AsFd>(&self, prog: F) -> Result<(), Error> {
+        self.rx.attach_fanout_ebpf(prog)
+    }
+
     /// Detach any attached BPF/eBPF filter.
     pub fn detach_filter(&self) -> Result<(), Error> {
         self.rx.detach_filter()

@@ -34,18 +34,20 @@ pub(crate) fn join_fanout(
 
 /// Attach an eBPF program to the fanout group for custom distribution.
 ///
-/// Must be called after [`join_fanout()`] with [`FanoutMode::Ebpf`].
-/// The program receives packets and returns the socket index (0-based).
-#[allow(dead_code)]
+/// Must be called after [`join_fanout()`] on a socket whose builder used
+/// [`FanoutMode::Ebpf`](crate::FanoutMode::Ebpf). The program receives packets
+/// and returns the socket index (0-based) within the fanout group.
 pub(crate) fn attach_fanout_ebpf(
-    fd: BorrowedFd<'_>,
-    prog_fd: std::os::fd::RawFd,
+    sock: BorrowedFd<'_>,
+    prog: BorrowedFd<'_>,
 ) -> Result<(), Error> {
+    use std::os::fd::AsRawFd;
+    let prog_raw: libc::c_int = prog.as_raw_fd();
     raw_setsockopt(
-        fd,
+        sock,
         ffi::SOL_PACKET,
         ffi::PACKET_FANOUT_DATA,
-        &prog_fd,
+        &prog_raw,
         "PACKET_FANOUT_DATA",
     )
 }

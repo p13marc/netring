@@ -59,6 +59,26 @@ impl AfPacketRx {
         filter::attach_ebpf_socket_filter(self.fd.as_fd(), prog_fd)
     }
 
+    /// Attach an eBPF program to govern fanout distribution.
+    ///
+    /// Must be called on a socket whose builder used
+    /// `.fanout(FanoutMode::Ebpf, group_id)`. The program type must be
+    /// `BPF_PROG_TYPE_SOCKET_FILTER`; it returns the 0-based socket index
+    /// within the fanout group.
+    ///
+    /// `prog` is borrowed for the duration of the call — netring does not
+    /// retain a reference. The kernel keeps its own reference until you
+    /// detach or close the socket.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`Error::SockOpt`] if `setsockopt(PACKET_FANOUT_DATA)` fails
+    /// (typically because the fanout group was not created with
+    /// [`FanoutMode::Ebpf`](crate::FanoutMode::Ebpf)).
+    pub fn attach_fanout_ebpf<F: AsFd>(&self, prog: F) -> Result<(), Error> {
+        fanout::attach_fanout_ebpf(self.fd.as_fd(), prog.as_fd())
+    }
+
     /// Detach any attached BPF/eBPF filter.
     ///
     /// # Errors

@@ -293,19 +293,26 @@ impl XdpSocketBuilder {
         } as u32;
 
         if prefill > 0 {
-            if let Some(idx) = fill.producer_reserve(prefill) {
+            if let Some(tok) = fill.producer_reserve(prefill) {
                 let mut written = 0u32;
                 for i in 0..prefill {
                     match umem.alloc_frame() {
                         Some(addr) => {
-                            unsafe { fill.write_desc(idx + i, addr) };
+                            fill.write_at(tok, i, addr);
                             written += 1;
                         }
                         None => break,
                     }
                 }
+                // Even if we wrote fewer than reserved, the producer index
+                // was advanced by `n` in reserve — submit the original token.
+                // Unwritten descriptors carry stale data, which is fine as
+                // long as the kernel reads only `written` of them. In our
+                // case alloc_frame can't fail mid-loop because we capped
+                // prefill to umem.available() up front.
+                debug_assert_eq!(written, tok.n);
                 if written > 0 {
-                    fill.producer_submit(written);
+                    fill.producer_submit(tok);
                 }
             }
         }
@@ -393,16 +400,15 @@ impl XdpSocket {
         self.recycle_completed();
 
         // 2. Peek RX ring
-        let n = self.rx.consumer_peek(64);
-        if n == 0 {
-            return Ok(Vec::new());
-        }
+        let tok = match self.rx.consumer_peek(64) {
+            Some(t) => t,
+            None => return Ok(Vec::new()),
+        };
 
-        let mut packets = Vec::with_capacity(n as usize);
-        let base_idx = self.rx.consumer_index();
+        let mut packets = Vec::with_capacity(tok.n as usize);
 
-        for i in 0..n {
-            let desc: libc::xdp_desc = unsafe { self.rx.read_desc(base_idx + i) };
+        for i in 0..tok.n {
+            let desc: libc::xdp_desc = self.rx.read_at(tok, i);
             match self.umem.data_checked(desc.addr, desc.len as usize) {
                 Some(data) => packets.push(OwnedPacket {
                     data: data.to_vec(),
@@ -425,7 +431,7 @@ impl XdpSocket {
         }
 
         // 3. Release consumed RX descriptors
-        self.rx.consumer_release(n);
+        self.rx.consumer_release(tok);
 
         // 4. Refill fill ring with recycled frames
         self.refill();
@@ -466,24 +472,23 @@ impl XdpSocket {
         buf.copy_from_slice(data);
 
         // Submit TX descriptor
-        let idx = match self.tx.producer_reserve(1) {
-            Some(i) => i,
+        let tok = match self.tx.producer_reserve(1) {
+            Some(t) => t,
             None => {
                 self.umem.free_frame(addr);
                 return Ok(false);
             }
         };
-        unsafe {
-            self.tx.write_desc(
-                idx,
-                libc::xdp_desc {
-                    addr,
-                    len: data.len() as u32,
-                    options: 0,
-                },
-            );
-        }
-        self.tx.producer_submit(1);
+        self.tx.write_at(
+            tok,
+            0,
+            libc::xdp_desc {
+                addr,
+                len: data.len() as u32,
+                options: 0,
+            },
+        );
+        self.tx.producer_submit(tok);
 
         Ok(true)
     }
@@ -534,17 +539,16 @@ impl XdpSocket {
     /// Recycle frames from the completion ring back to the UMEM free list.
     #[cfg(feature = "af-xdp")]
     fn recycle_completed(&mut self) {
-        let n = self.comp.consumer_peek(64);
-        if n == 0 {
-            return;
-        }
-        let base = self.comp.consumer_index();
+        let tok = match self.comp.consumer_peek(64) {
+            Some(t) => t,
+            None => return,
+        };
         let mut addrs = [0u64; 64];
-        for i in 0..n {
-            addrs[i as usize] = unsafe { self.comp.read_desc(base + i) };
+        for i in 0..tok.n {
+            addrs[i as usize] = self.comp.read_at(tok, i);
         }
-        self.umem.free_frames(&addrs[..n as usize]);
-        self.comp.consumer_release(n);
+        self.umem.free_frames(&addrs[..tok.n as usize]);
+        self.comp.consumer_release(tok);
     }
 
     /// Refill the fill ring with available UMEM frames.
@@ -554,16 +558,19 @@ impl XdpSocket {
         if want == 0 {
             return;
         }
-        if let Some(idx) = self.fill.producer_reserve(want) {
+        if let Some(tok) = self.fill.producer_reserve(want) {
             let mut filled = 0u32;
-            for i in 0..want {
+            for i in 0..tok.n {
                 if let Some(addr) = self.umem.alloc_frame() {
-                    unsafe { self.fill.write_desc(idx + i, addr) };
+                    self.fill.write_at(tok, i, addr);
                     filled += 1;
                 }
             }
+            // `want` was bounded by umem.available() so all reservations get
+            // filled; the assertion documents the invariant.
+            debug_assert_eq!(filled, tok.n);
             if filled > 0 {
-                self.fill.producer_submit(filled);
+                self.fill.producer_submit(tok);
             }
         }
     }

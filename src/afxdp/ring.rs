@@ -27,6 +27,27 @@ use nix::sys::mman::{MapFlags, ProtFlags};
 use super::ffi;
 use crate::error::Error;
 
+/// Token returned by [`XdpRing::consumer_peek`].
+///
+/// Carries the start index and count of a peeked range; pass to
+/// [`XdpRing::read_at`] (with `offset < n`) and [`XdpRing::consumer_release`].
+/// Tokens are short-lived (single peek/read/release cycle) and cheap to copy.
+#[derive(Debug, Clone, Copy)]
+pub(crate) struct PeekToken {
+    pub(crate) start: u32,
+    pub(crate) n: u32,
+}
+
+/// Token returned by [`XdpRing::producer_reserve`].
+///
+/// Carries the start index and count of a reserved range; pass to
+/// [`XdpRing::write_at`] (with `offset < n`) and [`XdpRing::producer_submit`].
+#[derive(Debug, Clone, Copy)]
+pub(crate) struct ReserveToken {
+    pub(crate) start: u32,
+    pub(crate) n: u32,
+}
+
 /// Generic XDP ring buffer over descriptor type `T`.
 pub(crate) struct XdpRing<T: Copy> {
     base: NonNull<u8>,
@@ -100,21 +121,20 @@ impl<T: Copy> XdpRing<T> {
 
     // ── Producer protocol (Fill ring, TX ring) ───────────────────────────
 
-    /// Current consumer index (for indexing into `read_desc`).
-    #[inline]
-    pub(crate) fn consumer_index(&self) -> u32 {
-        self.cached_cons
-    }
-
     /// Number of free slots available for the producer.
     #[inline]
     fn free_slots(&self) -> u32 {
         self.size - (self.cached_prod.wrapping_sub(self.cached_cons))
     }
 
-    /// Reserve `n` slots for producing. Returns the start index, or `None` if full.
+    /// Reserve `n` slots for producing.
+    ///
+    /// Returns a [`ReserveToken`] carrying the start index and count, or
+    /// `None` if the ring lacks free space. Use [`write_at`](Self::write_at)
+    /// with `offset` in `0..tok.n` to write each descriptor, then
+    /// [`producer_submit`](Self::producer_submit) to publish.
     #[inline]
-    pub(crate) fn producer_reserve(&mut self, n: u32) -> Option<u32> {
+    pub(crate) fn producer_reserve(&mut self, n: u32) -> Option<ReserveToken> {
         if self.free_slots() < n {
             // Refresh cached consumer from kernel.
             self.cached_cons = unsafe { &*self.consumer }.load(Ordering::Acquire);
@@ -122,60 +142,90 @@ impl<T: Copy> XdpRing<T> {
         if self.free_slots() < n {
             return None;
         }
-        let idx = self.cached_prod;
+        let start = self.cached_prod;
         self.cached_prod = self.cached_prod.wrapping_add(n);
-        Some(idx)
+        Some(ReserveToken { start, n })
     }
 
-    /// Write a descriptor at the given ring index.
+    /// Write a descriptor inside the reserved range.
     ///
-    /// # Safety
-    ///
-    /// `idx` must have been obtained from `producer_reserve`.
+    /// Panics if `offset >= tok.n` — programmer error: only offsets within
+    /// the token's reservation are valid.
     #[inline]
-    pub(crate) unsafe fn write_desc(&mut self, idx: u32, val: T) {
+    pub(crate) fn write_at(&mut self, tok: ReserveToken, offset: u32, val: T) {
+        assert!(
+            offset < tok.n,
+            "write_at: offset {offset} out of range for ReserveToken {{ start: {}, n: {} }}",
+            tok.start,
+            tok.n
+        );
+        let idx = tok.start.wrapping_add(offset);
+        // SAFETY: idx is within a slot reserved by producer_reserve; the
+        // mask keeps it within the descriptor array; the kernel won't read
+        // until producer_submit advances the visible producer index.
         unsafe { self.descs.add((idx & self.mask) as usize).write(val) };
     }
 
-    /// Submit `n` reserved entries to the kernel.
+    /// Submit a reserved-and-written range to the kernel.
     ///
-    /// Uses `store(Release)` — NOT `fetch_add` (single producer per ring).
+    /// `tok.n` is implicit in `cached_prod` (already advanced in
+    /// `producer_reserve`); this call publishes the new producer index
+    /// with `Release` ordering so the kernel sees the descriptor writes.
     #[inline]
-    pub(crate) fn producer_submit(&self, _n: u32) {
-        // cached_prod was already advanced in reserve().
-        // The store makes it visible to the kernel.
+    pub(crate) fn producer_submit(&self, _tok: ReserveToken) {
+        // cached_prod was already advanced in reserve(). The store makes
+        // it visible to the kernel.
         unsafe { &*self.producer }.store(self.cached_prod, Ordering::Release);
     }
 
     // ── Consumer protocol (RX ring, Completion ring) ─────────────────────
 
-    /// Peek up to `n` available entries. Returns the count actually available.
+    /// Peek up to `max` available entries.
+    ///
+    /// Returns a [`PeekToken`] carrying the start index and actual count, or
+    /// `None` if no entries are currently available.
     #[inline]
-    pub(crate) fn consumer_peek(&mut self, n: u32) -> u32 {
+    pub(crate) fn consumer_peek(&mut self, max: u32) -> Option<PeekToken> {
         let mut available = self.cached_prod.wrapping_sub(self.cached_cons);
         if available == 0 {
             self.cached_prod = unsafe { &*self.producer }.load(Ordering::Acquire);
             available = self.cached_prod.wrapping_sub(self.cached_cons);
         }
-        available.min(n)
+        let n = available.min(max);
+        if n == 0 {
+            return None;
+        }
+        Some(PeekToken {
+            start: self.cached_cons,
+            n,
+        })
     }
 
-    /// Read a descriptor at the given ring index.
+    /// Read a descriptor inside the peeked range.
     ///
-    /// # Safety
-    ///
-    /// `idx` must be within the range returned by `consumer_peek`.
+    /// Panics if `offset >= tok.n` — programmer error: only offsets within
+    /// the token's peeked range are valid.
     #[inline]
-    pub(crate) unsafe fn read_desc(&self, idx: u32) -> T {
+    pub(crate) fn read_at(&self, tok: PeekToken, offset: u32) -> T {
+        assert!(
+            offset < tok.n,
+            "read_at: offset {offset} out of range for PeekToken {{ start: {}, n: {} }}",
+            tok.start,
+            tok.n
+        );
+        let idx = tok.start.wrapping_add(offset);
+        // SAFETY: idx is within a slot the kernel marked produced (Acquire
+        // load in consumer_peek paired with the kernel's Release store);
+        // the mask keeps it within the descriptor array.
         unsafe { self.descs.add((idx & self.mask) as usize).read() }
     }
 
-    /// Release `n` consumed entries back to the kernel.
+    /// Release a peeked range back to the kernel.
     ///
-    /// Uses `store(Release)` — NOT `fetch_add` (single consumer per ring).
+    /// Advances `cached_cons` by `tok.n` and publishes with `Release`.
     #[inline]
-    pub(crate) fn consumer_release(&mut self, n: u32) {
-        self.cached_cons = self.cached_cons.wrapping_add(n);
+    pub(crate) fn consumer_release(&mut self, tok: PeekToken) {
+        self.cached_cons = self.cached_cons.wrapping_add(tok.n);
         unsafe { &*self.consumer }.store(self.cached_cons, Ordering::Release);
     }
 
@@ -316,12 +366,13 @@ mod tests {
     fn producer_reserve_and_submit() {
         let mut mock = MockRing::<u64>::new(4);
         // Reserve 1 slot
-        let idx = mock.ring.producer_reserve(1);
-        assert_eq!(idx, Some(0));
+        let tok = mock.ring.producer_reserve(1).unwrap();
+        assert_eq!(tok.start, 0);
+        assert_eq!(tok.n, 1);
 
         // Write a descriptor
-        unsafe { mock.ring.write_desc(0, 42u64) };
-        mock.ring.producer_submit(1);
+        mock.ring.write_at(tok, 0, 42u64);
+        mock.ring.producer_submit(tok);
 
         // Producer index should be visible
         assert_eq!(mock.read_producer(), 1);
@@ -331,17 +382,17 @@ mod tests {
     fn producer_reserve_full() {
         let mut mock = MockRing::<u64>::new(4);
         // Fill all 4 slots
-        assert!(mock.ring.producer_reserve(4).is_some());
-        mock.ring.producer_submit(4);
+        let tok = mock.ring.producer_reserve(4).unwrap();
+        mock.ring.producer_submit(tok);
 
         // Ring is now full
-        assert_eq!(mock.ring.producer_reserve(1), None);
+        assert!(mock.ring.producer_reserve(1).is_none());
     }
 
     #[test]
     fn consumer_peek_empty() {
         let mut mock = MockRing::<u64>::new(4);
-        assert_eq!(mock.ring.consumer_peek(4), 0);
+        assert!(mock.ring.consumer_peek(4).is_none());
     }
 
     #[test]
@@ -350,8 +401,9 @@ mod tests {
         // Simulate kernel producing 2 entries
         mock.kernel_set_producer(2);
 
-        let n = mock.ring.consumer_peek(4);
-        assert_eq!(n, 2);
+        let tok = mock.ring.consumer_peek(4).unwrap();
+        assert_eq!(tok.n, 2);
+        assert_eq!(tok.start, 0);
     }
 
     #[test]
@@ -365,16 +417,33 @@ mod tests {
         }
         mock.kernel_set_producer(2);
 
-        let n = mock.ring.consumer_peek(4);
-        assert_eq!(n, 2);
+        let tok = mock.ring.consumer_peek(4).unwrap();
+        assert_eq!(tok.n, 2);
 
-        let v0 = unsafe { mock.ring.read_desc(mock.ring.cached_cons) };
-        let v1 = unsafe { mock.ring.read_desc(mock.ring.cached_cons + 1) };
-        assert_eq!(v0, 100);
-        assert_eq!(v1, 200);
+        assert_eq!(mock.ring.read_at(tok, 0), 100);
+        assert_eq!(mock.ring.read_at(tok, 1), 200);
 
-        mock.ring.consumer_release(2);
+        mock.ring.consumer_release(tok);
         assert_eq!(mock.read_consumer(), 2);
+    }
+
+    #[test]
+    #[should_panic(expected = "read_at: offset")]
+    fn read_at_panics_past_token_end() {
+        let mut mock = MockRing::<u64>::new(4);
+        mock.kernel_set_producer(2);
+        let tok = mock.ring.consumer_peek(4).unwrap();
+        // Offset 5 is past tok.n=2 — must panic.
+        let _ = mock.ring.read_at(tok, 5);
+    }
+
+    #[test]
+    #[should_panic(expected = "write_at: offset")]
+    fn write_at_panics_past_token_end() {
+        let mut mock = MockRing::<u64>::new(4);
+        let tok = mock.ring.producer_reserve(2).unwrap();
+        // Offset 5 is past tok.n=2 — must panic.
+        mock.ring.write_at(tok, 5, 0u64);
     }
 
     #[test]
@@ -382,21 +451,22 @@ mod tests {
         let mut mock = MockRing::<u64>::new(4); // mask = 3
 
         // Produce 3, consume 3, then produce 2 more — wraps around
-        assert!(mock.ring.producer_reserve(3).is_some());
-        mock.ring.producer_submit(3);
+        let tok3 = mock.ring.producer_reserve(3).unwrap();
+        mock.ring.producer_submit(tok3);
 
         // Simulate consumer (kernel) consuming 3
         unsafe { &*mock.ring.consumer }.store(3, Ordering::Release);
         mock.ring.cached_cons = 3; // refresh
 
         // Now produce 2 more: indices 3,4 → slots 3,0 (wrapping)
-        let idx = mock.ring.producer_reserve(2);
-        assert_eq!(idx, Some(3));
+        let tok = mock.ring.producer_reserve(2).unwrap();
+        assert_eq!(tok.start, 3);
+        assert_eq!(tok.n, 2);
 
-        unsafe {
-            mock.ring.write_desc(3, 30u64); // slot 3 & 3 = 3
-            mock.ring.write_desc(4, 40u64); // slot 4 & 3 = 0
-        }
+        // Slots: tok.start=3 + offset=0 → idx=3 → slot 3 & 3 = 3
+        //        tok.start=3 + offset=1 → idx=4 → slot 4 & 3 = 0
+        mock.ring.write_at(tok, 0, 30u64);
+        mock.ring.write_at(tok, 1, 40u64);
 
         // Verify the wrapped write
         let v0 = unsafe { mock.ring.descs.add(3).read() };
@@ -422,9 +492,9 @@ mod tests {
         let mut mock = MockRing::<u64>::new(4);
 
         // Fill ring
-        assert!(mock.ring.producer_reserve(4).is_some());
-        mock.ring.producer_submit(4);
-        assert_eq!(mock.ring.producer_reserve(1), None);
+        let tok = mock.ring.producer_reserve(4).unwrap();
+        mock.ring.producer_submit(tok);
+        assert!(mock.ring.producer_reserve(1).is_none());
 
         // Kernel consumes 2
         unsafe { &*mock.ring.consumer }.store(2, Ordering::Release);

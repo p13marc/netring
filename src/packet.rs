@@ -353,7 +353,7 @@ impl OwnedPacket {
 /// **RAII**: dropping the batch returns the block to the kernel by writing
 /// `TP_STATUS_KERNEL` with `Release` ordering.
 ///
-/// Only one batch can be live at a time per [`AfPacketRx`](crate::afpacket::rx::AfPacketRx)
+/// Only one batch can be live at a time per [`Capture`](crate::Capture)
 /// (enforced by `&mut self` on [`next_batch()`](crate::traits::PacketSource::next_batch)).
 pub struct PacketBatch<'a> {
     block: NonNull<ffi::tpacket_block_desc>,

@@ -22,7 +22,7 @@ pub enum FanoutMode {
     /// The program receives the packet and returns the socket index
     /// (0-based) within the fanout group. After building the socket with
     /// `.fanout(FanoutMode::Ebpf, group_id)`, attach the program via
-    /// [`AfPacketRx::attach_fanout_ebpf()`](crate::AfPacketRx::attach_fanout_ebpf)
+    /// [`Capture::attach_fanout_ebpf()`](crate::Capture::attach_fanout_ebpf)
     /// or [`Capture::attach_fanout_ebpf()`](crate::Capture::attach_fanout_ebpf).
     Ebpf,
 }

@@ -48,18 +48,39 @@ pub enum BridgeDirection {
     BtoA,
 }
 
-/// Forwarding statistics for both directions.
+/// Forwarding statistics for both directions, plus per-cause drop counters.
+///
+/// The drop counters track packets that were dropped *by the bridge itself*
+/// (TX ring full, packet too large for the TX frame). Kernel-side drops
+/// (RX ring full) are reflected in `a_to_b.drops` / `b_to_a.drops`.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct BridgeStats {
     /// Statistics for A→B direction.
     pub a_to_b: CaptureStats,
     /// Statistics for B→A direction.
     pub b_to_a: CaptureStats,
+    /// A→B packets dropped because the TX frame was too small.
+    pub a_to_b_dropped_too_large: u64,
+    /// A→B packets dropped because the TX ring was full.
+    pub a_to_b_dropped_ring_full: u64,
+    /// B→A packets dropped because the TX frame was too small.
+    pub b_to_a_dropped_too_large: u64,
+    /// B→A packets dropped because the TX ring was full.
+    pub b_to_a_dropped_ring_full: u64,
 }
 
 impl std::fmt::Display for BridgeStats {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(f, "A→B: {} | B→A: {}", self.a_to_b, self.b_to_a)
+        write!(
+            f,
+            "A→B: {} dropped(too_large={}, ring_full={}) | B→A: {} dropped(too_large={}, ring_full={})",
+            self.a_to_b,
+            self.a_to_b_dropped_too_large,
+            self.a_to_b_dropped_ring_full,
+            self.b_to_a,
+            self.b_to_a_dropped_too_large,
+            self.b_to_a_dropped_ring_full,
+        )
     }
 }
 
@@ -84,6 +105,17 @@ pub struct Bridge {
     rx_b: AfPacketRx,
     tx_a: AfPacketTx,
     poll_timeout: Duration,
+    /// Per-direction drop counters maintained by the bridge itself
+    /// (kernel-side drops live in stats() / cumulative_stats()).
+    drops: DropCounters,
+}
+
+#[derive(Debug, Default, Clone, Copy)]
+struct DropCounters {
+    a_to_b_too_large: u64,
+    a_to_b_ring_full: u64,
+    b_to_a_too_large: u64,
+    b_to_a_ring_full: u64,
 }
 
 impl Bridge {
@@ -309,20 +341,46 @@ impl Bridge {
     where
         F: FnMut(&Packet<'_>, BridgeDirection) -> BridgeAction,
     {
-        let (rx, tx) = match direction {
-            BridgeDirection::AtoB => (&mut self.rx_a, &mut self.tx_b),
-            BridgeDirection::BtoA => (&mut self.rx_b, &mut self.tx_a),
+        let (rx, tx, too_large, ring_full) = match direction {
+            BridgeDirection::AtoB => (
+                &mut self.rx_a,
+                &mut self.tx_b,
+                &mut self.drops.a_to_b_too_large,
+                &mut self.drops.a_to_b_ring_full,
+            ),
+            BridgeDirection::BtoA => (
+                &mut self.rx_b,
+                &mut self.tx_a,
+                &mut self.drops.b_to_a_too_large,
+                &mut self.drops.b_to_a_ring_full,
+            ),
         };
+
+        let tx_capacity = tx.frame_capacity();
 
         while let Some(batch) = rx.next_batch() {
             for pkt in &batch {
-                if filter(&pkt, direction) == BridgeAction::Forward {
-                    if let Some(mut slot) = tx.allocate(pkt.len()) {
+                if filter(&pkt, direction) != BridgeAction::Forward {
+                    continue;
+                }
+                if pkt.len() > tx_capacity {
+                    *too_large += 1;
+                    tracing::warn!(
+                        pkt_len = pkt.len(),
+                        tx_capacity,
+                        "Bridge: dropping packet — exceeds TX frame capacity"
+                    );
+                    continue;
+                }
+                match tx.allocate(pkt.len()) {
+                    Some(mut slot) => {
                         slot.data_mut()[..pkt.len()].copy_from_slice(pkt.data());
                         slot.set_len(pkt.len());
                         slot.send();
-                    } else {
-                        tracing::debug!(pkt_len = pkt.len(), "TX ring full, dropping packet");
+                    }
+                    None => {
+                        *ring_full += 1;
+                        tracing::debug!(pkt_len = pkt.len(), "Bridge: dropping packet — TX ring full");
                     }
                 }
             }
@@ -347,6 +405,10 @@ impl Bridge {
         Ok(BridgeStats {
             a_to_b: self.rx_a.stats()?,
             b_to_a: self.rx_b.stats()?,
+            a_to_b_dropped_too_large: self.drops.a_to_b_too_large,
+            a_to_b_dropped_ring_full: self.drops.a_to_b_ring_full,
+            b_to_a_dropped_too_large: self.drops.b_to_a_too_large,
+            b_to_a_dropped_ring_full: self.drops.b_to_a_ring_full,
         })
     }
 
@@ -360,8 +422,47 @@ impl Bridge {
         Ok(BridgeStats {
             a_to_b: self.rx_a.cumulative_stats()?,
             b_to_a: self.rx_b.cumulative_stats()?,
+            a_to_b_dropped_too_large: self.drops.a_to_b_too_large,
+            a_to_b_dropped_ring_full: self.drops.a_to_b_ring_full,
+            b_to_a_dropped_too_large: self.drops.b_to_a_too_large,
+            b_to_a_dropped_ring_full: self.drops.b_to_a_ring_full,
         })
     }
+
+    /// Decompose into the four backend handles: `(rx_a, tx_b, rx_b, tx_a)`.
+    ///
+    /// After this call, the bridge no longer drives forwarding — the caller
+    /// is responsible for any further packet movement. Useful for advanced
+    /// patterns: attaching eBPF programs to one side, taking a custom
+    /// forwarding path, or shutting down a single direction.
+    pub fn into_inner(self) -> BridgeHandles {
+        BridgeHandles {
+            rx_a: self.rx_a,
+            tx_b: self.tx_b,
+            rx_b: self.rx_b,
+            tx_a: self.tx_a,
+        }
+    }
+
+    /// Borrow the four backend handles for inspection (e.g., extracting fds).
+    pub fn handles(&self) -> (&AfPacketRx, &AfPacketTx, &AfPacketRx, &AfPacketTx) {
+        (&self.rx_a, &self.tx_b, &self.rx_b, &self.tx_a)
+    }
+}
+
+/// The four backend handles that make up a [`Bridge`].
+///
+/// Returned by [`Bridge::into_inner`].
+#[derive(Debug)]
+pub struct BridgeHandles {
+    /// RX on interface A.
+    pub rx_a: AfPacketRx,
+    /// TX on interface B (forwards A→B).
+    pub tx_b: AfPacketTx,
+    /// RX on interface B.
+    pub rx_b: AfPacketRx,
+    /// TX on interface A (forwards B→A).
+    pub tx_a: AfPacketTx,
 }
 
 impl std::fmt::Debug for Bridge {
@@ -498,6 +599,7 @@ impl BridgeBuilder {
             rx_b,
             tx_a,
             poll_timeout: self.poll_timeout,
+            drops: DropCounters::default(),
         })
     }
 }
@@ -556,5 +658,19 @@ mod tests {
         let s = stats.to_string();
         assert!(s.contains("A→B"));
         assert!(s.contains("B→A"));
+        assert!(s.contains("too_large=0"));
+        assert!(s.contains("ring_full=0"));
+    }
+
+    #[test]
+    fn bridge_stats_drop_counters_display() {
+        let stats = BridgeStats {
+            a_to_b_dropped_too_large: 7,
+            b_to_a_dropped_ring_full: 13,
+            ..BridgeStats::default()
+        };
+        let s = stats.to_string();
+        assert!(s.contains("too_large=7"));
+        assert!(s.contains("ring_full=13"));
     }
 }

@@ -9,7 +9,7 @@ use crate::afpacket::ffi;
 use crate::afpacket::rx::{AfPacketRx, AfPacketRxBuilder};
 use crate::config::{BpfInsn, FanoutFlags, FanoutMode, RingProfile, TimestampSource};
 use crate::error::Error;
-use crate::packet::{Packet, PacketBatch};
+use crate::packet::{BatchIter, Packet, PacketBatch};
 use crate::stats::CaptureStats;
 use crate::traits::PacketSource;
 
@@ -58,21 +58,34 @@ impl Capture {
     ///
     /// The iterator blocks when no packets are available (using
     /// [`poll_timeout`](CaptureBuilder::poll_timeout)) and retries
-    /// indefinitely. It only stops on I/O error.
+    /// indefinitely. It returns `None` only on I/O error; inspect the cause via
+    /// [`PacketIter::take_error()`].
     ///
-    /// # Note
+    /// # Soundness — do not collect across blocks
     ///
-    /// For tests or bounded loops, use the low-level
+    /// Each [`Packet`] borrows from the *current* ring block. The iterator
+    /// returns a block to the kernel before yielding packets from the next
+    /// block, so any `Packet` retained from a prior block becomes a dangling
+    /// reference. Use [`Packet::to_owned()`] if you need to keep a packet:
+    ///
+    /// ```no_run
+    /// # let mut cap = netring::Capture::new("lo").unwrap();
+    /// // ✓ Sound: each packet copied out of the ring as it's yielded.
+    /// let owned: Vec<_> = cap.packets().take(100).map(|p| p.to_owned()).collect();
+    /// ```
+    ///
+    /// # Bounded loops
+    ///
+    /// For tests or deadline-driven loops, use the low-level
     /// [`next_batch_blocking()`](crate::PacketSource::next_batch_blocking)
-    /// with a deadline instead — this iterator never returns `None` on timeout.
+    /// instead — this iterator never returns `None` on idle timeout.
     pub fn packets(&mut self) -> PacketIter<'_> {
         PacketIter {
             rx: &mut self.rx as *mut AfPacketRx,
             timeout: self.timeout,
             batch: None,
-            remaining: 0,
-            current_ptr: std::ptr::null(),
-            block_end: std::ptr::null(),
+            iter: None,
+            last_error: None,
             _marker: PhantomData,
         }
     }
@@ -338,14 +351,42 @@ fn is_enomem(e: &std::io::Error) -> bool {
 /// Flat iterator over packets, managing block retirement automatically.
 ///
 /// Created by [`Capture::packets()`]. Designed for `for` loop consumption.
+///
+/// Walks blocks via the low-level [`BatchIter`] so bounds checking is uniform
+/// with [`PacketBatch::iter()`] — `Packet::direction()` and friends are sound.
 pub struct PacketIter<'cap> {
     rx: *mut AfPacketRx,
     timeout: Duration,
+    /// Active batch with `'static` lifetime erasure. The actual lifetime is tied
+    /// to `'cap` via the `PhantomData<&'cap mut Capture>` marker; `'static` is a
+    /// placeholder so we can store `batch` and `iter` in the same struct without
+    /// running into self-referential borrow restrictions.
     batch: Option<ManuallyDrop<PacketBatch<'static>>>,
-    remaining: u32,
-    current_ptr: *const u8,
-    block_end: *const u8,
+    /// Iterator borrowing from `batch`. Lifetime is also erased to `'static`;
+    /// always dropped together with `batch`.
+    iter: Option<BatchIter<'static>>,
+    /// Last I/O error encountered, exposed via [`PacketIter::take_error`].
+    last_error: Option<Error>,
     _marker: PhantomData<&'cap mut Capture>,
+}
+
+impl<'cap> PacketIter<'cap> {
+    /// Take the most recent error that caused iteration to terminate.
+    ///
+    /// Returns `None` if iteration is still active or terminated cleanly. The
+    /// error is consumed; a second call returns `None`.
+    pub fn take_error(&mut self) -> Option<Error> {
+        self.last_error.take()
+    }
+
+    /// Drop the active batch (if any), returning its block to the kernel.
+    fn drop_batch(&mut self) {
+        // The iter borrows from the batch — drop it first.
+        self.iter = None;
+        if let Some(batch) = self.batch.take() {
+            let _ = ManuallyDrop::into_inner(batch);
+        }
+    }
 }
 
 impl<'cap> Iterator for PacketIter<'cap> {
@@ -353,84 +394,59 @@ impl<'cap> Iterator for PacketIter<'cap> {
 
     fn next(&mut self) -> Option<Packet<'cap>> {
         loop {
-            if self.remaining > 0 {
-                let hdr_size = std::mem::size_of::<ffi::tpacket3_hdr>();
-
-                if (self.current_ptr as usize) + hdr_size > self.block_end as usize {
-                    self.remaining = 0;
-                    continue;
+            if let Some(it) = self.iter.as_mut() {
+                if let Some(pkt) = it.next() {
+                    // SAFETY: the packet borrows from `self.batch` via the
+                    // erased `'static` lifetime. The actual lifetime upper-bound
+                    // is `'cap` (the `PhantomData<&'cap mut Capture>` marker on
+                    // `PacketIter`), and the batch is held in `self.batch` until
+                    // the next iterator call drops it. Transmuting to `'cap`
+                    // re-imposes that bound for the caller.
+                    let pkt: Packet<'cap> = unsafe { std::mem::transmute(pkt) };
+                    return Some(pkt);
                 }
-
-                // SAFETY: bounds-checked, TPACKET_ALIGNMENT guarantees alignment.
-                let hdr: &'cap ffi::tpacket3_hdr =
-                    unsafe { &*(self.current_ptr as *const ffi::tpacket3_hdr) };
-
-                let data_offset = hdr.tp_mac as usize;
-                let snaplen = hdr.tp_snaplen as usize;
-                let data_ptr = self.current_ptr.map_addr(|a| a + data_offset);
-
-                if (data_ptr as usize) + snaplen > self.block_end as usize {
-                    self.remaining = 0;
-                    continue;
-                }
-
-                // SAFETY: bounds-checked, within mmap region.
-                let data: &'cap [u8] = unsafe { std::slice::from_raw_parts(data_ptr, snaplen) };
-
-                if hdr.tp_next_offset != 0 {
-                    self.current_ptr = self
-                        .current_ptr
-                        .map_addr(|a| a + hdr.tp_next_offset as usize);
-                }
-                self.remaining -= 1;
-
-                return Some(Packet::from_raw(data, hdr));
+                // BatchIter exhausted — drop the batch before requesting another
+                // (releases the block back to the kernel).
+                self.drop_batch();
             }
 
-            // Drop exhausted batch
-            if let Some(batch) = self.batch.take() {
-                let _ = ManuallyDrop::into_inner(batch);
-            }
-
-            // Get next batch
-            // SAFETY: rx is valid for 'cap and no batch is live.
+            // SAFETY: `rx` is valid for `'cap`; no batch is live (we just dropped
+            // it). The pointer dereference is guarded by `&mut self` on next().
             let rx = unsafe { &mut *self.rx };
             match rx.next_batch_blocking(self.timeout) {
                 Ok(Some(batch)) => {
-                    self.remaining = batch.len() as u32;
-                    if self.remaining == 0 {
+                    if batch.is_empty() {
                         drop(batch);
                         continue;
                     }
+                    // SAFETY: lifetime erasure from `PacketBatch<'_>` to
+                    // `PacketBatch<'static>`. Sound because:
+                    //   1. The mmap ring is valid for `'cap` (Capture owns rx,
+                    //      and PacketIter borrows via `PhantomData<&'cap mut Capture>`).
+                    //   2. We only release the block by explicitly calling
+                    //      `ManuallyDrop::into_inner` (in `drop_batch` or `Drop`).
+                    //   3. The yielded `Packet<'cap>` lifetime is bounded by `'cap`
+                    //      via the transmute back, so the borrow checker prevents
+                    //      retention past the next `drop_batch` call (provided the
+                    //      caller does not collect — see Capture::packets soundness
+                    //      note).
+                    // LendingIterator would let us avoid the transmute; until it
+                    // stabilizes, this is the standard workaround.
+                    let erased_batch: PacketBatch<'static> = unsafe { std::mem::transmute(batch) };
+                    self.batch = Some(ManuallyDrop::new(erased_batch));
 
-                    let base = batch.block_ptr().cast::<u8>();
-                    self.current_ptr = base.map_addr(|a| a + batch.offset_to_first_pkt() as usize);
-                    self.block_end = base.map_addr(|a| a + batch.blk_len() as usize);
-
-                    // SAFETY: Lifetime erasure from PacketBatch<'_> to PacketBatch<'static>.
-                    //
-                    // This is sound because:
-                    // 1. The mmap ring is valid for 'cap (owned by Capture, which
-                    //    PacketIter borrows via PhantomData<&'cap mut Capture>).
-                    // 2. The block is only released when we explicitly call
-                    //    ManuallyDrop::into_inner (in the drop-exhausted-batch
-                    //    branch above or in PacketIter::drop).
-                    // 3. We never dereference self.rx while a batch is live
-                    //    (checked by the if/else structure of next()).
-                    //
-                    // This exists because Rust's LendingIterator / StreamingIterator
-                    // is not stabilized — standard Iterator cannot express a
-                    // lifetime tied to the iterator itself.
-                    //
-                    // WARNING: collecting Packets across block boundaries (e.g.,
-                    // iter.collect::<Vec<_>>()) is unsound because earlier blocks
-                    // may be returned to the kernel. This iterator is designed
-                    // for for-loop consumption only.
-                    let erased: PacketBatch<'static> = unsafe { std::mem::transmute(batch) };
-                    self.batch = Some(ManuallyDrop::new(erased));
+                    // SAFETY: same lifetime erasure logic. The iter borrows from
+                    // the batch we just stored; both share the erased `'static`
+                    // and are dropped together.
+                    let iter: BatchIter<'_> = self.batch.as_ref().unwrap().iter();
+                    let iter_erased: BatchIter<'static> = unsafe { std::mem::transmute(iter) };
+                    self.iter = Some(iter_erased);
                 }
                 Ok(None) => continue,
-                Err(_) => return None,
+                Err(e) => {
+                    self.last_error = Some(e);
+                    return None;
+                }
             }
         }
     }
@@ -438,9 +454,7 @@ impl<'cap> Iterator for PacketIter<'cap> {
 
 impl Drop for PacketIter<'_> {
     fn drop(&mut self) {
-        if let Some(batch) = self.batch.take() {
-            let _ = ManuallyDrop::into_inner(batch);
-        }
+        self.drop_batch();
     }
 }
 

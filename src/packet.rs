@@ -152,12 +152,6 @@ pub struct Packet<'a> {
 }
 
 impl<'a> Packet<'a> {
-    /// Construct from raw references. Used internally by iterators.
-    #[inline]
-    pub(crate) fn from_raw(data: &'a [u8], hdr: &'a ffi::tpacket3_hdr) -> Self {
-        Self { data, hdr }
-    }
-
     /// Raw packet bytes starting from the MAC header.
     #[inline]
     pub fn data(&self) -> &'a [u8] {
@@ -379,21 +373,6 @@ impl<'a> PacketBatch<'a> {
     /// Timestamp of the last packet (or block close time).
     pub fn ts_last(&self) -> Timestamp {
         self.ts_last
-    }
-
-    /// Block descriptor pointer (for internal use by iterators).
-    pub(crate) fn block_ptr(&self) -> *const u8 {
-        self.block.as_ptr().cast()
-    }
-
-    /// Offset to first packet within the block.
-    pub(crate) fn offset_to_first_pkt(&self) -> u32 {
-        self.offset_to_first_pkt
-    }
-
-    /// Valid data length in the block.
-    pub(crate) fn blk_len(&self) -> u32 {
-        self.blk_len
     }
 
     /// Iterate over packets in the batch.

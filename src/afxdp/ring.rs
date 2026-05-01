@@ -176,9 +176,14 @@ impl<T: Copy> XdpRing<T> {
     // ── Wakeup ───────────────────────────────────────────────────────────
 
     /// Check if the kernel needs a wakeup (via `sendto` or `poll`).
+    ///
+    /// Honored by [`XdpSocket::flush`] when the socket was bound with
+    /// `XDP_USE_NEED_WAKEUP` — skips the syscall when the kernel signals it
+    /// is actively polling the TX ring.
     #[inline]
-    #[allow(dead_code)] // available for flush() optimization
     pub(crate) fn needs_wakeup(&self) -> bool {
+        // SAFETY: `self.flags` is a u32 in the mmap'd ring shared with the kernel.
+        // Volatile read prevents the compiler from caching kernel writes.
         (unsafe { self.flags.read_volatile() }) & ffi::XDP_RING_NEED_WAKEUP != 0
     }
 }

@@ -36,8 +36,11 @@ pub(crate) mod ffi;
 mod ring;
 #[cfg(feature = "af-xdp")]
 mod socket;
+mod stats;
 #[cfg(feature = "af-xdp")]
 mod umem;
+
+pub use stats::XdpStats;
 
 #[cfg(feature = "af-xdp")]
 use std::os::fd::{AsFd, AsRawFd, BorrowedFd, OwnedFd};
@@ -324,6 +327,7 @@ impl XdpSocketBuilder {
             rx,
             tx,
             comp,
+            need_wakeup_enabled: self.need_wakeup,
         })
     }
 
@@ -357,6 +361,10 @@ pub struct XdpSocket {
     tx: TxRing,
     #[cfg(feature = "af-xdp")]
     comp: CompletionRing,
+    /// Set when the socket was bound with `XDP_USE_NEED_WAKEUP`. Determines
+    /// whether `flush()` honors `tx.needs_wakeup()` or always kicks.
+    #[cfg(feature = "af-xdp")]
+    need_wakeup_enabled: bool,
     // Without the feature, keep a private field so the struct is unconstructable.
     #[cfg(not(feature = "af-xdp"))]
     _private: (),
@@ -472,13 +480,19 @@ impl XdpSocket {
 
     /// Flush pending TX frames by waking the kernel.
     ///
+    /// When the socket was bound with `XDP_USE_NEED_WAKEUP` (the default), the
+    /// kernel sets a flag in the TX ring whenever it actually needs a kick;
+    /// we honor that and skip the syscall otherwise. For sockets bound without
+    /// the flag, `needs_wakeup()` always returns false — we still kick.
+    ///
     /// Uses `sendto(fd, NULL, 0, MSG_DONTWAIT, NULL, 0)`.
     /// `MSG_DONTWAIT` is **mandatory** — kernel returns `EOPNOTSUPP` without it.
     /// EINTR is retried; transient `EAGAIN`/`ENOBUFS` are reported as success.
     #[cfg(feature = "af-xdp")]
     pub fn flush(&self) -> Result<(), Error> {
-        // Always kick for simplicity. Could check self.tx.needs_wakeup()
-        // to only kick when kernel signals NEED_WAKEUP.
+        if self.need_wakeup_enabled && !self.tx.needs_wakeup() {
+            return Ok(());
+        }
         crate::syscall::sendto_kick_eintr_safe(self.fd.as_raw_fd(), libc::MSG_DONTWAIT)
             .map_err(Error::Io)
     }
@@ -497,9 +511,12 @@ impl XdpSocket {
     }
 
     /// Get XDP socket statistics from the kernel.
+    ///
+    /// Counters are monotonically non-decreasing for the socket's lifetime
+    /// (no destructive-read semantics).
     #[cfg(feature = "af-xdp")]
-    pub fn statistics(&self) -> Result<ffi::xdp_statistics, Error> {
-        socket::get_statistics(self.fd.as_fd())
+    pub fn statistics(&self) -> Result<XdpStats, Error> {
+        socket::get_statistics(self.fd.as_fd()).map(XdpStats::from)
     }
 
     // ── Internal helpers ─────────────────────────────────────────────────

@@ -19,6 +19,9 @@
 //! bridge.run(|_pkt, _dir| BridgeAction::Forward).unwrap();
 //! ```
 
+use std::os::fd::AsFd;
+use std::time::Duration;
+
 use crate::afpacket::rx::{AfPacketRx, AfPacketRxBuilder};
 use crate::afpacket::tx::{AfPacketTx, AfPacketTxBuilder};
 use crate::config::RingProfile;
@@ -71,12 +74,16 @@ impl std::fmt::Display for BridgeStats {
 /// Interface A ──RX──→ filter ──TX──→ Interface B
 /// Interface B ──RX──→ filter ──TX──→ Interface A
 /// ```
+///
+/// The bridge waits via `poll(2)` on both RX fds before draining each direction,
+/// so it does not consume CPU while idle.
 #[must_use]
 pub struct Bridge {
     rx_a: AfPacketRx,
     tx_b: AfPacketTx,
     rx_b: AfPacketRx,
     tx_a: AfPacketTx,
+    poll_timeout: Duration,
 }
 
 impl Bridge {
@@ -87,7 +94,9 @@ impl Bridge {
 
     /// Run the bridge loop, forwarding packets through the filter.
     ///
-    /// Blocks forever (until I/O error). The callback receives each packet
+    /// Blocks forever (until I/O error). The bridge waits on `poll(2)` for
+    /// both RX fds before draining whichever directions became readable, so
+    /// idle interfaces do not consume CPU. The callback receives each packet
     /// and its direction, and returns [`BridgeAction::Forward`] or
     /// [`BridgeAction::Drop`].
     ///
@@ -97,32 +106,77 @@ impl Bridge {
     ///
     /// # Errors
     ///
-    /// Returns [`Error::Io`] if a `flush()` syscall fails.
+    /// Returns [`Error::Io`] if `poll(2)` or a `flush()` syscall fails.
     pub fn run<F>(&mut self, mut filter: F) -> Result<(), Error>
     where
         F: FnMut(&Packet<'_>, BridgeDirection) -> BridgeAction,
     {
         loop {
-            self.forward_direction(&mut filter, BridgeDirection::AtoB)?;
-            self.forward_direction(&mut filter, BridgeDirection::BtoA)?;
+            let [a_ready, b_ready] = self.poll_both(self.poll_timeout)?;
+            if a_ready {
+                self.drain_direction(&mut filter, BridgeDirection::AtoB)?;
+            }
+            if b_ready {
+                self.drain_direction(&mut filter, BridgeDirection::BtoA)?;
+            }
         }
     }
 
-    /// Run the bridge for a limited number of iterations (for testing).
+    /// Run the bridge for a limited number of poll iterations (for testing).
     ///
-    /// Each iteration polls both directions once.
+    /// Each iteration waits up to [`poll_timeout`](BridgeBuilder::poll_timeout)
+    /// on both RX fds, then drains any direction that became readable.
     pub fn run_iterations<F>(&mut self, iterations: usize, mut filter: F) -> Result<(), Error>
     where
         F: FnMut(&Packet<'_>, BridgeDirection) -> BridgeAction,
     {
         for _ in 0..iterations {
-            self.forward_direction(&mut filter, BridgeDirection::AtoB)?;
-            self.forward_direction(&mut filter, BridgeDirection::BtoA)?;
+            let [a_ready, b_ready] = self.poll_both(self.poll_timeout)?;
+            if a_ready {
+                self.drain_direction(&mut filter, BridgeDirection::AtoB)?;
+            }
+            if b_ready {
+                self.drain_direction(&mut filter, BridgeDirection::BtoA)?;
+            }
         }
         Ok(())
     }
 
-    fn forward_direction<F>(
+    /// Wait for either RX socket to become readable, with EINTR retry.
+    ///
+    /// Returns `[a_ready, b_ready]`. Both `false` indicates the timeout
+    /// elapsed with no traffic.
+    fn poll_both(&self, timeout: Duration) -> Result<[bool; 2], Error> {
+        use nix::poll::{PollFd, PollFlags, PollTimeout};
+
+        let mut pfds = [
+            PollFd::new(self.rx_a.as_fd(), PollFlags::POLLIN),
+            PollFd::new(self.rx_b.as_fd(), PollFlags::POLLIN),
+        ];
+        let pt = PollTimeout::try_from(timeout).unwrap_or(PollTimeout::MAX);
+        loop {
+            match nix::poll::poll(&mut pfds, pt) {
+                Ok(_) => break,
+                Err(nix::errno::Errno::EINTR) => continue,
+                Err(e) => return Err(Error::Io(e.into())),
+            }
+        }
+        Ok([
+            pfds[0]
+                .revents()
+                .is_some_and(|r| r.contains(PollFlags::POLLIN)),
+            pfds[1]
+                .revents()
+                .is_some_and(|r| r.contains(PollFlags::POLLIN)),
+        ])
+    }
+
+    /// Drain every retired block from one direction, forwarding through the filter.
+    ///
+    /// Continues until `next_batch()` reports nothing more is currently retired,
+    /// so a single readability wakeup empties the backlog (otherwise blocks
+    /// pile up until the next poll cycle).
+    fn drain_direction<F>(
         &mut self,
         filter: &mut F,
         direction: BridgeDirection,
@@ -135,7 +189,7 @@ impl Bridge {
             BridgeDirection::BtoA => (&mut self.rx_b, &mut self.tx_a),
         };
 
-        if let Some(batch) = rx.next_batch() {
+        while let Some(batch) = rx.next_batch() {
             for pkt in &batch {
                 if filter(&pkt, direction) == BridgeAction::Forward {
                     if let Some(mut slot) = tx.allocate(pkt.len()) {
@@ -143,7 +197,7 @@ impl Bridge {
                         slot.set_len(pkt.len());
                         slot.send();
                     } else {
-                        tracing::debug!("TX ring full, dropping packet");
+                        tracing::debug!(pkt_len = pkt.len(), "TX ring full, dropping packet");
                     }
                 }
             }
@@ -190,6 +244,7 @@ pub struct BridgeBuilder {
     profile: RingProfile,
     promiscuous: bool,
     qdisc_bypass: bool,
+    poll_timeout: Duration,
 }
 
 impl Default for BridgeBuilder {
@@ -200,6 +255,7 @@ impl Default for BridgeBuilder {
             profile: RingProfile::Default,
             promiscuous: true,
             qdisc_bypass: true,
+            poll_timeout: Duration::from_millis(100),
         }
     }
 }
@@ -232,6 +288,15 @@ impl BridgeBuilder {
     /// Bypass qdisc for TX on both interfaces. Default: true.
     pub fn qdisc_bypass(mut self, enable: bool) -> Self {
         self.qdisc_bypass = enable;
+        self
+    }
+
+    /// Maximum time the bridge waits in `poll(2)` between iterations.
+    ///
+    /// Smaller values reduce shutdown latency at the cost of more frequent
+    /// syscalls when traffic is sparse. Default: 100 ms.
+    pub fn poll_timeout(mut self, timeout: Duration) -> Self {
+        self.poll_timeout = timeout;
         self
     }
 
@@ -289,6 +354,7 @@ impl BridgeBuilder {
             tx_b,
             rx_b,
             tx_a,
+            poll_timeout: self.poll_timeout,
         })
     }
 }
@@ -321,6 +387,13 @@ mod tests {
         assert!(b.promiscuous);
         assert!(b.qdisc_bypass);
         assert_eq!(b.profile, RingProfile::Default);
+        assert_eq!(b.poll_timeout, Duration::from_millis(100));
+    }
+
+    #[test]
+    fn builder_poll_timeout_setter() {
+        let b = BridgeBuilder::default().poll_timeout(Duration::from_millis(25));
+        assert_eq!(b.poll_timeout, Duration::from_millis(25));
     }
 
     #[test]

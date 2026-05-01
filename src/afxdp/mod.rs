@@ -53,22 +53,64 @@ use crate::error::Error;
 #[cfg(feature = "af-xdp")]
 use crate::packet::{OwnedPacket, Timestamp};
 
+// ── XdpMode ──────────────────────────────────────────────────────────────
+
+/// Operating mode for an AF_XDP socket.
+///
+/// Controls how UMEM frames are partitioned between the fill ring (for kernel
+/// RX) and the free list (available for TX allocation). The wrong split breaks
+/// either RX (kernel can't enqueue packets — `rx_dropped` counter rises) or TX
+/// (`send()` can never allocate a frame).
+///
+/// Pick the mode that matches your traffic direction. For asymmetric splits or
+/// shared-UMEM setups, use [`XdpMode::Custom`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
+pub enum XdpMode {
+    /// Receive only. All UMEM frames are pre-staged to the fill ring; `send()`
+    /// will always return `Ok(false)` because no frames are reachable from the
+    /// free list.
+    Rx,
+    /// Transmit only. No prefill — every UMEM frame stays in the free list and
+    /// is available for `send()` allocation. RX descriptors will not arrive
+    /// (the fill ring is empty) but stats are unaffected.
+    Tx,
+    /// Bidirectional. Half the frames prefilled to the fill ring (RX), half
+    /// retained in the free list (TX). For uneven traffic patterns prefer
+    /// [`XdpMode::Custom`] to control the split explicitly.
+    #[default]
+    RxTx,
+    /// Custom prefill: pre-stage exactly `prefill` frames in the fill ring; the
+    /// remaining `frame_count - prefill` stay in the free list for TX.
+    ///
+    /// `prefill` is clamped to `min(frame_count, ring_size)`. Use `0` to skip
+    /// prefill entirely (equivalent to [`XdpMode::Tx`]); use `frame_count` to
+    /// prefill everything (equivalent to [`XdpMode::Rx`]).
+    Custom {
+        /// Number of frames to pre-stage in the fill ring at construction.
+        prefill: u32,
+    },
+}
+
 // ── XdpSocketBuilder ─────────────────────────────────────────────────────
 
 /// Builder for AF_XDP sockets.
 ///
+/// For TX-only workloads, set [`XdpMode::Tx`] — by default the builder
+/// pre-stages half the UMEM into the fill ring (RxTx mode), which leaves only
+/// half available for `send()`.
+///
 /// # Examples
 ///
 /// ```no_run,ignore
-/// use netring::afxdp::XdpSocketBuilder;
+/// use netring::afxdp::{XdpSocketBuilder, XdpMode};
 ///
 /// let mut xdp = XdpSocketBuilder::default()
 ///     .interface("eth0")
 ///     .queue_id(0)
+///     .mode(XdpMode::Tx)  // skip RX prefill so send() can allocate frames
 ///     .build()
 ///     .unwrap();
 ///
-/// // TX-only (no BPF program needed):
 /// xdp.send(&[0xff; 64]).unwrap();
 /// xdp.flush().unwrap();
 /// ```
@@ -80,6 +122,7 @@ pub struct XdpSocketBuilder {
     frame_size: usize,
     frame_count: usize,
     need_wakeup: bool,
+    mode: XdpMode,
 }
 
 impl Default for XdpSocketBuilder {
@@ -90,6 +133,7 @@ impl Default for XdpSocketBuilder {
             frame_size: 4096,
             frame_count: 4096,
             need_wakeup: true,
+            mode: XdpMode::default(),
         }
     }
 }
@@ -116,6 +160,18 @@ impl XdpSocketBuilder {
     /// Number of UMEM frames. Default: 4096.
     pub fn frame_count(mut self, count: usize) -> Self {
         self.frame_count = count;
+        self
+    }
+
+    /// Operating mode (RX/TX/RxTx/Custom prefill split). Default: [`XdpMode::RxTx`].
+    ///
+    /// For TX-only workloads — most importantly the [`xdp_send`] example pattern —
+    /// you **must** set this to [`XdpMode::Tx`], or every `send()` call will
+    /// silently fail because all UMEM frames are pre-staged to the fill ring.
+    ///
+    /// [`xdp_send`]: https://github.com/p13marc/netring/blob/master/examples/xdp_send.rs
+    pub fn mode(mut self, mode: XdpMode) -> Self {
+        self.mode = mode;
         self
     }
 
@@ -219,15 +275,36 @@ impl XdpSocketBuilder {
             )?
         };
 
-        // 7. Pre-fill the fill ring with frame addrs for kernel RX
-        let prefill = umem.available().min(ring_size as usize) as u32;
-        if let Some(idx) = fill.producer_reserve(prefill) {
-            for i in 0..prefill {
-                if let Some(addr) = umem.alloc_frame() {
-                    unsafe { fill.write_desc(idx + i, addr) };
+        // 7. Pre-fill the fill ring with frame addrs for kernel RX. The amount
+        //    to prefill depends on the operating mode:
+        //      - Rx: every frame goes to the fill ring (TX disabled).
+        //      - Tx: nothing prefilled (free list keeps all frames for TX).
+        //      - RxTx: half of frames prefilled, half retained for TX.
+        //      - Custom: caller-specified count, clamped to [0, min(avail, ring)].
+        let cap_avail = umem.available().min(ring_size as usize);
+        let prefill = match self.mode {
+            XdpMode::Rx => cap_avail,
+            XdpMode::Tx => 0,
+            XdpMode::RxTx => cap_avail / 2,
+            XdpMode::Custom { prefill } => (prefill as usize).min(cap_avail),
+        } as u32;
+
+        if prefill > 0 {
+            if let Some(idx) = fill.producer_reserve(prefill) {
+                let mut written = 0u32;
+                for i in 0..prefill {
+                    match umem.alloc_frame() {
+                        Some(addr) => {
+                            unsafe { fill.write_desc(idx + i, addr) };
+                            written += 1;
+                        }
+                        None => break,
+                    }
+                }
+                if written > 0 {
+                    fill.producer_submit(written);
                 }
             }
-            fill.producer_submit(prefill);
         }
 
         // 8. Bind to interface + queue
@@ -550,5 +627,67 @@ mod tests {
             .frame_count(1024)
             .need_wakeup(false);
         assert_eq!(b.validate().unwrap(), "eth0");
+    }
+
+    #[test]
+    fn builder_default_mode_is_rxtx() {
+        let b = XdpSocketBuilder::default();
+        assert_eq!(b.mode, XdpMode::RxTx);
+    }
+
+    #[test]
+    fn builder_mode_setter() {
+        let b = XdpSocketBuilder::default().mode(XdpMode::Tx);
+        assert_eq!(b.mode, XdpMode::Tx);
+
+        let b = XdpSocketBuilder::default().mode(XdpMode::Custom { prefill: 256 });
+        assert_eq!(b.mode, XdpMode::Custom { prefill: 256 });
+    }
+
+    /// Compute the prefill count the same way `build()` does, in isolation,
+    /// so we can unit-test the policy without a live AF_XDP socket.
+    fn compute_prefill(mode: XdpMode, available: usize, ring_size: usize) -> u32 {
+        let cap_avail = available.min(ring_size);
+        let n = match mode {
+            XdpMode::Rx => cap_avail,
+            XdpMode::Tx => 0,
+            XdpMode::RxTx => cap_avail / 2,
+            XdpMode::Custom { prefill } => (prefill as usize).min(cap_avail),
+        };
+        n as u32
+    }
+
+    #[test]
+    fn prefill_tx_keeps_all_frames_in_free_list() {
+        // The bug being fixed: prefill must not consume all frames in TX mode.
+        assert_eq!(compute_prefill(XdpMode::Tx, 4096, 4096), 0);
+    }
+
+    #[test]
+    fn prefill_rx_consumes_all_frames() {
+        assert_eq!(compute_prefill(XdpMode::Rx, 4096, 4096), 4096);
+    }
+
+    #[test]
+    fn prefill_rxtx_splits_in_half() {
+        assert_eq!(compute_prefill(XdpMode::RxTx, 4096, 4096), 2048);
+    }
+
+    #[test]
+    fn prefill_custom_clamped() {
+        assert_eq!(
+            compute_prefill(XdpMode::Custom { prefill: 100 }, 4096, 4096),
+            100
+        );
+        // Clamps to ring_size when caller asks for too much.
+        assert_eq!(
+            compute_prefill(XdpMode::Custom { prefill: 8192 }, 4096, 4096),
+            4096
+        );
+        // Clamps to available when caller asks for too much.
+        assert_eq!(
+            compute_prefill(XdpMode::Custom { prefill: 1000 }, 64, 4096),
+            64
+        );
     }
 }

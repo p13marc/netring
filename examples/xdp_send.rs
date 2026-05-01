@@ -3,7 +3,7 @@
 //! Usage: cargo run --example xdp_send --features af-xdp -- <interface>
 //! Requires CAP_NET_RAW + CAP_BPF (or root).
 
-use netring::afxdp::XdpSocketBuilder;
+use netring::afxdp::{XdpMode, XdpSocketBuilder};
 
 fn main() -> Result<(), netring::Error> {
     let iface = std::env::args().nth(1).unwrap_or_else(|| "lo".into());
@@ -12,6 +12,7 @@ fn main() -> Result<(), netring::Error> {
     let mut xdp = XdpSocketBuilder::default()
         .interface(&iface)
         .queue_id(0)
+        .mode(XdpMode::Tx)
         .build()?;
 
     // Send 10 raw Ethernet frames

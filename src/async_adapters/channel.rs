@@ -17,6 +17,13 @@ use crate::traits::PacketSource;
 /// Not zero-copy across the channel boundary (packets are copied out of ring).
 /// Useful for runtime-agnostic async or multi-consumer patterns.
 ///
+/// # Drop semantics
+///
+/// On drop, the capture thread is signaled to stop and joined; **any
+/// packets still buffered in the channel are discarded**. Use
+/// [`stop_and_drain()`](Self::stop_and_drain) instead if you need to
+/// process trailing packets.
+///
 /// # Examples
 ///
 /// ```no_run
@@ -55,8 +62,10 @@ impl ChannelCapture {
 
         let handle = thread::spawn(move || {
             let mut rx = rx;
+            // Short poll timeout so the worker checks the stop flag often;
+            // larger values delay shutdown by up to that interval.
             while !stop_clone.load(Ordering::Relaxed) {
-                match rx.next_batch_blocking(Duration::from_millis(100)) {
+                match rx.next_batch_blocking(Duration::from_millis(10)) {
                     Ok(Some(batch)) => {
                         for pkt in &batch {
                             let owned = pkt.to_owned();
@@ -93,6 +102,25 @@ impl ChannelCapture {
     /// thread has stopped.
     pub fn try_recv(&self) -> Result<OwnedPacket, TryRecvError> {
         self.receiver.try_recv()
+    }
+
+    /// Stop the capture thread, join it, and drain any packets still
+    /// buffered in the channel.
+    ///
+    /// Use this instead of relying on [`Drop`](Self::drop) when trailing
+    /// packets matter — `Drop` discards them.
+    ///
+    /// Returns the drained packets in FIFO order.
+    pub fn stop_and_drain(mut self) -> Vec<OwnedPacket> {
+        self.stop.store(true, Ordering::Relaxed);
+        if let Some(handle) = self.handle.take() {
+            let _ = handle.join();
+        }
+        let mut drained = Vec::new();
+        while let Ok(pkt) = self.receiver.try_recv() {
+            drained.push(pkt);
+        }
+        drained
     }
 }
 

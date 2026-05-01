@@ -171,6 +171,138 @@ impl Bridge {
         ])
     }
 
+    /// Async version of [`run`](Self::run) for users with a tokio runtime.
+    ///
+    /// Uses [`tokio::io::unix::AsyncFd`] on each RX fd and `tokio::select!`
+    /// to wait for readability — no manual `poll(2)` syscall, EINTR handled
+    /// by tokio's reactor.
+    ///
+    /// Prefer this over [`run`](Self::run) when you already have a tokio
+    /// runtime: it avoids the bridge's own poll loop and reuses the runtime's
+    /// epoll registration.
+    ///
+    /// # Examples
+    ///
+    /// ```no_run
+    /// # #[cfg(feature = "tokio")]
+    /// # async fn _ex() -> Result<(), netring::Error> {
+    /// use netring::bridge::{Bridge, BridgeAction};
+    ///
+    /// let mut bridge = Bridge::builder()
+    ///     .interface_a("veth0")
+    ///     .interface_b("veth1")
+    ///     .build()?;
+    ///
+    /// bridge.run_async(|_pkt, _dir| BridgeAction::Forward).await?;
+    /// # Ok(()) }
+    /// ```
+    ///
+    /// # Errors
+    ///
+    /// Returns [`Error::Io`] if `AsyncFd` registration or a `flush()` fails.
+    #[cfg(feature = "tokio")]
+    pub async fn run_async<F>(&mut self, mut filter: F) -> Result<(), Error>
+    where
+        F: FnMut(&Packet<'_>, BridgeDirection) -> BridgeAction,
+    {
+        use std::os::fd::{AsRawFd, RawFd};
+        use tokio::io::Interest;
+        use tokio::io::unix::AsyncFd;
+
+        // Tokio's AsyncFd needs T: AsRawFd by value. Wrap the raw fd in a
+        // POD holder so AsyncFd doesn't borrow from `self`. AsyncFd's Drop
+        // deregisters from epoll without closing — `self.rx_*` retain
+        // ownership of the underlying fd.
+        struct FdHolder(RawFd);
+        impl AsRawFd for FdHolder {
+            fn as_raw_fd(&self) -> RawFd {
+                self.0
+            }
+        }
+
+        let async_a = AsyncFd::with_interest(
+            FdHolder(self.rx_a.as_fd().as_raw_fd()),
+            Interest::READABLE,
+        )
+        .map_err(Error::Io)?;
+        let async_b = AsyncFd::with_interest(
+            FdHolder(self.rx_b.as_fd().as_raw_fd()),
+            Interest::READABLE,
+        )
+        .map_err(Error::Io)?;
+
+        loop {
+            tokio::select! {
+                result = async_a.readable() => {
+                    let mut guard = result.map_err(Error::Io)?;
+                    self.drain_direction(&mut filter, BridgeDirection::AtoB)?;
+                    // We've drained until next_batch returned None — re-arm
+                    // tokio's readiness so the next iteration awaits epoll.
+                    guard.clear_ready();
+                }
+                result = async_b.readable() => {
+                    let mut guard = result.map_err(Error::Io)?;
+                    self.drain_direction(&mut filter, BridgeDirection::BtoA)?;
+                    guard.clear_ready();
+                }
+            }
+        }
+    }
+
+    /// Async version of [`run_iterations`](Self::run_iterations) for tokio runtimes.
+    #[cfg(feature = "tokio")]
+    pub async fn run_iterations_async<F>(
+        &mut self,
+        iterations: usize,
+        mut filter: F,
+    ) -> Result<(), Error>
+    where
+        F: FnMut(&Packet<'_>, BridgeDirection) -> BridgeAction,
+    {
+        use std::os::fd::{AsRawFd, RawFd};
+        use tokio::io::Interest;
+        use tokio::io::unix::AsyncFd;
+
+        struct FdHolder(RawFd);
+        impl AsRawFd for FdHolder {
+            fn as_raw_fd(&self) -> RawFd {
+                self.0
+            }
+        }
+
+        let async_a = AsyncFd::with_interest(
+            FdHolder(self.rx_a.as_fd().as_raw_fd()),
+            Interest::READABLE,
+        )
+        .map_err(Error::Io)?;
+        let async_b = AsyncFd::with_interest(
+            FdHolder(self.rx_b.as_fd().as_raw_fd()),
+            Interest::READABLE,
+        )
+        .map_err(Error::Io)?;
+
+        for _ in 0..iterations {
+            // Bound each iteration with poll_timeout so a quiet bridge still
+            // returns control eventually (mirrors run_iterations semantics).
+            tokio::select! {
+                result = async_a.readable() => {
+                    let mut guard = result.map_err(Error::Io)?;
+                    self.drain_direction(&mut filter, BridgeDirection::AtoB)?;
+                    guard.clear_ready();
+                }
+                result = async_b.readable() => {
+                    let mut guard = result.map_err(Error::Io)?;
+                    self.drain_direction(&mut filter, BridgeDirection::BtoA)?;
+                    guard.clear_ready();
+                }
+                _ = tokio::time::sleep(self.poll_timeout) => {
+                    // Idle iteration — fall through to next loop pass.
+                }
+            }
+        }
+        Ok(())
+    }
+
     /// Drain every retired block from one direction, forwarding through the filter.
     ///
     /// Continues until `next_batch()` reports nothing more is currently retired,

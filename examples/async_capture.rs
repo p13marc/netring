@@ -5,13 +5,13 @@
 #[cfg(feature = "tokio")]
 #[tokio::main]
 async fn main() -> Result<(), netring::Error> {
-    use netring::AfPacketRxBuilder;
+    use netring::CaptureBuilder;
     use netring::async_adapters::tokio_adapter::AsyncCapture;
 
     let iface = std::env::args().nth(1).unwrap_or_else(|| "lo".into());
     eprintln!("Async capture on {iface}...");
 
-    let rx = AfPacketRxBuilder::default()
+    let rx = CaptureBuilder::default()
         .interface(&iface)
         .block_timeout_ms(100)
         .build()?;

@@ -4,14 +4,14 @@
 
 mod helpers;
 
-use netring::{AfPacketRxBuilder, PacketSource};
+use netring::{CaptureBuilder, PacketSource};
 use std::time::Duration;
 
 #[test]
 fn block_timeout_triggers() {
     let port = helpers::unique_port();
 
-    let mut rx = AfPacketRxBuilder::default()
+    let mut rx = CaptureBuilder::default()
         .interface(helpers::LOOPBACK)
         .block_timeout_ms(10) // very short timeout
         .build()

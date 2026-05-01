@@ -10,7 +10,7 @@
 #[cfg(feature = "tokio")]
 #[tokio::main]
 async fn main() -> Result<(), netring::Error> {
-    use netring::AfPacketTxBuilder;
+    use netring::InjectorBuilder;
     use netring::async_adapters::tokio_injector::AsyncInjector;
     use std::time::Duration;
 
@@ -25,7 +25,7 @@ async fn main() -> Result<(), netring::Error> {
     // Build a small TX ring on purpose to exercise the backpressure path.
     // With 64 frames, sending 1000 will cycle the ring ~16 times — every
     // few hundred sends will await POLLOUT.
-    let tx = AfPacketTxBuilder::default()
+    let tx = InjectorBuilder::default()
         .interface(&iface)
         .frame_size(2048)
         .frame_count(64)

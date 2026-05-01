@@ -7,7 +7,7 @@ use std::time::Duration;
 
 use crossbeam_channel::{Receiver, TryRecvError};
 
-use crate::afpacket::rx::AfPacketRxBuilder;
+use crate::afpacket::rx::CaptureBuilder;
 use crate::error::Error;
 use crate::packet::OwnedPacket;
 use crate::traits::PacketSource;
@@ -43,7 +43,7 @@ pub struct ChannelCapture {
 impl ChannelCapture {
     /// Spawn a capture thread on the given interface.
     ///
-    /// Creates an `AfPacketRx` in the current thread (so errors propagate),
+    /// Creates an `Capture` in the current thread (so errors propagate),
     /// then spawns a background thread that captures packets and sends
     /// [`OwnedPacket`]s over a bounded channel of the given `capacity`.
     ///
@@ -54,7 +54,7 @@ impl ChannelCapture {
     /// - [`Error::Mmap`] if ring buffer allocation fails
     pub fn spawn(interface: &str, capacity: usize) -> Result<Self, Error> {
         // Create the RX handle in the current thread so errors propagate.
-        let rx = AfPacketRxBuilder::default().interface(interface).build()?;
+        let rx = CaptureBuilder::default().interface(interface).build()?;
 
         let (sender, receiver) = crossbeam_channel::bounded(capacity);
         let stop = Arc::new(AtomicBool::new(false));

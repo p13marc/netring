@@ -1,13 +1,13 @@
 //! EINTR-safety: blocking syscalls under signal pressure.
 //!
-//! Verifies that AfPacketRx::next_batch_blocking returns Ok(None) on
+//! Verifies that Capture::next_batch_blocking returns Ok(None) on
 //! timeout even when the polling thread receives a signal mid-syscall.
 
 #![cfg(feature = "integration-tests")]
 
 mod helpers;
 
-use netring::{AfPacketRxBuilder, PacketSource};
+use netring::{CaptureBuilder, PacketSource};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, Instant};
@@ -16,7 +16,7 @@ use std::time::{Duration, Instant};
 fn next_batch_blocking_survives_signal() {
     // Build the RX in the parent thread so capability errors propagate
     // before we spawn anything.
-    let mut rx = AfPacketRxBuilder::default()
+    let mut rx = CaptureBuilder::default()
         .interface(helpers::LOOPBACK)
         .block_timeout_ms(10)
         .build()

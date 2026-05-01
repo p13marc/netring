@@ -6,7 +6,7 @@
 
 mod helpers;
 
-use netring::{AfPacketRxBuilder, Capture, PacketSource};
+use netring::{Capture, CaptureBuilder, PacketSource};
 use std::time::{Duration, Instant};
 
 #[test]
@@ -14,7 +14,7 @@ fn capture_loopback_basic() {
     let port = helpers::unique_port();
     let marker = format!("netring_test_{port}");
 
-    let mut rx = AfPacketRxBuilder::default()
+    let mut rx = CaptureBuilder::default()
         .interface(helpers::LOOPBACK)
         .block_timeout_ms(10)
         .build()
@@ -56,7 +56,7 @@ fn low_level_rx_next_batch() {
     let port = helpers::unique_port();
     let marker = format!("netring_batch_{port}");
 
-    let mut rx = AfPacketRxBuilder::default()
+    let mut rx = CaptureBuilder::default()
         .interface(helpers::LOOPBACK)
         .block_timeout_ms(10)
         .build()

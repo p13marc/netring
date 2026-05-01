@@ -11,7 +11,7 @@ use std::time::Duration;
 fn capture_stats_basic() {
     let port = helpers::unique_port();
 
-    let cap = Capture::builder()
+    let mut cap = Capture::builder()
         .interface(helpers::LOOPBACK)
         .block_timeout_ms(10)
         .build()
@@ -27,10 +27,8 @@ fn capture_stats_basic() {
     std::thread::sleep(Duration::from_millis(100));
 
     // Drain some packets to ensure the ring processes them
-    let rx = cap.into_inner();
-    let mut rx = rx;
     for _ in 0..10 {
-        if rx
+        if cap
             .next_batch_blocking(Duration::from_millis(50))
             .unwrap()
             .is_some()
@@ -39,7 +37,7 @@ fn capture_stats_basic() {
         }
     }
 
-    let stats = rx.stats().expect("get stats");
+    let stats = cap.stats().expect("get stats");
     // We should have received at least some packets (loopback has other traffic too)
     // The exact count depends on timing, so just verify the field is populated.
     assert_eq!(

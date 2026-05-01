@@ -22,8 +22,8 @@
 use std::os::fd::AsFd;
 use std::time::Duration;
 
-use crate::afpacket::rx::{AfPacketRx, AfPacketRxBuilder};
-use crate::afpacket::tx::{AfPacketTx, AfPacketTxBuilder};
+use crate::afpacket::rx::{Capture, CaptureBuilder};
+use crate::afpacket::tx::{Injector, InjectorBuilder};
 use crate::config::RingProfile;
 use crate::error::Error;
 use crate::packet::Packet;
@@ -100,10 +100,10 @@ impl std::fmt::Display for BridgeStats {
 /// so it does not consume CPU while idle.
 #[must_use]
 pub struct Bridge {
-    rx_a: AfPacketRx,
-    tx_b: AfPacketTx,
-    rx_b: AfPacketRx,
-    tx_a: AfPacketTx,
+    rx_a: Capture,
+    tx_b: Injector,
+    rx_b: Capture,
+    tx_a: Injector,
     poll_timeout: Duration,
     /// Per-direction drop counters maintained by the bridge itself
     /// (kernel-side drops live in stats() / cumulative_stats()).
@@ -388,7 +388,7 @@ impl Bridge {
     ///
     /// # Reads are destructive
     ///
-    /// Each call invokes [`AfPacketRx::stats()`] on both RX sockets, which
+    /// Each call invokes [`Capture::stats()`] on both RX sockets, which
     /// performs a `getsockopt(PACKET_STATISTICS)` — a destructive read that
     /// resets kernel counters. To accumulate over time, sum the result of
     /// periodic calls.
@@ -410,7 +410,7 @@ impl Bridge {
     /// Accumulated forwarding statistics since this bridge was created.
     ///
     /// Each direction's counters are monotonically non-decreasing across
-    /// calls (deltas accumulated via the underlying [`AfPacketRx::cumulative_stats`]).
+    /// calls (deltas accumulated via the underlying [`Capture::cumulative_stats`]).
     /// **Do not mix with [`stats()`](Self::stats)** — see that method's
     /// docstring for the reason.
     pub fn cumulative_stats(&self) -> Result<BridgeStats, Error> {
@@ -440,7 +440,7 @@ impl Bridge {
     }
 
     /// Borrow the four backend handles for inspection (e.g., extracting fds).
-    pub fn handles(&self) -> (&AfPacketRx, &AfPacketTx, &AfPacketRx, &AfPacketTx) {
+    pub fn handles(&self) -> (&Capture, &Injector, &Capture, &Injector) {
         (&self.rx_a, &self.tx_b, &self.rx_b, &self.tx_a)
     }
 }
@@ -451,13 +451,13 @@ impl Bridge {
 #[derive(Debug)]
 pub struct BridgeHandles {
     /// RX on interface A.
-    pub rx_a: AfPacketRx,
+    pub rx_a: Capture,
     /// TX on interface B (forwards A→B).
-    pub tx_b: AfPacketTx,
+    pub tx_b: Injector,
     /// RX on interface B.
-    pub rx_b: AfPacketRx,
+    pub rx_b: Capture,
     /// TX on interface A (forwards B→A).
-    pub tx_a: AfPacketTx,
+    pub tx_a: Injector,
 }
 
 impl std::fmt::Debug for Bridge {
@@ -671,7 +671,7 @@ impl BridgeBuilder {
         let tx_b_fs = self.tx_b_frame_size.unwrap_or(b_fs);
         let tx_a_fs = self.tx_a_frame_size.unwrap_or(a_fs);
 
-        let rx_a = AfPacketRxBuilder::default()
+        let rx_a = CaptureBuilder::default()
             .interface(&iface_a)
             .block_size(a_bs)
             .block_count(a_bc)
@@ -680,7 +680,7 @@ impl BridgeBuilder {
             .promiscuous(self.promiscuous)
             .build()?;
 
-        let mut tx_b_builder = AfPacketTxBuilder::default()
+        let mut tx_b_builder = InjectorBuilder::default()
             .interface(&iface_b)
             .frame_size(tx_b_fs)
             .qdisc_bypass(self.qdisc_bypass);
@@ -689,7 +689,7 @@ impl BridgeBuilder {
         }
         let tx_b = tx_b_builder.build()?;
 
-        let rx_b = AfPacketRxBuilder::default()
+        let rx_b = CaptureBuilder::default()
             .interface(&iface_b)
             .block_size(b_bs)
             .block_count(b_bc)
@@ -698,7 +698,7 @@ impl BridgeBuilder {
             .promiscuous(self.promiscuous)
             .build()?;
 
-        let mut tx_a_builder = AfPacketTxBuilder::default()
+        let mut tx_a_builder = InjectorBuilder::default()
             .interface(&iface_a)
             .frame_size(tx_a_fs)
             .qdisc_bypass(self.qdisc_bypass);

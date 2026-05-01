@@ -44,9 +44,9 @@ fn main() {
     // Verify that Capture implements AsFd (compile-time check)
     fn _assert_as_fd<T: AsFd>() {}
     _assert_as_fd::<netring::Capture>();
-    _assert_as_fd::<netring::AfPacketRx>();
+    _assert_as_fd::<netring::Capture>();
     _assert_as_fd::<netring::Injector>();
-    _assert_as_fd::<netring::AfPacketTx>();
+    _assert_as_fd::<netring::Injector>();
 
     println!("All netring handles implement AsFd.");
     println!("See source code comments for aya integration pattern.");

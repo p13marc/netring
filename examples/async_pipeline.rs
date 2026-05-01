@@ -11,7 +11,7 @@
 #[cfg(feature = "tokio")]
 #[tokio::main]
 async fn main() -> Result<(), netring::Error> {
-    use netring::AfPacketRxBuilder;
+    use netring::CaptureBuilder;
     use netring::async_adapters::tokio_adapter::AsyncCapture;
     use std::sync::Arc;
     use std::sync::atomic::{AtomicU64, Ordering};
@@ -81,7 +81,7 @@ async fn main() -> Result<(), netring::Error> {
         let tx = tx.clone();
         let iface = iface.clone();
         tokio::spawn(async move {
-            let rx = AfPacketRxBuilder::default()
+            let rx = CaptureBuilder::default()
                 .interface(&iface)
                 .block_timeout_ms(50)
                 .build()

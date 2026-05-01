@@ -27,10 +27,10 @@ use crate::traits::PacketSource;
 /// ## Zero-copy (two-step)
 ///
 /// ```no_run
-/// # use netring::{AfPacketRxBuilder, PacketSource};
+/// # use netring::{CaptureBuilder, PacketSource};
 /// # use netring::async_adapters::tokio_adapter::AsyncCapture;
 /// # async fn example() -> Result<(), netring::Error> {
-/// let rx = AfPacketRxBuilder::default().interface("lo").build()?;
+/// let rx = CaptureBuilder::default().interface("lo").build()?;
 /// let mut cap = AsyncCapture::new(rx)?;
 /// loop {
 ///     cap.wait_readable().await?;
@@ -46,10 +46,10 @@ use crate::traits::PacketSource;
 /// ## Owned (single call, copies data)
 ///
 /// ```no_run
-/// # use netring::{AfPacketRxBuilder};
+/// # use netring::{CaptureBuilder};
 /// # use netring::async_adapters::tokio_adapter::AsyncCapture;
 /// # async fn example() -> Result<(), netring::Error> {
-/// let rx = AfPacketRxBuilder::default().interface("lo").build()?;
+/// let rx = CaptureBuilder::default().interface("lo").build()?;
 /// let mut cap = AsyncCapture::new(rx)?;
 /// let packets = cap.recv().await?;
 /// for pkt in &packets {
@@ -96,10 +96,10 @@ impl<S: PacketSource + AsRawFd> AsyncCapture<S> {
     /// # Examples
     ///
     /// ```no_run
-    /// # use netring::AfPacketRxBuilder;
+    /// # use netring::CaptureBuilder;
     /// # use netring::async_adapters::tokio_adapter::AsyncCapture;
     /// # async fn _ex() -> Result<(), netring::Error> {
-    /// let rx = AfPacketRxBuilder::default().interface("lo").build()?;
+    /// let rx = CaptureBuilder::default().interface("lo").build()?;
     /// let mut cap = AsyncCapture::new(rx)?;
     /// loop {
     ///     let mut guard = cap.readable().await?;
@@ -329,10 +329,10 @@ impl<S: PacketSource + AsRawFd + Send> crate::traits::AsyncPacketSource for Asyn
 /// ```no_run
 /// # async fn _ex() -> Result<(), netring::Error> {
 /// use futures_core::Stream;
-/// use netring::AfPacketRxBuilder;
+/// use netring::CaptureBuilder;
 /// use netring::async_adapters::tokio_adapter::{AsyncCapture, PacketStream};
 ///
-/// let rx = AfPacketRxBuilder::default().interface("lo").build()?;
+/// let rx = CaptureBuilder::default().interface("lo").build()?;
 /// let cap = AsyncCapture::new(rx)?;
 /// let stream = PacketStream::new(cap);
 ///

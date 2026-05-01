@@ -4,7 +4,7 @@
 
 mod helpers;
 
-use netring::{AfPacketRxBuilder, FanoutFlags, FanoutMode, PacketSource};
+use netring::{CaptureBuilder, FanoutFlags, FanoutMode, PacketSource};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::thread;
@@ -23,7 +23,7 @@ fn fanout_two_sockets() {
             let marker = marker.clone();
 
             thread::spawn(move || {
-                let mut rx = AfPacketRxBuilder::default()
+                let mut rx = CaptureBuilder::default()
                     .interface(helpers::LOOPBACK)
                     .fanout(FanoutMode::Hash, 9999)
                     .fanout_flags(FanoutFlags::ROLLOVER)

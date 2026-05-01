@@ -4,7 +4,7 @@
 
 mod helpers;
 
-use netring::AfPacketRxBuilder;
+use netring::CaptureBuilder;
 use netring::async_adapters::tokio_adapter::AsyncCapture;
 use std::time::Duration;
 
@@ -13,7 +13,7 @@ async fn async_capture_recv() {
     let port = helpers::unique_port();
     let marker = format!("async_test_{port}");
 
-    let rx = AfPacketRxBuilder::default()
+    let rx = CaptureBuilder::default()
         .interface(helpers::LOOPBACK)
         .block_timeout_ms(10)
         .build()

@@ -25,10 +25,10 @@ use std::time::Duration;
 
 use tokio::io::unix::AsyncFd;
 
-use crate::afpacket::tx::AfPacketTx;
+use crate::afpacket::tx::Injector;
 use crate::error::Error;
 
-/// Async wrapper around [`AfPacketTx`] using tokio's [`AsyncFd`].
+/// Async wrapper around [`Injector`] using tokio's [`AsyncFd`].
 ///
 /// Provides three async-friendly entry points:
 ///
@@ -45,11 +45,11 @@ use crate::error::Error;
 /// already `slot.send()`'d before cancellation remain queued and will be
 /// transmitted by the next `flush()`.
 pub struct AsyncInjector {
-    inner: AsyncFd<AfPacketTx>,
+    inner: AsyncFd<Injector>,
 }
 
 impl AsyncInjector {
-    /// Wrap an [`AfPacketTx`] in an async adapter.
+    /// Wrap an [`Injector`] in an async adapter.
     ///
     /// Registers the source's fd with tokio's reactor for `POLLOUT` and
     /// `POLLIN` (the kernel signals slot reclamation via `POLLOUT`).
@@ -57,14 +57,14 @@ impl AsyncInjector {
     /// # Errors
     ///
     /// Returns [`Error::Io`] if `AsyncFd` registration fails.
-    pub fn new(tx: AfPacketTx) -> Result<Self, Error> {
+    pub fn new(tx: Injector) -> Result<Self, Error> {
         let fd = AsyncFd::with_interest(tx, tokio::io::Interest::WRITABLE).map_err(Error::Io)?;
         Ok(Self { inner: fd })
     }
 
     /// Queue a packet for transmission, waiting if the TX ring is full.
     ///
-    /// Equivalent to repeatedly trying [`AfPacketTx::allocate`] +
+    /// Equivalent to repeatedly trying [`Injector::allocate`] +
     /// `slot.set_len(len) + slot.send()` and awaiting `POLLOUT` between
     /// failed attempts. Returns once the frame is queued — call
     /// [`flush`](Self::flush) to actually kick the kernel.
@@ -104,7 +104,7 @@ impl AsyncInjector {
 
     /// Kick the kernel to transmit queued frames.
     ///
-    /// Forwards to [`AfPacketTx::flush`]; awaits no I/O readiness today
+    /// Forwards to [`Injector::flush`]; awaits no I/O readiness today
     /// (the underlying syscall is non-blocking with `EAGAIN`/`ENOBUFS`
     /// reported as transient success). Async signature reserves room for
     /// future enhancements.
@@ -115,7 +115,7 @@ impl AsyncInjector {
     /// Wait until every queued frame has been transmitted.
     ///
     /// Polls `POLLOUT` (kernel signals slot reclamation) and re-checks
-    /// [`AfPacketTx::pending_count`] until it hits zero or `timeout`
+    /// [`Injector::pending_count`] until it hits zero or `timeout`
     /// elapses. Use before drop when you need to observe transmission
     /// failures or guarantee the kernel has finished.
     pub async fn wait_drained(&mut self, timeout: Duration) -> Result<(), Error> {
@@ -146,54 +146,54 @@ impl AsyncInjector {
     }
 
     /// Borrow the inner sink (e.g., for `cumulative_stats`-style accessors).
-    pub fn get_ref(&self) -> &AfPacketTx {
+    pub fn get_ref(&self) -> &Injector {
         self.inner.get_ref()
     }
 
     /// Mutable inner-sink access.
-    pub fn get_mut(&mut self) -> &mut AfPacketTx {
+    pub fn get_mut(&mut self) -> &mut Injector {
         self.inner.get_mut()
     }
 
     /// Unwrap into the inner sink.
-    pub fn into_inner(self) -> AfPacketTx {
+    pub fn into_inner(self) -> Injector {
         self.inner.into_inner()
     }
 
-    // ── Inherent passthroughs to AfPacketTx ─────────────────────────────
+    // ── Inherent passthroughs to Injector ─────────────────────────────
     //
     // Saves a `use netring::PacketSink;` (or direct field access via
     // `get_ref()`) at the call site for the most common observability
     // accessors.
 
     /// Maximum payload bytes that fit in a single TX frame.
-    /// See [`AfPacketTx::frame_capacity`].
+    /// See [`Injector::frame_capacity`].
     #[inline]
     pub fn frame_capacity(&self) -> usize {
         self.inner.get_ref().frame_capacity()
     }
 
     /// Total number of frames in the TX ring.
-    /// See [`AfPacketTx::frame_count`].
+    /// See [`Injector::frame_count`].
     #[inline]
     pub fn frame_count(&self) -> usize {
         self.inner.get_ref().frame_count()
     }
 
     /// Slots currently `TP_STATUS_AVAILABLE` (reclaimed by kernel).
-    /// See [`AfPacketTx::available_slots`].
+    /// See [`Injector::available_slots`].
     pub fn available_slots(&self) -> usize {
         self.inner.get_ref().available_slots()
     }
 
     /// Slots currently `TP_STATUS_WRONG_FORMAT` (kernel-rejected).
-    /// See [`AfPacketTx::rejected_slots`].
+    /// See [`Injector::rejected_slots`].
     pub fn rejected_slots(&self) -> usize {
         self.inner.get_ref().rejected_slots()
     }
 
     /// Slots in `TP_STATUS_SEND_REQUEST` / `TP_STATUS_SENDING`.
-    /// See [`AfPacketTx::pending_count`].
+    /// See [`Injector::pending_count`].
     pub fn pending_count(&self) -> usize {
         self.inner.get_ref().pending_count()
     }

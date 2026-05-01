@@ -9,14 +9,14 @@
 //! Requires CAP_NET_RAW.
 
 use etherparse::{NetSlice, SlicedPacket, TransportSlice};
-use netring::{AfPacketRxBuilder, PacketSource};
+use netring::{CaptureBuilder, PacketSource};
 use std::time::{Duration, Instant};
 
 fn main() -> Result<(), netring::Error> {
     let iface = std::env::args().nth(1).unwrap_or_else(|| "lo".into());
     eprintln!("🔍 DPI capture on {iface} (Ctrl-C to stop)\n");
 
-    let mut rx = AfPacketRxBuilder::default()
+    let mut rx = CaptureBuilder::default()
         .interface(&iface)
         .block_timeout_ms(50)
         .ignore_outgoing(false)

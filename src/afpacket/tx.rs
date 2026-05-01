@@ -46,8 +46,8 @@ impl<'a> TxSlot<'a> {
     /// # Panics
     ///
     /// Panics if `len` exceeds the frame capacity. This is intentional:
-    /// the frame capacity is known at [`allocate()`](crate::AfPacketTx::allocate)
-    /// time, so exceeding it is a programming error (like indexing past a Vec).
+    /// the frame capacity is known at [`Injector::allocate`] time, so
+    /// exceeding it is a programming error (like indexing past a `Vec`).
     pub fn set_len(&mut self, len: usize) {
         assert!(
             len <= self.max_len,
@@ -60,7 +60,7 @@ impl<'a> TxSlot<'a> {
     /// Mark this frame for transmission and consume the slot.
     ///
     /// The frame is queued in the TX ring. Call
-    /// [`flush()`](crate::traits::PacketSink::flush) to trigger
+    /// [`flush()`](Injector::flush) to trigger
     /// kernel transmission of all queued frames.
     pub fn send(mut self) {
         // Write tp_len, tp_snaplen, tp_mac into the tpacket_hdr at frame start
@@ -95,11 +95,26 @@ impl Drop for TxSlot<'_> {
     }
 }
 
-// ── AfPacketTx ─────────────────────────────────────────────────────────────
+// ── Injector ───────────────────────────────────────────────────────────────
 
-/// AF_PACKET TX ring (V1 frame-based semantics).
+/// AF_PACKET packet injector (TX ring with V1 frame-based semantics).
 ///
 /// Implements [`PacketSink`](crate::traits::PacketSink) and [`AsFd`].
+/// Use [`Injector::open`] for the common case or [`Injector::builder`]
+/// for full configuration.
+///
+/// # Examples
+///
+/// ```no_run
+/// let mut tx = netring::Injector::open("lo")?;
+/// if let Some(mut slot) = tx.allocate(64) {
+///     slot.data_mut()[0..6].copy_from_slice(&[0xff; 6]);
+///     slot.set_len(64);
+///     slot.send();
+/// }
+/// tx.flush()?;
+/// # Ok::<(), netring::Error>(())
+/// ```
 ///
 /// # Drop semantics
 ///
@@ -108,7 +123,7 @@ impl Drop for TxSlot<'_> {
 /// flush are logged at `warn` level via `tracing` but cannot be returned —
 /// call [`flush()`](Self::flush) explicitly before dropping if you need to
 /// observe transmission failures.
-pub struct AfPacketTx {
+pub struct Injector {
     // Drop order: ring (munmap) before fd (close).
     ring: MmapRing,
     fd: OwnedFd,
@@ -119,9 +134,9 @@ pub struct AfPacketTx {
     pending: u32,
 }
 
-impl std::fmt::Debug for AfPacketTx {
+impl std::fmt::Debug for Injector {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("AfPacketTx")
+        f.debug_struct("Injector")
             .field("frame_count", &self.frame_count)
             .field("frame_size", &self.frame_size)
             .field("pending", &self.pending)
@@ -129,10 +144,17 @@ impl std::fmt::Debug for AfPacketTx {
     }
 }
 
-impl AfPacketTx {
-    /// Start building a new TX handle.
-    pub fn builder() -> AfPacketTxBuilder {
-        AfPacketTxBuilder::default()
+impl Injector {
+    /// Open an injector on `interface` with default settings.
+    ///
+    /// Equivalent to `Injector::builder().interface(interface).build()`.
+    pub fn open(interface: &str) -> Result<Self, Error> {
+        Self::builder().interface(interface).build()
+    }
+
+    /// Start building a configured injector.
+    pub fn builder() -> InjectorBuilder {
+        InjectorBuilder::default()
     }
 
     fn frame_ptr(&self, index: usize) -> NonNull<u8> {
@@ -249,17 +271,6 @@ impl AfPacketTx {
     /// slot in the ring is currently in `TP_STATUS_SEND_REQUEST` /
     /// `TP_STATUS_SENDING` (all frames pending kernel transmission).
     ///
-    /// Implementation notes — for two latent issues this method works around:
-    ///
-    /// 1. A `TxSlot` dropped without `send()` resets its frame status to
-    ///    AVAILABLE but the cursor has already advanced past it. To reuse
-    ///    the gap, this scans forward up to `frame_count` slots looking
-    ///    for the next AVAILABLE.
-    /// 2. Slots in `TP_STATUS_WRONG_FORMAT` (kernel-rejected frames) are
-    ///    treated as available: we reset them back to AVAILABLE and reuse
-    ///    them. Without this the only signal a user gets is "ring full"
-    ///    forever — diagnose via [`rejected_slots()`](Self::rejected_slots).
-    ///
     /// Worst-case O(N) scan but typical O(1) on the happy path.
     pub fn allocate(&mut self, len: usize) -> Option<TxSlot<'_>> {
         if len > self.frame_size - self.data_offset {
@@ -352,55 +363,55 @@ impl AfPacketTx {
     }
 }
 
-impl AsFd for AfPacketTx {
+impl AsFd for Injector {
     fn as_fd(&self) -> BorrowedFd<'_> {
         self.fd.as_fd()
     }
 }
 
-impl AsRawFd for AfPacketTx {
+impl AsRawFd for Injector {
     fn as_raw_fd(&self) -> std::os::fd::RawFd {
         self.fd.as_raw_fd()
     }
 }
 
-impl crate::traits::PacketSink for AfPacketTx {
+impl crate::traits::PacketSink for Injector {
     fn allocate(&mut self, len: usize) -> Option<TxSlot<'_>> {
-        self.allocate(len)
+        Injector::allocate(self, len)
     }
 
     fn flush(&mut self) -> Result<usize, Error> {
-        self.flush()
+        Injector::flush(self)
     }
 }
 
-impl Drop for AfPacketTx {
+impl Drop for Injector {
     fn drop(&mut self) {
         // Best-effort flush before unmapping. Errors are logged at warn
         // level rather than discarded silently — explicit `flush()` before
         // drop remains the only way to observe transmission failures
         // (Drop can't return Result).
         if let Err(e) = self.flush() {
-            tracing::warn!(error = %e, "AfPacketTx::drop final flush failed");
+            tracing::warn!(error = %e, "Injector::drop final flush failed");
         }
     }
 }
 
-// SAFETY: AfPacketTx owns its fd and ring exclusively.
-unsafe impl Send for AfPacketTx {}
+// SAFETY: Injector owns its fd and ring exclusively.
+unsafe impl Send for Injector {}
 
 // ── Builder ────────────────────────────────────────────────────────────────
 
-/// Builder for [`AfPacketTx`].
+/// Builder for [`Injector`].
 #[must_use]
-pub struct AfPacketTxBuilder {
+pub struct InjectorBuilder {
     interface: Option<String>,
     frame_size: usize,
     frame_count: usize,
     qdisc_bypass: bool,
 }
 
-impl Default for AfPacketTxBuilder {
+impl Default for InjectorBuilder {
     fn default() -> Self {
         Self {
             interface: None,
@@ -411,7 +422,7 @@ impl Default for AfPacketTxBuilder {
     }
 }
 
-impl AfPacketTxBuilder {
+impl InjectorBuilder {
     /// Set the network interface name (required).
     pub fn interface(mut self, name: &str) -> Self {
         self.interface = Some(name.to_string());
@@ -436,8 +447,8 @@ impl AfPacketTxBuilder {
         self
     }
 
-    /// Validate and create the [`AfPacketTx`].
-    pub fn build(self) -> Result<AfPacketTx, Error> {
+    /// Validate and create the [`Injector`].
+    pub fn build(self) -> Result<Injector, Error> {
         let interface = self
             .interface
             .ok_or_else(|| Error::Config("interface is required".into()))?;
@@ -492,7 +503,7 @@ impl AfPacketTxBuilder {
 
         let data_offset = ffi::tpacket_align(std::mem::size_of::<libc::tpacket_hdr>());
 
-        Ok(AfPacketTx {
+        Ok(Injector {
             ring,
             fd,
             current_frame: 0,
@@ -510,13 +521,13 @@ mod tests {
 
     #[test]
     fn builder_rejects_missing_interface() {
-        let err = AfPacketTxBuilder::default().build().unwrap_err();
+        let err = InjectorBuilder::default().build().unwrap_err();
         assert!(matches!(err, Error::Config(_)));
     }
 
     #[test]
     fn builder_rejects_bad_frame_size() {
-        let err = AfPacketTxBuilder::default()
+        let err = InjectorBuilder::default()
             .interface("lo")
             .frame_size(100) // not multiple of 16
             .build()
@@ -526,7 +537,7 @@ mod tests {
 
     #[test]
     fn builder_rejects_zero_frame_count() {
-        let err = AfPacketTxBuilder::default()
+        let err = InjectorBuilder::default()
             .interface("lo")
             .frame_count(0)
             .build()
@@ -536,20 +547,16 @@ mod tests {
 
     #[test]
     fn builder_defaults() {
-        let b = AfPacketTxBuilder::default();
+        let b = InjectorBuilder::default();
         assert_eq!(b.frame_size, 2048);
         assert_eq!(b.frame_count, 256);
         assert!(!b.qdisc_bypass);
     }
 
     /// frame_capacity should equal frame_size minus the tpacket_hdr alignment.
-    /// Verified arithmetically since we can't construct a real AfPacketTx
-    /// without a privileged socket.
     #[test]
     fn frame_capacity_arithmetic() {
         let hdr_aligned = ffi::tpacket_align(std::mem::size_of::<libc::tpacket_hdr>());
-        // For default 2048 frame_size, capacity = 2048 - aligned(sizeof(tpacket_hdr))
-        // tpacket_hdr is small (about 32 B on 64-bit), so capacity should be > 1500.
         let capacity = 2048 - hdr_aligned;
         assert!(capacity > 1500);
         assert!(capacity < 2048);

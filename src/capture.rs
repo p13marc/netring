@@ -146,6 +146,7 @@ pub struct CaptureBuilder {
     block_count: usize,
     frame_size: usize,
     block_timeout_ms: u32,
+    fill_rxhash: bool,
     promiscuous: bool,
     ignore_outgoing: bool,
     busy_poll_us: Option<u32>,
@@ -164,6 +165,7 @@ impl Default for CaptureBuilder {
             block_count: 64,
             frame_size: 2048,
             block_timeout_ms: 60,
+            fill_rxhash: true,
             promiscuous: false,
             ignore_outgoing: false,
             busy_poll_us: None,
@@ -232,6 +234,15 @@ impl CaptureBuilder {
         self
     }
 
+    /// Request the kernel to populate `tp_rxhash` on every received packet.
+    ///
+    /// Default: `true`. Disable to shave a few percent of kernel-side overhead
+    /// when [`Packet::rxhash()`](crate::Packet::rxhash) is unused.
+    pub fn fill_rxhash(mut self, enable: bool) -> Self {
+        self.fill_rxhash = enable;
+        self
+    }
+
     /// Enable promiscuous mode. Default: false.
     pub fn promiscuous(mut self, enable: bool) -> Self {
         self.promiscuous = enable;
@@ -287,6 +298,7 @@ impl CaptureBuilder {
             .block_count(block_count)
             .frame_size(self.frame_size)
             .block_timeout_ms(self.block_timeout_ms)
+            .fill_rxhash(self.fill_rxhash)
             .promiscuous(self.promiscuous)
             .ignore_outgoing(self.ignore_outgoing)
             .timestamp_source(self.timestamp_source);
@@ -469,8 +481,15 @@ mod tests {
         assert_eq!(b.block_count, 64);
         assert_eq!(b.frame_size, 2048);
         assert_eq!(b.block_timeout_ms, 60);
+        assert!(b.fill_rxhash);
         assert!(!b.promiscuous);
         assert!(!b.ignore_outgoing);
+    }
+
+    #[test]
+    fn builder_fill_rxhash_setter() {
+        let b = CaptureBuilder::default().fill_rxhash(false);
+        assert!(!b.fill_rxhash);
     }
 
     #[test]

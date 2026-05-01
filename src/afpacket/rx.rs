@@ -234,6 +234,17 @@ impl AfPacketRxBuilder {
         self
     }
 
+    /// Request the kernel to populate `tp_rxhash` on every received packet.
+    ///
+    /// When enabled (the default), each [`Packet`](crate::Packet) carries an
+    /// RSS-style flow hash usable for fanout, deduplication, or flow tracking.
+    /// Disabling shaves a few percent of kernel-side overhead in exchange for
+    /// `Packet::rxhash()` always returning 0.
+    pub fn fill_rxhash(mut self, enable: bool) -> Self {
+        self.fill_rxhash = enable;
+        self
+    }
+
     /// Enable promiscuous mode. Default: false.
     pub fn promiscuous(mut self, enable: bool) -> Self {
         self.promiscuous = enable;
@@ -452,5 +463,13 @@ mod tests {
         assert!(b.fill_rxhash);
         assert!(!b.promiscuous);
         assert!(!b.ignore_outgoing);
+    }
+
+    #[test]
+    fn builder_fill_rxhash_setter() {
+        let b = AfPacketRxBuilder::default().fill_rxhash(false);
+        assert!(!b.fill_rxhash);
+        let b = AfPacketRxBuilder::default().fill_rxhash(true);
+        assert!(b.fill_rxhash);
     }
 }

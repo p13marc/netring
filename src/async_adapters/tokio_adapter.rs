@@ -85,6 +85,14 @@ impl<S: PacketSource + AsRawFd> AsyncCapture<S> {
     /// Preferred over [`wait_readable`](Self::wait_readable) — same
     /// efficiency, no race window between waiting and reading.
     ///
+    /// # Cancel safety
+    ///
+    /// This method is cancel-safe. Dropping the future before it resolves
+    /// abandons the readiness wait but does not lose data — tokio's reactor
+    /// re-arms on the next call. Once the future resolves and a guard is
+    /// returned, the kernel ring is unaffected; if you then drop the guard
+    /// without calling `next_batch`, no data is consumed.
+    ///
     /// # Examples
     ///
     /// ```no_run
@@ -142,6 +150,14 @@ impl<S: PacketSource + AsRawFd> AsyncCapture<S> {
     ///
     /// Borrows `&mut self` for the lifetime of the returned batch — same
     /// "one batch live at a time" rule as [`PacketSource::next_batch`].
+    ///
+    /// # Cancel safety
+    ///
+    /// Cancel-safe between iterations: if cancelled while awaiting
+    /// readability, no data is consumed; if cancelled while holding a
+    /// resolved guard but before extracting the batch, the guard drops
+    /// without consuming. Once `next_batch()` returns `Some(batch)`, the
+    /// borrow is committed — drop the batch normally to release it.
     pub async fn try_recv_batch(&mut self) -> Result<PacketBatch<'_>, Error> {
         loop {
             // SAFETY: same polonius workaround as ReadableGuard::next_batch.
@@ -221,6 +237,98 @@ impl<S: PacketSource + AsRawFd> AsyncCapture<S> {
 impl<S: PacketSource + AsRawFd> AsFd for AsyncCapture<S> {
     fn as_fd(&self) -> std::os::fd::BorrowedFd<'_> {
         self.inner.get_ref().as_fd()
+    }
+}
+
+// AsyncPacketSource trait impl — sugar for `try_recv_batch()` so callers
+// can hold a generic `T: AsyncPacketSource` instead of a concrete
+// `AsyncCapture<S>`.
+impl<S: PacketSource + AsRawFd + Send> crate::traits::AsyncPacketSource for AsyncCapture<S> {
+    fn next_batch(
+        &mut self,
+    ) -> impl std::future::Future<Output = Result<crate::packet::PacketBatch<'_>, Error>> + Send
+    {
+        self.try_recv_batch()
+    }
+}
+
+/// Adapter implementing [`futures_core::Stream`] over an [`AsyncCapture`].
+///
+/// Yields one `Vec<OwnedPacket>` per retired block — the standard
+/// "borrow-then-copy" idiom for Streams (the `Stream::Item` lifetime can't
+/// outlive a single `poll_next`, so we copy data out of the ring before
+/// yielding).
+///
+/// For zero-copy access without copies, hold the underlying `AsyncCapture`
+/// directly and use [`AsyncCapture::try_recv_batch`] in a loop.
+///
+/// # Cancel safety
+///
+/// `Stream::poll_next` is cancel-safe: dropping the future between polls
+/// abandons the in-flight readiness wait without losing data (the next
+/// poll will re-arm via tokio's reactor).
+///
+/// # Examples
+///
+/// ```no_run
+/// # async fn _ex() -> Result<(), netring::Error> {
+/// use futures_core::Stream;
+/// use netring::AfPacketRxBuilder;
+/// use netring::async_adapters::tokio_adapter::{AsyncCapture, PacketStream};
+///
+/// let rx = AfPacketRxBuilder::default().interface("lo").build()?;
+/// let cap = AsyncCapture::new(rx)?;
+/// let stream = PacketStream::new(cap);
+///
+/// // Pin and consume:
+/// let mut stream = Box::pin(stream);
+/// // .. then use Stream combinators or hand-poll. See StreamExt examples.
+/// # let _: std::pin::Pin<Box<dyn Stream<Item = Result<Vec<netring::OwnedPacket>, netring::Error>>>> = stream;
+/// # Ok(()) }
+/// ```
+pub struct PacketStream<S: PacketSource + AsRawFd> {
+    cap: AsyncCapture<S>,
+}
+
+impl<S: PacketSource + AsRawFd> PacketStream<S> {
+    /// Wrap an [`AsyncCapture`] as a [`Stream`](futures_core::Stream).
+    pub fn new(cap: AsyncCapture<S>) -> Self {
+        Self { cap }
+    }
+
+    /// Unwrap into the underlying [`AsyncCapture`].
+    pub fn into_inner(self) -> AsyncCapture<S> {
+        self.cap
+    }
+}
+
+impl<S: PacketSource + AsRawFd + Unpin> futures_core::Stream for PacketStream<S> {
+    type Item = Result<Vec<OwnedPacket>, Error>;
+
+    fn poll_next(
+        self: std::pin::Pin<&mut Self>,
+        cx: &mut std::task::Context<'_>,
+    ) -> std::task::Poll<Option<Self::Item>> {
+        let this = self.get_mut();
+        loop {
+            // Wait for readability.
+            let mut ready = match this.cap.inner.poll_read_ready_mut(cx) {
+                std::task::Poll::Ready(Ok(g)) => g,
+                std::task::Poll::Ready(Err(e)) => {
+                    return std::task::Poll::Ready(Some(Err(Error::Io(e))));
+                }
+                std::task::Poll::Pending => return std::task::Poll::Pending,
+            };
+
+            // Try to drain a batch. If None (spurious wakeup), clear ready
+            // and let the next loop iteration re-poll.
+            if let Some(batch) = ready.get_inner_mut().next_batch() {
+                let pkts: Vec<OwnedPacket> = batch.iter().map(|p| p.to_owned()).collect();
+                // batch dropped here → block returned to kernel
+                return std::task::Poll::Ready(Some(Ok(pkts)));
+            }
+            ready.clear_ready();
+        }
     }
 }
 

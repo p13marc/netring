@@ -158,6 +158,12 @@ impl AfPacketTx {
         self.frame_size - self.data_offset
     }
 
+    /// Total number of frames in the TX ring.
+    #[inline]
+    pub fn frame_count(&self) -> usize {
+        self.frame_count
+    }
+
     /// Number of slots currently in `TP_STATUS_AVAILABLE` (reclaimed by kernel).
     ///
     /// Useful after [`flush()`](Self::flush) to estimate transmission progress —
@@ -349,6 +355,12 @@ impl AfPacketTx {
 impl AsFd for AfPacketTx {
     fn as_fd(&self) -> BorrowedFd<'_> {
         self.fd.as_fd()
+    }
+}
+
+impl AsRawFd for AfPacketTx {
+    fn as_raw_fd(&self) -> std::os::fd::RawFd {
+        self.fd.as_raw_fd()
     }
 }
 

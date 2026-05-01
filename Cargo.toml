@@ -21,6 +21,7 @@ tracing = { version = "0.1", default-features = false, features = ["std"] }
 bitflags = "2"
 
 tokio = { version = "1", features = ["io-util", "net", "macros", "rt-multi-thread", "time"], optional = true }
+futures-core = { version = "0.3", default-features = false, features = ["std"], optional = true }
 crossbeam-channel = { version = "0.5", optional = true }
 etherparse = { version = "0.16", optional = true }
 # xsk-rs requires libxdp native library. Uncomment when building on a system with libxdp.
@@ -35,7 +36,7 @@ core_affinity = "0.8"
 
 [features]
 default = []
-tokio = ["dep:tokio"]
+tokio = ["dep:tokio", "dep:futures-core"]
 channel = ["dep:crossbeam-channel"]
 parse = ["dep:etherparse"]
 af-xdp = []  # AF_XDP kernel-bypass packet I/O (pure Rust, no native deps)

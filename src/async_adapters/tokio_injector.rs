@@ -1,0 +1,174 @@
+//! Async packet injection using tokio [`AsyncFd`].
+//!
+//! Pairs with [`AsyncCapture`](crate::AsyncCapture): the same `AsyncFd`-based
+//! readiness machinery, but for the TX path. `AsyncInjector::send` waits on
+//! `POLLOUT` (kernel reclaims a TX slot) when the ring is full, instead of
+//! returning `None` and forcing the caller to retry.
+//!
+//! # Example
+//!
+//! ```no_run
+//! # async fn _ex() -> Result<(), netring::Error> {
+//! use netring::Injector;
+//! use netring::async_adapters::tokio_injector::AsyncInjector;
+//!
+//! let tx = Injector::builder().interface("lo").build()?.into_inner();
+//! let mut atx = AsyncInjector::new(tx)?;
+//!
+//! atx.send(&[0xff; 64]).await?;
+//! atx.flush().await?;
+//! # Ok(()) }
+//! ```
+
+use std::os::fd::{AsFd, AsRawFd, BorrowedFd};
+use std::time::Duration;
+
+use tokio::io::unix::AsyncFd;
+
+use crate::afpacket::tx::AfPacketTx;
+use crate::error::Error;
+
+/// Async wrapper around [`AfPacketTx`] using tokio's [`AsyncFd`].
+///
+/// Provides three async-friendly entry points:
+///
+/// - [`send`](Self::send) — copies a packet into a TX slot, waiting on
+///   `POLLOUT` if the ring is full. Returns once the slot is queued.
+/// - [`flush`](Self::flush) — kicks the kernel to drain queued frames.
+/// - [`wait_drained`](Self::wait_drained) — awaits `POLLOUT` until every
+///   queued frame has been transmitted (or the timeout expires).
+///
+/// # Cancel safety
+///
+/// All three methods are cancel-safe: dropping the future between awaits
+/// abandons the readiness wait without losing in-flight frames. Frames
+/// already `slot.send()`'d before cancellation remain queued and will be
+/// transmitted by the next `flush()`.
+pub struct AsyncInjector {
+    inner: AsyncFd<AfPacketTx>,
+}
+
+impl AsyncInjector {
+    /// Wrap an [`AfPacketTx`] in an async adapter.
+    ///
+    /// Registers the source's fd with tokio's reactor for `POLLOUT` and
+    /// `POLLIN` (the kernel signals slot reclamation via `POLLOUT`).
+    ///
+    /// # Errors
+    ///
+    /// Returns [`Error::Io`] if `AsyncFd` registration fails.
+    pub fn new(tx: AfPacketTx) -> Result<Self, Error> {
+        let fd = AsyncFd::with_interest(tx, tokio::io::Interest::WRITABLE).map_err(Error::Io)?;
+        Ok(Self { inner: fd })
+    }
+
+    /// Queue a packet for transmission, waiting if the TX ring is full.
+    ///
+    /// Equivalent to repeatedly trying [`AfPacketTx::allocate`] +
+    /// `slot.set_len(len) + slot.send()` and awaiting `POLLOUT` between
+    /// failed attempts. Returns once the frame is queued — call
+    /// [`flush`](Self::flush) to actually kick the kernel.
+    ///
+    /// # Errors
+    ///
+    /// - Returns [`Error::Config`] if `data.len()` exceeds the TX frame
+    ///   capacity (set at builder time).
+    /// - Returns [`Error::Io`] if the underlying readiness wait fails.
+    pub async fn send(&mut self, data: &[u8]) -> Result<(), Error> {
+        let cap = self.inner.get_ref().frame_capacity();
+        if data.len() > cap {
+            return Err(Error::Config(format!(
+                "packet length {} exceeds TX frame capacity {}",
+                data.len(),
+                cap
+            )));
+        }
+        loop {
+            // Try non-blocking allocate first — common-case fast path.
+            if let Some(mut slot) = self.inner.get_mut().allocate(data.len()) {
+                slot.data_mut()[..data.len()].copy_from_slice(data);
+                slot.set_len(data.len());
+                slot.send();
+                return Ok(());
+            }
+            // Ring full: wait for kernel to reclaim a slot via POLLOUT.
+            let mut guard = self.inner.writable_mut().await.map_err(Error::Io)?;
+            // The reclamation might be partial; clear_ready re-arms the
+            // reactor so the next iteration's writable_mut() will block.
+            // We do not consult pending_count here (would re-borrow self.inner
+            // while guard is alive); the next allocate() attempt will tell us.
+            guard.clear_ready();
+            drop(guard);
+        }
+    }
+
+    /// Kick the kernel to transmit queued frames.
+    ///
+    /// Forwards to [`AfPacketTx::flush`]; awaits no I/O readiness today
+    /// (the underlying syscall is non-blocking with `EAGAIN`/`ENOBUFS`
+    /// reported as transient success). Async signature reserves room for
+    /// future enhancements.
+    pub async fn flush(&mut self) -> Result<usize, Error> {
+        self.inner.get_mut().flush()
+    }
+
+    /// Wait until every queued frame has been transmitted.
+    ///
+    /// Polls `POLLOUT` (kernel signals slot reclamation) and re-checks
+    /// [`AfPacketTx::pending_count`] until it hits zero or `timeout`
+    /// elapses. Use before drop when you need to observe transmission
+    /// failures or guarantee the kernel has finished.
+    pub async fn wait_drained(&mut self, timeout: Duration) -> Result<(), Error> {
+        let deadline = tokio::time::Instant::now() + timeout;
+        loop {
+            if self.inner.get_ref().pending_count() == 0 {
+                return Ok(());
+            }
+            let remaining = match deadline.checked_duration_since(tokio::time::Instant::now()) {
+                Some(r) => r,
+                None => {
+                    return Err(Error::Io(std::io::Error::from(
+                        std::io::ErrorKind::TimedOut,
+                    )));
+                }
+            };
+            // Cap each wait so we re-check pending_count even on partial
+            // reclamation events.
+            let slice = remaining.min(Duration::from_millis(10));
+            tokio::select! {
+                ready = self.inner.writable_mut() => {
+                    let mut guard = ready.map_err(Error::Io)?;
+                    guard.clear_ready();
+                }
+                _ = tokio::time::sleep(slice) => {}
+            }
+        }
+    }
+
+    /// Borrow the inner sink (e.g., for `cumulative_stats`-style accessors).
+    pub fn get_ref(&self) -> &AfPacketTx {
+        self.inner.get_ref()
+    }
+
+    /// Mutable inner-sink access.
+    pub fn get_mut(&mut self) -> &mut AfPacketTx {
+        self.inner.get_mut()
+    }
+
+    /// Unwrap into the inner sink.
+    pub fn into_inner(self) -> AfPacketTx {
+        self.inner.into_inner()
+    }
+}
+
+impl AsFd for AsyncInjector {
+    fn as_fd(&self) -> BorrowedFd<'_> {
+        self.inner.get_ref().as_fd()
+    }
+}
+
+impl AsRawFd for AsyncInjector {
+    fn as_raw_fd(&self) -> std::os::fd::RawFd {
+        self.inner.get_ref().as_raw_fd()
+    }
+}

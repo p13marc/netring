@@ -56,6 +56,17 @@
 - **`AsyncCapture::readable()` / `ReadableGuard`** — single-step zero-copy
   receive without the `wait_readable + next_batch` race window. Also
   `try_recv_batch` for sugar.
+- **`PacketStream`** — `futures_core::Stream<Item = Result<Vec<OwnedPacket>, Error>>`
+  adapter over `AsyncCapture`. Composes with `StreamExt` combinators and
+  is cancel-safe between polls. Pulls in a tiny `futures-core` dep
+  gated by the `tokio` feature.
+- **`AsyncInjector`** — async TX counterpart to `AsyncCapture`. `send`
+  awaits `POLLOUT` when the ring is full instead of returning `None`;
+  `wait_drained` blocks until every queued frame has been transmitted.
+- **`AsyncPacketSource`** trait now has an impl for `AsyncCapture<S>`.
+- **Cancel safety** documented on `readable`, `try_recv_batch`,
+  `PacketStream::poll_next`, and all `AsyncInjector` methods.
+- New `examples/async_stream.rs` demonstrating the Stream API.
 - **`PacketSource::cumulative_stats`** — monotonic running totals
   (default impl falls back to `stats()`; AF_PACKET overrides to accumulate
   deltas internally). Mirrored on `Capture` and `Bridge`.

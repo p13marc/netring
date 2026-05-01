@@ -39,12 +39,32 @@ while let Some(batch) = rx.next_batch_blocking(Duration::from_millis(100)).unwra
 # fn process(_: &[u8]) {}
 ```
 
+```rust,no_run
+// Async with tokio: zero-copy zero-overhead readiness via AsyncFd
+# async fn _ex() -> Result<(), netring::Error> {
+use netring::{AfPacketRxBuilder, async_adapters::tokio_adapter::AsyncCapture};
+
+let rx = AfPacketRxBuilder::default().interface("eth0").build()?;
+let mut cap = AsyncCapture::new(rx)?;
+
+loop {
+    let mut guard = cap.readable().await?;
+    if let Some(batch) = guard.next_batch() {
+        for pkt in &batch {
+            handle(pkt.data()).await;
+        }
+    }
+}
+# async fn handle(_: &[u8]) {}
+# }
+```
+
 ## Features
 
 | Feature | Default | Description |
 |---------|---------|-------------|
 | `af-xdp` | off | AF_XDP kernel-bypass packet I/O (pure Rust, no native deps) |
-| `tokio` | off | Async capture via `AsyncFd` (wait_readable + next_batch) |
+| `tokio` | off | Async capture/inject via `AsyncFd`, `Stream` impl, async `Bridge` |
 | `channel` | off | Thread + bounded channel adapter (runtime-agnostic) |
 | `parse` | off | Packet header parsing via `etherparse` |
 
@@ -55,7 +75,7 @@ while let Some(batch) = rx.next_batch_blocking(Duration::from_millis(100)).unwra
 | **High** | `Capture`, `Injector` | Simple capture/inject with iterators and builders |
 | **Low** | `AfPacketRx`, `AfPacketTx` | Batch processing, sequence tracking, custom poll logic |
 | **AF_XDP** | `XdpSocket`, `XdpSocketBuilder` | Kernel-bypass via AF_XDP (feature: `af-xdp`) |
-| **Async** | `AsyncCapture`, `ChannelCapture` | Integration with tokio or any async runtime |
+| **Async** | `AsyncCapture`, `AsyncInjector`, `PacketStream`, `ChannelCapture` | Integration with tokio or any async runtime |
 
 ## Default Configuration
 

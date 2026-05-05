@@ -481,20 +481,11 @@ impl XdpSocket {
         self.rx.cached_count() == 0
     }
 
-    /// Deprecated alias for [`next_batch`](Self::next_batch).
-    ///
-    /// Renamed in 0.4.0 to align naming with [`Capture::next_batch`](crate::Capture).
-    #[cfg(feature = "af-xdp")]
-    #[deprecated(since = "0.4.0", note = "renamed to `next_batch`")]
-    pub fn recv_batch(&mut self) -> Result<Option<XdpBatch<'_>>, Error> {
-        Ok(self.next_batch())
-    }
-
     /// Receive packets (non-blocking) as owned copies.
     ///
     /// Returns owned copies of received packets — convenient but allocates
     /// a `Vec<u8>` per packet plus the outer `Vec`. For zero-copy access
-    /// use [`recv_batch()`](Self::recv_batch) instead.
+    /// use [`next_batch()`](Self::next_batch) instead.
     ///
     /// Returns an empty `Vec` if no packets are available.
     #[cfg(feature = "af-xdp")]

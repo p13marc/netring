@@ -50,33 +50,3 @@ pub use async_adapters::tokio_injector::AsyncInjector;
 #[cfg(feature = "tokio")]
 pub use traits::AsyncPacketSource;
 
-// ── Deprecated aliases (will be removed in 0.5.0) ─────────────────────────
-//
-// 0.4.0 dropped the redundant `Capture`/`Injector` wrappers (they were thin
-// shells around `AfPacketRx`/`AfPacketTx`) and renamed the underlying types
-// to match user-visible naming. Old code can keep compiling for one release
-// by routing through these aliases.
-
-/// Deprecated alias for [`Capture`]. The 0.4.0 redesign collapsed the old
-/// `Capture` wrapper and `AfPacketRx` into a single type. Use [`Capture`]
-/// directly.
-#[deprecated(
-    since = "0.4.0",
-    note = "renamed to `Capture` (the wrapper was dropped)"
-)]
-pub type AfPacketRx = Capture;
-
-/// Deprecated alias for [`CaptureBuilder`].
-#[deprecated(since = "0.4.0", note = "renamed to `CaptureBuilder`")]
-pub type AfPacketRxBuilder = CaptureBuilder;
-
-/// Deprecated alias for [`Injector`].
-#[deprecated(
-    since = "0.4.0",
-    note = "renamed to `Injector` (the wrapper was dropped)"
-)]
-pub type AfPacketTx = Injector;
-
-/// Deprecated alias for [`InjectorBuilder`].
-#[deprecated(since = "0.4.0", note = "renamed to `InjectorBuilder`")]
-pub type AfPacketTxBuilder = InjectorBuilder;

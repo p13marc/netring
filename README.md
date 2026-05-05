@@ -1,15 +1,79 @@
 # netring
 
-High-performance zero-copy packet I/O for Linux.
+High-performance zero-copy packet I/O for Linux, **async-first**.
 
 `netring` provides packet capture and injection via AF_PACKET (TPACKET_V3
 block-based mmap ring buffers) and AF_XDP (kernel-bypass via XDP sockets).
-One type per role — use it directly, no wrappers, no extra layers.
+The recommended API is async/tokio; sync types are first-class but
+mostly used as the underlying source for the async wrappers.
 
-## Quick Start
+## Quick start (async, recommended)
+
+```toml
+[dependencies]
+netring = { version = "0.6", features = ["tokio"] }
+```
 
 ```rust,no_run
-// Flat packet iterator — the simplest path.
+// Capture: zero-copy borrowed batches via AsyncFd.
+# async fn _ex() -> Result<(), netring::Error> {
+let mut cap = netring::AsyncCapture::open("eth0")?;
+loop {
+    let mut guard = cap.readable().await?;
+    if let Some(batch) = guard.next_batch() {
+        for pkt in &batch {
+            handle(pkt.data()).await;
+        }
+    }
+}
+# async fn handle(_: &[u8]) {}
+# }
+```
+
+```rust,ignore
+// Stream-style consumption with futures::StreamExt
+// (add `futures = "0.3"` to your Cargo.toml):
+use futures::StreamExt;
+
+let mut stream = netring::AsyncCapture::open("eth0")?.into_stream();
+while let Some(batch) = stream.next().await {
+    for pkt in batch? {
+        let _ = pkt.data;
+    }
+}
+```
+
+```rust,no_run
+// Inject with backpressure (awaits POLLOUT when ring is full):
+# async fn _ex() -> Result<(), netring::Error> {
+let mut tx = netring::AsyncInjector::open("eth0")?;
+tx.send(&[0xff; 64]).await?;
+tx.flush().await?;
+# Ok(()) }
+```
+
+```rust,no_run
+// AF_XDP (kernel bypass, 10M+ pps) — same shape as AsyncCapture:
+# #[cfg(feature = "af-xdp")]
+# async fn _ex() -> Result<(), netring::Error> {
+let mut xdp = netring::AsyncXdpSocket::open("eth0")?;
+let batch = xdp.try_recv_batch().await?;
+for pkt in &batch {
+    let _ = pkt.data();
+}
+# Ok(()) }
+```
+
+See [docs/ASYNC_GUIDE.md](docs/ASYNC_GUIDE.md) for the full async story —
+patterns, trade-offs, when to use which entry point, and `Send`/`!Send`
+considerations.
+
+## Sync API
+
+The sync types power the async wrappers and are also usable directly:
+
+```rust,no_run
+// Flat iterator — simplest path.
 let mut cap = netring::Capture::open("eth0").unwrap();
 for pkt in cap.packets().take(100) {
     println!("[{}] {} bytes", pkt.timestamp(), pkt.len());
@@ -28,61 +92,35 @@ let mut cap = Capture::builder()
     .unwrap();
 
 while let Some(batch) = cap.next_batch_blocking(Duration::from_millis(100)).unwrap() {
-    println!("seq={} pkts={} timed_out={}",
-        batch.seq_num(), batch.len(), batch.timed_out());
     for pkt in &batch {
-        process(pkt.data());
-    }
-    // batch dropped → block returned to kernel
-}
-# fn process(_: &[u8]) {}
-```
-
-```rust,no_run
-// Async with tokio: zero-copy zero-overhead readiness via AsyncFd.
-# async fn _ex() -> Result<(), netring::Error> {
-use netring::{AsyncCapture, Capture};
-
-let mut cap = AsyncCapture::new(Capture::open("eth0")?)?;
-
-loop {
-    let mut guard = cap.readable().await?;
-    if let Some(batch) = guard.next_batch() {
-        for pkt in &batch {
-            handle(pkt.data()).await;
-        }
+        let _ = pkt.data();
     }
 }
-# async fn handle(_: &[u8]) {}
-# }
 ```
 
 ## Features
 
 | Feature | Default | Description |
 |---------|---------|-------------|
+| `tokio` | off | Async wrappers (`AsyncCapture`, `AsyncInjector`, `AsyncXdpSocket`, `PacketStream`) |
 | `af-xdp` | off | AF_XDP kernel-bypass packet I/O (pure Rust, no native deps) |
-| `tokio` | off | Async capture/inject via `AsyncFd`, `Stream` impl, async `Bridge` |
 | `channel` | off | Thread + bounded channel adapter (runtime-agnostic) |
 | `parse` | off | Packet header parsing via `etherparse` |
+| `pcap` | off | Stream packets to PCAP files |
+| `metrics` | off | `metrics` crate counters (`netring_capture_*_total`) |
 
 ## Public API
 
-One type per role:
+| Concept | Sync type | Async wrapper |
+|---------|-----------|---------------|
+| AF_PACKET RX | `Capture` | `AsyncCapture<Capture>` |
+| AF_PACKET TX | `Injector` | `AsyncInjector` |
+| AF_XDP (RX + TX) | `XdpSocket` | `AsyncXdpSocket` |
+| Bridge two interfaces | `Bridge` | `Bridge::run_async` |
+| Channel adapter | — | `ChannelCapture` (sync threads) |
 
-| Concept | Type | Backend |
-|---------|------|---------|
-| Receive packets | `Capture` | AF_PACKET |
-| Inject packets | `Injector` | AF_PACKET |
-| Receive + inject (single fd) | `XdpSocket` | AF_XDP (feature: `af-xdp`) |
-| Bridge two interfaces | `Bridge` | AF_PACKET |
-| Async capture | `AsyncCapture<S>` | any (feature: `tokio`) |
-| Async inject | `AsyncInjector` | AF_PACKET (feature: `tokio`) |
-| Async stream | `PacketStream` | wraps `AsyncCapture` (feature: `tokio`) |
-| Channel adapter | `ChannelCapture` | AF_PACKET (feature: `channel`) |
-
-Each type has both a `::open(iface)` shortcut and a `::builder()` for full
-configuration.
+Every type has a `::open(iface)` shortcut for the simple case and a
+`::builder()` for full configuration.
 
 ## Default Configuration
 

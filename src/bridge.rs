@@ -123,6 +123,19 @@ impl Bridge {
         BridgeBuilder::default()
     }
 
+    /// Open a bridge between two interfaces with default settings.
+    ///
+    /// One-liner shortcut for
+    /// `Bridge::builder().interface_a(a).interface_b(b).build()`.
+    /// Defaults match the builder: promiscuous + qdisc_bypass on, 100 ms
+    /// poll timeout, [`RingProfile::Default`].
+    pub fn open_pair(interface_a: &str, interface_b: &str) -> Result<Self, Error> {
+        Self::builder()
+            .interface_a(interface_a)
+            .interface_b(interface_b)
+            .build()
+    }
+
     /// Run the bridge loop, forwarding packets through the filter.
     ///
     /// Blocks forever (until I/O error). The bridge waits on `poll(2)` for

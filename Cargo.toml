@@ -35,6 +35,7 @@ divan = "0.1"
 criterion = { version = "0.5", features = ["html_reports"] }
 etherparse = "0.16"
 core_affinity = "0.8"
+futures = "0.3"
 
 [features]
 default = []
@@ -58,6 +59,14 @@ required-features = ["af-xdp"]
 [[example]]
 name = "pcap_write"
 required-features = ["pcap"]
+
+[[example]]
+name = "async_xdp"
+required-features = ["tokio", "af-xdp"]
+
+[[example]]
+name = "async_metrics"
+required-features = ["tokio", "metrics"]
 
 [[bench]]
 name = "throughput"

@@ -102,6 +102,9 @@ async-inject *args:    (example "async_inject" args)
 async-signal *args:    (example "async_signal" args)
 async-pipeline *args:  (example "async_pipeline" args)
 async-bridge *args:    (example "async_bridge" args)
+async-streamext *args: (example "async_streamext" args)
+async-xdp *args:       cargo run --example async_xdp --features tokio,af-xdp -- {{args}}
+async-metrics *args:   cargo run --example async_metrics --features tokio,metrics -- {{args}}
 channel *args:      (example "channel_consumer" args)
 ebpf *args:         (example "ebpf_filter" args)
 dpi *args:          (example "dpi" args)

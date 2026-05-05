@@ -130,6 +130,10 @@ pub struct XdpSocketBuilder {
     frame_count: usize,
     need_wakeup: bool,
     mode: XdpMode,
+    /// Raw fd of an already-bound XDP socket whose UMEM we want to share.
+    /// `0` means "no sharing". When non-zero, build() skips
+    /// `XDP_UMEM_REG` and sets `XDP_SHARED_UMEM` in the bind flags.
+    shared_umem_fd: u32,
 }
 
 impl Default for XdpSocketBuilder {
@@ -141,6 +145,7 @@ impl Default for XdpSocketBuilder {
             frame_count: 4096,
             need_wakeup: true,
             mode: XdpMode::default(),
+            shared_umem_fd: 0,
         }
     }
 }
@@ -188,6 +193,38 @@ impl XdpSocketBuilder {
         self
     }
 
+    /// Bind this socket as a secondary that **shares the UMEM** of an
+    /// existing AF_XDP socket.
+    ///
+    /// Pass an `AsFd` for an already-bound `XdpSocket` that owns the
+    /// UMEM you want to reuse. The kernel skips per-socket UMEM
+    /// registration and threads packets through *this* socket's RX/TX
+    /// rings while addressing the same shared frame pool.
+    ///
+    /// # Manual partitioning
+    ///
+    /// netring does **not** synchronize allocation between the primary
+    /// and secondary sockets. Each socket's allocator hands out frame
+    /// addresses independently — if both pick the same address, the
+    /// kernel will overwrite one with the other's data. You're
+    /// responsible for partitioning the UMEM range across sockets.
+    /// The simplest scheme is: primary uses the first half, secondary
+    /// uses the second half; configure each via `frame_count` and
+    /// arrange for them to land at disjoint frame indices.
+    ///
+    /// For the canonical multi-queue capture pattern (one socket per
+    /// NIC queue, one process), this is fine: each socket's fill ring
+    /// only ever contains its own addresses, and the kernel dispatches
+    /// inbound packets to the correct queue's RX ring via the BPF
+    /// program's `bpf_redirect_map(&xskmap, queue_id, 0)` call.
+    ///
+    /// A higher-level `SharedUmem` helper that automates partitioning
+    /// is planned for a future release.
+    pub fn shared_umem<F: AsFd>(mut self, primary: F) -> Self {
+        self.shared_umem_fd = primary.as_fd().as_raw_fd() as u32;
+        self
+    }
+
     /// Validate the builder configuration.
     ///
     /// Returns the interface name if valid.
@@ -224,8 +261,12 @@ impl XdpSocketBuilder {
         // 2. Create AF_XDP socket
         let fd = socket::create_xdp_socket()?;
 
-        // 3. Register UMEM with kernel
-        socket::register_umem(fd.as_fd(), &umem.as_reg())?;
+        // 3. Register UMEM with kernel.
+        //    Skipped when this socket is binding as a XDP_SHARED_UMEM secondary —
+        //    the kernel inherits the UMEM from the primary socket fd.
+        if self.shared_umem_fd == 0 {
+            socket::register_umem(fd.as_fd(), &umem.as_reg())?;
+        }
 
         // 4. Configure ring sizes (each power of 2, independent)
         let ring_size = (self.frame_count as u32).next_power_of_two();
@@ -324,12 +365,22 @@ impl XdpSocketBuilder {
         // 8. Bind to interface + queue
         // flags=0: auto-negotiate (kernel tries zero-copy, falls back to copy)
         // XDP_USE_NEED_WAKEUP enables wakeup optimization
-        let bind_flags = if self.need_wakeup {
-            ffi::XDP_USE_NEED_WAKEUP
-        } else {
-            0
-        };
-        socket::bind_xdp(fd.as_fd(), ifindex, self.queue_id, bind_flags)?;
+        // XDP_SHARED_UMEM tells the kernel to attach this socket to the
+        //   UMEM owned by `shared_umem_fd` instead of the one we registered.
+        let mut bind_flags: u16 = 0;
+        if self.need_wakeup {
+            bind_flags |= ffi::XDP_USE_NEED_WAKEUP;
+        }
+        if self.shared_umem_fd != 0 {
+            bind_flags |= ffi::XDP_SHARED_UMEM;
+        }
+        socket::bind_xdp(
+            fd.as_fd(),
+            ifindex,
+            self.queue_id,
+            bind_flags,
+            self.shared_umem_fd,
+        )?;
 
         Ok(XdpSocket {
             fd,

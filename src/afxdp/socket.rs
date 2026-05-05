@@ -81,18 +81,22 @@ pub(crate) fn get_mmap_offsets(fd: BorrowedFd<'_>) -> Result<ffi::xdp_mmap_offse
 /// - `0`: auto-negotiate (kernel tries zero-copy, falls back to copy)
 /// - `XDP_USE_NEED_WAKEUP`: enable wakeup optimization
 /// - `XDP_ZEROCOPY`: force zero-copy (fails with EOPNOTSUPP if unsupported)
+/// - `XDP_SHARED_UMEM`: bind without registering a UMEM, sharing the one
+///   on `shared_umem_fd` (must be a previously-bound XDP socket fd).
+///   Setting this without `shared_umem_fd != 0` is a usage error.
 pub(crate) fn bind_xdp(
     fd: BorrowedFd<'_>,
     ifindex: u32,
     queue_id: u32,
     flags: u16,
+    shared_umem_fd: u32,
 ) -> Result<(), Error> {
     let sxdp = ffi::sockaddr_xdp {
         sxdp_family: ffi::AF_XDP as u16,
         sxdp_flags: flags,
         sxdp_ifindex: ifindex,
         sxdp_queue_id: queue_id,
-        sxdp_shared_umem_fd: 0,
+        sxdp_shared_umem_fd: shared_umem_fd,
     };
     let ret = unsafe {
         // SAFETY: fd is valid, sxdp is a valid sockaddr_xdp on the stack.

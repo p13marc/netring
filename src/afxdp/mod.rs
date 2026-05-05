@@ -364,10 +364,8 @@ impl XdpSocketBuilder {
 /// like, but only one thread at a time may call any method on it.
 ///
 /// ```compile_fail
-/// # #[cfg(feature = "af-xdp")] {
 /// fn assert_sync<T: Sync>() {}
 /// assert_sync::<netring::XdpSocket>();
-/// # }
 /// ```
 pub struct XdpSocket {
     #[cfg(feature = "af-xdp")]
@@ -387,8 +385,11 @@ pub struct XdpSocket {
     #[cfg(feature = "af-xdp")]
     need_wakeup_enabled: bool,
     // Without the feature, keep a private field so the struct is unconstructable.
+    // `PhantomData<*const ()>` mirrors the with-feature `!Sync` property so
+    // the `compile_fail` doctest that asserts `!Sync` works regardless of
+    // which features the test run uses.
     #[cfg(not(feature = "af-xdp"))]
-    _private: (),
+    _private: std::marker::PhantomData<*const ()>,
 }
 
 impl XdpSocket {
@@ -424,13 +425,12 @@ impl XdpSocket {
     /// The batch's `&mut self` borrow is enforced by the compiler:
     ///
     /// ```compile_fail
-    /// # #[cfg(feature = "af-xdp")] {
-    /// # async fn _ex(mut s: netring::XdpSocket) -> Result<(), netring::Error> {
+    /// # fn _ex(mut s: netring::XdpSocket) {
     /// let b1 = s.next_batch();
     /// let b2 = s.next_batch();  // ERROR: two mutable borrows
     /// drop(b1);
     /// drop(b2);
-    /// # Ok(()) }}
+    /// # }
     /// ```
     #[cfg(feature = "af-xdp")]
     pub fn next_batch(&mut self) -> Option<XdpBatch<'_>> {

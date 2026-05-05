@@ -1,7 +1,7 @@
-# Upstream tracking
+# Upstream + future-work tracking
 
-Things waiting on rustc / kernel features. Re-check at each release cycle and
-update the "Last checked" line.
+Things waiting on rustc / kernel features, or deliberately deferred. Re-check
+at each minor release and update the "Last checked" line.
 
 ---
 
@@ -11,16 +11,16 @@ update the "Last checked" line.
 - **Tracking issue**: rust-lang/rust #117078
 - **Action when stable**: implement `Capture::packets_gen` per SPEC §6.3.
 - **Cargo.toml** reserves the `nightly` feature for this.
-- **Last checked**: 2026-05-01 — still nightly only.
+- **Last checked**: 2026-05-05 — still nightly only.
 
 ## `LendingIterator` / GAT iteration in `Iterator`
 
 - **Status**: not on track for stabilization.
-- **Workaround in netring**: `PacketBatch<'a>` + `BatchIter<'a>` pair plus the
-  `'static`-erasure trick in `PacketIter` (`src/capture.rs`) and
-  `AsyncCapture::try_recv_batch` (`src/async_adapters/tokio_adapter.rs`). When
-  Polonius lands these workarounds simplify; until then they stay.
-- **Last checked**: 2026-05-01.
+- **Workaround in netring**: `PacketBatch<'a>` + `BatchIter<'a>` pair plus
+  the `'static`-erasure trick in `Packets` (`src/afpacket/rx.rs`) and
+  `AsyncCapture::try_recv_batch` (`src/async_adapters/tokio_adapter.rs`).
+  When Polonius lands these workarounds simplify; until then they stay.
+- **Last checked**: 2026-05-05.
 
 ## Polonius (NLL successor)
 
@@ -29,30 +29,52 @@ update the "Last checked" line.
   use a raw-pointer split because stable's NLL can't see that the Some-arm
   borrow doesn't outlive the None-arm `clear_ready`. Polonius would handle
   the split natively; remove the unsafe blocks once it's stable on the MSRV.
-- **Last checked**: 2026-05-01 — `-Znext-solver` previews but no stabilization
-  ETA.
+- **Last checked**: 2026-05-05 — `-Znext-solver` previews but no
+  stabilization ETA.
 
 ## XDP RX metadata extensions
 
 - **Kernel**: 6.0+ via `BPF_PROG_TYPE_XDP` with `xdp_metadata_ops`.
 - **Action**: implement `XdpPacket::timestamp()` (currently always returns
-  `None`) and populate `OwnedPacket` metadata fields for AF_XDP origin. Both
-  are documented as "not yet wired" and are forward-compatible.
+  `None`) and populate `OwnedPacket` metadata fields for AF_XDP origin.
+  Both are documented as "not yet wired" and are forward-compatible.
 - **Tracking**: kernel commit set around v6.0; userland integration still
   evolving (libxdp/aya have partial support).
-- **Last checked**: 2026-05-01.
+- **Last checked**: 2026-05-05.
 
-## XDP shared UMEM
+## High-level `SharedUmem` helper
 
-- **Kernel**: supported since the AF_XDP introduction; netring just doesn't
-  expose it yet.
-- **Action**: see Phase 3 plan, Fix #32 in `plans/fixes/03-afxdp-completeness.md`.
-  Holds the multi-queue / multi-thread surface area; deferred until trait
-  abstraction (Fix #31) lands so the plumbing fits the unified API.
-- **Last checked**: 2026-05-01.
+- **Status**: low-level primitive shipped in 0.5.0
+  (`XdpSocketBuilder::shared_umem(primary)` — sets `XDP_SHARED_UMEM` and
+  passes the primary fd as `sxdp_shared_umem_fd`). Each socket still has
+  its own private free-list; users must partition the UMEM range manually.
+- **Action**: design and ship a higher-level helper that automates frame
+  partitioning across primary + N secondaries, optionally with a shared
+  allocator (Mutex-protected or partition-based). Wait for actual user
+  code that demands it before settling the threading-model trade-offs.
+- **Last checked**: 2026-05-05.
+
+## Unified `PacketBackend` trait
+
+- **Status**: deferred. AF_PACKET `Packet` exposes metadata
+  (`direction`, `vlan_tci`, `rxhash`, `status`) that AF_XDP doesn't,
+  so a unified trait would force `Option`-wrapped accessors and lose
+  ergonomics. Most users pick one backend and stay there.
+- **Action**: revisit when there's user code that demands cross-backend
+  generic handling.
+- **Last checked**: 2026-05-05.
+
+## CI hardening (post-0.5)
+
+- **Miri** — add `cargo +nightly miri test --features tokio,channel` to
+  catch UB in the unsafe-heavy modules (`packet.rs::BatchIter`,
+  `afxdp::ring`, `async_adapters::tokio_adapter`).
+- **cargo-public-api** — pin the public API once 0.5 is stable, surface
+  diffs on PRs.
+- **Last checked**: 2026-05-05 — neither blocking, both nice-to-have.
 
 ## Review cadence
 
 Each minor release: re-check the "Last checked" lines and update or remove
-obsolete entries. If an item ships, port the implementation note from this
-file into a CHANGELOG entry.
+obsolete entries. When an item ships, port the implementation note into the
+release CHANGELOG and remove its entry here.

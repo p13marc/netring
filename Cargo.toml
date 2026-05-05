@@ -24,6 +24,7 @@ tokio = { version = "1", features = ["io-util", "net", "macros", "rt-multi-threa
 futures-core = { version = "0.3", default-features = false, features = ["std"], optional = true }
 crossbeam-channel = { version = "0.5", optional = true }
 etherparse = { version = "0.16", optional = true }
+pcap-file = { version = "2", optional = true }
 # xsk-rs requires libxdp native library. Uncomment when building on a system with libxdp.
 # xsk-rs = { version = "0.8", optional = true }
 
@@ -39,6 +40,7 @@ default = []
 tokio = ["dep:tokio", "dep:futures-core"]
 channel = ["dep:crossbeam-channel"]
 parse = ["dep:etherparse"]
+pcap = ["dep:pcap-file"]
 af-xdp = []  # AF_XDP kernel-bypass packet I/O (pure Rust, no native deps)
 nightly = []
 integration-tests = []
@@ -50,6 +52,10 @@ rustdoc-args = ["--cfg", "docsrs"]
 [[example]]
 name = "xdp_send"
 required-features = ["af-xdp"]
+
+[[example]]
+name = "pcap_write"
+required-features = ["pcap"]
 
 [[bench]]
 name = "throughput"

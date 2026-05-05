@@ -72,11 +72,11 @@ jobs:
       - uses: Swatinem/rust-cache@v2
 
       - name: Build test binaries
-        run: cargo test --features "integration-tests,tokio,channel" --no-run
+        run: cargo test --features "integration-tests,tokio,channel,af-xdp" --no-run
 
       - name: Grant CAP_NET_RAW to test binaries
         run: |
-          for bin in $(cargo test --features "integration-tests,tokio,channel" \
+          for bin in $(cargo test --features "integration-tests,tokio,channel,af-xdp" \
               --no-run --message-format=json 2>/dev/null \
               | jq -r 'select(.executable != null) | .executable'); do
             if [ -f "$bin" ]; then
@@ -86,7 +86,7 @@ jobs:
           done
 
       - name: Run integration tests
-        run: cargo test --features "integration-tests,tokio,channel" -- --test-threads=1
+        run: cargo test --features "integration-tests,tokio,channel,af-xdp" -- --test-threads=1
 
   # ── Benchmarks compile ────────────────────────────────────────────────────
   bench:

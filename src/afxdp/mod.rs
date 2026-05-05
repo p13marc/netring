@@ -46,8 +46,9 @@ mod umem;
 pub use batch::{XdpBatch, XdpBatchIter, XdpPacket};
 pub use stats::XdpStats;
 
+use std::os::fd::{AsFd, AsRawFd};
 #[cfg(feature = "af-xdp")]
-use std::os::fd::{AsFd, AsRawFd, BorrowedFd, OwnedFd};
+use std::os::fd::{BorrowedFd, OwnedFd};
 #[cfg(feature = "af-xdp")]
 use std::time::Duration;
 

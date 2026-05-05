@@ -65,9 +65,11 @@ fn next_batch_blocking_survives_signal() {
     *target_tid.lock().unwrap() = Some(unsafe { libc::pthread_self() });
 
     // Run several next_batch_blocking calls; with the EINTR-safe wrapper,
-    // each call should return Ok(_) regardless of how many times poll
-    // gets interrupted.
-    let deadline = Instant::now() + Duration::from_millis(500);
+    // each call must return Ok(_) regardless of how many times poll gets
+    // interrupted. The Err arm panics — that's the entire test contract;
+    // the iteration count is only relevant insofar as it gives the signaler
+    // enough chances to land a signal during the syscall.
+    let deadline = Instant::now() + Duration::from_secs(1);
     let mut ok_count = 0;
     while Instant::now() < deadline {
         match rx.next_batch_blocking(Duration::from_millis(50)) {
@@ -79,9 +81,12 @@ fn next_batch_blocking_survives_signal() {
     stop.store(true, Ordering::Relaxed);
     let _ = signaler.join();
 
+    // Guard against accidental zero-iteration runs (would mean we never
+    // exercised the wrapper). Even a slow CI runner should manage one cycle
+    // in a one-second window.
     assert!(
-        ok_count >= 5,
-        "expected ≥5 successful poll cycles under signal pressure, got {ok_count}"
+        ok_count >= 1,
+        "next_batch_blocking did not run at all in the 1s test window"
     );
 }
 

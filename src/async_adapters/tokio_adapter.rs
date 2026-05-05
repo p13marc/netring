@@ -112,7 +112,6 @@ impl AsyncCapture<crate::Capture> {
 }
 
 impl<S: PacketSource + AsRawFd> AsyncCapture<S> {
-
     /// Wait until readable and return a guard for zero-copy batch retrieval.
     ///
     /// The guard borrows `&mut self` and exposes a single

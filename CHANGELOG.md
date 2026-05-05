@@ -1,5 +1,55 @@
 # Changelog
 
+## 0.6.0 — Async first
+
+netring's primary API is now async/tokio. The sync types are still
+first-class but the documentation, examples, and recommended patterns
+all lead with the async wrappers.
+
+### Added
+
+- **`AsyncXdpSocket`** — async wrapper for AF_XDP, the previously-missing
+  piece in the tokio story. Mirrors `AsyncCapture` for RX (three reception
+  modes) and `AsyncInjector` for TX (`send().await` awaits `POLLOUT` under
+  backpressure). One wrapper covers both directions since `XdpSocket`
+  shares one fd. Behind `tokio + af-xdp` features.
+  - `AsyncXdpSocket::open(iface)` / `::new(socket)`
+  - `readable() → XdpReadableGuard` / `try_recv_batch()` / `recv()`
+  - `into_stream() → XdpStream` (`futures_core::Stream`)
+  - `send(data).await` / `flush().await` / `wait_drained(timeout).await`
+  - `statistics()` (passthrough to `XdpStats`)
+
+- **`AsyncCapture::open(iface)` / `AsyncInjector::open(iface)`** —
+  one-liner shortcuts that replace
+  `AsyncCapture::new(Capture::open(iface)?)?`. Specialized impls;
+  the generic `new()` still works for builder-configured sources.
+
+- **`Bridge::open_pair(a, b)`** — shortcut for
+  `Bridge::builder().interface_a(a).interface_b(b).build()`.
+
+- **`docs/ASYNC_GUIDE.md`** — full async guide covering all four
+  async types, the three reception modes, `Send`/`!Send` rules,
+  Stream + StreamExt usage, and patterns (mpsc fan-out, graceful
+  shutdown, periodic stats + metrics integration).
+
+- **Three new examples**:
+  - `examples/async_streamext.rs` — `PacketStream` + `futures::StreamExt`
+  - `examples/async_xdp.rs` — `AsyncXdpSocket` TX with backpressure
+  - `examples/async_metrics.rs` — periodic `tokio::time::interval` +
+    metrics integration
+
+### Changed
+
+- **README rewrite** — leads with async (Quick Start), demotes the
+  sync API to its own section. Public API table now pairs sync types
+  with their async wrappers.
+- **Dev-dependency added**: `futures = "0.3"` (used by the
+  `async_streamext` example only).
+
+### Internal
+
+- New module `src/async_adapters/tokio_xdp.rs`.
+
 ## 0.5.0 — Feature expansion + cleanup
 
 ### Breaking

@@ -9,6 +9,8 @@ pub mod bridge;
 pub mod config;
 pub mod error;
 pub mod interface;
+#[cfg(feature = "metrics")]
+pub mod metrics;
 pub mod packet;
 #[cfg(feature = "pcap")]
 pub mod pcap;

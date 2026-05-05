@@ -51,5 +51,7 @@ pub use async_adapters::channel::ChannelCapture;
 pub use async_adapters::tokio_adapter::{AsyncCapture, PacketStream, ReadableGuard};
 #[cfg(feature = "tokio")]
 pub use async_adapters::tokio_injector::AsyncInjector;
+#[cfg(all(feature = "tokio", feature = "af-xdp"))]
+pub use async_adapters::tokio_xdp::{AsyncXdpSocket, XdpReadableGuard, XdpStream};
 #[cfg(feature = "tokio")]
 pub use traits::AsyncPacketSource;

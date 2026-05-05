@@ -6,5 +6,8 @@ pub mod tokio_adapter;
 #[cfg(feature = "tokio")]
 pub mod tokio_injector;
 
+#[cfg(all(feature = "tokio", feature = "af-xdp"))]
+pub mod tokio_xdp;
+
 #[cfg(feature = "channel")]
 pub mod channel;

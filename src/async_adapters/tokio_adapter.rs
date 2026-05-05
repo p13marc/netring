@@ -85,6 +85,33 @@ impl<S: PacketSource + AsRawFd> AsyncCapture<S> {
         let fd = AsyncFd::new(source).map_err(Error::Io)?;
         Ok(Self { inner: fd })
     }
+}
+
+impl AsyncCapture<crate::Capture> {
+    /// Open an async AF_PACKET capture on `interface` with default settings.
+    ///
+    /// One-liner shortcut for `AsyncCapture::new(Capture::open(interface)?)`.
+    /// For configured captures, use `AsyncCapture::new(Capture::builder()...build()?)`.
+    ///
+    /// # Examples
+    ///
+    /// ```no_run
+    /// # async fn _ex() -> Result<(), netring::Error> {
+    /// let mut cap = netring::AsyncCapture::open("eth0")?;
+    /// let mut guard = cap.readable().await?;
+    /// if let Some(batch) = guard.next_batch() {
+    ///     for pkt in &batch {
+    ///         println!("{} bytes", pkt.len());
+    ///     }
+    /// }
+    /// # Ok(()) }
+    /// ```
+    pub fn open(interface: &str) -> Result<Self, Error> {
+        Self::new(crate::Capture::open(interface)?)
+    }
+}
+
+impl<S: PacketSource + AsRawFd> AsyncCapture<S> {
 
     /// Wait until readable and return a guard for zero-copy batch retrieval.
     ///

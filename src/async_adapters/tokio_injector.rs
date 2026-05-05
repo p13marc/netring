@@ -59,6 +59,25 @@ impl AsyncInjector {
         Ok(Self { inner: fd })
     }
 
+    /// Open an async injector on `interface` with default settings.
+    ///
+    /// One-liner shortcut for `AsyncInjector::new(Injector::open(interface)?)`.
+    /// For configured injectors, use the builder via
+    /// `AsyncInjector::new(Injector::builder()...build()?)`.
+    ///
+    /// # Examples
+    ///
+    /// ```no_run
+    /// # async fn _ex() -> Result<(), netring::Error> {
+    /// let mut tx = netring::AsyncInjector::open("eth0")?;
+    /// tx.send(&[0xff; 64]).await?;
+    /// tx.flush().await?;
+    /// # Ok(()) }
+    /// ```
+    pub fn open(interface: &str) -> Result<Self, Error> {
+        Self::new(Injector::open(interface)?)
+    }
+
     /// Queue a packet for transmission, waiting if the TX ring is full.
     ///
     /// Equivalent to repeatedly trying [`Injector::allocate`] +

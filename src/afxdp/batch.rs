@@ -3,7 +3,7 @@
 //! Mirrors the AF_PACKET [`PacketBatch`](crate::PacketBatch) lifecycle but for
 //! AF_XDP descriptors:
 //!
-//! 1. [`XdpSocket::recv_batch`](crate::XdpSocket::recv_batch) peeks the RX ring,
+//! 1. [`XdpSocket::next_batch`](crate::XdpSocket::next_batch) peeks the RX ring,
 //!    yielding an [`XdpBatch`] that holds `&mut self`.
 //! 2. Iterating yields [`XdpPacket<'_>`] views borrowed directly from UMEM —
 //!    no copies.
@@ -96,7 +96,7 @@ impl<'a> XdpPacket<'a> {
 
 /// Zero-copy view over a peeked range of the AF_XDP RX ring.
 ///
-/// Construct via [`XdpSocket::recv_batch`](crate::XdpSocket::recv_batch).
+/// Construct via [`XdpSocket::next_batch`](crate::XdpSocket::next_batch).
 ///
 /// # RAII
 ///
@@ -213,7 +213,7 @@ impl<'a> Iterator for XdpBatchIter<'a> {
                     tracing::warn!(
                         addr = desc.addr,
                         len = desc.len,
-                        "AF_XDP recv_batch: malformed descriptor; skipping"
+                        "AF_XDP next_batch: malformed descriptor; skipping"
                     );
                 }
             }

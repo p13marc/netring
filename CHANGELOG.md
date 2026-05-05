@@ -1,5 +1,73 @@
 # Changelog
 
+## 0.5.0 — Feature expansion + cleanup
+
+### Breaking
+
+- **Deprecated 0.3.x aliases removed**: `AfPacketRx`, `AfPacketRxBuilder`,
+  `AfPacketTx`, `AfPacketTxBuilder` — use `Capture`, `CaptureBuilder`,
+  `Injector`, `InjectorBuilder` (introduced in 0.4.0).
+- **`XdpSocket::recv_batch` removed**: use `XdpSocket::next_batch` (renamed
+  in 0.4.0).
+- Both removals are mechanical migrations covered by 0.4.0's CHANGELOG.
+
+### Added
+
+- **`pcap` feature** — exports captured packets to PCAP files via the
+  pure-Rust [`pcap-file`] crate. New `netring::pcap::CaptureWriter`
+  type with `write_packet` (zero-copy) and `write_owned` (owned)
+  entry points. Nanosecond-resolution kernel timestamps. Includes
+  `examples/pcap_write.rs`.
+- **`metrics` feature** — `netring::metrics::record_capture_delta`
+  records three counters (`netring_capture_packets_total`,
+  `netring_capture_drops_total`, `netring_capture_freezes_total`)
+  via the [`metrics`] façade. Pair with any recorder
+  (`metrics-exporter-prometheus`, OTel, statsd, ...).
+- **AF_XDP `XDP_SHARED_UMEM` primitive** —
+  `XdpSocketBuilder::shared_umem(primary: impl AsFd)` lets a secondary
+  socket share an existing UMEM region. Documents the manual-partition
+  contract (each socket allocates from its own free list; users are
+  responsible for keeping address ranges disjoint). A higher-level
+  `SharedUmem` helper that automates partitioning is planned for a
+  future release.
+
+### Documentation
+
+- `docs/TUNING_GUIDE.md` updated for 0.4-era surface (rcvbuf,
+  reuseport, fill_rxhash, snap_len, cumulative_stats, AF_XDP `XdpMode`,
+  metrics integration).
+- `docs/AF_XDP_EVALUATION.md` rewritten as a "what we shipped"
+  retrospective covering the four-module layout, ring protocol,
+  BPF-program requirement, and unfinished extensions.
+
+### Tests + CI
+
+- `tests/bridge.rs` — paired-veth integration tests for `Bridge`
+  (idle smoke + into_inner decomposition). Skips gracefully without
+  CAP_NET_ADMIN.
+- `tests/xdp.rs` — Tx-only AF_XDP smoke test on `lo`. Skips
+  gracefully where the kernel doesn't support XDP on the loopback.
+- New `tests/helpers.rs::VethPair` RAII fixture.
+- CI:
+  - `actions/checkout@v4` → `@v5` (Node 20 deprecation).
+  - New `cargo-deny` job (license + advisory + source allowlist).
+  - New `cargo-machete` job (unused-dep detection).
+  - Integration test feature set now includes `af-xdp`.
+
+### Decision: PacketBackend trait deferred
+
+A unified `PacketBackend` trait covering both AF_PACKET and AF_XDP
+was scoped but deferred. The AF_PACKET `Packet` exposes metadata
+(`direction`, `vlan_tci`, `rxhash`, `status`) that AF_XDP doesn't
+surface, and forcing every AF_PACKET caller to unwrap `Option` for
+fields they used directly is a worse trade-off than parallel concrete
+APIs. Most users pick one backend (AF_PACKET ~500K–1M pps, AF_XDP
+10–24M pps) and stay there. Will revisit when there's user code that
+demands cross-backend generic handling.
+
+[`pcap-file`]: https://crates.io/crates/pcap-file
+[`metrics`]: https://crates.io/crates/metrics
+
 ## 0.4.0 — API redesign
 
 The 0.3.0 surface had two parallel layers per direction: a high-level

@@ -31,10 +31,10 @@ use crate::stats::CaptureStats;
 /// # Examples
 ///
 /// ```no_run
-/// use netring::{AfPacketRxBuilder, PacketSource};
+/// use netring::{Capture, PacketSource};
 /// use std::time::Duration;
 ///
-/// let mut rx = AfPacketRxBuilder::default().interface("lo").build().unwrap();
+/// let mut rx = Capture::open("lo").unwrap();
 /// while let Some(batch) = rx.next_batch_blocking(Duration::from_millis(100)).unwrap() {
 ///     for pkt in &batch {
 ///         println!("{} bytes", pkt.len());
@@ -45,7 +45,7 @@ use crate::stats::CaptureStats;
 #[diagnostic::on_unimplemented(
     message = "`{Self}` cannot be used as a packet source",
     label = "this type does not implement `PacketSource`",
-    note = "consider using `AfPacketRx` or implementing this trait for your backend"
+    note = "consider using `Capture` or implementing this trait for your backend"
 )]
 pub trait PacketSource: AsFd {
     /// Non-blocking poll for the next retired block.
@@ -116,7 +116,7 @@ pub trait PacketSource: AsFd {
 #[diagnostic::on_unimplemented(
     message = "`{Self}` cannot be used as a packet sink",
     label = "this type does not implement `PacketSink`",
-    note = "consider using `AfPacketTx` or implementing this trait for your backend"
+    note = "consider using `Injector` or implementing this trait for your backend"
 )]
 pub trait PacketSink: AsFd {
     /// Allocate a mutable TX frame for a packet of up to `len` bytes.

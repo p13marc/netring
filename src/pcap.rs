@@ -134,10 +134,7 @@ mod tests {
         // PCAP magic for nanosecond resolution (any-endian variants begin
         // with 0xa1b23c4d / 0x4d3cb2a1) or microsecond (0xa1b2c3d4 / ...).
         let magic = u32::from_le_bytes([buf[0], buf[1], buf[2], buf[3]]);
-        let valid = matches!(
-            magic,
-            0xa1b2_c3d4 | 0xd4c3_b2a1 | 0xa1b2_3c4d | 0x4d3c_b2a1
-        );
+        let valid = matches!(magic, 0xa1b2_c3d4 | 0xd4c3_b2a1 | 0xa1b2_3c4d | 0x4d3c_b2a1);
         assert!(valid, "PCAP magic missing: 0x{magic:08x}");
     }
 

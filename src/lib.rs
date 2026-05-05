@@ -53,4 +53,3 @@ pub use async_adapters::tokio_adapter::{AsyncCapture, PacketStream, ReadableGuar
 pub use async_adapters::tokio_injector::AsyncInjector;
 #[cfg(feature = "tokio")]
 pub use traits::AsyncPacketSource;
-

@@ -47,8 +47,7 @@ pub fn record_capture_delta(iface: &str, delta: &CaptureStats) {
     let iface_label = iface.to_string();
     metrics::counter!(COUNTER_PACKETS, "iface" => iface_label.clone())
         .increment(delta.packets as u64);
-    metrics::counter!(COUNTER_DROPS, "iface" => iface_label.clone())
-        .increment(delta.drops as u64);
+    metrics::counter!(COUNTER_DROPS, "iface" => iface_label.clone()).increment(delta.drops as u64);
     metrics::counter!(COUNTER_FREEZES, "iface" => iface_label).increment(delta.freeze_count as u64);
 }
 

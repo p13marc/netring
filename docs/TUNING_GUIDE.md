@@ -105,14 +105,24 @@ sudo ethtool -C eth0 rx-usecs 50 rx-frames 64
 sudo ethtool -T eth0
 ```
 
+## Additional builder knobs (0.4+)
+
+| Setter | Purpose |
+|--------|---------|
+| `.fill_rxhash(false)` | Skip kernel `tp_rxhash` population (~3 % savings) |
+| `.reuseport(true)` | `SO_REUSEPORT`; allow cooperating processes to share an iface |
+| `.rcvbuf(bytes)` | `SO_RCVBUF` (capped at `net.core.rmem_max`) |
+| `.rcvbuf_force(true)` | Use `SO_RCVBUFFORCE` (CAP_NET_ADMIN, bypasses rmem_max) |
+| `.snap_len(n)` | Capture only the first `n` bytes of each packet |
+| `.poll_timeout(d)` | Default poll timeout used by the `packets()` iterator |
+
 ## Monitoring
 
-### Capture Statistics
+### Capture statistics — destructive vs cumulative
 
 ```rust
-let stats = cap.stats()?;
-println!("{}", stats);
-// Output: "packets: 12345, drops: 0, freezes: 0"
+let delta = cap.stats()?;             // since last call (resets kernel counters)
+let total = cap.cumulative_stats()?;  // monotonic since open
 ```
 
 | Field | Meaning |
@@ -121,7 +131,23 @@ println!("{}", stats);
 | `drops` | Packets dropped because ring was full |
 | `freeze_count` | Times the ring was frozen (queue depth exceeded) |
 
-**Reading stats resets kernel counters.** Call periodically for rate calculation.
+**`stats()` resets kernel counters.** **Don't mix `stats()` and
+`cumulative_stats()`** on the same capture — each `stats()` call also
+resets the kernel counter and bypasses the running total.
+
+### Metrics integration (feature: `metrics`)
+
+```rust
+use netring::metrics::record_capture_delta;
+loop {
+    let delta = cap.stats()?;
+    record_capture_delta("eth0", &delta);  // → metrics::counter!
+    std::thread::sleep(Duration::from_secs(1));
+}
+```
+
+Pair with `metrics-exporter-prometheus` to surface
+`netring_capture_packets_total{iface="eth0"}` etc.
 
 ### Sequence Gap Detection
 
@@ -158,3 +184,39 @@ if batch.seq_num() != expected_seq {
 - `DEFRAG`: reassemble IP fragments before hashing (prevents flow splitting)
 - `ROLLOVER`: overflow to next socket when selected one is full
 - `IGNORE_OUTGOING`: skip outgoing packets in fanout group
+
+## AF_XDP tuning (feature: `af-xdp`)
+
+### Pick the right `XdpMode`
+
+| Mode | UMEM split | Use when |
+|------|-----------|----------|
+| `Tx` | 0 % to fill ring, 100 % free for TX alloc | TX-only workloads (no BPF program needed) |
+| `Rx` | 100 % to fill ring, 0 % free | RX-only workloads with attached XDP program |
+| `RxTx` (default) | 50 / 50 | Bidirectional |
+| `Custom { prefill }` | caller-specified | asymmetric or shared-UMEM setups |
+
+The default split breaks TX-only code if you forget to set the mode —
+`send()` returns `Ok(false)` because all UMEM is in the fill ring.
+
+### Sizing UMEM
+
+```rust
+XdpSocket::builder()
+    .interface("eth0")
+    .frame_size(2048)       // multiple of 2048 — page-aligned matters
+    .frame_count(8192)      // 16 MiB UMEM total
+    .mode(XdpMode::RxTx)
+    .build()?;
+```
+
+- `frame_count` should be ≥ 2 × max-inflight-per-direction in `RxTx`.
+- Ring size is rounded up to the next power of two; oversized rings are fine.
+- Bind to one NIC queue per socket; pair with shared-UMEM (when supported)
+  for multi-queue capture.
+
+### Wakeup optimization
+
+`XDP_USE_NEED_WAKEUP` is enabled by default (`.need_wakeup(true)`).
+`flush()` skips the `sendto` syscall entirely when the kernel is actively
+polling the TX ring. Worth a few % CPU at high pps.

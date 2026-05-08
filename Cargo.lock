@@ -593,7 +593,7 @@ dependencies = [
 
 [[package]]
 name = "netring"
-version = "0.6.0"
+version = "0.7.0-alpha.0"
 dependencies = [
  "bitflags",
  "core_affinity",
@@ -606,12 +606,17 @@ dependencies = [
  "futures-core",
  "libc",
  "metrics",
+ "netring-flow",
  "nix",
  "pcap-file",
  "thiserror 2.0.18",
  "tokio",
  "tracing",
 ]
+
+[[package]]
+name = "netring-flow"
+version = "0.1.0-alpha.0"
 
 [[package]]
 name = "nix"

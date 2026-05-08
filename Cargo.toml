@@ -1,73 +1,28 @@
-[package]
-name = "netring"
-version = "0.6.0"
+[workspace]
+members = [
+    "netring",
+    "netring-flow",
+]
+resolver = "2"
+
+[workspace.package]
 edition = "2024"
 rust-version = "1.85"
 license = "MIT OR Apache-2.0"
-description = "High-performance zero-copy packet I/O for Linux (AF_PACKET TPACKET_V3 + AF_XDP)"
-keywords = ["packet", "capture", "af_packet", "af_xdp", "zero-copy"]
-categories = ["network-programming", "os::linux-apis"]
-readme = "README.md"
-documentation = "https://docs.rs/netring"
 repository = "https://github.com/p13marc/netring"
-homepage = "https://github.com/p13marc/netring"
-exclude = ["CLAUDE.md", "SPEC.md", "justfile", "plans/"]
+authors = ["Marc Pardo <p13marc@gmail.com>"]
 
-[dependencies]
+# Shared deps. Member crates inherit via `dep.workspace = true`.
+[workspace.dependencies]
 libc = "0.2"
 nix = { version = "0.31", features = ["socket", "mman", "poll", "net", "ioctl"] }
 thiserror = "2"
 tracing = { version = "0.1", default-features = false, features = ["std"] }
 bitflags = "2"
 
-tokio = { version = "1", features = ["io-util", "net", "macros", "rt-multi-thread", "time", "signal", "sync"], optional = true }
-futures-core = { version = "0.3", default-features = false, features = ["std"], optional = true }
-crossbeam-channel = { version = "0.5", optional = true }
-etherparse = { version = "0.16", optional = true }
-pcap-file = { version = "2", optional = true }
-metrics = { version = "0.24", optional = true }
-# xsk-rs requires libxdp native library. Uncomment when building on a system with libxdp.
-# xsk-rs = { version = "0.8", optional = true }
-
-[dev-dependencies]
-env_logger = "0.11"
-divan = "0.1"
-criterion = { version = "0.5", features = ["html_reports"] }
+tokio = { version = "1", features = ["io-util", "net", "macros", "rt-multi-thread", "time", "signal", "sync"] }
+futures-core = { version = "0.3", default-features = false, features = ["std"] }
+crossbeam-channel = "0.5"
 etherparse = "0.16"
-core_affinity = "0.8"
-futures = "0.3"
-
-[features]
-default = []
-tokio = ["dep:tokio", "dep:futures-core"]
-channel = ["dep:crossbeam-channel"]
-parse = ["dep:etherparse"]
-pcap = ["dep:pcap-file"]
-metrics = ["dep:metrics"]
-af-xdp = []  # AF_XDP kernel-bypass packet I/O (pure Rust, no native deps)
-nightly = []
-integration-tests = []
-
-[package.metadata.docs.rs]
-all-features = true
-rustdoc-args = ["--cfg", "docsrs"]
-
-[[example]]
-name = "xdp_send"
-required-features = ["af-xdp"]
-
-[[example]]
-name = "pcap_write"
-required-features = ["pcap"]
-
-[[example]]
-name = "async_xdp"
-required-features = ["tokio", "af-xdp"]
-
-[[example]]
-name = "async_metrics"
-required-features = ["tokio", "metrics"]
-
-[[bench]]
-name = "throughput"
-harness = false
+pcap-file = "2"
+metrics = "0.24"

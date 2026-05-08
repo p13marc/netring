@@ -1,4 +1,4 @@
-# netring justfile
+# netring justfile (workspace-aware: netring + netring-flow)
 # Requires: just (https://github.com/casey/just)
 #
 # Integration tests and examples need AF_PACKET (CAP_NET_RAW).
@@ -12,17 +12,17 @@ default:
 
 # ── Build ───────────────────────────────────────────────────────────────────
 
-# Build the library
+# Build the whole workspace
 build:
-    cargo build
+    cargo build --workspace
 
 # Build in release mode
 build-release:
-    cargo build --release --all-targets
+    cargo build --workspace --release --all-targets
 
 # Build all examples
 build-examples:
-    cargo build --examples --features tokio,channel
+    cargo build -p netring --examples --features tokio,channel
 
 # ── Capabilities ────────────────────────────────────────────────────────────
 
@@ -31,16 +31,16 @@ setcap:
     #!/usr/bin/env bash
     set -euo pipefail
     # Build everything first
-    cargo test --features "integration-tests,tokio,channel" --no-run 2>&1 | tail -1
-    cargo build --examples --features tokio,channel 2>&1 | tail -1
+    cargo test -p netring --features "integration-tests,tokio,channel" --no-run 2>&1 | tail -1
+    cargo build -p netring --examples --features tokio,channel 2>&1 | tail -1
     # Collect all binary paths
     bins=()
     while IFS= read -r bin; do
         [ -f "$bin" ] && bins+=("$bin")
     done < <(
-        cargo test --features "integration-tests,tokio,channel" --no-run --message-format=json 2>/dev/null \
+        cargo test -p netring --features "integration-tests,tokio,channel" --no-run --message-format=json 2>/dev/null \
             | jq -r 'select(.executable != null) | .executable'
-        cargo build --examples --features tokio,channel --message-format=json 2>/dev/null \
+        cargo build -p netring --examples --features tokio,channel --message-format=json 2>/dev/null \
             | jq -r 'select(.executable != null) | .executable'
     )
     if [ ${#bins[@]} -eq 0 ]; then
@@ -67,27 +67,37 @@ check-afpacket:
 
 # ── Test ────────────────────────────────────────────────────────────────────
 
-# Run unit tests only (no privileges needed)
+# Run unit tests across the workspace (no privileges needed)
 test-unit:
-    cargo test
+    cargo test --workspace
 
 # Run ALL tests including integration (run `just setcap` first)
 test:
-    cargo test --features "integration-tests,tokio,channel" -- --test-threads=1
+    cargo test -p netring --features "integration-tests,tokio,channel" -- --test-threads=1
+    cargo test -p netring-flow
+
+# Run netring-flow tests only (cross-platform, no privileges)
+test-flow:
+    cargo test -p netring-flow
 
 # Run a specific test by name
 test-one name:
-    cargo test --features "integration-tests,tokio,channel" -- --test-threads=1 "{{name}}"
+    cargo test -p netring --features "integration-tests,tokio,channel" -- --test-threads=1 "{{name}}"
 
 # Run integration tests only
 test-integration:
-    cargo test --features "integration-tests,tokio,channel" --test '*' -- --test-threads=1
+    cargo test -p netring --features "integration-tests,tokio,channel" --test '*' -- --test-threads=1
+
+# Verify netring-flow has zero default deps (proves runtime-free claim)
+verify-flow-no-deps:
+    @cargo tree -p netring-flow --no-default-features
+    @echo "✓ netring-flow has no default deps"
 
 # ── Examples ────────────────────────────────────────────────────────────────
 
 # Run an example (run `just setcap` first for AF_PACKET access)
 example name *args:
-    cargo run --example "{{name}}" --features tokio,channel -- {{args}}
+    cargo run -p netring --example "{{name}}" --features tokio,channel -- {{args}}
 
 # Shorthand recipes
 capture *args:      (example "capture" args)
@@ -103,8 +113,8 @@ async-signal *args:    (example "async_signal" args)
 async-pipeline *args:  (example "async_pipeline" args)
 async-bridge *args:    (example "async_bridge" args)
 async-streamext *args: (example "async_streamext" args)
-async-xdp *args:       cargo run --example async_xdp --features tokio,af-xdp -- {{args}}
-async-metrics *args:   cargo run --example async_metrics --features tokio,metrics -- {{args}}
+async-xdp *args:       cargo run -p netring --example async_xdp --features tokio,af-xdp -- {{args}}
+async-metrics *args:   cargo run -p netring --example async_metrics --features tokio,metrics -- {{args}}
 channel *args:      (example "channel_consumer" args)
 ebpf *args:         (example "ebpf_filter" args)
 dpi *args:          (example "dpi" args)
@@ -112,42 +122,42 @@ bridge *args:       (example "bridge" args)
 
 # ── Lint & Format ───────────────────────────────────────────────────────────
 
-# Run clippy with all features
+# Run clippy on the workspace with all features
 clippy:
-    cargo clippy --all-targets --all-features -- --deny warnings
+    cargo clippy --workspace --all-targets --all-features -- --deny warnings
 
 # Check formatting
 fmt-check:
-    cargo fmt -- --check
+    cargo fmt --all -- --check
 
 # Format code
 fmt:
-    cargo fmt
+    cargo fmt --all
 
 # ── Docs ────────────────────────────────────────────────────────────────────
 
-# Build documentation
+# Build documentation for the whole workspace
 doc:
-    cargo doc --all-features --no-deps
+    cargo doc --workspace --all-features --no-deps
 
 # Build and open documentation in browser
 doc-open:
-    cargo doc --all-features --no-deps --open
+    cargo doc --workspace --all-features --no-deps --open
 
 # ── Bench ───────────────────────────────────────────────────────────────────
 
 # Run benchmarks
 bench:
-    cargo bench
+    cargo bench -p netring
 
 # Verify benchmarks compile
 bench-check:
-    cargo bench --no-run
+    cargo bench -p netring --no-run
 
 # ── CI ──────────────────────────────────────────────────────────────────────
 
-# Quick CI (no privileges): lint + unit tests + docs + bench compile
-ci: clippy test-unit doc bench-check
+# Quick CI (no privileges): lint + unit tests + docs + bench compile + flow no-deps check
+ci: clippy test-unit verify-flow-no-deps doc bench-check
     @echo "✓ CI checks passed"
 
 # Full CI: setcap + lint + ALL tests + docs + bench
@@ -162,10 +172,10 @@ clean:
 
 # Show project stats
 project-stats:
-    @echo "Source:    $(find src -name '*.rs' | wc -l) files"
-    @echo "Tests:     $(find tests -name '*.rs' | wc -l) files"
-    @echo "Examples:  $(find examples -name '*.rs' | wc -l) files"
-    @echo "Docs:      $(find docs -name '*.md' | wc -l) files"
-    @echo "Lines:     $(find src tests examples benches -name '*.rs' -exec cat {} + | wc -l) Rust"
-    @cargo test --features tokio,channel 2>&1 | grep "test result" \
+    @echo "Source:    $(find netring/src netring-flow/src -name '*.rs' | wc -l) files"
+    @echo "Tests:     $(find netring/tests -name '*.rs' 2>/dev/null | wc -l) files"
+    @echo "Examples:  $(find netring/examples -name '*.rs' 2>/dev/null | wc -l) files"
+    @echo "Docs:      $(find docs -name '*.md' 2>/dev/null | wc -l) files"
+    @echo "Lines:     $(find netring/src netring-flow/src netring/tests netring/examples netring/benches -name '*.rs' -exec cat {} + 2>/dev/null | wc -l) Rust"
+    @cargo test --workspace --features tokio,channel 2>&1 | grep "test result" \
         | awk '{sum += $$4} END {print "Tests:     " sum " passing"}'

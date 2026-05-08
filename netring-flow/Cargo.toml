@@ -1,0 +1,20 @@
+[package]
+name = "netring-flow"
+version = "0.1.0-alpha.0"
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+description = "Pluggable flow & session tracking for packet capture (cross-platform, runtime-free)"
+keywords = ["flow", "session", "tcp", "packet", "tracking"]
+categories = ["network-programming"]
+readme = "../README.md"
+documentation = "https://docs.rs/netring-flow"
+
+# Plan 00: zero deps. Plan 01 will add etherparse/ahash/smallvec/bitflags
+# behind feature flags.
+[dependencies]
+
+[features]
+default = []

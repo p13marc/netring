@@ -20,9 +20,9 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
       - name: cargo check
-        run: cargo check --all-features
+        run: cargo check --workspace --all-features
       - name: clippy
-        run: cargo clippy --all-targets --all-features -- --deny warnings
+        run: cargo clippy --workspace --all-targets --all-features -- --deny warnings
 
   fmt:
     name: Format
@@ -32,7 +32,7 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
         with:
           components: rustfmt
-      - run: cargo fmt -- --check
+      - run: cargo fmt --all -- --check
 
   doc:
     name: Documentation
@@ -42,7 +42,7 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
       - name: Build docs
-        run: cargo doc --all-features --no-deps
+        run: cargo doc --workspace --all-features --no-deps
         env:
           RUSTDOCFLAGS: "-D warnings"
 
@@ -59,8 +59,18 @@ jobs:
         with:
           toolchain: ${{ matrix.rust }}
       - uses: Swatinem/rust-cache@v2
-      - name: Unit tests
-        run: cargo test --features tokio,channel
+      - name: Unit tests (workspace)
+        run: cargo test --workspace --features tokio,channel
+      - name: Verify netring-flow has no default deps
+        run: |
+          deps=$(cargo tree -p netring-flow --no-default-features --depth 1 \
+                 | tail -n +2)
+          if [ -n "$deps" ]; then
+            echo "netring-flow pulled unexpected deps:"
+            echo "$deps"
+            exit 1
+          fi
+          echo "✓ netring-flow has no default deps"
 
   # ── Integration tests (need CAP_NET_RAW) ──────────────────────────────────
   test-integration:
@@ -72,11 +82,11 @@ jobs:
       - uses: Swatinem/rust-cache@v2
 
       - name: Build test binaries
-        run: cargo test --features "integration-tests,tokio,channel,af-xdp" --no-run
+        run: cargo test -p netring --features "integration-tests,tokio,channel,af-xdp" --no-run
 
       - name: Grant CAP_NET_RAW to test binaries
         run: |
-          for bin in $(cargo test --features "integration-tests,tokio,channel,af-xdp" \
+          for bin in $(cargo test -p netring --features "integration-tests,tokio,channel,af-xdp" \
               --no-run --message-format=json 2>/dev/null \
               | jq -r 'select(.executable != null) | .executable'); do
             if [ -f "$bin" ]; then
@@ -86,7 +96,7 @@ jobs:
           done
 
       - name: Run integration tests
-        run: cargo test --features "integration-tests,tokio,channel,af-xdp" -- --test-threads=1
+        run: cargo test -p netring --features "integration-tests,tokio,channel,af-xdp" -- --test-threads=1
 
   # ── Benchmarks compile ────────────────────────────────────────────────────
   bench:
@@ -96,7 +106,7 @@ jobs:
       - uses: actions/checkout@v5
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
-      - run: cargo bench --no-run
+      - run: cargo bench -p netring --no-run
 
   # ── Examples compile ──────────────────────────────────────────────────────
   examples:
@@ -106,7 +116,7 @@ jobs:
       - uses: actions/checkout@v5
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
-      - run: cargo build --examples --features tokio,channel
+      - run: cargo build -p netring --examples --features tokio,channel
 
   # ── License + advisory checks (cargo-deny) ───────────────────────────────
   deny:

@@ -1,5 +1,37 @@
 # Changelog
 
+## [Unreleased] / 0.7.0-alpha.0 — Workspace split
+
+Mechanical change with no new functionality. Sets up the foundation
+for the upcoming flow-tracking stack (plans 01–04 in `plans/`).
+
+### Changed
+
+- The repo is now a Cargo workspace with two members:
+  - `netring` (this crate) — capture + inject. Linux only, AF_PACKET
+    + AF_XDP. Unchanged user-facing API.
+  - `netring-flow` (new) — currently an empty skeleton. Will host
+    flow & session tracking (extractor trait, tracker, reassembler
+    hook). Cross-platform, runtime-free.
+- `Timestamp` moved to `netring-flow`. `netring::Timestamp` continues
+  to work via re-export. Deep paths like
+  `netring::packet::Timestamp` also still resolve.
+- `cargo` invocations: most CI / tooling now uses `--workspace` or
+  `-p netring` / `-p netring-flow`. The `justfile` and CI workflow
+  have been updated. End-user `cargo add netring` / `cargo build`
+  continue to work without changes.
+
+### Notes
+
+- No new public types or methods.
+- 91 `netring` unit tests + 6 `netring-flow` unit tests = same 97
+  unit-test count as 0.6.0 (Timestamp tests followed the type to
+  `netring-flow`).
+- `netring-flow` with `--no-default-features` has zero deps,
+  enforced by a CI check.
+- Subsequent `0.7.0-alpha.N` releases will add the flow API in
+  pieces. See `plans/INDEX.md`.
+
 ## 0.6.0 — Async first
 
 netring's primary API is now async/tokio. The sync types are still

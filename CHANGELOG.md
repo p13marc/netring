@@ -1,195 +1,162 @@
 # Changelog
 
-## [Unreleased] / 0.7.0-alpha.3 — Reassembler hooks (`netring-flow` 0.1.0-alpha.3)
+## 0.7.0 — Flow & session tracking (workspace split)
 
-Plan 03 from `plans/INDEX.md` complete. TCP byte streams now flow
-through user-pluggable reassemblers, with backpressure all the way
-to the kernel ring on the async path.
+A major release introducing pluggable flow & session tracking,
+delivered across two crates in a Cargo workspace:
 
-### Added (in `netring-flow`)
+- **`netring` 0.7.0** — the existing AF_PACKET / AF_XDP capture +
+  inject crate. Linux only.
+- **`netring-flow` 0.1.0** (new) — pluggable flow & session tracking,
+  cross-platform and **runtime-free** (no tokio, no async deps,
+  no Linux-specific code). Pair with any source of `&[u8]` frames:
+  pcap, tun-tap, replay, embedded.
 
-- `Reassembler` trait — sync; `segment(seq, payload)`, `fin()`, `rst()`.
-- `ReassemblerFactory<K>` trait — gopacket-style factory.
-- `BufferedReassembler` + `BufferedReassemblerFactory` — in-order
-  accumulator with OOO drop counter.
-- `FlowTracker::track_with_payload<F>(view, F)` — sync callback that
-  fires per (key, side, seq, payload) for TCP packets with a
-  non-empty payload, before any events are returned.
-- `FlowTracker::extractor()` — borrow the inner extractor.
-- `FlowDriver<E, F, S>` — sync wrapper that bundles a tracker with
-  a reassembler factory; manages per-(flow, side) reassemblers and
-  cleans them up on `Ended`.
-- `FlowSide` is now `Hash` (used as part of reassembler-instance keys).
-- New `reassembler` feature (default-on) — pure std, no extra deps.
-- `pcap_buffered_reassembly` example: sync TCP reassembly over a
-  pcap file using `FlowDriver`.
+The flow stack went through four implementation phases (alpha.0
+through alpha.3 — see `plans/INDEX.md` and intermediate tags). What
+shipped:
 
-### Added (in `netring`, gated by `flow + tokio`)
+### Workspace + skeleton (was alpha.0)
 
-- `AsyncReassembler` trait — `fn segment(&mut self, seq: u32, payload: Bytes)
-  -> Pin<Box<dyn Future<Output = ()> + Send + 'static>>`. Methods
-  return `'static` futures so the stream can store them; implementors
-  clone or move state into the future.
-- `AsyncReassemblerFactory<K>` trait.
-- `ChannelReassembler` — built-in async impl pushing each segment
-  into a `tokio::sync::mpsc::Sender<Bytes>`.
-- `channel_factory<K, F>(F) -> ChannelFactory<K, F>` — convenience
-  wrapping a per-(flow, side) `Sender<Bytes>` factory.
-- `FlowStream::with_async_reassembler(factory)` — returns
-  `FlowStream<S, E, U, AsyncReassemblerSlot<K, F>>`.
-- Separate `Stream` impls for `NoReassembler` and
-  `AsyncReassemblerSlot` paths; the async impl awaits each
-  reassembler future inline before yielding the corresponding event,
-  with `pending_payloads` queued during sync `track_with_payload`.
-- New deps under `flow + tokio`: `bytes`, `ahash`.
-- `async_flow_channel` example: spawn a task per (flow, side) via
-  `channel_factory`, demonstrate the full backpressure path.
+- Repository is now a Cargo workspace. `netring` and `netring-flow`
+  are members; `Cargo.lock` lives at the workspace root.
+- `Timestamp` moved from `netring` to `netring-flow`.
+  `netring::Timestamp` continues to work via re-export.
+- `justfile` recipes and CI workflow updated for the workspace.
+- End-user surface (`cargo add netring`, `cargo build`) unchanged.
 
-### Tests
+### Flow extractor + built-ins (was alpha.1)
 
-- 13 new tests (8 reassembler + 2 driver + 3 async_reassembler).
-- 202 unit + doctests passing across the workspace (was 189).
+In `netring-flow`:
 
-### Notes
+- **`PacketView<'a>`** — frame + timestamp; the abstract input to
+  every extractor.
+- **`FlowExtractor` trait** — implement to define what a flow is in
+  your domain. `Send + Sync + 'static`, returns `Extracted<Key>`.
+- **`Extracted<K>`** — flow descriptor: key, orientation
+  (Forward/Reverse), `Option<L4Proto>`, `Option<TcpInfo>`.
+- **`L4Proto`**, **`Orientation`**, **`TcpInfo`**, **`TcpFlags`**.
+- **Built-in extractors**: `FiveTuple` (default `bidirectional()`),
+  `IpPair`, `MacPair`.
+- **Decap combinators**: `StripVlan`, `StripMpls`, `InnerVxlan`
+  (default UDP/4789), `InnerGtpU` (default UDP/2152). Compose freely.
+- New `extractors` feature (default-on), pulling `etherparse`.
 
-- Plan 04 (FLOW_GUIDE.md, README updates, coordinated 0.7.0/0.1.0
-  publish) is next.
+In `netring`:
 
-## 0.7.0-alpha.2 — Flow tracker + AsyncCapture::flow_stream (`netring-flow` 0.1.0-alpha.2)
+- **`Packet::view() -> netring_flow::PacketView<'_>`** — zero-cost
+  bridge from the existing capture API to the flow types.
+- **`netring::flow::*`** — all flow types re-exported under `parse`.
+- **`parse`** feature now activates `netring-flow/extractors`.
 
-Plan 02 from `plans/INDEX.md` complete. The headline async API is
-now live:
+### Flow tracker + AsyncCapture::flow_stream (was alpha.2)
 
-```rust
-let mut stream = cap.flow_stream(FiveTuple::bidirectional());
-while let Some(evt) = stream.next().await { /* ... */ }
-```
+In `netring-flow`:
 
-### Added (in `netring-flow`)
-
-- `FlowTracker<E, S>` — bidirectional flow tracker generic over an
-  extractor and per-flow user state (defaults to `()`).
-  - `new`, `with_config` (when `S: Default`)
-  - `with_state`, `with_config_and_state` (any `S`)
-  - `track(view) -> FlowEvents<K>`
-  - `sweep(now) -> Vec<FlowEvent<K>>`
-  - `get`, `get_mut`, `flows`, `flow_count`, `stats`, `config`,
-    `set_config`, `into_extractor`
-- `FlowEntry<S>`, `FlowStats`, `FlowState` (lifecycle).
-- `FlowEvent<K>` — Started / Packet / Established / StateChange / Ended.
-- `FlowSide` (Initiator / Responder), `EndReason`.
-- `HistoryString` — Zeek-style `ShAdaFf` history, capped at 16 chars.
-- TCP state machine: `Active → SynSent → SynReceived → Established →
-  FinWait → ClosingTcp → Closed` (or `Reset` on RST).
-- LRU eviction on `max_flows` overflow (via `lru` crate).
-- Per-protocol idle timeouts (TCP 5min, UDP 60s, other 30s — Suricata defaults).
+- **`FlowTracker<E, S>`** — bidirectional flow tracker generic over
+  an extractor and per-flow user state (defaults to `()`).
+  Constructors: `new`, `with_config` (for `S: Default`), `with_state`,
+  `with_config_and_state` (any `S`).
+- **TCP state machine**: `Active → SynSent → SynReceived → Established
+  → FinWait → ClosingTcp → Closed` (or `Reset` on RST).
+- **Per-protocol idle timeouts** (Suricata defaults: TCP 5min, UDP
+  60s, other 30s) with `FlowTracker::sweep(now)`.
+- **LRU eviction** on `max_flows` overflow (default 100k) via the
+  `lru` crate.
+- **`FlowEvent<K>`**: `Started`, `Packet`, `Established`, `StateChange`,
+  `Ended` (with reason, stats, history).
+- **`FlowSide`** (Initiator/Responder), **`EndReason`**, **`FlowStats`**,
+  **`HistoryString`** (Zeek-style `ShAdaFf`, capped at 16 chars).
 - New `tracker` feature (default-on); pulls `ahash`, `smallvec`,
   `arrayvec`, `lru`.
-- `pcap_flow_summary` example: sync flow tracking over a pcap file.
 
-### Added (in `netring`)
+In `netring`:
 
-- `FlowStream<S, E, U>` — `futures_core::Stream<Item = Result<FlowEvent<K>, Error>>`.
-  - Driven from `AsyncCapture` via `AsyncFd::poll_read_ready_mut`.
-  - `.with_state(init)` to attach per-flow user state.
-  - `.with_config(config)` for non-default tracker config.
-  - `.tracker()` / `.tracker_mut()` for stats / introspection.
-  - Periodic sweep ticked from a `tokio::time::Interval`.
-- `AsyncCapture::flow_stream(extractor) -> FlowStream<...>` —
-  consumes the capture; the headline tokio API.
-- New `flow` feature on `netring` — pulls `parse` +
-  `netring-flow/tracker`.
-- 3 new async examples:
-  - `async_flow_summary` — Started/Established/Ended events.
-  - `async_flow_filter` — protocol + port filter via inline match.
-  - `async_flow_history` — Zeek-style `conn.log` output.
+- **`FlowStream<S, E, U, R>`** — `futures_core::Stream<Item =
+  Result<FlowEvent<K>, Error>>`. Driven from `AsyncCapture` via
+  `AsyncFd::poll_read_ready_mut`.
+- **`AsyncCapture::flow_stream(extractor)`** — the headline tokio
+  API; consumes the capture and returns a `FlowStream`.
+- **`FlowStream::with_state(init)`** — attach per-flow user state.
+- **`FlowStream::with_config(config)`** — non-default tracker config.
+- **`FlowStream::tracker()` / `tracker_mut()`** — stats / introspection
+  / poking user state mid-stream.
+- New `flow` feature on `netring`; pulls `parse` + `netring-flow/tracker`.
+
+### Reassembler hooks (was alpha.3)
+
+In `netring-flow` (sync, runtime-free):
+
+- **`Reassembler` trait** — `segment(seq, payload)`, `fin()`, `rst()`.
+- **`ReassemblerFactory<K>`** trait (gopacket-style).
+- **`BufferedReassembler`** + **`BufferedReassemblerFactory`** —
+  in-order accumulator with OOO drop counter.
+- **`FlowTracker::track_with_payload<F>(view, F)`** — sync per-segment
+  callback, fires before any events are returned.
+- **`FlowTracker::extractor()`** accessor.
+- **`FlowDriver<E, F, S>`** — sync wrapper bundling a tracker with a
+  reassembler factory; manages per-(flow, side) reassemblers and
+  cleans them up on `Ended`.
+- **`FlowSide`** is now `Hash` (used as part of reassembler-instance keys).
+- New `reassembler` feature (default-on, pure std).
+
+In `netring` (gated by `flow + tokio`):
+
+- **`AsyncReassembler` trait** — methods return
+  `Pin<Box<dyn Future<Output = ()> + Send + 'static>>`.
+- **`AsyncReassemblerFactory<K>`** trait.
+- **`ChannelReassembler`** + **`channel_factory<K, F>(F)`** —
+  spawn-task-per-flow pattern with `mpsc::Sender<Bytes>` and
+  end-to-end backpressure.
+- **`FlowStream::with_async_reassembler(factory)`** — type-shifts
+  to `FlowStream<S, E, U, AsyncReassemblerSlot<K, F>>`.
+- Async `Stream` impl awaits each reassembler future inline before
+  yielding the next event — slow consumers backpressure all the way
+  to the kernel ring.
+- New deps under `flow + tokio`: `bytes`, `ahash`.
+
+### Documentation (this release)
+
+- **`netring-flow/docs/FLOW_GUIDE.md`** — comprehensive cookbook
+  covering quick starts (sync + async), built-in extractors,
+  encapsulation combinators, custom extractors (3 worked examples),
+  per-flow user state, TCP events and history strings, sync + async
+  reassembly, backpressure, idle timeouts, performance notes,
+  source-agnosticism, `protolens` bridging.
+- **`netring-flow/README.md`** — crates.io card.
+- Workspace `README.md` — new "Flow & session tracking" section
+  near the top.
+
+### Examples added
+
+In `netring-flow`:
+- `pcap_flow_keys.rs` — extract 5-tuples from a pcap.
+- `pcap_flow_summary.rs` — sync flow tracking over pcap.
+- `pcap_buffered_reassembly.rs` — sync TCP reassembly over pcap
+  via `FlowDriver`.
+
+In `netring`:
+- `async_flow_keys.rs` — built-in + custom extractor on live capture.
+- `async_flow_summary.rs` — Started/Established/Ended events.
+- `async_flow_filter.rs` — protocol + port filter.
+- `async_flow_history.rs` — Zeek-style `conn.log` output.
+- `async_flow_channel.rs` — `channel_factory` + spawned per-flow tasks.
 
 ### Tests
 
-- 25 new tests in `netring-flow` (TCP 3WHS, RST, idle timeout, LRU,
-  bidirectional reorientation, history, user state).
-- 189 unit + doctests passing across the workspace.
+- 202 unit + doctests passing across the workspace (was 97 in 0.6.0).
+- New: 25 tracker tests, 13 reassembler / driver tests, 25 extractor
+  tests, parser, history, TCP state machine.
 
-### Notes
+### Migration from 0.6.0
 
-- Plan 03 (sync `Reassembler` + async `AsyncReassembler` +
-  `channel_factory`) is next.
-
-## 0.7.0-alpha.1 — Flow extractor + built-ins (`netring-flow` 0.1.0-alpha.1)
-
-First piece of the flow stack lands in `netring-flow`. Plan 01 from
-`plans/INDEX.md` complete.
-
-### Added (in `netring-flow`)
-
-- `PacketView<'a>` — frame + timestamp pair fed to extractors.
-  Source-agnostic.
-- `FlowExtractor` trait — implement to teach the rest of the flow
-  stack what counts as a flow in your domain.
-- `Extracted<K>` — descriptor returned by extractors: `key`,
-  `orientation` (Forward/Reverse), `l4`, `tcp`.
-- `L4Proto`, `Orientation`, `TcpInfo`, `TcpFlags` — supporting types.
-- Built-in extractors:
-  - `FiveTuple` — protocol + (src, dst). Bidirectional by default
-    (default impl); use `FiveTuple::directional()` to opt out.
-  - `IpPair` — IP address pair only; useful for ICMP / fragmented.
-  - `MacPair` — L2 MAC pair; useful for ARP / BPDU / LLDP.
-- Decap combinators (compose freely):
-  - `StripVlan<E>` — VLAN-aware (etherparse handles the heavy lifting)
-  - `StripMpls<E>` — MPLS label-stack stripper (we parse it inline)
-  - `InnerVxlan<E>` — VXLAN decap (default UDP port 4789)
-  - `InnerGtpU<E>` — GTP-U decap (default UDP port 2152)
-- `extractors` feature (default-on) — pulls `etherparse`.
-- 43 unit tests + 1 pcap-based example (`pcap_flow_keys`).
-
-### Added (in `netring`)
-
-- `Packet::view() -> netring_flow::PacketView<'_>` — zero-cost bridge
-  between the existing capture API and the source-agnostic flow types.
-- `netring::PacketView` — re-export of `netring_flow::PacketView`.
-- `netring::flow::*` — extractor types re-exported when `parse` is on.
-- `parse` feature now activates `netring-flow/extractors`.
-- New example: `async_flow_keys` (under `tokio + parse`) demonstrates
-  using built-in + custom extractors against a live capture.
-
-### Notes
-
-- The full `flow` feature (FlowTracker, AsyncCapture::flow_stream)
-  arrives in plan 02. This release is just the extractor surface.
-- `netring-flow` with `--no-default-features` still pulls only
-  `bitflags` (one tiny dep). The "runtime-free" claim holds.
-
-## 0.7.0-alpha.0 — Workspace split
-
-Mechanical change with no new functionality. Sets up the foundation
-for the upcoming flow-tracking stack (plans 01–04 in `plans/`).
-
-### Changed
-
-- The repo is now a Cargo workspace with two members:
-  - `netring` (this crate) — capture + inject. Linux only, AF_PACKET
-    + AF_XDP. Unchanged user-facing API.
-  - `netring-flow` (new) — currently an empty skeleton. Will host
-    flow & session tracking (extractor trait, tracker, reassembler
-    hook). Cross-platform, runtime-free.
-- `Timestamp` moved to `netring-flow`. `netring::Timestamp` continues
-  to work via re-export. Deep paths like
+- `netring::Timestamp` keeps working (re-export). Deep paths like
   `netring::packet::Timestamp` also still resolve.
-- `cargo` invocations: most CI / tooling now uses `--workspace` or
-  `-p netring` / `-p netring-flow`. The `justfile` and CI workflow
-  have been updated. End-user `cargo add netring` / `cargo build`
-  continue to work without changes.
-
-### Notes
-
-- No new public types or methods.
-- 91 `netring` unit tests + 6 `netring-flow` unit tests = same 97
-  unit-test count as 0.6.0 (Timestamp tests followed the type to
-  `netring-flow`).
-- `netring-flow` with `--no-default-features` has zero deps,
-  enforced by a CI check.
-- Subsequent `0.7.0-alpha.N` releases will add the flow API in
-  pieces. See `plans/INDEX.md`.
+- No public types or methods removed from `netring`.
+- New optional `flow` feature opts into the flow API; existing
+  `netring` users see no change unless they enable it.
+- Workspace structure: if you depend on netring as a path dependency,
+  update the path to `netring/netring/`.
 
 ## 0.6.0 — Async first
 

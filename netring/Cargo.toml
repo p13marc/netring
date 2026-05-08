@@ -1,6 +1,6 @@
 [package]
 name = "netring"
-version = "0.7.0-alpha.3"
+version = "0.7.0"
 edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
@@ -15,7 +15,7 @@ homepage = "https://github.com/p13marc/netring"
 exclude = ["CLAUDE.md", "SPEC.md"]
 
 [dependencies]
-netring-flow = { version = "0.1.0-alpha.3", path = "../netring-flow", default-features = false }
+netring-flow = { version = "0.1.0", path = "../netring-flow", default-features = false }
 
 libc = { workspace = true }
 nix = { workspace = true }

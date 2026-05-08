@@ -1,6 +1,6 @@
 [package]
 name = "netring-flow"
-version = "0.1.0-alpha.3"
+version = "0.1.0"
 edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
@@ -9,7 +9,7 @@ authors.workspace = true
 description = "Pluggable flow & session tracking for packet capture (cross-platform, runtime-free)"
 keywords = ["flow", "session", "tcp", "packet", "tracking"]
 categories = ["network-programming"]
-readme = "../README.md"
+readme = "README.md"
 documentation = "https://docs.rs/netring-flow"
 
 [dependencies]

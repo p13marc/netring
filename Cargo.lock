@@ -791,6 +791,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "netring-flow-pcap"
+version = "0.1.0"
+dependencies = [
+ "netring-flow",
+ "pcap-file",
+ "thiserror 2.0.18",
+]
+
+[[package]]
 name = "nix"
 version = "0.31.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"

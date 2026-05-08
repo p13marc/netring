@@ -115,6 +115,22 @@ In `netring` (gated by `flow + tokio`):
   to the kernel ring.
 - New deps under `flow + tokio`: `bytes`, `ahash`.
 
+### `netring-flow-pcap` companion crate (plan 20)
+
+A new workspace member that wraps `pcap-file` and exposes pcap
+files as iterators of `PacketView`s or `FlowEvent`s. Removes ~10
+lines of boilerplate from every offline-analysis program.
+
+- `PcapFlowSource::open(path)` — open a pcap on disk.
+- `PcapFlowSource::from_reader(R)` — wrap any `Read` (testing).
+- `.views()` — `Iterator<Item = Result<OwnedPacketView, Error>>`
+- `.with_extractor(extractor)` — `Iterator<Item = Result<FlowEvent<K>, Error>>`,
+  drives an internal `FlowTracker` and runs a final far-future
+  sweep on pcap exhaustion to flush unfinished flows as
+  `Ended { IdleTimeout }`.
+- 3 integration tests, 2 doctests, 1 example (`pcap_summary.rs`).
+- README documents the relationship to other capture sources.
+
 ### Test infrastructure (plan 12)
 
 - **3 pcap fixtures** under `netring-flow/tests/data/`:

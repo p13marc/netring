@@ -2,6 +2,7 @@
 members = [
     "netring",
     "netring-flow",
+    "netring-flow-pcap",
 ]
 resolver = "2"
 

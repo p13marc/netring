@@ -61,7 +61,7 @@ Each crate is independently versioned, lives in the workspace.
 
 | Plan | Crate | Effort |
 |------|-------|--------|
-| [`20-flow-pcap.md`](./20-flow-pcap.md) | `netring-flow-pcap` — pcap source adapter | 1 day |
+| [`20-flow-pcap.md`](./20-flow-pcap.md) | `netring-flow-pcap` — pcap source adapter | ✅ done |
 | [`21-flow-protolens.md`](./21-flow-protolens.md) | `netring-flow-protolens` — productized protolens bridge | 2 days |
 | [`22-flow-http.md`](./22-flow-http.md) | `netring-flow-http` — `httparse`-based HTTP/1.x | 2 days |
 | [`23-flow-tls.md`](./23-flow-tls.md) | `netring-flow-tls` — `tls-parser` + optional JA3/JA4 | 2 days |

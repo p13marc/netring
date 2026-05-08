@@ -11,6 +11,8 @@ pub mod tokio_xdp;
 
 #[cfg(all(feature = "tokio", feature = "flow"))]
 pub mod async_reassembler;
+#[cfg(all(feature = "tokio", feature = "flow"))]
+pub mod conversation;
 #[cfg(feature = "tokio")]
 pub mod dedup_stream;
 #[cfg(all(feature = "tokio", feature = "flow"))]

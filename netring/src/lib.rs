@@ -97,4 +97,6 @@ pub mod flow {
 }
 
 #[cfg(all(feature = "tokio", feature = "flow"))]
+pub use async_adapters::conversation::{Conversation, ConversationChunk, ConversationStream};
+#[cfg(all(feature = "tokio", feature = "flow"))]
 pub use async_adapters::flow_stream::{AsyncReassemblerSlot, FlowStream, NoReassembler};

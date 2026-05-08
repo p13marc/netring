@@ -99,6 +99,10 @@ required-features = ["tokio", "flow"]
 name = "async_lo_dedup"
 required-features = ["tokio"]
 
+[[example]]
+name = "async_flow_conversations"
+required-features = ["tokio", "flow"]
+
 [[bench]]
 name = "throughput"
 harness = false

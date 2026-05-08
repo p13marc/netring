@@ -115,6 +115,29 @@ In `netring` (gated by `flow + tokio`):
   to the kernel ring.
 - New deps under `flow + tokio`: `bytes`, `ahash`.
 
+### `Conversation<K>` aggregate (plan 30)
+
+A higher-level abstraction in `netring` (gated by `tokio + flow`)
+that bundles a flow's two byte streams into a single async iterator.
+Sugar over `with_async_reassembler(channel_factory(...))` for the
+common "give me all the bytes from this flow" case.
+
+- `Conversation<K>` — owns an mpsc receiver + shared end-reason
+  cell. `next_chunk().await` returns `Initiator(Bytes)` /
+  `Responder(Bytes)` / `Closed { reason }` / `None`.
+- `ConversationStream<S, E>` — `Stream<Item = Result<Conversation<K>>>`,
+  yields one conversation per flow.
+- `FlowStream::into_conversations()` — entry point; consumes
+  `FlowStream<S, E, (), NoReassembler>`.
+- `FlowStream::into_conversations_with_capacity(N)` — explicit
+  per-conversation channel capacity (default 64).
+- `AsyncCapture::flow_conversations(extractor)` — shortcut.
+- Implementation uses `Weak<ConvShared>` in the factory's lookup
+  map so per-flow state is reclaimed automatically when both
+  reassemblers drop — no leak.
+- 5 unit tests + 1 example (`async_flow_conversations.rs`) + 1
+  doctest.
+
 ### `netring-flow-http` companion crate (plan 22)
 
 A `ReassemblerFactory` that bridges `httparse`'s zero-copy HTTP/1.x

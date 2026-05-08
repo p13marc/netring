@@ -1,6 +1,6 @@
 # plans/ — index
 
-This directory holds two kinds of files:
+Two kinds of files:
 
 - **Design docs** (`*-design.md`) — architecture, rationale, prior-art
   surveys, decision matrices. The source of truth for *why*.
@@ -14,87 +14,145 @@ detail; design wins for "why is this even shaped this way."
 
 ---
 
-## Files
+## Design docs
 
-| File | Kind | Status |
-|------|------|--------|
-| [`flow-session-tracking-design.md`](./flow-session-tracking-design.md) | Design — pluggable extractor + tracker + reassembler hook | Approved |
-| [`high-level-features-design.md`](./high-level-features-design.md) | Design — loopback dedup (Part 2 superseded; see flow design) | Approved |
-| [`upstream-tracking.md`](./upstream-tracking.md) | Tracking doc — Rust upstream features (gen blocks, Polonius, etc.) we're waiting on | Live |
-| [`00-workspace-split.md`](./00-workspace-split.md) | Plan — convert repo to workspace, create `netring-flow` skeleton | Done (`0.7.0-alpha.0`) |
-| [`01-flow-extractor.md`](./01-flow-extractor.md) | Plan — `FlowExtractor` trait + built-ins + decap combinators | Done (`0.7.0-alpha.1` / `0.1.0-alpha.1`) |
-| [`02-flow-tracker.md`](./02-flow-tracker.md) | Plan — `FlowTracker<E, S>` + TCP state + `AsyncCapture::flow_stream` | Done (`0.7.0-alpha.2` / `0.1.0-alpha.2`) |
-| [`03-flow-reassembler.md`](./03-flow-reassembler.md) | Plan — sync `Reassembler` + `AsyncReassembler` + `channel_factory` | Done (`0.7.0-alpha.3` / `0.1.0-alpha.3`) |
-| [`04-flow-release.md`](./04-flow-release.md) | Plan — docs, CHANGELOG, coordinated 0.7.0 / 0.1.0 release | **Prep complete; awaiting publish confirmation** |
-| [`10-dedup.md`](./10-dedup.md) | Plan — `Dedup` primitive + `dedup_stream()` adapter (parallel track) | Not started |
+| File | Status |
+|------|--------|
+| [`flow-session-tracking-design.md`](./flow-session-tracking-design.md) | Approved |
+| [`high-level-features-design.md`](./high-level-features-design.md) | Approved |
+| [`upstream-tracking.md`](./upstream-tracking.md) | Live |
+
+## Numbering scheme
+
+| Range | Theme |
+|-------|-------|
+| 00–09 | Workspace + flow stack core |
+| 10–19 | Capture-side features (dedup, etc.) |
+| 20–29 | Companion crates (`netring-flow-*` for protocol bridges + sources) |
+| 30–39 | Higher-level abstractions (Conversation, SessionParser) |
+| 40–49 | Observability + performance |
+| 50–59 | Deferred-feature catchup |
+| 60–69 | Tooling (CLIs) |
 
 ---
 
-## Dependency graph
+## Tier 0 — Done (released or release-prep)
+
+| Plan | Crate version | Status |
+|------|---------------|--------|
+| [`00-workspace-split.md`](./00-workspace-split.md) | `0.7.0-alpha.0` / `0.1.0-alpha.0` | ✅ |
+| [`01-flow-extractor.md`](./01-flow-extractor.md) | `0.7.0-alpha.1` / `0.1.0-alpha.1` | ✅ |
+| [`02-flow-tracker.md`](./02-flow-tracker.md) | `0.7.0-alpha.2` / `0.1.0-alpha.2` | ✅ |
+| [`03-flow-reassembler.md`](./03-flow-reassembler.md) | `0.7.0-alpha.3` / `0.1.0-alpha.3` | ✅ |
+| [`04-flow-release.md`](./04-flow-release.md) | `0.7.0` / `0.1.0` (manifests bumped) | ⏸ awaiting publish |
+
+## Tier 1 — Foundations (target 0.7.x or 0.8.0)
+
+Short, high-leverage. Each unblocks downstream work.
+
+| Plan | Goal | Effort |
+|------|------|--------|
+| [`10-dedup.md`](./10-dedup.md) | `Dedup` primitive + `dedup_stream()` for `lo` | 1 day |
+| [`11-benchmarks.md`](./11-benchmarks.md) | `criterion` benches + perf baseline numbers in README | 1 day |
+| [`12-test-infra.md`](./12-test-infra.md) | pcap fixtures, `proptest`, `cargo-fuzz` harness | 1.5 days |
+
+## Tier 2 — Companion crates (target 0.8.0)
+
+Each crate is independently versioned, lives in the workspace.
+
+| Plan | Crate | Effort |
+|------|-------|--------|
+| [`20-flow-pcap.md`](./20-flow-pcap.md) | `netring-flow-pcap` — pcap source adapter | 1 day |
+| [`21-flow-protolens.md`](./21-flow-protolens.md) | `netring-flow-protolens` — productized protolens bridge | 2 days |
+| [`22-flow-http.md`](./22-flow-http.md) | `netring-flow-http` — `httparse`-based HTTP/1.x | 2 days |
+| [`23-flow-tls.md`](./23-flow-tls.md) | `netring-flow-tls` — `tls-parser` + optional JA3/JA4 | 2 days |
+| [`24-flow-dns.md`](./24-flow-dns.md) | `netring-flow-dns` — query/response correlation | 1.5 days |
+
+## Tier 3 — Higher-level abstractions (target 0.9.0)
+
+| Plan | Goal | Effort |
+|------|------|--------|
+| [`30-conversation.md`](./30-conversation.md) | `Conversation<E>` aggregate (init+resp byte streams as one Stream) | 1 day |
+| [`31-session-parser.md`](./31-session-parser.md) | `SessionParser<P>` trait + `session_stream()` — protocol-agnostic L7 message stream | 5 days |
+
+## Tier 4 — Observability + performance (target 0.9.0/1.0.0)
+
+| Plan | Goal | Effort |
+|------|------|--------|
+| [`32-flow-export.md`](./32-flow-export.md) | NetFlow/IPFIX export via `netgauze-flow-pkt` | 2 days |
+| [`40-observability.md`](./40-observability.md) | `metrics` + `tracing` integration | 1.5 days |
+| [`41-perf-foundations.md`](./41-perf-foundations.md) | Zero-copy reassembly (`BytesMut` pool) + LRU hot-cache | 3 days |
+
+## Tier 5 — Deferred catchup + tooling
+
+| Plan | Goal | Effort |
+|------|------|--------|
+| [`50-deferred-catchup.md`](./50-deferred-catchup.md) | `InnerGre`, `FlowLabel`, `AutoDetectEncap`, manual sweep, async state init, IPv6 frags, `broadcast` helper | 2 days |
+| [`60-cli-tools.md`](./60-cli-tools.md) | `flow-replay`, `flow-summary` CLI binaries | 1.5 days |
+
+---
+
+## Suggested release cadence
+
+| Version | Includes | When |
+|---------|----------|------|
+| `0.7.0` | Tier 0 (current prep) | now |
+| `0.7.1` | Plan 10 (dedup), Plan 50 quick wins | +1 week |
+| `0.8.0` | Tier 1 + Tier 2 | +4–6 weeks |
+| `0.9.0` | Tier 3 + Tier 4 selected | +3 months |
+| `1.0.0` | Plan 31 + perf + IPFIX done; API frozen | when ready |
+
+---
+
+## Dependency graph for Tier 1+2
 
 ```
-                    ┌─────────────────────────┐
-                    │ 00-workspace-split      │  Phase 0 — must come first
-                    └────────────┬────────────┘
-                                 │
-                ┌────────────────┴────────────────┐
-                │                                 │
-                ▼                                 ▼
-   ┌────────────────────────┐         ┌────────────────────────┐
-   │ 01-flow-extractor      │         │ 10-dedup               │  parallel
-   │ (FlowExtractor + built-ins)│     │ (independent of flow)  │
-   └────────────┬───────────┘         └──────────┬─────────────┘
-                │                                │
-                ▼                                │
-   ┌────────────────────────┐                   │
-   │ 02-flow-tracker        │                   │
-   │ (FlowTracker + Stream) │                   │
-   └────────────┬───────────┘                   │
-                │                                │
-                ▼                                │
-   ┌────────────────────────┐                   │
-   │ 03-flow-reassembler    │                   │
-   │ (sync + async hooks)   │                   │
-   └────────────┬───────────┘                   │
-                │                                │
-                └──────────────┬─────────────────┘
-                               ▼
+                ┌─────────────────────────┐
+                │ 0.7.0 published          │
+                └────────────┬─────────────┘
+                             │
+        ┌────────────────────┼────────────────────────────┐
+        ▼                    ▼                            ▼
+  ┌──────────────┐    ┌──────────────┐           ┌──────────────────┐
+  │ 10-dedup     │    │ 11-benchmarks│           │ 12-test-infra    │
+  │              │    │ (criterion + │           │ (pcap fixtures + │
+  │              │    │  baseline)   │           │  proptest + fuzz)│
+  └──────────────┘    └──────┬───────┘           └────────┬─────────┘
+                             │                            │
+                             │  ┌─────────────────────────┘
+                             │  │  (pcap fixtures unlock the L7 bridges'
+                             ▼  ▼   integration tests)
                 ┌────────────────────────────┐
-                │ 04-flow-release            │  Phase 4 — final
-                │ (docs, CHANGELOG, publish) │
+                │  Tier 2 — companion crates  │
+                │  (parallel; pick any two)   │
+                ├────────────────────────────┤
+                │ 20-flow-pcap                │
+                │ 21-flow-protolens           │
+                │ 22-flow-http                │
+                │ 23-flow-tls                 │
+                │ 24-flow-dns                 │
                 └────────────────────────────┘
 ```
 
-Sequencing rules:
+Tier 3+4 plans depend on at least one Tier 2 crate (so we have a real
+parser to test SessionParser against).
 
-- **Phase 00 blocks everything else.** No new code until the workspace
-  is in place.
-- **`10-dedup` is parallel** to flow phases. Could ship in 0.7.0
-  alongside the flow stack, or earlier as 0.6.x.
-- **Flow phases are linear** (01 → 02 → 03), each depends on types
-  from the previous.
-- **Phase 04 publishes both** `netring-flow` 0.1.0 and `netring`
-  0.7.0 together.
+## Sequencing principles
 
----
-
-## Effort summary
-
-| Phase | LOC (rough) | Effort | Notes |
-|-------|------------:|:------:|-------|
-| 00 — workspace split | 0 (movement only) | 0.5 day | Mechanical; CI matrix shake-out is the main work |
-| 01 — extractor + built-ins | ~600 | 2 days | Decap combinators are the meatiest |
-| 02 — tracker + async stream | ~700 | 2.5 days | TCP state machine + `FlowStream` builder |
-| 03 — reassembler hooks | ~450 | 1.5 days | Two parallel surfaces, `channel_factory` helper |
-| 04 — release | ~50 + 2 docs | 1 day | `FLOW_GUIDE.md`, `CHANGELOG.md`, version bumps |
-| 10 — dedup | ~250 | 1 day | Independent; can drop in any time |
-| **Total** | ~2 050 | ~8.5 days | |
-
-(Numbers from the design doc; +/-30%.)
+- **Companion crates are siblings**, not children. Each can be
+  worked on independently once Tier 1 is done. Pick highest-leverage
+  first based on user demand.
+- **Performance work needs benchmarks first.** Plan 11 must land
+  before Plan 41; we don't optimize without numbers.
+- **Test infra unlocks confidence.** Plan 12's fuzz harness will
+  catch parser bugs in Tier 2 before users do.
+- **The big abstraction (Plan 31) waits for proof.** SessionParser
+  is the pre-1.0 redesign. We need ≥2 Tier-2 parsers in production
+  before locking the trait shape.
 
 ---
 
-## Conventions for plan files
+## Conventions
 
 Each `NN-*.md` plan has these sections:
 
@@ -110,21 +168,7 @@ Each `NN-*.md` plan has these sections:
 10. **Risks** — known unknowns specific to this phase
 11. **Effort** — LOC and time estimate
 
-Plan files are living documents: update Status + check off
-implementation steps as you go. When a phase ships, the plan stays
-in `plans/` as a record of what was done — don't delete.
-
-When a plan turns out to be wrong (design assumption breaks during
-implementation), update the plan first, then fix code. The plan
-should track reality.
-
----
-
-## Releases coordinated by these plans
-
-| Version | Plans involved |
-|---------|---------------|
-| `netring-flow` 0.1.0-alpha.0 + `netring` 0.7.0-alpha.0 | 00 |
-| `netring-flow` 0.1.0-alpha.1+ + `netring` 0.7.0-alpha.1+ | 01, 02, 03 (rolling alphas) |
-| `netring-flow` 0.1.0 + `netring` 0.7.0 | 04 (final) |
-| `netring` 0.7.0 (also includes dedup) | 10 |
+Plan files are living documents: update Status as you go. When a
+phase ships, the plan stays in `plans/` as a record — don't delete.
+When the plan turns out wrong (design assumption breaks during
+implementation), update the plan first, then fix code.

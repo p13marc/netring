@@ -858,6 +858,17 @@ dependencies = [
 ]
 
 [[package]]
+name = "netring-flow-dns"
+version = "0.1.0"
+dependencies = [
+ "ahash",
+ "netring-flow",
+ "netring-flow-pcap",
+ "simple-dns",
+ "thiserror 2.0.18",
+]
+
+[[package]]
 name = "netring-flow-http"
 version = "0.1.0"
 dependencies = [
@@ -1398,6 +1409,15 @@ checksum = "c4db69cba1110affc0e9f7bcd48bbf87b3f4fc7c61fc9155afd4c469eb3d6c1b"
 dependencies = [
  "errno",
  "libc",
+]
+
+[[package]]
+name = "simple-dns"
+version = "0.10.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "c88e405cb7f98ae6f6ca32e9cc1259d97f845b180fa26cd6280011a87375075e"
+dependencies = [
+ "bitflags",
 ]
 
 [[package]]

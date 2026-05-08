@@ -5,6 +5,7 @@ members = [
     "netring-flow-pcap",
     "netring-flow-http",
     "netring-flow-tls",
+    "netring-flow-dns",
 ]
 resolver = "2"
 
@@ -42,3 +43,4 @@ httparse = "1.10"
 tls-parser = "0.12"
 md-5 = "0.10"
 hex = "0.4"
+simple-dns = "0.10"

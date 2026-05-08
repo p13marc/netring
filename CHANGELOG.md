@@ -138,6 +138,35 @@ common "give me all the bytes from this flow" case.
 - 5 unit tests + 1 example (`async_flow_conversations.rs`) + 1
   doctest.
 
+### `netring-flow-dns` companion crate (plan 24)
+
+Passive DNS observer — UDP/53 only in v0.1. A new `DnsUdpObserver`
+type wraps an inner `FlowExtractor` (the "extractor as tap" pattern)
+and fires DNS events on every UDP/53 packet, while delegating flow
+tracking to the inner extractor. Built on `simple-dns`.
+
+- `parse_message` / `parse_message_at` — standalone DNS message
+  parsers; return `DnsParseResult::{Query, Response}`.
+- `DnsHandler` trait: `on_query`, `on_response`, `on_unanswered`.
+- `Correlator<S>` — bounded `HashMap<(scope, tx_id), DnsQuery>` with
+  oldest-first eviction, query/response matching with elapsed time,
+  and `sweep(now)` for the configured `query_timeout` (default 30 s).
+  Scoping by flow key prevents cross-flow tx-ID collisions.
+- Decoded record types: A, AAAA, CNAME, NS, PTR, MX. Everything
+  else surfaces as `DnsRdata::Other { rtype, data }`. TXT bodies
+  empty for now (current `simple-dns` API limitation).
+- Reads `transaction_id` and the flags word directly from the wire
+  to avoid `simple-dns` opcode/rcode conversions; exposes accessors
+  via `DnsFlags`.
+- Internal `peek_udp` walks Ethernet → optional VLAN×2 → IPv4/IPv6
+  → UDP without pulling `etherparse`. Fragments and IPv6 extension
+  headers are skipped.
+- 7 tests covering parse + correlator (match, orphan, sweep).
+- Example: `examples/dns_log.rs` — pcap replay logging Q/R/timeouts
+  with RTT.
+- Out of scope for v0.1: TCP/53 reassembly (zone transfers, large
+  responses), DoT/DoH/DoQ, EDNS(0) option decoding, DNSSEC validation.
+
 ### `netring-flow-tls` companion crate (plan 23)
 
 A `ReassemblerFactory` that bridges `tls-parser` (rusticata) into

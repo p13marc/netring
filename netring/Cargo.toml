@@ -27,6 +27,7 @@ tokio = { workspace = true, optional = true }
 futures-core = { workspace = true, optional = true }
 bytes = { workspace = true, optional = true }
 ahash = { workspace = true, optional = true }
+xxhash-rust = { workspace = true }
 crossbeam-channel = { workspace = true, optional = true }
 etherparse = { workspace = true, optional = true }
 pcap-file = { workspace = true, optional = true }
@@ -93,6 +94,10 @@ required-features = ["tokio", "flow"]
 [[example]]
 name = "async_flow_channel"
 required-features = ["tokio", "flow"]
+
+[[example]]
+name = "async_lo_dedup"
+required-features = ["tokio"]
 
 [[bench]]
 name = "throughput"

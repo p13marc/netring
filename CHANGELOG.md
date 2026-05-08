@@ -115,6 +115,23 @@ In `netring` (gated by `flow + tokio`):
   to the kernel ring.
 - New deps under `flow + tokio`: `bytes`, `ahash`.
 
+### Loopback dedup (plan 10)
+
+- **`Dedup`** primitive in `netring`. Two factory modes:
+  - `Dedup::loopback()` — 1ms window, 256-entry ring,
+    direction-aware. Drops the kernel's `Outgoing/Host` re-injection
+    pair on `lo`. Same-direction repeats (legitimate retransmits)
+    are kept.
+  - `Dedup::content(window, ring_size)` — generic content-hash
+    dedup, direction-agnostic. Use for any capture where
+    duplicates aren't loopback-shaped.
+- **`AsyncCapture::dedup_stream(Dedup)`** — `Stream<Item = Result<OwnedPacket>>`
+  with duplicates filtered. Sync users use the `Dedup::keep(&pkt)`
+  loop directly.
+- New dep: `xxhash-rust` (xxh3-64 for content hashing, ~zero deps).
+- 10 unit tests; 2 integration tests on `lo`.
+- Example: `examples/async_lo_dedup.rs`.
+
 ### Documentation (this release)
 
 - **`netring-flow/docs/FLOW_GUIDE.md`** — comprehensive cookbook
@@ -136,6 +153,7 @@ In `netring-flow`:
   via `FlowDriver`.
 
 In `netring`:
+- `async_lo_dedup.rs` — loopback dedup demo with periodic stats.
 - `async_flow_keys.rs` — built-in + custom extractor on live capture.
 - `async_flow_summary.rs` — Started/Established/Ended events.
 - `async_flow_filter.rs` — protocol + port filter.

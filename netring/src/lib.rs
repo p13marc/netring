@@ -7,6 +7,7 @@ pub mod afxdp;
 pub mod async_adapters;
 pub mod bridge;
 pub mod config;
+pub mod dedup;
 pub mod error;
 pub mod interface;
 #[cfg(feature = "metrics")]
@@ -31,6 +32,7 @@ pub use bridge::{
     Bridge, BridgeAction, BridgeBuilder, BridgeDirection, BridgeHandles, BridgeStats,
 };
 pub use config::{BpfFilter, BpfInsn, FanoutFlags, FanoutMode, RingProfile, TimestampSource};
+pub use dedup::Dedup;
 pub use error::Error;
 pub use interface::{InterfaceInfo, interface_info};
 pub use packet::{
@@ -49,6 +51,8 @@ pub use afxdp::{XdpMode, XdpSocket, XdpSocketBuilder, XdpStats};
 // Async / channel adapters
 #[cfg(feature = "channel")]
 pub use async_adapters::channel::ChannelCapture;
+#[cfg(feature = "tokio")]
+pub use async_adapters::dedup_stream::DedupStream;
 #[cfg(feature = "tokio")]
 pub use async_adapters::tokio_adapter::{AsyncCapture, PacketStream, ReadableGuard};
 #[cfg(feature = "tokio")]

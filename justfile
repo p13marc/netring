@@ -127,6 +127,9 @@ flow-filter *args:   cargo run -p netring --example async_flow_filter --features
 flow-history *args:  cargo run -p netring --example async_flow_history --features tokio,flow -- {{args}}
 flow-channel *args:  cargo run -p netring --example async_flow_channel --features tokio,flow -- {{args}}
 
+# Loopback dedup demo (no privileges-by-default; needs setcap for live capture)
+lo-dedup *args:      cargo run -p netring --example async_lo_dedup --features tokio -- {{args}}
+
 # Sync flow tracking examples (in netring-flow, no Linux privileges needed)
 flow-pcap-keys *args:        cargo run -p netring-flow --example pcap_flow_keys -- {{args}}
 flow-pcap-summary *args:     cargo run -p netring-flow --example pcap_flow_summary -- {{args}}

@@ -52,7 +52,7 @@ Short, high-leverage. Each unblocks downstream work.
 
 | Plan | Goal | Effort |
 |------|------|--------|
-| [`10-dedup.md`](./10-dedup.md) | `Dedup` primitive + `dedup_stream()` for `lo` | 1 day |
+| [`10-dedup.md`](./10-dedup.md) | `Dedup` primitive + `dedup_stream()` for `lo` | ✅ done (folded into 0.7.0) |
 | [`12-test-infra.md`](./12-test-infra.md) | pcap fixtures, `proptest`, `cargo-fuzz` harness | 1.5 days |
 
 ## Tier 2 — Companion crates (target 0.8.0)

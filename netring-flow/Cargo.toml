@@ -24,6 +24,11 @@ lru = { workspace = true, optional = true }
 
 [dev-dependencies]
 pcap-file = { workspace = true }
+proptest = { workspace = true }
+
+[[example]]
+name = "generate_fixtures"
+required-features = ["test-helpers"]
 
 [features]
 default = ["extractors", "tracker", "reassembler"]
@@ -31,3 +36,6 @@ extractors = ["dep:etherparse"]
 tracker = ["dep:ahash", "dep:smallvec", "dep:arrayvec", "dep:lru"]
 # `reassembler` requires `tracker` for FlowDriver / FlowSide.
 reassembler = ["tracker"]
+# `test-helpers` exposes `extract::parse::test_frames` for proptest,
+# fuzz harnesses, and fixture generation. Not for production use.
+test-helpers = ["extractors"]

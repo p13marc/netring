@@ -115,6 +115,33 @@ In `netring` (gated by `flow + tokio`):
   to the kernel ring.
 - New deps under `flow + tokio`: `bytes`, `ahash`.
 
+### Test infrastructure (plan 12)
+
+- **3 pcap fixtures** under `netring-flow/tests/data/`:
+  `http_session.pcap` (TCP HTTP/1.1 lifecycle), `dns_queries.pcap`
+  (UDP/53 query/response pairs + NXDOMAIN + lone unanswered),
+  `mixed_short.pcap` (TCP + UDP + ICMP). All synthetic; ~2 KB total.
+- **Fixture generator**: `cargo run -p netring-flow --example
+  generate_fixtures --features test-helpers` re-creates them
+  deterministically.
+- **3 fixture-driven integration tests** in `netring-flow/tests/pcap_fixtures.rs`.
+- **10 property-based tests** (`proptest`) in
+  `netring-flow/tests/proptest_invariants.rs` covering: 5-tuple
+  canonicalization, TCP state machine never panics, tracker
+  flow-count invariant, tracker stats balance, "every parser must
+  not panic on arbitrary bytes" (5 separate properties: FiveTuple,
+  StripVlan, StripMpls, InnerVxlan, InnerGtpU), and "Established
+  always after Started." 256 cases per property by default.
+- **6 `cargo fuzz` targets** under `netring-flow/fuzz/fuzz_targets/`
+  for the 5 built-in extractors. Excluded from the workspace; run
+  with `cargo +nightly fuzz run TARGET`. Justfile recipes:
+  `just fuzz-build`, `just fuzz-smoke` (30s per target),
+  `just fuzz TARGET`.
+- **`test-helpers` feature** on `netring-flow` exposes
+  `extract::parse::test_frames` (synthetic-frame builders) for
+  downstream tests. Also opens `tcp_state` for proptest. Not for
+  production use.
+
 ### Loopback dedup (plan 10)
 
 - **`Dedup`** primitive in `netring`. Two factory modes:

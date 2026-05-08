@@ -34,3 +34,4 @@ arrayvec = "0.7"
 lru = "0.16"
 bytes = "1"
 xxhash-rust = { version = "0.8", default-features = false, features = ["xxh3"] }
+proptest = "1"

@@ -1,0 +1,5 @@
+# cargo-fuzz produces these at runtime; keep the source tree clean.
+target/
+corpus/
+artifacts/
+coverage/

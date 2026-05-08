@@ -1,0 +1,57 @@
+[package]
+name = "netring-flow-fuzz"
+version = "0.0.0"
+publish = false
+edition = "2024"
+
+[package.metadata]
+cargo-fuzz = true
+
+[dependencies]
+libfuzzer-sys = "0.4"
+netring-flow = { path = "..", features = ["extractors"] }
+
+# Prevent this from joining the workspace.
+[workspace]
+
+[[bin]]
+name = "extract_five_tuple"
+path = "fuzz_targets/extract_five_tuple.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "extract_strip_vlan"
+path = "fuzz_targets/extract_strip_vlan.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "extract_strip_mpls"
+path = "fuzz_targets/extract_strip_mpls.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "extract_inner_vxlan"
+path = "fuzz_targets/extract_inner_vxlan.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "extract_inner_gtpu"
+path = "fuzz_targets/extract_inner_gtpu.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "extract_ip_pair"
+path = "fuzz_targets/extract_ip_pair.rs"
+test = false
+doc = false
+bench = false

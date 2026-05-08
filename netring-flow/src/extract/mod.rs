@@ -18,6 +18,9 @@
 //!
 //! Combinators compose: `StripVlan(InnerVxlan::new(FiveTuple::bidirectional()))`.
 
+#[cfg(any(test, feature = "test-helpers"))]
+pub mod parse;
+#[cfg(not(any(test, feature = "test-helpers")))]
 pub(crate) mod parse;
 
 pub mod five_tuple;

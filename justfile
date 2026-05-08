@@ -80,6 +80,35 @@ test:
 test-flow:
     cargo test -p netring-flow
 
+# Run property-based invariant tests with extended case count
+proptest-flow:
+    PROPTEST_CASES=10000 cargo test -p netring-flow --test proptest_invariants --features test-helpers
+
+# Regenerate the committed pcap fixtures (deterministic; only re-run
+# when you want to change synthetic traffic shape).
+fixtures:
+    cargo run -p netring-flow --example generate_fixtures --features test-helpers
+
+# ── Fuzz (requires nightly) ─────────────────────────────────────────
+
+# Build all fuzz targets (verifies they compile).
+fuzz-build:
+    cd netring-flow && cargo +nightly fuzz build
+
+# Run a single fuzz target until interrupted; pass --time SECONDS to bound.
+fuzz target *args:
+    cd netring-flow && cargo +nightly fuzz run "{{target}}" {{args}}
+
+# Run all fuzz targets for 30s each — used by the CI smoke job.
+fuzz-smoke:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    cd netring-flow
+    for t in extract_five_tuple extract_strip_vlan extract_strip_mpls extract_inner_vxlan extract_inner_gtpu extract_ip_pair; do
+        echo "▶ fuzz $t for 30s"
+        cargo +nightly fuzz run "$t" -- -max_total_time=30
+    done
+
 # Run a specific test by name
 test-one name:
     cargo test -p netring --features "integration-tests,tokio,channel" -- --test-threads=1 "{{name}}"

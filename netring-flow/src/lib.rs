@@ -31,7 +31,9 @@ pub mod extract;
 pub mod event;
 #[cfg(feature = "tracker")]
 pub mod history;
-#[cfg(feature = "tracker")]
+#[cfg(all(feature = "tracker", any(test, feature = "test-helpers")))]
+pub mod tcp_state;
+#[cfg(all(feature = "tracker", not(any(test, feature = "test-helpers"))))]
 mod tcp_state;
 #[cfg(feature = "tracker")]
 pub mod tracker;

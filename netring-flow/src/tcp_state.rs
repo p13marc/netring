@@ -9,7 +9,7 @@ use crate::event::{FlowSide, FlowState};
 use crate::extractor::TcpFlags;
 
 /// Outcome of one TCP-flag transition.
-pub(crate) struct Transition {
+pub struct Transition {
     /// New state (may equal the old state).
     pub state: FlowState,
     /// True if the transition crosses into Established for the first time.
@@ -17,7 +17,7 @@ pub(crate) struct Transition {
 }
 
 /// Compute the next state.
-pub(crate) fn transition(state: FlowState, flags: TcpFlags, side: FlowSide) -> Transition {
+pub fn transition(state: FlowState, flags: TcpFlags, side: FlowSide) -> Transition {
     // RST forces immediate Reset regardless of state.
     if flags.contains(TcpFlags::RST) {
         return Transition {

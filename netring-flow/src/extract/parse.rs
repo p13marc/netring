@@ -175,9 +175,12 @@ fn byte_offset(outer: &[u8], inner: &[u8]) -> Option<usize> {
     Some(inner_start - outer_start)
 }
 
-#[cfg(test)]
-pub(crate) mod test_frames {
+#[cfg(any(test, feature = "test-helpers"))]
+pub mod test_frames {
     //! Synthetic frame builders used across extractor tests.
+    //!
+    //! Available behind the `test-helpers` feature for downstream
+    //! crates (proptest, fuzz harnesses, fixture generators).
 
     /// Build an Ethernet/IPv4/TCP frame with the given fields.
     /// Returns the byte buffer.

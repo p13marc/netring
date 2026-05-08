@@ -287,6 +287,26 @@ impl<'a> Packet<'a> {
     ) -> Result<etherparse::SlicedPacket<'a>, etherparse::err::packet::SliceError> {
         etherparse::SlicedPacket::from_ethernet(self.data)
     }
+
+    /// View this packet as a [`netring_flow::PacketView`] for use with
+    /// the source-agnostic flow-tracking API.
+    ///
+    /// Zero-cost — borrows the same frame slice and copies the
+    /// timestamp.
+    ///
+    /// # Examples
+    ///
+    /// ```no_run
+    /// # fn example(pkt: &netring::Packet<'_>) {
+    /// let view = pkt.view();
+    /// // pass `view` to any FlowExtractor
+    /// # let _ = view;
+    /// # }
+    /// ```
+    #[inline]
+    pub fn view(&self) -> netring_flow::PacketView<'a> {
+        netring_flow::PacketView::new(self.data, self.timestamp())
+    }
 }
 
 impl OwnedPacket {

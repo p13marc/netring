@@ -22,7 +22,7 @@ detail; design wins for "why is this even shaped this way."
 | [`high-level-features-design.md`](./high-level-features-design.md) | Design — loopback dedup (Part 2 superseded; see flow design) | Approved |
 | [`upstream-tracking.md`](./upstream-tracking.md) | Tracking doc — Rust upstream features (gen blocks, Polonius, etc.) we're waiting on | Live |
 | [`00-workspace-split.md`](./00-workspace-split.md) | Plan — convert repo to workspace, create `netring-flow` skeleton | Done (`0.7.0-alpha.0`) |
-| [`01-flow-extractor.md`](./01-flow-extractor.md) | Plan — `FlowExtractor` trait + built-ins + decap combinators | Not started |
+| [`01-flow-extractor.md`](./01-flow-extractor.md) | Plan — `FlowExtractor` trait + built-ins + decap combinators | Done (`0.7.0-alpha.1` / `0.1.0-alpha.1`) |
 | [`02-flow-tracker.md`](./02-flow-tracker.md) | Plan — `FlowTracker<E, S>` + TCP state + `AsyncCapture::flow_stream` | Not started |
 | [`03-flow-reassembler.md`](./03-flow-reassembler.md) | Plan — sync `Reassembler` + `AsyncReassembler` + `channel_factory` | Not started |
 | [`04-flow-release.md`](./04-flow-release.md) | Plan — docs, CHANGELOG, coordinated 0.7.0 / 0.1.0 release | Not started |

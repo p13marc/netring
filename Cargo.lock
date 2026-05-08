@@ -593,7 +593,7 @@ dependencies = [
 
 [[package]]
 name = "netring"
-version = "0.7.0-alpha.0"
+version = "0.7.0-alpha.1"
 dependencies = [
  "bitflags",
  "core_affinity",
@@ -616,7 +616,12 @@ dependencies = [
 
 [[package]]
 name = "netring-flow"
-version = "0.1.0-alpha.0"
+version = "0.1.0-alpha.1"
+dependencies = [
+ "bitflags",
+ "etherparse",
+ "pcap-file",
+]
 
 [[package]]
 name = "nix"

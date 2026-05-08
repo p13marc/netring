@@ -1,6 +1,6 @@
 [package]
 name = "netring"
-version = "0.7.0-alpha.0"
+version = "0.7.0-alpha.1"
 edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
@@ -15,7 +15,7 @@ homepage = "https://github.com/p13marc/netring"
 exclude = ["CLAUDE.md", "SPEC.md"]
 
 [dependencies]
-netring-flow = { version = "0.1.0-alpha.0", path = "../netring-flow", default-features = false }
+netring-flow = { version = "0.1.0-alpha.1", path = "../netring-flow", default-features = false }
 
 libc = { workspace = true }
 nix = { workspace = true }
@@ -42,7 +42,7 @@ futures = "0.3"
 default = []
 tokio = ["dep:tokio", "dep:futures-core"]
 channel = ["dep:crossbeam-channel"]
-parse = ["dep:etherparse"]
+parse = ["dep:etherparse", "netring-flow/extractors"]
 pcap = ["dep:pcap-file"]
 metrics = ["dep:metrics"]
 af-xdp = []
@@ -68,6 +68,10 @@ required-features = ["tokio", "af-xdp"]
 [[example]]
 name = "async_metrics"
 required-features = ["tokio", "metrics"]
+
+[[example]]
+name = "async_flow_keys"
+required-features = ["tokio", "parse"]
 
 [[bench]]
 name = "throughput"

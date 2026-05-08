@@ -1,6 +1,6 @@
 [package]
 name = "netring-flow"
-version = "0.1.0-alpha.0"
+version = "0.1.0-alpha.1"
 edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
@@ -12,9 +12,13 @@ categories = ["network-programming"]
 readme = "../README.md"
 documentation = "https://docs.rs/netring-flow"
 
-# Plan 00: zero deps. Plan 01 will add etherparse/ahash/smallvec/bitflags
-# behind feature flags.
 [dependencies]
+bitflags = { workspace = true }
+etherparse = { workspace = true, optional = true }
+
+[dev-dependencies]
+pcap-file = { workspace = true }
 
 [features]
-default = []
+default = ["extractors"]
+extractors = ["dep:etherparse"]

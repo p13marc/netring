@@ -1,6 +1,50 @@
 # Changelog
 
-## [Unreleased] / 0.7.0-alpha.0 — Workspace split
+## [Unreleased] / 0.7.0-alpha.1 — Flow extractor + built-ins (`netring-flow` 0.1.0-alpha.1)
+
+First piece of the flow stack lands in `netring-flow`. Plan 01 from
+`plans/INDEX.md` complete.
+
+### Added (in `netring-flow`)
+
+- `PacketView<'a>` — frame + timestamp pair fed to extractors.
+  Source-agnostic.
+- `FlowExtractor` trait — implement to teach the rest of the flow
+  stack what counts as a flow in your domain.
+- `Extracted<K>` — descriptor returned by extractors: `key`,
+  `orientation` (Forward/Reverse), `l4`, `tcp`.
+- `L4Proto`, `Orientation`, `TcpInfo`, `TcpFlags` — supporting types.
+- Built-in extractors:
+  - `FiveTuple` — protocol + (src, dst). Bidirectional by default
+    (default impl); use `FiveTuple::directional()` to opt out.
+  - `IpPair` — IP address pair only; useful for ICMP / fragmented.
+  - `MacPair` — L2 MAC pair; useful for ARP / BPDU / LLDP.
+- Decap combinators (compose freely):
+  - `StripVlan<E>` — VLAN-aware (etherparse handles the heavy lifting)
+  - `StripMpls<E>` — MPLS label-stack stripper (we parse it inline)
+  - `InnerVxlan<E>` — VXLAN decap (default UDP port 4789)
+  - `InnerGtpU<E>` — GTP-U decap (default UDP port 2152)
+- `extractors` feature (default-on) — pulls `etherparse`.
+- 43 unit tests + 1 pcap-based example (`pcap_flow_keys`).
+
+### Added (in `netring`)
+
+- `Packet::view() -> netring_flow::PacketView<'_>` — zero-cost bridge
+  between the existing capture API and the source-agnostic flow types.
+- `netring::PacketView` — re-export of `netring_flow::PacketView`.
+- `netring::flow::*` — extractor types re-exported when `parse` is on.
+- `parse` feature now activates `netring-flow/extractors`.
+- New example: `async_flow_keys` (under `tokio + parse`) demonstrates
+  using built-in + custom extractors against a live capture.
+
+### Notes
+
+- The full `flow` feature (FlowTracker, AsyncCapture::flow_stream)
+  arrives in plan 02. This release is just the extractor surface.
+- `netring-flow` with `--no-default-features` still pulls only
+  `bitflags` (one tiny dep). The "runtime-free" claim holds.
+
+## 0.7.0-alpha.0 — Workspace split
 
 Mechanical change with no new functionality. Sets up the foundation
 for the upcoming flow-tracking stack (plans 01–04 in `plans/`).

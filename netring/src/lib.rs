@@ -36,6 +36,8 @@ pub use interface::{InterfaceInfo, interface_info};
 pub use packet::{
     BatchIter, OwnedPacket, Packet, PacketBatch, PacketDirection, PacketStatus, Timestamp,
 };
+// Always re-exported — needed for `Packet::view()`.
+pub use netring_flow::PacketView;
 pub use stats::CaptureStats;
 pub use traits::{PacketSink, PacketSource};
 
@@ -55,3 +57,22 @@ pub use async_adapters::tokio_injector::AsyncInjector;
 pub use async_adapters::tokio_xdp::{AsyncXdpSocket, XdpReadableGuard, XdpStream};
 #[cfg(feature = "tokio")]
 pub use traits::AsyncPacketSource;
+
+// ── Flow tracking re-exports ─────────────────────────────────────────────
+//
+// When `parse` is enabled (which pulls etherparse), surface the
+// netring-flow extractor types as `netring::flow::*`. Users who want
+// the full flow API still need to enable the upcoming `flow` feature
+// (plan 02), but the extractor surface is available now.
+
+/// Source-agnostic flow & session tracking types from `netring-flow`.
+///
+/// Re-exports under `parse` because the built-in extractors require
+/// `etherparse`. Users can also depend on `netring-flow` directly.
+#[cfg(feature = "parse")]
+pub mod flow {
+    pub use netring_flow::extract;
+    pub use netring_flow::{
+        Extracted, FlowExtractor, L4Proto, Orientation, PacketView, TcpFlags, TcpInfo,
+    };
+}

@@ -115,6 +115,29 @@ In `netring` (gated by `flow + tokio`):
   to the kernel ring.
 - New deps under `flow + tokio`: `bytes`, `ahash`.
 
+### `netring-flow-http` companion crate (plan 22)
+
+A `ReassemblerFactory` that bridges `httparse`'s zero-copy HTTP/1.x
+parser into `netring-flow`'s reassembler. User implements
+`HttpHandler` to receive parsed `HttpRequest` / `HttpResponse`
+events.
+
+- HTTP/1.0 + HTTP/1.1 request/response lines + headers + body via
+  Content-Length.
+- Pipelined requests (multiple events per buffer pass).
+- `Connection: close` body terminated by FIN (via
+  `Reassembler::fin`).
+- Messages split across multiple TCP segments handled
+  incrementally.
+- Configurable `max_buffer` (1 MiB default) and `max_headers`
+  (64 default).
+- 7 unit tests + 1 integration test against the Plan-12 HTTP fixture
+  + 1 doctest.
+- Example: `examples/http_log.rs` — log requests + responses from
+  a pcap.
+- README documents what's deferred (chunked encoding, HTTP/2,
+  HEAD-correlation).
+
 ### `netring-flow-pcap` companion crate (plan 20)
 
 A new workspace member that wraps `pcap-file` and exposes pcap

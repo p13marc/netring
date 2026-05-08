@@ -26,3 +26,9 @@ crossbeam-channel = "0.5"
 etherparse = "0.16"
 pcap-file = "2"
 metrics = "0.24"
+
+# netring-flow tracker deps
+ahash = { version = "0.8", default-features = false }
+smallvec = "1"
+arrayvec = "0.7"
+lru = "0.16"

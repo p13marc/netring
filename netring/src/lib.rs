@@ -75,4 +75,13 @@ pub mod flow {
     pub use netring_flow::{
         Extracted, FlowExtractor, L4Proto, Orientation, PacketView, TcpFlags, TcpInfo,
     };
+
+    #[cfg(feature = "flow")]
+    pub use netring_flow::{
+        EndReason, FlowEntry, FlowEvent, FlowEvents, FlowSide, FlowState, FlowStats, FlowTracker,
+        FlowTrackerConfig, FlowTrackerStats, HistoryString,
+    };
 }
+
+#[cfg(all(feature = "tokio", feature = "flow"))]
+pub use async_adapters::flow_stream::FlowStream;

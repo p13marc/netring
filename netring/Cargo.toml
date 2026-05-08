@@ -1,6 +1,6 @@
 [package]
 name = "netring"
-version = "0.7.0-alpha.1"
+version = "0.7.0-alpha.2"
 edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
@@ -15,7 +15,7 @@ homepage = "https://github.com/p13marc/netring"
 exclude = ["CLAUDE.md", "SPEC.md"]
 
 [dependencies]
-netring-flow = { version = "0.1.0-alpha.1", path = "../netring-flow", default-features = false }
+netring-flow = { version = "0.1.0-alpha.2", path = "../netring-flow", default-features = false }
 
 libc = { workspace = true }
 nix = { workspace = true }
@@ -48,6 +48,8 @@ metrics = ["dep:metrics"]
 af-xdp = []
 nightly = []
 integration-tests = []
+# Flow & session tracking. `flow + tokio` enables `AsyncCapture::flow_stream`.
+flow = ["parse", "netring-flow/tracker"]
 
 [package.metadata.docs.rs]
 all-features = true
@@ -72,6 +74,18 @@ required-features = ["tokio", "metrics"]
 [[example]]
 name = "async_flow_keys"
 required-features = ["tokio", "parse"]
+
+[[example]]
+name = "async_flow_summary"
+required-features = ["tokio", "flow"]
+
+[[example]]
+name = "async_flow_filter"
+required-features = ["tokio", "flow"]
+
+[[example]]
+name = "async_flow_history"
+required-features = ["tokio", "flow"]
 
 [[bench]]
 name = "throughput"

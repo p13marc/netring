@@ -120,6 +120,16 @@ ebpf *args:         (example "ebpf_filter" args)
 dpi *args:          (example "dpi" args)
 bridge *args:       (example "bridge" args)
 
+# Flow tracking examples (require `flow` feature → netring-flow)
+flow-keys *args:     cargo run -p netring --example async_flow_keys --features tokio,parse -- {{args}}
+flow-summary *args:  cargo run -p netring --example async_flow_summary --features tokio,flow -- {{args}}
+flow-filter *args:   cargo run -p netring --example async_flow_filter --features tokio,flow -- {{args}}
+flow-history *args:  cargo run -p netring --example async_flow_history --features tokio,flow -- {{args}}
+
+# Sync flow tracking examples (in netring-flow, no Linux privileges needed)
+flow-pcap-keys *args:    cargo run -p netring-flow --example pcap_flow_keys -- {{args}}
+flow-pcap-summary *args: cargo run -p netring-flow --example pcap_flow_summary -- {{args}}
+
 # ── Lint & Format ───────────────────────────────────────────────────────────
 
 # Run clippy on the workspace with all features

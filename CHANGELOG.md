@@ -1,6 +1,66 @@
 # Changelog
 
-## [Unreleased] / 0.7.0-alpha.1 — Flow extractor + built-ins (`netring-flow` 0.1.0-alpha.1)
+## [Unreleased] / 0.7.0-alpha.2 — Flow tracker + AsyncCapture::flow_stream (`netring-flow` 0.1.0-alpha.2)
+
+Plan 02 from `plans/INDEX.md` complete. The headline async API is
+now live:
+
+```rust
+let mut stream = cap.flow_stream(FiveTuple::bidirectional());
+while let Some(evt) = stream.next().await { /* ... */ }
+```
+
+### Added (in `netring-flow`)
+
+- `FlowTracker<E, S>` — bidirectional flow tracker generic over an
+  extractor and per-flow user state (defaults to `()`).
+  - `new`, `with_config` (when `S: Default`)
+  - `with_state`, `with_config_and_state` (any `S`)
+  - `track(view) -> FlowEvents<K>`
+  - `sweep(now) -> Vec<FlowEvent<K>>`
+  - `get`, `get_mut`, `flows`, `flow_count`, `stats`, `config`,
+    `set_config`, `into_extractor`
+- `FlowEntry<S>`, `FlowStats`, `FlowState` (lifecycle).
+- `FlowEvent<K>` — Started / Packet / Established / StateChange / Ended.
+- `FlowSide` (Initiator / Responder), `EndReason`.
+- `HistoryString` — Zeek-style `ShAdaFf` history, capped at 16 chars.
+- TCP state machine: `Active → SynSent → SynReceived → Established →
+  FinWait → ClosingTcp → Closed` (or `Reset` on RST).
+- LRU eviction on `max_flows` overflow (via `lru` crate).
+- Per-protocol idle timeouts (TCP 5min, UDP 60s, other 30s — Suricata defaults).
+- New `tracker` feature (default-on); pulls `ahash`, `smallvec`,
+  `arrayvec`, `lru`.
+- `pcap_flow_summary` example: sync flow tracking over a pcap file.
+
+### Added (in `netring`)
+
+- `FlowStream<S, E, U>` — `futures_core::Stream<Item = Result<FlowEvent<K>, Error>>`.
+  - Driven from `AsyncCapture` via `AsyncFd::poll_read_ready_mut`.
+  - `.with_state(init)` to attach per-flow user state.
+  - `.with_config(config)` for non-default tracker config.
+  - `.tracker()` / `.tracker_mut()` for stats / introspection.
+  - Periodic sweep ticked from a `tokio::time::Interval`.
+- `AsyncCapture::flow_stream(extractor) -> FlowStream<...>` —
+  consumes the capture; the headline tokio API.
+- New `flow` feature on `netring` — pulls `parse` +
+  `netring-flow/tracker`.
+- 3 new async examples:
+  - `async_flow_summary` — Started/Established/Ended events.
+  - `async_flow_filter` — protocol + port filter via inline match.
+  - `async_flow_history` — Zeek-style `conn.log` output.
+
+### Tests
+
+- 25 new tests in `netring-flow` (TCP 3WHS, RST, idle timeout, LRU,
+  bidirectional reorientation, history, user state).
+- 189 unit + doctests passing across the workspace.
+
+### Notes
+
+- Plan 03 (sync `Reassembler` + async `AsyncReassembler` +
+  `channel_factory`) is next.
+
+## 0.7.0-alpha.1 — Flow extractor + built-ins (`netring-flow` 0.1.0-alpha.1)
 
 First piece of the flow stack lands in `netring-flow`. Plan 01 from
 `plans/INDEX.md` complete.

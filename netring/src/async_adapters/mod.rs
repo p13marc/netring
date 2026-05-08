@@ -9,5 +9,8 @@ pub mod tokio_injector;
 #[cfg(all(feature = "tokio", feature = "af-xdp"))]
 pub mod tokio_xdp;
 
+#[cfg(all(feature = "tokio", feature = "flow"))]
+pub mod flow_stream;
+
 #[cfg(feature = "channel")]
 pub mod channel;

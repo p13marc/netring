@@ -1,6 +1,6 @@
 [package]
 name = "netring-flow"
-version = "0.1.0-alpha.1"
+version = "0.1.0-alpha.2"
 edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
@@ -16,9 +16,16 @@ documentation = "https://docs.rs/netring-flow"
 bitflags = { workspace = true }
 etherparse = { workspace = true, optional = true }
 
+# tracker feature deps
+ahash = { workspace = true, optional = true }
+smallvec = { workspace = true, optional = true }
+arrayvec = { workspace = true, optional = true }
+lru = { workspace = true, optional = true }
+
 [dev-dependencies]
 pcap-file = { workspace = true }
 
 [features]
-default = ["extractors"]
+default = ["extractors", "tracker"]
 extractors = ["dep:etherparse"]
+tracker = ["dep:ahash", "dep:smallvec", "dep:arrayvec", "dep:lru"]

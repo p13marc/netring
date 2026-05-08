@@ -9,14 +9,13 @@
 //!
 //! 1. [`FlowExtractor`] — user (or built-in) trait that turns a frame
 //!    into a flow descriptor.
-//! 2. `FlowTracker<E, S>` (plan 02) — accounts for flows, runs the
-//!    TCP state machine, emits lifecycle events.
+//! 2. [`FlowTracker`] — accounts for flows, runs the TCP state
+//!    machine, emits lifecycle events.
 //! 3. `Reassembler` (plan 03) — sync hook for TCP byte streams;
 //!    plug `protolens` / `blatta` / your own buffer in.
 //!
-//! Plan 01 ships layers 1's types and a set of built-in extractors;
-//! the tracker and reassembler arrive in subsequent plans. See
-//! `plans/INDEX.md` in the repository.
+//! Plan 02 ships layers 1+2; the reassembler arrives in plan 03.
+//! See `plans/INDEX.md` in the repository.
 
 #![cfg_attr(docsrs, feature(doc_cfg))]
 
@@ -28,7 +27,23 @@ pub mod extractor;
 #[cfg(feature = "extractors")]
 pub mod extract;
 
+#[cfg(feature = "tracker")]
+pub mod event;
+#[cfg(feature = "tracker")]
+pub mod history;
+#[cfg(feature = "tracker")]
+mod tcp_state;
+#[cfg(feature = "tracker")]
+pub mod tracker;
+
 pub use timestamp::Timestamp;
 pub use view::PacketView;
 
 pub use extractor::{Extracted, FlowExtractor, L4Proto, Orientation, TcpFlags, TcpInfo};
+
+#[cfg(feature = "tracker")]
+pub use event::{EndReason, FlowEvent, FlowSide, FlowState, FlowStats};
+#[cfg(feature = "tracker")]
+pub use history::HistoryString;
+#[cfg(feature = "tracker")]
+pub use tracker::{FlowEntry, FlowEvents, FlowTracker, FlowTrackerConfig, FlowTrackerStats};

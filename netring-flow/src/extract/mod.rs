@@ -18,7 +18,7 @@
 //!
 //! Combinators compose: `StripVlan(InnerVxlan::new(FiveTuple::bidirectional()))`.
 
-mod parse;
+pub(crate) mod parse;
 
 pub mod five_tuple;
 pub mod ip_pair;

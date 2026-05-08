@@ -112,6 +112,18 @@ impl AsyncCapture<crate::Capture> {
 }
 
 impl<S: PacketSource + AsRawFd> AsyncCapture<S> {
+    /// Poll-based readability check for use inside custom `Stream`
+    /// impls that need to drive their own state from `poll_next`.
+    /// Returns the same `AsyncFdReadyMutGuard` shape as
+    /// `AsyncFd::poll_read_ready_mut`.
+    #[doc(hidden)]
+    pub(crate) fn poll_read_ready_mut(
+        &mut self,
+        cx: &mut std::task::Context<'_>,
+    ) -> std::task::Poll<std::io::Result<tokio::io::unix::AsyncFdReadyMutGuard<'_, S>>> {
+        self.inner.poll_read_ready_mut(cx)
+    }
+
     /// Wait until readable and return a guard for zero-copy batch retrieval.
     ///
     /// The guard borrows `&mut self` and exposes a single

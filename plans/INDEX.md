@@ -53,7 +53,6 @@ Short, high-leverage. Each unblocks downstream work.
 | Plan | Goal | Effort |
 |------|------|--------|
 | [`10-dedup.md`](./10-dedup.md) | `Dedup` primitive + `dedup_stream()` for `lo` | 1 day |
-| [`11-benchmarks.md`](./11-benchmarks.md) | `criterion` benches + perf baseline numbers in README | 1 day |
 | [`12-test-infra.md`](./12-test-infra.md) | pcap fixtures, `proptest`, `cargo-fuzz` harness | 1.5 days |
 
 ## Tier 2 — Companion crates (target 0.8.0)
@@ -111,17 +110,16 @@ Each crate is independently versioned, lives in the workspace.
                 │ 0.7.0 published          │
                 └────────────┬─────────────┘
                              │
-        ┌────────────────────┼────────────────────────────┐
-        ▼                    ▼                            ▼
-  ┌──────────────┐    ┌──────────────┐           ┌──────────────────┐
-  │ 10-dedup     │    │ 11-benchmarks│           │ 12-test-infra    │
-  │              │    │ (criterion + │           │ (pcap fixtures + │
-  │              │    │  baseline)   │           │  proptest + fuzz)│
-  └──────────────┘    └──────┬───────┘           └────────┬─────────┘
-                             │                            │
-                             │  ┌─────────────────────────┘
-                             │  │  (pcap fixtures unlock the L7 bridges'
-                             ▼  ▼   integration tests)
+                ┌────────────┴────────────┐
+                ▼                         ▼
+        ┌──────────────┐         ┌──────────────────┐
+        │ 10-dedup     │         │ 12-test-infra    │
+        │              │         │ (pcap fixtures + │
+        │              │         │  proptest + fuzz)│
+        └──────────────┘         └────────┬─────────┘
+                                          │
+                                          │  (pcap fixtures unlock
+                                          ▼   the L7 bridges' tests)
                 ┌────────────────────────────┐
                 │  Tier 2 — companion crates  │
                 │  (parallel; pick any two)   │
@@ -142,8 +140,6 @@ parser to test SessionParser against).
 - **Companion crates are siblings**, not children. Each can be
   worked on independently once Tier 1 is done. Pick highest-leverage
   first based on user demand.
-- **Performance work needs benchmarks first.** Plan 11 must land
-  before Plan 41; we don't optimize without numbers.
 - **Test infra unlocks confidence.** Plan 12's fuzz harness will
   catch parser bugs in Tier 2 before users do.
 - **The big abstraction (Plan 31) waits for proof.** SessionParser

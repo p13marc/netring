@@ -10,16 +10,16 @@ improvement on representative workloads:
 2. **LRU hot-cache fast-path** — Suricata-style "remember the last
    flow" optimization for monoflow / packet-burst workloads.
 
-Both gated on the metrics from Plan 11 (we don't optimize without
-numbers).
-
 ## Status
 
-Not started. **Plan 11 (benchmarks) is a hard prerequisite.**
+Not started.
 
 ## Prerequisites
 
-- Plan 11 done. We have baseline numbers to optimize against.
+- Profiling data on representative workloads (perf, tracy,
+  flamegraph). Either ad-hoc local profiling or a one-off micro-bench
+  set up alongside this plan — whatever gives confidence the
+  optimization is targeting a real cost.
 
 ## Out of scope
 
@@ -187,12 +187,14 @@ Estimated win: 2× on monoflow. ~1.05–1.1× on heterogeneous.
 
 ## Implementation steps
 
-1. **Re-run Plan 11 benches; capture baseline.**
+1. **Capture a baseline** with whatever profiler / micro-bench you
+   prefer (perf, flamegraph, criterion ad-hoc, hyperfine wrapping
+   a flow-replay). Document it inline in PERFORMANCE.md.
 2. **Land Part B (hot cache)** first — smaller, simpler change.
-3. **Re-run benches; document delta.**
+3. **Re-measure; document delta.**
 4. **Land Part A (BytesMut pool).**
-5. **Re-run benches; document delta.**
-6. **Add `bench-results.md`** showing before/after for the
+5. **Re-measure; document delta.**
+6. **Add `PERFORMANCE.md`** showing before/after for the
    representative workloads (monoflow, 1M-flows, mixed).
 
 ---
@@ -208,12 +210,12 @@ Estimated win: 2× on monoflow. ~1.05–1.1× on heterogeneous.
 
 ## Acceptance criteria
 
-- [ ] Hot-cache fast path implemented; ≥10% throughput gain on
-      monoflow benches.
-- [ ] BytesMut pool in async reassembler path; ≥30% throughput
-      gain on TCP-heavy benches.
+- [ ] Hot-cache fast path implemented; measurable throughput gain
+      on monoflow workload (target ≥10%).
+- [ ] BytesMut pool in async reassembler path; measurable
+      throughput gain on TCP-heavy workload (target ≥30%).
 - [ ] No regression on existing tests.
-- [ ] PERFORMANCE.md has the numbers.
+- [ ] PERFORMANCE.md has the numbers (before / after / methodology).
 
 ---
 

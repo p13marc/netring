@@ -14,8 +14,8 @@ Not started.
 ## Prerequisites
 
 - Plans 00–04 published.
-- (Soft) Plan 11 benchmarks — so we can prove the `tracing` overhead
-  is acceptable.
+- Some form of profiling / micro-bench so the `tracing` overhead
+  can be measured (ad-hoc; doesn't need to be a full bench suite).
 
 ## Out of scope
 
@@ -154,8 +154,9 @@ Both are zero-overhead when off (compile-time stripped).
    ```rust
    pub const METRIC_FLOWS_CREATED: &str = "netring_flow_flows_created_total";
    ```
-6. **Bench**: re-run Plan 11 benches with `--features metrics,tracing`
-   and document the overhead.
+6. **Measure overhead**: profile a representative workload with
+   and without the `metrics` / `tracing` features active; document
+   the delta in PERFORMANCE.md.
 
 ---
 
@@ -174,8 +175,8 @@ Both are zero-overhead when off (compile-time stripped).
 - [ ] `tracing` feature compiles cleanly.
 - [ ] All counters/gauges/histograms populate as expected.
 - [ ] `docs/OBSERVABILITY.md` lists every metric.
-- [ ] Bench delta from Plan 11 is documented (target: <5% overhead
-      with `metrics`; <10% with `tracing` at INFO).
+- [ ] Overhead measurement documented (target: <5% with `metrics`;
+      <10% with `tracing` at INFO).
 
 ---
 

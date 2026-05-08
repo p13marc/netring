@@ -307,8 +307,8 @@ netring-flow/fuzz/
     #[cfg(feature = "test-helpers")]
     pub use extract::parse::test_frames;
     ```
-16. Benches (Plan 11) and proptest will activate `test-helpers` via
-    dev-deps in their respective Cargo.toml.
+16. Proptest will activate `test-helpers` via dev-deps in its
+    Cargo.toml.
 
 ---
 

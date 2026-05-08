@@ -138,6 +138,33 @@ common "give me all the bytes from this flow" case.
 - 5 unit tests + 1 example (`async_flow_conversations.rs`) + 1
   doctest.
 
+### `netring-flow-tls` companion crate (plan 23)
+
+A `ReassemblerFactory` that bridges `tls-parser` (rusticata) into
+`netring-flow`'s reassembler. Passive observation only — no
+decryption, no MITM. User implements `TlsHandler` to receive
+`TlsClientHello` / `TlsServerHello` / `TlsAlert` events.
+
+- Surfaced from ClientHello: legacy + record version, random,
+  session ID, cipher suites (in order, GREASE-included), compression,
+  SNI, ALPN list, `supported_versions` (for TLS 1.3), `supported_groups`,
+  full extension-type list (ordered, suitable for fingerprinting).
+- Surfaced from ServerHello: legacy + selected version, random,
+  session ID, chosen cipher, ALPN selection.
+- Alerts: level (Warning / Fatal / Other) + RFC 5246 description code.
+- ChangeCipherSpec stops parsing on that direction (records past
+  it are encrypted).
+- Records spanning multiple TCP segments handled incrementally.
+- Optional `ja3` feature: computes the JA3 canonical string +
+  MD5 hex digest, fires `TlsHandler::on_ja3`. GREASE values (RFC
+  8701) stripped per the upstream reference.
+- 6 unit tests + 1 doctest + 1 JA3 test (when feature on) + 2
+  fingerprint unit tests.
+- Example: `examples/tls_observer.rs` — print SNI/ALPN per
+  ClientHello from a pcap.
+- README documents what's not surfaced (encrypted records,
+  certificate parsing, session resumption details, JA4).
+
 ### `netring-flow-http` companion crate (plan 22)
 
 A `ReassemblerFactory` that bridges `httparse`'s zero-copy HTTP/1.x

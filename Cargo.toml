@@ -4,6 +4,7 @@ members = [
     "netring-flow",
     "netring-flow-pcap",
     "netring-flow-http",
+    "netring-flow-tls",
 ]
 resolver = "2"
 
@@ -38,3 +39,6 @@ bytes = "1"
 xxhash-rust = { version = "0.8", default-features = false, features = ["xxh3"] }
 proptest = "1"
 httparse = "1.10"
+tls-parser = "0.12"
+md-5 = "0.10"
+hex = "0.4"

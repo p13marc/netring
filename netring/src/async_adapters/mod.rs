@@ -10,6 +10,8 @@ pub mod tokio_injector;
 pub mod tokio_xdp;
 
 #[cfg(all(feature = "tokio", feature = "flow"))]
+pub mod async_reassembler;
+#[cfg(all(feature = "tokio", feature = "flow"))]
 pub mod flow_stream;
 
 #[cfg(feature = "channel")]

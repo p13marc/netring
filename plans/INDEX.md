@@ -24,7 +24,7 @@ detail; design wins for "why is this even shaped this way."
 | [`00-workspace-split.md`](./00-workspace-split.md) | Plan — convert repo to workspace, create `netring-flow` skeleton | Done (`0.7.0-alpha.0`) |
 | [`01-flow-extractor.md`](./01-flow-extractor.md) | Plan — `FlowExtractor` trait + built-ins + decap combinators | Done (`0.7.0-alpha.1` / `0.1.0-alpha.1`) |
 | [`02-flow-tracker.md`](./02-flow-tracker.md) | Plan — `FlowTracker<E, S>` + TCP state + `AsyncCapture::flow_stream` | Done (`0.7.0-alpha.2` / `0.1.0-alpha.2`) |
-| [`03-flow-reassembler.md`](./03-flow-reassembler.md) | Plan — sync `Reassembler` + `AsyncReassembler` + `channel_factory` | Not started |
+| [`03-flow-reassembler.md`](./03-flow-reassembler.md) | Plan — sync `Reassembler` + `AsyncReassembler` + `channel_factory` | Done (`0.7.0-alpha.3` / `0.1.0-alpha.3`) |
 | [`04-flow-release.md`](./04-flow-release.md) | Plan — docs, CHANGELOG, coordinated 0.7.0 / 0.1.0 release | Not started |
 | [`10-dedup.md`](./10-dedup.md) | Plan — `Dedup` primitive + `dedup_stream()` adapter (parallel track) | Not started |
 

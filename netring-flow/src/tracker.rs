@@ -123,6 +123,29 @@ impl<E: FlowExtractor, S: Send + 'static> FlowTracker<E, S> {
 
     /// Process a packet. Returns 0–3 events.
     pub fn track(&mut self, view: PacketView<'_>) -> FlowEvents<E::Key> {
+        self.track_with_payload(view, |_, _, _, _| {})
+    }
+
+    /// Borrow the inner extractor (for callers that want to extract
+    /// a key without driving the tracker, e.g. external dispatch).
+    pub fn extractor(&self) -> &E {
+        &self.extractor
+    }
+
+    /// Process a packet, calling `payload_cb(&key, side, seq, payload)`
+    /// for each TCP packet with a non-empty payload **before** any
+    /// events are returned. Lets sync reassemblers (or any per-segment
+    /// dispatch) run inline without a second extract pass.
+    ///
+    /// `payload_cb` is called at most once per packet (TCP only).
+    pub fn track_with_payload<F>(
+        &mut self,
+        view: PacketView<'_>,
+        mut payload_cb: F,
+    ) -> FlowEvents<E::Key>
+    where
+        F: FnMut(&E::Key, FlowSide, u32, &[u8]),
+    {
         let mut events: FlowEvents<E::Key> = SmallVec::new();
         let extracted = match self.extractor.extract(view) {
             Some(e) => e,
@@ -195,6 +218,21 @@ impl<E: FlowExtractor, S: Send + 'static> FlowTracker<E, S> {
             .expect("flow entry just created or pre-existing");
 
         let side = entry.side_for(orientation);
+
+        // ── reassembler dispatch hook ────────────────────────────
+        // Called inline before any events are queued. The callback
+        // sees the same `key` and the current `side`, plus the TCP
+        // sequence number and payload slice. Non-TCP / no-payload
+        // packets skip the call.
+        if let Some(tcp_info) = &tcp
+            && tcp_info.payload_len > 0
+        {
+            let start = tcp_info.payload_offset;
+            let end = start + tcp_info.payload_len;
+            if end <= view.frame.len() {
+                payload_cb(&key, side, tcp_info.seq, &view.frame[start..end]);
+            }
+        }
 
         // ── update stats ─────────────────────────────────────────
         match side {

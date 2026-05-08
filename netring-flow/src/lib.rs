@@ -36,6 +36,11 @@ mod tcp_state;
 #[cfg(feature = "tracker")]
 pub mod tracker;
 
+#[cfg(feature = "reassembler")]
+pub mod driver;
+#[cfg(feature = "reassembler")]
+pub mod reassembler;
+
 pub use timestamp::Timestamp;
 pub use view::PacketView;
 
@@ -47,3 +52,10 @@ pub use event::{EndReason, FlowEvent, FlowSide, FlowState, FlowStats};
 pub use history::HistoryString;
 #[cfg(feature = "tracker")]
 pub use tracker::{FlowEntry, FlowEvents, FlowTracker, FlowTrackerConfig, FlowTrackerStats};
+
+#[cfg(feature = "reassembler")]
+pub use driver::FlowDriver;
+#[cfg(feature = "reassembler")]
+pub use reassembler::{
+    BufferedReassembler, BufferedReassemblerFactory, Reassembler, ReassemblerFactory,
+};

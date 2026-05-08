@@ -11,7 +11,7 @@ use crate::history::HistoryString;
 ///   `Initiator` direction.
 /// - Packets matching that orientation are `Initiator`, packets in
 ///   the opposite orientation are `Responder`.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum FlowSide {
     Initiator,
     Responder,

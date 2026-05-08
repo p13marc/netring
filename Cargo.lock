@@ -643,9 +643,11 @@ dependencies = [
 
 [[package]]
 name = "netring"
-version = "0.7.0-alpha.2"
+version = "0.7.0-alpha.3"
 dependencies = [
+ "ahash",
  "bitflags",
+ "bytes",
  "core_affinity",
  "criterion",
  "crossbeam-channel",
@@ -666,7 +668,7 @@ dependencies = [
 
 [[package]]
 name = "netring-flow"
-version = "0.1.0-alpha.2"
+version = "0.1.0-alpha.3"
 dependencies = [
  "ahash",
  "arrayvec",

@@ -1,6 +1,61 @@
 # Changelog
 
-## [Unreleased] / 0.7.0-alpha.2 — Flow tracker + AsyncCapture::flow_stream (`netring-flow` 0.1.0-alpha.2)
+## [Unreleased] / 0.7.0-alpha.3 — Reassembler hooks (`netring-flow` 0.1.0-alpha.3)
+
+Plan 03 from `plans/INDEX.md` complete. TCP byte streams now flow
+through user-pluggable reassemblers, with backpressure all the way
+to the kernel ring on the async path.
+
+### Added (in `netring-flow`)
+
+- `Reassembler` trait — sync; `segment(seq, payload)`, `fin()`, `rst()`.
+- `ReassemblerFactory<K>` trait — gopacket-style factory.
+- `BufferedReassembler` + `BufferedReassemblerFactory` — in-order
+  accumulator with OOO drop counter.
+- `FlowTracker::track_with_payload<F>(view, F)` — sync callback that
+  fires per (key, side, seq, payload) for TCP packets with a
+  non-empty payload, before any events are returned.
+- `FlowTracker::extractor()` — borrow the inner extractor.
+- `FlowDriver<E, F, S>` — sync wrapper that bundles a tracker with
+  a reassembler factory; manages per-(flow, side) reassemblers and
+  cleans them up on `Ended`.
+- `FlowSide` is now `Hash` (used as part of reassembler-instance keys).
+- New `reassembler` feature (default-on) — pure std, no extra deps.
+- `pcap_buffered_reassembly` example: sync TCP reassembly over a
+  pcap file using `FlowDriver`.
+
+### Added (in `netring`, gated by `flow + tokio`)
+
+- `AsyncReassembler` trait — `fn segment(&mut self, seq: u32, payload: Bytes)
+  -> Pin<Box<dyn Future<Output = ()> + Send + 'static>>`. Methods
+  return `'static` futures so the stream can store them; implementors
+  clone or move state into the future.
+- `AsyncReassemblerFactory<K>` trait.
+- `ChannelReassembler` — built-in async impl pushing each segment
+  into a `tokio::sync::mpsc::Sender<Bytes>`.
+- `channel_factory<K, F>(F) -> ChannelFactory<K, F>` — convenience
+  wrapping a per-(flow, side) `Sender<Bytes>` factory.
+- `FlowStream::with_async_reassembler(factory)` — returns
+  `FlowStream<S, E, U, AsyncReassemblerSlot<K, F>>`.
+- Separate `Stream` impls for `NoReassembler` and
+  `AsyncReassemblerSlot` paths; the async impl awaits each
+  reassembler future inline before yielding the corresponding event,
+  with `pending_payloads` queued during sync `track_with_payload`.
+- New deps under `flow + tokio`: `bytes`, `ahash`.
+- `async_flow_channel` example: spawn a task per (flow, side) via
+  `channel_factory`, demonstrate the full backpressure path.
+
+### Tests
+
+- 13 new tests (8 reassembler + 2 driver + 3 async_reassembler).
+- 202 unit + doctests passing across the workspace (was 189).
+
+### Notes
+
+- Plan 04 (FLOW_GUIDE.md, README updates, coordinated 0.7.0/0.1.0
+  publish) is next.
+
+## 0.7.0-alpha.2 — Flow tracker + AsyncCapture::flow_stream (`netring-flow` 0.1.0-alpha.2)
 
 Plan 02 from `plans/INDEX.md` complete. The headline async API is
 now live:

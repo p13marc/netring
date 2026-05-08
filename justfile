@@ -125,10 +125,12 @@ flow-keys *args:     cargo run -p netring --example async_flow_keys --features t
 flow-summary *args:  cargo run -p netring --example async_flow_summary --features tokio,flow -- {{args}}
 flow-filter *args:   cargo run -p netring --example async_flow_filter --features tokio,flow -- {{args}}
 flow-history *args:  cargo run -p netring --example async_flow_history --features tokio,flow -- {{args}}
+flow-channel *args:  cargo run -p netring --example async_flow_channel --features tokio,flow -- {{args}}
 
 # Sync flow tracking examples (in netring-flow, no Linux privileges needed)
-flow-pcap-keys *args:    cargo run -p netring-flow --example pcap_flow_keys -- {{args}}
-flow-pcap-summary *args: cargo run -p netring-flow --example pcap_flow_summary -- {{args}}
+flow-pcap-keys *args:        cargo run -p netring-flow --example pcap_flow_keys -- {{args}}
+flow-pcap-summary *args:     cargo run -p netring-flow --example pcap_flow_summary -- {{args}}
+flow-pcap-reassembly *args:  cargo run -p netring-flow --example pcap_buffered_reassembly -- {{args}}
 
 # ── Lint & Format ───────────────────────────────────────────────────────────
 

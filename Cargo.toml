@@ -32,3 +32,4 @@ ahash = { version = "0.8", default-features = false }
 smallvec = "1"
 arrayvec = "0.7"
 lru = "0.16"
+bytes = "1"

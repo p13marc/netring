@@ -78,10 +78,19 @@ pub mod flow {
 
     #[cfg(feature = "flow")]
     pub use netring_flow::{
-        EndReason, FlowEntry, FlowEvent, FlowEvents, FlowSide, FlowState, FlowStats, FlowTracker,
-        FlowTrackerConfig, FlowTrackerStats, HistoryString,
+        BufferedReassembler, BufferedReassemblerFactory, EndReason, FlowDriver, FlowEntry,
+        FlowEvent, FlowEvents, FlowSide, FlowState, FlowStats, FlowTracker, FlowTrackerConfig,
+        FlowTrackerStats, HistoryString, Reassembler, ReassemblerFactory,
+    };
+
+    /// Async reassembly types for tokio integration.
+    /// Available under `flow + tokio`.
+    #[cfg(all(feature = "tokio", feature = "flow"))]
+    pub use crate::async_adapters::async_reassembler::{
+        AsyncReassembler, AsyncReassemblerFactory, ChannelFactory, ChannelReassembler,
+        channel_factory,
     };
 }
 
 #[cfg(all(feature = "tokio", feature = "flow"))]
-pub use async_adapters::flow_stream::FlowStream;
+pub use async_adapters::flow_stream::{AsyncReassemblerSlot, FlowStream, NoReassembler};

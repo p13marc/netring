@@ -1,6 +1,6 @@
 [package]
 name = "netring-flow"
-version = "0.1.0-alpha.2"
+version = "0.1.0-alpha.3"
 edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
@@ -26,6 +26,8 @@ lru = { workspace = true, optional = true }
 pcap-file = { workspace = true }
 
 [features]
-default = ["extractors", "tracker"]
+default = ["extractors", "tracker", "reassembler"]
 extractors = ["dep:etherparse"]
 tracker = ["dep:ahash", "dep:smallvec", "dep:arrayvec", "dep:lru"]
+# `reassembler` requires `tracker` for FlowDriver / FlowSide.
+reassembler = ["tracker"]

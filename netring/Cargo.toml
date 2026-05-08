@@ -1,6 +1,6 @@
 [package]
 name = "netring"
-version = "0.7.0-alpha.2"
+version = "0.7.0-alpha.3"
 edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
@@ -15,7 +15,7 @@ homepage = "https://github.com/p13marc/netring"
 exclude = ["CLAUDE.md", "SPEC.md"]
 
 [dependencies]
-netring-flow = { version = "0.1.0-alpha.2", path = "../netring-flow", default-features = false }
+netring-flow = { version = "0.1.0-alpha.3", path = "../netring-flow", default-features = false }
 
 libc = { workspace = true }
 nix = { workspace = true }
@@ -25,6 +25,8 @@ bitflags = { workspace = true }
 
 tokio = { workspace = true, optional = true }
 futures-core = { workspace = true, optional = true }
+bytes = { workspace = true, optional = true }
+ahash = { workspace = true, optional = true }
 crossbeam-channel = { workspace = true, optional = true }
 etherparse = { workspace = true, optional = true }
 pcap-file = { workspace = true, optional = true }
@@ -49,7 +51,8 @@ af-xdp = []
 nightly = []
 integration-tests = []
 # Flow & session tracking. `flow + tokio` enables `AsyncCapture::flow_stream`.
-flow = ["parse", "netring-flow/tracker"]
+# Pulls `bytes` since the async reassembler API uses it.
+flow = ["parse", "netring-flow/tracker", "netring-flow/reassembler", "dep:bytes", "dep:ahash"]
 
 [package.metadata.docs.rs]
 all-features = true
@@ -85,6 +88,10 @@ required-features = ["tokio", "flow"]
 
 [[example]]
 name = "async_flow_history"
+required-features = ["tokio", "flow"]
+
+[[example]]
+name = "async_flow_channel"
 required-features = ["tokio", "flow"]
 
 [[bench]]

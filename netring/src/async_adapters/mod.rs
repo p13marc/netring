@@ -13,10 +13,14 @@ pub mod tokio_xdp;
 pub mod async_reassembler;
 #[cfg(all(feature = "tokio", feature = "flow"))]
 pub mod conversation;
+#[cfg(all(feature = "tokio", feature = "flow"))]
+pub mod datagram_stream;
 #[cfg(feature = "tokio")]
 pub mod dedup_stream;
 #[cfg(all(feature = "tokio", feature = "flow"))]
 pub mod flow_stream;
+#[cfg(all(feature = "tokio", feature = "flow"))]
+pub mod session_stream;
 
 #[cfg(feature = "channel")]
 pub mod channel;

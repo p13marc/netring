@@ -145,6 +145,43 @@ where
     }
 }
 
+impl<S, E> FlowStream<S, E, (), NoReassembler>
+where
+    S: PacketSource + std::os::unix::io::AsRawFd,
+    E: FlowExtractor,
+    E::Key: Eq + std::hash::Hash + Clone + Send + 'static,
+{
+    /// Convert into a stream of typed L7 messages. Bytes from each
+    /// flow's TCP segments are dispatched to a per-flow
+    /// [`netring_flow::SessionParser`] built by `factory`; whatever
+    /// messages the parser returns are surfaced as
+    /// [`netring_flow::SessionEvent::Application`].
+    pub fn session_stream<F>(
+        self,
+        factory: F,
+    ) -> crate::async_adapters::session_stream::SessionStream<S, E, F>
+    where
+        F: netring_flow::SessionParserFactory<E::Key>,
+    {
+        let extractor = self.tracker.into_extractor();
+        crate::async_adapters::session_stream::SessionStream::new(self.cap, extractor, factory)
+    }
+
+    /// Convert into a stream of typed L7 messages from packet-oriented
+    /// (UDP) protocols. Each UDP payload is fed to a per-flow
+    /// [`netring_flow::DatagramParser`].
+    pub fn datagram_stream<F>(
+        self,
+        factory: F,
+    ) -> crate::async_adapters::datagram_stream::DatagramStream<S, E, F>
+    where
+        F: netring_flow::DatagramParserFactory<E::Key>,
+    {
+        let extractor = self.tracker.into_extractor();
+        crate::async_adapters::datagram_stream::DatagramStream::new(self.cap, extractor, factory)
+    }
+}
+
 impl<S, E, U, R> FlowStream<S, E, U, R>
 where
     S: PacketSource + std::os::unix::io::AsRawFd,

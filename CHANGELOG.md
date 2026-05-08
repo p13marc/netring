@@ -138,6 +138,57 @@ common "give me all the bytes from this flow" case.
 - 5 unit tests + 1 example (`async_flow_conversations.rs`) + 1
   doctest.
 
+### `SessionParser` + `DatagramParser` (plan 31, phase 1)
+
+The pre-1.0 strategic abstraction: typed L7 message streams instead
+of byte streams. New traits in `netring-flow` (runtime-free):
+
+- **`SessionParser`** — one parser per flow, `feed_initiator` /
+  `feed_responder` / `fin_*` / `rst_*` methods returning
+  `Vec<Self::Message>`. For stream-based protocols (HTTP/1, TLS,
+  DNS-over-TCP).
+- **`DatagramParser`** — one parser per flow, `parse(payload, side)
+  -> Vec<Self::Message>`. For packet-based protocols (DNS-over-UDP,
+  syslog, NTP).
+- **`SessionParserFactory<K>` / `DatagramParserFactory<K>`** with
+  blanket impls for `Default + Clone` parsers — pass any such
+  parser as its own factory; each new flow gets a clone.
+- **`SessionEvent<K, M>`** — `Started { key, ts }`,
+  `Application { key, side, message, ts }`,
+  `Closed { key, reason, stats }`.
+- New `session` feature on `netring-flow` (default-on, depends on
+  `tracker`).
+
+Async stream adapters in `netring` (gated on `flow + tokio`):
+
+- **`AsyncCapture::flow_stream(...).session_stream(parser)`** —
+  yields `SessionEvent<_, P::Message>` driven by a per-flow
+  `SessionParser`. Bytes from each TCP segment dispatch to the
+  parser; messages buffer in a per-stream `VecDeque` and drain via
+  `Stream::poll_next`.
+- **`AsyncCapture::flow_stream(...).datagram_stream(parser)`** —
+  same shape for UDP. Walks Eth → optional VLAN×2 → IPv4/IPv6 →
+  UDP and feeds the L4 payload to the parser. Skips IP fragments
+  and IPv6 extension headers.
+
+Trait bridges shipped with this phase:
+
+- **`netring_flow_http::HttpParser`** — `SessionParser` impl
+  producing `HttpMessage::{Request, Response}`. Wraps the existing
+  `parser::step` / `eof` machinery; holds independent state per
+  direction inside one parser. The callback-style `HttpFactory<H>`
+  remains; users pick whichever shape fits.
+- **`netring_flow_dns::DnsUdpParser`** — `DatagramParser` impl
+  producing `DnsMessage::{Query, Response}`. Stateless across
+  packets (correlation lives in the separate `Correlator` type).
+
+Out of scope for this phase:
+- `TlsParser` and `DnsTcpParser` bridges (the parser shape is
+  proven; mechanical follow-up).
+- Per-flow parser stats trait (`SessionParserStats`).
+- Property tests across all parsers.
+- Migration guide.
+
 ### `netring-flow-dns` companion crate (plan 24)
 
 Passive DNS observer — UDP/53 only in v0.1. A new `DnsUdpObserver`

@@ -13,7 +13,7 @@ readme = "README.md"
 documentation = "https://docs.rs/netring-flow-http"
 
 [dependencies]
-netring-flow = { version = "0.1", path = "../netring-flow", default-features = false, features = ["tracker", "reassembler"] }
+netring-flow = { version = "0.1", path = "../netring-flow", default-features = false, features = ["tracker", "reassembler", "session"] }
 httparse = { workspace = true }
 bytes = { workspace = true }
 thiserror = { workspace = true }

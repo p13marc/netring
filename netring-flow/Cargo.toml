@@ -31,11 +31,14 @@ name = "generate_fixtures"
 required-features = ["test-helpers"]
 
 [features]
-default = ["extractors", "tracker", "reassembler"]
+default = ["extractors", "tracker", "reassembler", "session"]
 extractors = ["dep:etherparse"]
 tracker = ["dep:ahash", "dep:smallvec", "dep:arrayvec", "dep:lru"]
 # `reassembler` requires `tracker` for FlowDriver / FlowSide.
 reassembler = ["tracker"]
+# `session` exposes the SessionParser + DatagramParser traits
+# (typed L7 message parsers; pair with netring::SessionStream).
+session = ["tracker"]
 # `test-helpers` exposes `extract::parse::test_frames` for proptest,
 # fuzz harnesses, and fixture generation. Not for production use.
 test-helpers = ["extractors"]

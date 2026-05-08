@@ -13,7 +13,7 @@ pub enum Error {
 }
 
 /// Per-direction parser state.
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub(crate) enum DirState {
     /// Awaiting a request line + headers (initiator side) or
     /// status line + headers (responder side).

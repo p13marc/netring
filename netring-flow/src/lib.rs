@@ -43,6 +43,9 @@ pub mod driver;
 #[cfg(feature = "reassembler")]
 pub mod reassembler;
 
+#[cfg(feature = "session")]
+pub mod session;
+
 pub use timestamp::Timestamp;
 pub use view::PacketView;
 
@@ -60,4 +63,9 @@ pub use driver::FlowDriver;
 #[cfg(feature = "reassembler")]
 pub use reassembler::{
     BufferedReassembler, BufferedReassemblerFactory, Reassembler, ReassemblerFactory,
+};
+
+#[cfg(feature = "session")]
+pub use session::{
+    DatagramParser, DatagramParserFactory, SessionEvent, SessionParser, SessionParserFactory,
 };

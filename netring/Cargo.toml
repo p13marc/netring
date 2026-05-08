@@ -53,7 +53,7 @@ nightly = []
 integration-tests = []
 # Flow & session tracking. `flow + tokio` enables `AsyncCapture::flow_stream`.
 # Pulls `bytes` since the async reassembler API uses it.
-flow = ["parse", "netring-flow/tracker", "netring-flow/reassembler", "dep:bytes", "dep:ahash"]
+flow = ["parse", "netring-flow/tracker", "netring-flow/reassembler", "netring-flow/session", "dep:bytes", "dep:ahash"]
 
 [package.metadata.docs.rs]
 all-features = true

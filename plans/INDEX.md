@@ -72,7 +72,7 @@ Each crate is independently versioned, lives in the workspace.
 | Plan | Goal | Effort |
 |------|------|--------|
 | [`30-conversation.md`](./30-conversation.md) | `Conversation<E>` aggregate (init+resp byte streams as one Stream) | ✅ done |
-| [`31-session-parser.md`](./31-session-parser.md) | `SessionParser<P>` trait + `session_stream()` — protocol-agnostic L7 message stream | 5 days |
+| [`31-session-parser.md`](./31-session-parser.md) | `SessionParser<P>` trait + `session_stream()` — protocol-agnostic L7 message stream | 🚧 phase 1 done (traits + Stream impls + HTTP/DNS-UDP bridges); TLS + DNS-TCP bridges pending |
 
 ## Tier 4 — Observability + performance (target 0.9.0/1.0.0)
 

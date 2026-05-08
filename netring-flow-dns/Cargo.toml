@@ -13,7 +13,7 @@ readme = "README.md"
 documentation = "https://docs.rs/netring-flow-dns"
 
 [dependencies]
-netring-flow = { version = "0.1", path = "../netring-flow", default-features = false, features = ["extractors", "tracker"] }
+netring-flow = { version = "0.1", path = "../netring-flow", default-features = false, features = ["extractors", "tracker", "session"] }
 simple-dns = { workspace = true }
 thiserror = { workspace = true }
 ahash = { workspace = true, default-features = false }

@@ -18,6 +18,8 @@ pub mod datagram_stream;
 #[cfg(feature = "tokio")]
 pub mod dedup_stream;
 #[cfg(all(feature = "tokio", feature = "flow"))]
+pub mod flow_broadcast;
+#[cfg(all(feature = "tokio", feature = "flow"))]
 pub mod flow_stream;
 #[cfg(all(feature = "tokio", feature = "flow"))]
 pub mod session_stream;

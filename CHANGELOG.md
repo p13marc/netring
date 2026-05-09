@@ -2,6 +2,31 @@
 
 ## Unreleased
 
+### `FlowBroadcast` — multi-subscriber flow events (plan 50.6)
+
+`FlowStream::broadcast(buffer)` converts a single-consumer flow
+stream into a `FlowBroadcast<K>` that fans events out to multiple
+independent subscribers. Each `subscribe()` returns a fresh
+`Stream` over `Arc<FlowEvent<K>>`. Slow subscribers see
+`BroadcastRecvError::Lagged(n)` instead of blocking the others
+(per `tokio::sync::broadcast` semantics).
+
+Use case: a logger + a metrics exporter + a real-time UI all
+consuming the same capture without contending on the underlying
+fd.
+
+- New types: `FlowBroadcast`, `FlowSubscriber`, `BroadcastRecvError`.
+- New entry point: `FlowStream::<NoReassembler>::broadcast(buffer)`
+  on the simple (non-reassembler) flow stream variant.
+- `Arc<FlowEvent<K>>` so the (potentially large) event isn't
+  cloned for every subscriber.
+- Spawned task aborts on `FlowBroadcast::drop`, draining the
+  underlying capture exactly as long as the broadcast handle lives.
+- New optional dep: `tokio-stream 0.1` (with `sync` feature) for
+  `BroadcastStream` adapter, behind the existing `tokio` feature.
+
+Closes plan 50.6 from [flowscope's plan 50](https://github.com/p13marc/flowscope/blob/master/plans/50-deferred-catchup.md).
+
 ### Built-in XDP program loader for AF_XDP (plan 12)
 
 `XdpSocketBuilder::with_default_program()` makes AF_XDP self-contained:

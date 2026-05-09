@@ -442,6 +442,8 @@ pub struct CaptureBuilder {
     promiscuous: bool,
     ignore_outgoing: bool,
     busy_poll_us: Option<u32>,
+    prefer_busy_poll: Option<bool>,
+    busy_poll_budget: Option<u16>,
     reuseport: bool,
     rcvbuf: Option<usize>,
     rcvbuf_force: bool,
@@ -464,6 +466,8 @@ impl Default for CaptureBuilder {
             promiscuous: false,
             ignore_outgoing: false,
             busy_poll_us: None,
+            prefer_busy_poll: None,
+            busy_poll_budget: None,
             reuseport: false,
             rcvbuf: None,
             rcvbuf_force: false,
@@ -545,9 +549,34 @@ impl CaptureBuilder {
         self
     }
 
-    /// Enable SO_BUSY_POLL with the given microsecond timeout.
+    /// Enable `SO_BUSY_POLL` with the given microsecond timeout. Kernel ≥ 4.5.
+    ///
+    /// For low-latency AF_PACKET capture, pair with [`prefer_busy_poll`](Self::prefer_busy_poll)
+    /// and [`busy_poll_budget`](Self::busy_poll_budget). See
+    /// <https://docs.kernel.org/networking/af_xdp.html>.
     pub fn busy_poll_us(mut self, us: u32) -> Self {
         self.busy_poll_us = Some(us);
+        self
+    }
+
+    /// Enable `SO_PREFER_BUSY_POLL`. Kernel ≥ 5.11.
+    ///
+    /// Tells the kernel to prefer the busy-polling path over softirq for
+    /// this socket. Has no effect without [`busy_poll_us`](Self::busy_poll_us)
+    /// also set.
+    pub fn prefer_busy_poll(mut self, enable: bool) -> Self {
+        self.prefer_busy_poll = Some(enable);
+        self
+    }
+
+    /// Set `SO_BUSY_POLL_BUDGET` (per-poll packet cap). Kernel ≥ 5.11.
+    ///
+    /// Default kernel budget is 8 in 6.x; 64 is a common production value
+    /// for AF_PACKET / AF_XDP. Values above
+    /// `/proc/sys/net/core/busy_poll_budget_max` (typically 64) require
+    /// `CAP_NET_ADMIN`; otherwise the kernel returns `EPERM`.
+    pub fn busy_poll_budget(mut self, budget: u16) -> Self {
+        self.busy_poll_budget = Some(budget);
         self
     }
 
@@ -711,6 +740,12 @@ fn build_inner(b: &CaptureBuilder, block_count: usize) -> Result<Capture, Error>
     if let Some(us) = b.busy_poll_us {
         socket::set_busy_poll(fd.as_fd(), us)?;
     }
+    if let Some(prefer) = b.prefer_busy_poll {
+        socket::set_prefer_busy_poll(fd.as_fd(), prefer)?;
+    }
+    if let Some(budget) = b.busy_poll_budget {
+        socket::set_busy_poll_budget(fd.as_fd(), budget)?;
+    }
     if b.reuseport {
         socket::set_reuseport(fd.as_fd(), true)?;
     }
@@ -817,5 +852,24 @@ mod tests {
     fn builder_poll_timeout_setter() {
         let b = CaptureBuilder::default().poll_timeout(Duration::from_millis(25));
         assert_eq!(b.poll_timeout, Duration::from_millis(25));
+    }
+
+    #[test]
+    fn builder_busy_poll_trio_chain() {
+        let b = CaptureBuilder::default()
+            .busy_poll_us(50)
+            .prefer_busy_poll(true)
+            .busy_poll_budget(64);
+        assert_eq!(b.busy_poll_us, Some(50));
+        assert_eq!(b.prefer_busy_poll, Some(true));
+        assert_eq!(b.busy_poll_budget, Some(64));
+    }
+
+    #[test]
+    fn builder_busy_poll_default_unset() {
+        let b = CaptureBuilder::default();
+        assert_eq!(b.busy_poll_us, None);
+        assert_eq!(b.prefer_busy_poll, None);
+        assert_eq!(b.busy_poll_budget, None);
     }
 }

@@ -135,6 +135,9 @@ pub struct XdpSocketBuilder {
     /// `0` means "no sharing". When non-zero, build() skips
     /// `XDP_UMEM_REG` and sets `XDP_SHARED_UMEM` in the bind flags.
     shared_umem_fd: u32,
+    busy_poll_us: Option<u32>,
+    prefer_busy_poll: Option<bool>,
+    busy_poll_budget: Option<u16>,
 }
 
 impl Default for XdpSocketBuilder {
@@ -147,6 +150,9 @@ impl Default for XdpSocketBuilder {
             need_wakeup: true,
             mode: XdpMode::default(),
             shared_umem_fd: 0,
+            busy_poll_us: None,
+            prefer_busy_poll: None,
+            busy_poll_budget: None,
         }
     }
 }
@@ -191,6 +197,37 @@ impl XdpSocketBuilder {
     /// Enable `XDP_USE_NEED_WAKEUP` optimization. Default: true.
     pub fn need_wakeup(mut self, enable: bool) -> Self {
         self.need_wakeup = enable;
+        self
+    }
+
+    /// Enable `SO_BUSY_POLL` with the given microsecond timeout. Kernel ≥ 4.5.
+    ///
+    /// For low-latency AF_XDP capture, pair with [`prefer_busy_poll`](Self::prefer_busy_poll)
+    /// and [`busy_poll_budget`](Self::busy_poll_budget). See
+    /// <https://docs.kernel.org/networking/af_xdp.html>.
+    pub fn busy_poll_us(mut self, us: u32) -> Self {
+        self.busy_poll_us = Some(us);
+        self
+    }
+
+    /// Enable `SO_PREFER_BUSY_POLL`. Kernel ≥ 5.11.
+    ///
+    /// Tells the kernel to prefer the busy-polling path over softirq for
+    /// this socket. Has no effect without [`busy_poll_us`](Self::busy_poll_us)
+    /// also set.
+    pub fn prefer_busy_poll(mut self, enable: bool) -> Self {
+        self.prefer_busy_poll = Some(enable);
+        self
+    }
+
+    /// Set `SO_BUSY_POLL_BUDGET` (per-poll packet cap). Kernel ≥ 5.11.
+    ///
+    /// Default kernel budget is 8 in 6.x; 64 is a common production value
+    /// for AF_XDP. Values above `/proc/sys/net/core/busy_poll_budget_max`
+    /// (typically 64) require `CAP_NET_ADMIN`; otherwise the kernel returns
+    /// `EPERM`.
+    pub fn busy_poll_budget(mut self, budget: u16) -> Self {
+        self.busy_poll_budget = Some(budget);
         self
     }
 
@@ -261,6 +298,19 @@ impl XdpSocketBuilder {
 
         // 2. Create AF_XDP socket
         let fd = socket::create_xdp_socket()?;
+
+        // 2a. Apply busy-poll trio if requested. These are SOL_SOCKET options
+        //     and work identically on AF_XDP and AF_PACKET sockets, so we reuse
+        //     the AF_PACKET helpers.
+        if let Some(us) = self.busy_poll_us {
+            crate::afpacket::socket::set_busy_poll(fd.as_fd(), us)?;
+        }
+        if let Some(prefer) = self.prefer_busy_poll {
+            crate::afpacket::socket::set_prefer_busy_poll(fd.as_fd(), prefer)?;
+        }
+        if let Some(budget) = self.busy_poll_budget {
+            crate::afpacket::socket::set_busy_poll_budget(fd.as_fd(), budget)?;
+        }
 
         // 3. Register UMEM with kernel.
         //    Skipped when this socket is binding as a XDP_SHARED_UMEM secondary —
@@ -815,6 +865,27 @@ mod tests {
     fn builder_default_mode_is_rxtx() {
         let b = XdpSocketBuilder::default();
         assert_eq!(b.mode, XdpMode::RxTx);
+    }
+
+    #[test]
+    fn builder_busy_poll_trio_chain() {
+        let b = XdpSocketBuilder::default()
+            .interface("lo")
+            .queue_id(0)
+            .busy_poll_us(50)
+            .prefer_busy_poll(true)
+            .busy_poll_budget(64);
+        assert_eq!(b.busy_poll_us, Some(50));
+        assert_eq!(b.prefer_busy_poll, Some(true));
+        assert_eq!(b.busy_poll_budget, Some(64));
+    }
+
+    #[test]
+    fn builder_busy_poll_default_unset() {
+        let b = XdpSocketBuilder::default();
+        assert_eq!(b.busy_poll_us, None);
+        assert_eq!(b.prefer_busy_poll, None);
+        assert_eq!(b.busy_poll_budget, None);
     }
 
     #[test]

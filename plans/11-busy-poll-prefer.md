@@ -21,7 +21,7 @@ between netring and SOTA capture configurations.
 
 ## Status
 
-Not started.
+✅ Done.
 
 ## Prerequisites
 

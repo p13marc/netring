@@ -2,6 +2,39 @@
 
 ## Unreleased
 
+### AF_XDP / AF_PACKET busy-poll trio (plan 11)
+
+Expose Linux ≥ 5.11 socket options that close most of the latency
+gap between AF_XDP and DPDK on payload-touching workloads:
+
+- `SO_BUSY_POLL` (kernel ≥ 4.5) — already supported via `busy_poll_us`
+  on `Capture::builder()`; now also on `XdpSocketBuilder`.
+- `SO_PREFER_BUSY_POLL` (≥ 5.11) — new `prefer_busy_poll(bool)`
+  builder method on both. Tells the kernel to prefer the busy-poll
+  path over softirq scheduling.
+- `SO_BUSY_POLL_BUDGET` (≥ 5.11) — new `busy_poll_budget(u16)` builder
+  method on both. Caps per-poll packet count.
+
+Pulled libc constants directly (`libc 0.2.183` exports both new
+options); no native deps. The trio matches Suricata's
+`af-xdp.busy-poll{,_budget,prefer}` config keys.
+
+Example: `examples/async_xdp_busy_poll.rs`.
+
+Reference: <https://docs.kernel.org/networking/af_xdp.html>,
+arxiv 2402.10513 *Understanding Delays in AF_XDP-based Applications*.
+
+### Build fix: flowscope dep is non-optional
+
+The previous workspace-extraction commit (`0a04082`) made `flowscope`
+an optional dep, which broke `cargo build` without the `parse`
+feature because `Packet::view()` and `pub use flowscope::Timestamp`
+in `lib.rs` are unconditional. This release makes `flowscope` a
+non-optional dep with `default-features = false`. With no features,
+flowscope pulls only `bitflags` + `thiserror` — both already in
+netring's tree, so the no-feature dep tree is unchanged in
+practice.
+
 ### Workspace split: flow tracking moves to `flowscope`
 
 The flow & session tracking crate previously known as `netring-flow`

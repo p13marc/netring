@@ -112,6 +112,21 @@ pub use libc::PACKET_FANOUT_DATA;
 
 pub use libc::SO_ATTACH_BPF;
 
+// ── Busy-poll socket options (kernel ≥ 5.11) ───────────────────────────────
+//
+// `SO_BUSY_POLL` (kernel ≥ 4.5) sets a busy-poll timeout in microseconds.
+// `SO_PREFER_BUSY_POLL` (≥ 5.11) tells the kernel to prefer busy-polling
+// over softirq scheduling for this socket. `SO_BUSY_POLL_BUDGET` (≥ 5.11)
+// caps the per-poll packet count so a busy-poll thread doesn't monopolise
+// a core.
+//
+// Use the trio for AF_XDP / AF_PACKET low-latency capture; see
+// <https://docs.kernel.org/networking/af_xdp.html>.
+
+pub use libc::SO_BUSY_POLL;
+pub use libc::SO_BUSY_POLL_BUDGET;
+pub use libc::SO_PREFER_BUSY_POLL;
+
 // ── Fanout flags ───────────────────────────────────────────────────────────
 
 pub use libc::PACKET_FANOUT_FLAG_DEFRAG;
@@ -204,6 +219,10 @@ mod tests {
         assert_eq!(PACKET_QDISC_BYPASS, 20);
         assert_eq!(PACKET_IGNORE_OUTGOING, 23);
         assert_eq!(PACKET_TIMESTAMP, 17);
+        // Busy-poll trio per asm-generic/socket.h.
+        assert_eq!(SO_BUSY_POLL, 46);
+        assert_eq!(SO_PREFER_BUSY_POLL, 69);
+        assert_eq!(SO_BUSY_POLL_BUDGET, 70);
         assert_eq!(ETH_P_ALL as u32, 0x0003);
         assert_eq!(TPACKET_ALIGNMENT as u32, 16);
         assert_eq!(TPACKET3_HDRLEN as u32, 68);

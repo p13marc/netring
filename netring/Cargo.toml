@@ -18,7 +18,14 @@ exclude = ["CLAUDE.md", "SPEC.md"]
 # Flow & session tracking lives in the flowscope crate. Pulled from
 # git until the first crates.io release; switch to a version dep
 # (`flowscope = "0.1"`) once it's published.
-flowscope = { git = "https://github.com/p13marc/flowscope", branch = "master", default-features = false, optional = true }
+#
+# Non-optional: netring re-exports `flowscope::Timestamp` and
+# `flowscope::PacketView` unconditionally as the canonical packet
+# timestamp / view types. With `default-features = false`, flowscope
+# pulls only `bitflags` + `thiserror` — both already in netring's tree.
+# The `parse` feature additionally enables `flowscope/extractors`,
+# `flow` enables `tracker`/`reassembler`/`session`.
+flowscope = { git = "https://github.com/p13marc/flowscope", branch = "master", default-features = false }
 
 libc = { workspace = true }
 nix = { workspace = true }
@@ -48,7 +55,7 @@ futures = "0.3"
 default = []
 tokio = ["dep:tokio", "dep:futures-core"]
 channel = ["dep:crossbeam-channel"]
-parse = ["dep:etherparse", "dep:flowscope", "flowscope/extractors"]
+parse = ["dep:etherparse", "flowscope/extractors"]
 pcap = ["dep:pcap-file"]
 metrics = ["dep:metrics"]
 af-xdp = []
@@ -72,6 +79,10 @@ required-features = ["pcap"]
 
 [[example]]
 name = "async_xdp"
+required-features = ["tokio", "af-xdp"]
+
+[[example]]
+name = "async_xdp_busy_poll"
 required-features = ["tokio", "af-xdp"]
 
 [[example]]

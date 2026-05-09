@@ -127,7 +127,11 @@ pub(crate) fn set_ignore_outgoing(fd: BorrowedFd<'_>) -> Result<(), Error> {
     )
 }
 
-/// Set `SO_BUSY_POLL` for kernel-side NIC driver polling.
+/// Set `SO_BUSY_POLL` for kernel-side NIC driver polling. Kernel ≥ 4.5.
+///
+/// Pair with [`set_prefer_busy_poll`] and [`set_busy_poll_budget`] for
+/// the AF_XDP / AF_PACKET low-latency configuration documented in
+/// <https://docs.kernel.org/networking/af_xdp.html>.
 pub(crate) fn set_busy_poll(fd: BorrowedFd<'_>, us: u32) -> Result<(), Error> {
     let val = us as libc::c_int;
     raw_setsockopt(
@@ -136,6 +140,41 @@ pub(crate) fn set_busy_poll(fd: BorrowedFd<'_>, us: u32) -> Result<(), Error> {
         libc::SO_BUSY_POLL,
         &val,
         "SO_BUSY_POLL",
+    )
+}
+
+/// Set `SO_PREFER_BUSY_POLL`. Kernel ≥ 5.11.
+///
+/// Tells the kernel to prefer the busy-polling path over softirq for
+/// this socket. Has no effect without [`set_busy_poll`] also set.
+pub(crate) fn set_prefer_busy_poll(fd: BorrowedFd<'_>, enable: bool) -> Result<(), Error> {
+    let val: libc::c_int = if enable { 1 } else { 0 };
+    raw_setsockopt(
+        fd,
+        libc::SOL_SOCKET,
+        ffi::SO_PREFER_BUSY_POLL,
+        &val,
+        "SO_PREFER_BUSY_POLL",
+    )
+}
+
+/// Set `SO_BUSY_POLL_BUDGET`. Kernel ≥ 5.11.
+///
+/// Cap on the per-poll packet count, so a busy-polling thread can't
+/// monopolise the core. The default budget when unset is 8 in 6.x
+/// kernels; 64 is a common production value for AF_XDP.
+///
+/// Note: values beyond `/proc/sys/net/core/busy_poll_budget_max` (typically
+/// 64 by default on most distros) require `CAP_NET_ADMIN`. The kernel
+/// returns `EPERM` otherwise.
+pub(crate) fn set_busy_poll_budget(fd: BorrowedFd<'_>, budget: u16) -> Result<(), Error> {
+    let val: libc::c_int = budget as libc::c_int;
+    raw_setsockopt(
+        fd,
+        libc::SOL_SOCKET,
+        ffi::SO_BUSY_POLL_BUDGET,
+        &val,
+        "SO_BUSY_POLL_BUDGET",
     )
 }
 

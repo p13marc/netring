@@ -11,7 +11,7 @@ mostly used as the underlying source for the async wrappers.
 
 ```toml
 [dependencies]
-netring = { version = "0.6", features = ["tokio"] }
+netring = { version = "0.8", features = ["tokio"] }
 ```
 
 ```rust,no_run
@@ -72,7 +72,7 @@ considerations.
 
 ```toml
 [dependencies]
-netring = { version = "0.7", features = ["tokio", "flow"] }
+netring = { version = "0.8", features = ["tokio", "flow"] }
 futures = "0.3"
 ```
 
@@ -145,6 +145,7 @@ while let Some(batch) = cap.next_batch_blocking(Duration::from_millis(100)).unwr
 |---------|---------|-------------|
 | `tokio` | off | Async wrappers (`AsyncCapture`, `AsyncInjector`, `AsyncXdpSocket`, `PacketStream`) |
 | `af-xdp` | off | AF_XDP kernel-bypass packet I/O (pure Rust, no native deps) |
+| `xdp-loader` | off | Built-in redirect-all XDP program loader for AF_XDP via [`aya`](https://crates.io/crates/aya). Implies `af-xdp`. See [`async_xdp_self_loaded`](netring/examples/async_xdp_self_loaded.rs) example. |
 | `channel` | off | Thread + bounded channel adapter (runtime-agnostic) |
 | `parse` | off | Packet header parsing via `etherparse` |
 | `pcap` | off | Stream packets to PCAP files |
@@ -179,7 +180,7 @@ Every type has a `::open(iface)` shortcut for the simple case and a
 | Profile | block_size | block_count | timeout_ms | Notes |
 |---------|-----------|-------------|------------|-------|
 | High throughput | 4 MiB | 128–256 | 60 | + `FanoutMode::Cpu` + thread pinning |
-| Low latency | 256 KiB | 64 | 1–10 | + `busy_poll_us(50)` |
+| Low latency | 256 KiB | 64 | 1–10 | + `busy_poll_us(50).prefer_busy_poll(true).busy_poll_budget(64)` (kernel ≥ 5.11) |
 | Memory-constrained | 1 MiB | 16 | 100 | 16 MiB total ring |
 | Jumbo frames | 4 MiB | 64 | 60 | `frame_size(65536)` |
 

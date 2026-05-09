@@ -1,6 +1,19 @@
 # Changelog
 
-## Unreleased
+## 0.8.0 — XDP loader, busy-poll trio, broadcast, flowscope split
+
+A feature-additive release. New AF_XDP self-contained loader (no more
+`xdp-loader` CLI dance), kernel-5.11 busy-poll knobs that close most
+of the AF_XDP↔DPDK latency gap, multi-subscriber flow-event broadcast,
+and the workspace split of flow tracking out to a separate
+[`flowscope`](https://github.com/p13marc/flowscope) crate. No
+breaking changes; every existing user-facing API still works.
+
+> **Publishing prerequisite:** the `flow` feature pulls
+> `flowscope` from git pending the first flowscope crates.io
+> release. Before publishing this version of netring, swap the
+> git dep in `netring/Cargo.toml` to a version dep
+> (`flowscope = "0.1"`).
 
 ### `XdpProgram::from_aya` — caller-loaded XDP programs (plan 12 phase 2)
 

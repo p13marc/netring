@@ -9,15 +9,13 @@ authors.workspace = true
 description = "High-performance zero-copy packet I/O for Linux (AF_PACKET TPACKET_V3 + AF_XDP)"
 keywords = ["packet", "capture", "af_packet", "af_xdp", "zero-copy"]
 categories = ["network-programming", "os::linux-apis"]
-readme = "../README.md"
+readme = "README.md"
 documentation = "https://docs.rs/netring"
 homepage = "https://github.com/p13marc/netring"
 exclude = ["CLAUDE.md", "SPEC.md"]
 
 [dependencies]
-# Flow & session tracking lives in the flowscope crate. Pulled from
-# git until the first crates.io release; switch to a version dep
-# (`flowscope = "0.1"`) once it's published.
+# Flow & session tracking lives in the flowscope crate.
 #
 # Non-optional: netring re-exports `flowscope::Timestamp` and
 # `flowscope::PacketView` unconditionally as the canonical packet
@@ -25,7 +23,7 @@ exclude = ["CLAUDE.md", "SPEC.md"]
 # pulls only `bitflags` + `thiserror` — both already in netring's tree.
 # The `parse` feature additionally enables `flowscope/extractors`,
 # `flow` enables `tracker`/`reassembler`/`session`.
-flowscope = { git = "https://github.com/p13marc/flowscope", branch = "master", default-features = false }
+flowscope = { version = "0.1", default-features = false }
 
 libc = { workspace = true }
 nix = { workspace = true }

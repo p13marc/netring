@@ -21,6 +21,9 @@ allow = [
     "MPL-2.0",
     "CC0-1.0",
     "0BSD",
+    # Permissive; OSI-approved. Used by `xxhash-rust` (our content
+    # hash for dedup).
+    "BSL-1.0",
 ]
 confidence-threshold = 0.8
 

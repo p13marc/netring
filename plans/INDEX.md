@@ -10,12 +10,12 @@ Two kinds of files:
 If a design doc and a plan disagree, the plan wins for execution
 detail; design wins for "why is this even shaped this way."
 
-> **Scope split.** Flow & session tracking moved to the separate
-> [`flowscope`](https://github.com/p13marc/flowscope) crate. Plans
-> 12, 20, 22–24, 30–32, 41, 50, 60, plus the design docs covering
-> flow features, live in flowscope's `plans/` now. This index covers
-> only netring-side plans (capture, dedup, observability of capture,
-> upstream tracking).
+> **Scope split.** Flow & session tracking lives in the separate
+> [`flowscope`](https://github.com/p13marc/flowscope) crate.
+> flowscope's `plans/` holds everything related to flow extraction,
+> tracking, reassembly, session/datagram parsing, observability of
+> flows, and L7 protocol parsers. This index covers only
+> netring-side plans (capture, dedup, upstream tracking).
 
 ---
 
@@ -29,27 +29,11 @@ detail; design wins for "why is this even shaped this way."
 
 | Range | Theme |
 |-------|-------|
-| 00–09 | Workspace + flow stack core (now done; flow plans moved to flowscope) |
 | 10–19 | Capture-side features (dedup, etc.) |
 
 ---
 
-## Tier 0 — Done (released or release-prep)
-
-| Plan | Crate version | Status |
-|------|---------------|--------|
-| [`00-workspace-split.md`](./00-workspace-split.md) | `0.7.0-alpha.0` / `0.1.0-alpha.0` | ✅ |
-| [`01-flow-extractor.md`](./01-flow-extractor.md) | `0.7.0-alpha.1` / `0.1.0-alpha.1` | ✅ |
-| [`02-flow-tracker.md`](./02-flow-tracker.md) | `0.7.0-alpha.2` / `0.1.0-alpha.2` | ✅ |
-| [`03-flow-reassembler.md`](./03-flow-reassembler.md) | `0.7.0-alpha.3` / `0.1.0-alpha.3` | ✅ |
-| [`04-flow-release.md`](./04-flow-release.md) | `0.7.0` published | ✅ |
-
-These plans built the original flow stack as a workspace inside
-netring. The flow code subsequently migrated to the separate
-flowscope crate (see header note); these plans stay as historical
-record of how it happened.
-
-## Tier 1 — Foundations
+## Plans
 
 | Plan | Goal | Status |
 |------|------|--------|

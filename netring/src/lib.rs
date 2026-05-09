@@ -39,7 +39,7 @@ pub use packet::{
     BatchIter, OwnedPacket, Packet, PacketBatch, PacketDirection, PacketStatus, Timestamp,
 };
 // Always re-exported — needed for `Packet::view()`.
-pub use netring_flow::PacketView;
+pub use flowscope::PacketView;
 pub use stats::CaptureStats;
 pub use traits::{PacketSink, PacketSource};
 
@@ -65,23 +65,24 @@ pub use traits::AsyncPacketSource;
 // ── Flow tracking re-exports ─────────────────────────────────────────────
 //
 // When `parse` is enabled (which pulls etherparse), surface the
-// netring-flow extractor types as `netring::flow::*`. Users who want
-// the full flow API still need to enable the upcoming `flow` feature
-// (plan 02), but the extractor surface is available now.
+// flowscope extractor types as `netring::flow::*`. Users who want
+// the full flow API need the `flow` feature; the extractor surface
+// alone is available under `parse`.
 
-/// Source-agnostic flow & session tracking types from `netring-flow`.
+/// Source-agnostic flow & session tracking types from
+/// [`flowscope`](https://crates.io/crates/flowscope).
 ///
 /// Re-exports under `parse` because the built-in extractors require
-/// `etherparse`. Users can also depend on `netring-flow` directly.
+/// `etherparse`. Users can also depend on `flowscope` directly.
 #[cfg(feature = "parse")]
 pub mod flow {
-    pub use netring_flow::extract;
-    pub use netring_flow::{
+    pub use flowscope::extract;
+    pub use flowscope::{
         Extracted, FlowExtractor, L4Proto, Orientation, PacketView, TcpFlags, TcpInfo,
     };
 
     #[cfg(feature = "flow")]
-    pub use netring_flow::{
+    pub use flowscope::{
         BufferedReassembler, BufferedReassemblerFactory, EndReason, FlowDriver, FlowEntry,
         FlowEvent, FlowEvents, FlowSide, FlowState, FlowStats, FlowTracker, FlowTrackerConfig,
         FlowTrackerStats, HistoryString, Reassembler, ReassemblerFactory,

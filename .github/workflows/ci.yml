@@ -61,16 +61,6 @@ jobs:
       - uses: Swatinem/rust-cache@v2
       - name: Unit tests (workspace)
         run: cargo test --workspace --features tokio,channel
-      - name: Verify netring-flow has no default deps
-        run: |
-          deps=$(cargo tree -p netring-flow --no-default-features --depth 1 \
-                 | tail -n +2)
-          if [ -n "$deps" ]; then
-            echo "netring-flow pulled unexpected deps:"
-            echo "$deps"
-            exit 1
-          fi
-          echo "✓ netring-flow has no default deps"
 
   # ── Integration tests (need CAP_NET_RAW) ──────────────────────────────────
   test-integration:

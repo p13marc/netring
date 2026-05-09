@@ -1,12 +1,5 @@
 [workspace]
-members = [
-    "netring",
-    "netring-flow",
-    "netring-flow-pcap",
-    "netring-flow-http",
-    "netring-flow-tls",
-    "netring-flow-dns",
-]
+members = ["netring"]
 resolver = "2"
 
 [workspace.package]
@@ -31,16 +24,9 @@ etherparse = "0.16"
 pcap-file = "2"
 metrics = "0.24"
 
-# netring-flow tracker deps
+# Flow & session tracking lives in the flowscope crate
+# (https://github.com/p13marc/flowscope). Pulled in via netring's
+# `flow` feature.
 ahash = { version = "0.8", default-features = false }
-smallvec = "1"
-arrayvec = "0.7"
-lru = "0.16"
 bytes = "1"
 xxhash-rust = { version = "0.8", default-features = false, features = ["xxh3"] }
-proptest = "1"
-httparse = "1.10"
-tls-parser = "0.12"
-md-5 = "0.10"
-hex = "0.4"
-simple-dns = "0.10"

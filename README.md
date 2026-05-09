@@ -100,14 +100,14 @@ LRU eviction, optional TCP reassembly hook (sync `Reassembler` or
 async `AsyncReassembler` with `channel_factory` for backpressure).
 
 The flow types live in a separate cross-platform crate
-[`netring-flow`](https://crates.io/crates/netring-flow) (no Linux,
-no tokio, no async runtime — usable with pcap, tun-tap, embedded).
-`netring` is the Linux integration; the underlying API works on any
-source of `&[u8]` frames.
+[`flowscope`](https://github.com/p13marc/flowscope) (no Linux, no
+tokio, no async runtime — usable with pcap, tun-tap, embedded).
+`netring` is the Linux capture integration; the underlying flow API
+works on any source of `&[u8]` frames.
 
-See [`netring-flow/docs/FLOW_GUIDE.md`](netring-flow/docs/FLOW_GUIDE.md)
-for the full cookbook: built-in extractors, custom keys, encap
-composition, reassembly patterns, backpressure, perf notes.
+`flowscope` also ships feature-gated L7 modules: `http` (HTTP/1.x),
+`tls` (TLS handshake observation, optional JA3), `dns` (DNS-over-UDP
+parser + correlator), and `pcap` (offline replay).
 
 ## Sync API
 
@@ -149,7 +149,7 @@ while let Some(batch) = cap.next_batch_blocking(Duration::from_millis(100)).unwr
 | `parse` | off | Packet header parsing via `etherparse` |
 | `pcap` | off | Stream packets to PCAP files |
 | `metrics` | off | `metrics` crate counters (`netring_capture_*_total`) |
-| `flow` | off | Pluggable flow & session tracking (pulls `netring-flow`, see [Flow & session tracking](#flow--session-tracking) above) |
+| `flow` | off | Pluggable flow & session tracking (pulls `flowscope`, see [Flow & session tracking](#flow--session-tracking) above) |
 
 ## Public API
 

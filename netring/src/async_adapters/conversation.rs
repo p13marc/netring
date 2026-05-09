@@ -60,8 +60,8 @@ use std::task::{Context, Poll};
 
 use ahash::RandomState;
 use bytes::Bytes;
+use flowscope::{EndReason, FlowExtractor, FlowSide};
 use futures_core::Stream;
-use netring_flow::{EndReason, FlowExtractor, FlowSide};
 use tokio::sync::mpsc;
 
 use crate::async_adapters::async_reassembler::{AsyncReassembler, AsyncReassemblerFactory};

@@ -1,5 +1,36 @@
 # Changelog
 
+## Unreleased
+
+### Workspace split: flow tracking moves to `flowscope`
+
+The flow & session tracking crate previously known as `netring-flow`
+(plus its companions `netring-flow-{http,tls,dns,pcap}`) has been
+extracted to a separate repository and consolidated into a single
+crate, [`flowscope`](https://github.com/p13marc/flowscope). The
+companion crates are now feature-gated modules of `flowscope`
+(`http`, `tls` + `ja3`, `dns`, `pcap`).
+
+netring's `flow` feature now pulls `flowscope` instead of
+`netring-flow`. Until `flowscope` is published to crates.io, the
+dep is sourced from git. Async stream adapters
+(`AsyncCapture::flow_stream`, `.session_stream`, `.datagram_stream`)
+remain in netring; only the underlying traits and parsers moved.
+
+If you imported anything from `netring-flow` or its companions:
+- `netring_flow::X` → `flowscope::X`
+- `netring_flow_http::X` → `flowscope::http::X`
+- `netring_flow_tls::X` → `flowscope::tls::X`
+- `netring_flow_dns::X` → `flowscope::dns::X`
+- `netring_flow_pcap::X` → `flowscope::pcap::X`
+
+If you went through `netring::flow::*`, no change.
+
+The CHANGELOG entries for plans 10, 12, 20, 22–24, 30, 31 (the flow
+work shipped under netring 0.7.0) are preserved below as the original
+release record. New flow-related changes will be tracked in
+`flowscope`'s changelog.
+
 ## 0.7.0 — Flow & session tracking (workspace split)
 
 A major release introducing pluggable flow & session tracking,

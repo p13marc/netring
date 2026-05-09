@@ -6,7 +6,7 @@ use std::ptr::NonNull;
 use crate::afpacket::ffi;
 use crate::afpacket::ring::{self, MmapRing};
 
-pub use netring_flow::Timestamp;
+pub use flowscope::Timestamp;
 
 /// Decoded per-packet status flags from `tpacket3_hdr.tp_status`.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
@@ -288,7 +288,7 @@ impl<'a> Packet<'a> {
         etherparse::SlicedPacket::from_ethernet(self.data)
     }
 
-    /// View this packet as a [`netring_flow::PacketView`] for use with
+    /// View this packet as a [`flowscope::PacketView`] for use with
     /// the source-agnostic flow-tracking API.
     ///
     /// Zero-cost — borrows the same frame slice and copies the
@@ -304,8 +304,8 @@ impl<'a> Packet<'a> {
     /// # }
     /// ```
     #[inline]
-    pub fn view(&self) -> netring_flow::PacketView<'a> {
-        netring_flow::PacketView::new(self.data, self.timestamp())
+    pub fn view(&self) -> flowscope::PacketView<'a> {
+        flowscope::PacketView::new(self.data, self.timestamp())
     }
 }
 

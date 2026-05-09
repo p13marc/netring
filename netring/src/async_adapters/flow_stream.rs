@@ -1,5 +1,5 @@
 //! [`FlowStream`] — `futures_core::Stream` of [`FlowEvent`]s built on
-//! top of [`AsyncCapture`] and [`netring_flow::FlowTracker`].
+//! top of [`AsyncCapture`] and [`flowscope::FlowTracker`].
 //!
 //! Available under `flow + tokio` features. The headline async API:
 //!
@@ -27,11 +27,11 @@ use std::time::Duration;
 
 use ahash::RandomState;
 use bytes::Bytes;
-use futures_core::Stream;
-use netring_flow::tracker::FlowEvents;
-use netring_flow::{
+use flowscope::tracker::FlowEvents;
+use flowscope::{
     EndReason, FlowEvent, FlowExtractor, FlowSide, FlowTracker, FlowTrackerConfig, Timestamp,
 };
+use futures_core::Stream;
 
 use crate::async_adapters::async_reassembler::{AsyncReassembler, AsyncReassemblerFactory};
 use crate::async_adapters::tokio_adapter::AsyncCapture;
@@ -153,15 +153,15 @@ where
 {
     /// Convert into a stream of typed L7 messages. Bytes from each
     /// flow's TCP segments are dispatched to a per-flow
-    /// [`netring_flow::SessionParser`] built by `factory`; whatever
+    /// [`flowscope::SessionParser`] built by `factory`; whatever
     /// messages the parser returns are surfaced as
-    /// [`netring_flow::SessionEvent::Application`].
+    /// [`flowscope::SessionEvent::Application`].
     pub fn session_stream<F>(
         self,
         factory: F,
     ) -> crate::async_adapters::session_stream::SessionStream<S, E, F>
     where
-        F: netring_flow::SessionParserFactory<E::Key>,
+        F: flowscope::SessionParserFactory<E::Key>,
     {
         let extractor = self.tracker.into_extractor();
         crate::async_adapters::session_stream::SessionStream::new(self.cap, extractor, factory)
@@ -169,13 +169,13 @@ where
 
     /// Convert into a stream of typed L7 messages from packet-oriented
     /// (UDP) protocols. Each UDP payload is fed to a per-flow
-    /// [`netring_flow::DatagramParser`].
+    /// [`flowscope::DatagramParser`].
     pub fn datagram_stream<F>(
         self,
         factory: F,
     ) -> crate::async_adapters::datagram_stream::DatagramStream<S, E, F>
     where
-        F: netring_flow::DatagramParserFactory<E::Key>,
+        F: flowscope::DatagramParserFactory<E::Key>,
     {
         let extractor = self.tracker.into_extractor();
         crate::async_adapters::datagram_stream::DatagramStream::new(self.cap, extractor, factory)

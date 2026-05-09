@@ -15,7 +15,10 @@ homepage = "https://github.com/p13marc/netring"
 exclude = ["CLAUDE.md", "SPEC.md"]
 
 [dependencies]
-netring-flow = { version = "0.1.0", path = "../netring-flow", default-features = false }
+# Flow & session tracking lives in the flowscope crate. Pulled from
+# git until the first crates.io release; switch to a version dep
+# (`flowscope = "0.1"`) once it's published.
+flowscope = { git = "https://github.com/p13marc/flowscope", branch = "master", default-features = false, optional = true }
 
 libc = { workspace = true }
 nix = { workspace = true }
@@ -45,7 +48,7 @@ futures = "0.3"
 default = []
 tokio = ["dep:tokio", "dep:futures-core"]
 channel = ["dep:crossbeam-channel"]
-parse = ["dep:etherparse", "netring-flow/extractors"]
+parse = ["dep:etherparse", "dep:flowscope", "flowscope/extractors"]
 pcap = ["dep:pcap-file"]
 metrics = ["dep:metrics"]
 af-xdp = []
@@ -53,7 +56,7 @@ nightly = []
 integration-tests = []
 # Flow & session tracking. `flow + tokio` enables `AsyncCapture::flow_stream`.
 # Pulls `bytes` since the async reassembler API uses it.
-flow = ["parse", "netring-flow/tracker", "netring-flow/reassembler", "netring-flow/session", "dep:bytes", "dep:ahash"]
+flow = ["parse", "flowscope/tracker", "flowscope/reassembler", "flowscope/session", "dep:bytes", "dep:ahash"]
 
 [package.metadata.docs.rs]
 all-features = true

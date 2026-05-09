@@ -2,8 +2,8 @@
 
 //! Async TCP reassembly hooks for the [`crate::FlowStream`].
 //!
-//! Sync reassembly users should use [`netring_flow::Reassembler`] +
-//! [`netring_flow::FlowDriver`]. This module is for tokio users who
+//! Sync reassembly users should use [`flowscope::Reassembler`] +
+//! [`flowscope::FlowDriver`]. This module is for tokio users who
 //! want backpressure: the [`AsyncReassembler`]'s `segment` future
 //! is awaited inline in `FlowStream::poll_next`, so a slow consumer
 //! propagates pressure all the way to the kernel ring.
@@ -12,7 +12,7 @@ use std::future::Future;
 use std::pin::Pin;
 
 use bytes::Bytes;
-use netring_flow::FlowSide;
+use flowscope::FlowSide;
 use tokio::sync::mpsc;
 
 /// Receives TCP segments for one direction of one session.

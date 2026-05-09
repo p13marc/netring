@@ -10,7 +10,7 @@
 //! # use futures::StreamExt;
 //! # use netring::AsyncCapture;
 //! # use netring::flow::extract::FiveTuple;
-//! # use netring_flow::{DatagramParser, FlowSide, SessionEvent};
+//! # use flowscope::{DatagramParser, FlowSide, SessionEvent};
 //! # #[derive(Default, Clone)]
 //! # struct MyParser;
 //! # impl DatagramParser for MyParser {
@@ -32,11 +32,11 @@ use std::task::{Context, Poll};
 use std::time::Duration;
 
 use ahash::RandomState;
-use futures_core::Stream;
-use netring_flow::{
+use flowscope::{
     DatagramParser, DatagramParserFactory, FlowEvent, FlowExtractor, FlowTracker, L4Proto,
     Orientation, SessionEvent, Timestamp,
 };
+use futures_core::Stream;
 
 use crate::async_adapters::tokio_adapter::AsyncCapture;
 use crate::error::Error;
@@ -145,8 +145,8 @@ where
                             // direction, else Responder. Use the FlowSide derived from the
                             // tracker's recorded orientation: the tracker just set it.
                             let side = match extracted.orientation {
-                                Orientation::Forward => netring_flow::FlowSide::Initiator,
-                                Orientation::Reverse => netring_flow::FlowSide::Responder,
+                                Orientation::Forward => flowscope::FlowSide::Initiator,
+                                Orientation::Reverse => flowscope::FlowSide::Responder,
                             };
                             let parser = this
                                 .parsers

@@ -11,7 +11,7 @@
 //! # use futures::StreamExt;
 //! # use netring::AsyncCapture;
 //! # use netring::flow::extract::FiveTuple;
-//! # use netring_flow::{FlowSide, SessionEvent, SessionParser};
+//! # use flowscope::{FlowSide, SessionEvent, SessionParser};
 //! # #[derive(Default, Clone)]
 //! # struct MyParser;
 //! # impl SessionParser for MyParser {
@@ -39,11 +39,11 @@ use std::task::{Context, Poll};
 use std::time::Duration;
 
 use ahash::RandomState;
-use futures_core::Stream;
-use netring_flow::{
+use flowscope::{
     EndReason, FlowEvent, FlowExtractor, FlowSide, FlowTracker, SessionEvent, SessionParser,
     SessionParserFactory, Timestamp,
 };
+use futures_core::Stream;
 
 use crate::async_adapters::tokio_adapter::AsyncCapture;
 use crate::error::Error;

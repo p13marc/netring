@@ -38,6 +38,12 @@ detail; design wins for "why is this even shaped this way."
 | Plan | Goal | Status |
 |------|------|--------|
 | [`10-dedup.md`](./10-dedup.md) | `Dedup` primitive + `dedup_stream()` for `lo` | ✅ done (folded into 0.7.0) |
+| [`11-busy-poll-prefer.md`](./11-busy-poll-prefer.md) | `SO_PREFER_BUSY_POLL` + `SO_BUSY_POLL_BUDGET` for AF_PACKET + AF_XDP (kernel 5.11+) | not started |
+| [`12-xdp-loader.md`](./12-xdp-loader.md) | Built-in XDP redirect-all program loader via optional `aya` (pure Rust, feature-gated) | not started |
+
+Both 11 and 12 close the two gaps identified in
+[flowscope's DPI architecture research](https://github.com/p13marc/flowscope/blob/master/plans/DPI_ARCHITECTURE.md):
+the AF_XDP busy-poll latency knobs and the XDP program loading step.
 
 ---
 

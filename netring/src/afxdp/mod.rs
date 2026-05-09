@@ -42,9 +42,15 @@ mod stats;
 #[cfg(feature = "af-xdp")]
 mod umem;
 
+#[cfg(feature = "xdp-loader")]
+pub mod loader;
+
 #[cfg(feature = "af-xdp")]
 pub use batch::{XdpBatch, XdpBatchIter, XdpPacket};
 pub use stats::XdpStats;
+
+#[cfg(feature = "xdp-loader")]
+pub use loader::{XdpAttachment, XdpFlags, XdpProgram, default_program};
 
 use std::os::fd::{AsFd, AsRawFd};
 #[cfg(feature = "af-xdp")]
@@ -138,6 +144,12 @@ pub struct XdpSocketBuilder {
     busy_poll_us: Option<u32>,
     prefer_busy_poll: Option<bool>,
     busy_poll_budget: Option<u16>,
+    #[cfg(feature = "xdp-loader")]
+    attach_default: bool,
+    #[cfg(feature = "xdp-loader")]
+    attach_flags: loader::XdpFlags,
+    #[cfg(feature = "xdp-loader")]
+    force_replace: bool,
 }
 
 impl Default for XdpSocketBuilder {
@@ -153,6 +165,12 @@ impl Default for XdpSocketBuilder {
             busy_poll_us: None,
             prefer_busy_poll: None,
             busy_poll_budget: None,
+            #[cfg(feature = "xdp-loader")]
+            attach_default: false,
+            #[cfg(feature = "xdp-loader")]
+            attach_flags: loader::XdpFlags::SKB_MODE, // safest default; works on lo
+            #[cfg(feature = "xdp-loader")]
+            force_replace: false,
         }
     }
 }
@@ -228,6 +246,42 @@ impl XdpSocketBuilder {
     /// `EPERM`.
     pub fn busy_poll_budget(mut self, budget: u16) -> Self {
         self.busy_poll_budget = Some(budget);
+        self
+    }
+
+    /// Load and attach the built-in redirect-all XDP program, then
+    /// register this socket on its embedded XSKMAP. Available with
+    /// the `xdp-loader` feature.
+    ///
+    /// On `Drop` of the resulting `XdpSocket`, the program is
+    /// detached from the interface and the map fd is closed.
+    ///
+    /// Default attach mode is `SKB_MODE` (works on every interface
+    /// including `lo`). Override with [`xdp_attach_flags`](Self::xdp_attach_flags)
+    /// for `DRV_MODE` on supported NICs.
+    ///
+    /// If a program is already attached to the interface, `build()`
+    /// fails with an error suggesting [`force_replace`](Self::force_replace).
+    #[cfg(feature = "xdp-loader")]
+    pub fn with_default_program(mut self) -> Self {
+        self.attach_default = true;
+        self
+    }
+
+    /// Set the XDP attach flags used by [`with_default_program`](Self::with_default_program).
+    /// Default: `SKB_MODE`.
+    #[cfg(feature = "xdp-loader")]
+    pub fn xdp_attach_flags(mut self, flags: loader::XdpFlags) -> Self {
+        self.attach_flags = flags;
+        self
+    }
+
+    /// If `true`, attach with `XDP_FLAGS_REPLACE` so an existing
+    /// program on the interface is replaced. Default: false (build
+    /// fails with `EBUSY` if a program is already attached).
+    #[cfg(feature = "xdp-loader")]
+    pub fn force_replace(mut self, force: bool) -> Self {
+        self.force_replace = force;
         self
     }
 
@@ -433,7 +487,8 @@ impl XdpSocketBuilder {
             self.shared_umem_fd,
         )?;
 
-        Ok(XdpSocket {
+        #[cfg_attr(not(feature = "xdp-loader"), allow(unused_mut))]
+        let mut socket = XdpSocket {
             fd,
             umem,
             fill,
@@ -441,7 +496,30 @@ impl XdpSocketBuilder {
             tx,
             comp,
             need_wakeup_enabled: self.need_wakeup,
-        })
+            #[cfg(feature = "xdp-loader")]
+            _xdp_attachment: None,
+        };
+
+        // Optionally load + attach the default redirect-all XDP program
+        // and register this socket on its XSKMAP.
+        #[cfg(feature = "xdp-loader")]
+        if self.attach_default {
+            let iface = self.interface.as_deref().unwrap_or("");
+            let flags = if self.force_replace {
+                self.attach_flags | loader::XdpFlags::REPLACE
+            } else {
+                self.attach_flags
+            };
+            let mut prog = loader::default_program(/* max_queues */ 256)?;
+            // Register *before* attach: the kernel program reads
+            // map[queue_id] on the very first packet, so any race in
+            // the other order risks dropping the first batch.
+            prog.register(self.queue_id, &socket)?;
+            let attachment = prog.attach(iface, flags)?;
+            socket._xdp_attachment = Some(attachment);
+        }
+
+        Ok(socket)
     }
 
     /// Build the XDP socket (stub without `af-xdp` feature).
@@ -486,6 +564,12 @@ pub struct XdpSocket {
     /// whether `flush()` honors `tx.needs_wakeup()` or always kicks.
     #[cfg(feature = "af-xdp")]
     need_wakeup_enabled: bool,
+    /// RAII guard for an attached XDP program (if the socket was built
+    /// with `with_default_program()`). Drops before the socket fd, so
+    /// the program is detached from the interface before AF_XDP shuts
+    /// down.
+    #[cfg(feature = "xdp-loader")]
+    _xdp_attachment: Option<loader::XdpAttachment>,
     // Without the feature, keep a private field so the struct is unconstructable.
     // `PhantomData<*const ()>` mirrors the with-feature `!Sync` property so
     // the `compile_fail` doctest that asserts `!Sync` works regardless of

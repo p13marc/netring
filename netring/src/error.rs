@@ -40,6 +40,11 @@ pub enum Error {
     /// Generic I/O error.
     #[error(transparent)]
     Io(#[from] std::io::Error),
+
+    /// XDP loader error (only present when the `xdp-loader` feature is enabled).
+    #[cfg(feature = "xdp-loader")]
+    #[error("XDP loader: {0}")]
+    Loader(String),
 }
 
 /// Convenience alias used throughout the crate.

@@ -109,6 +109,7 @@ async-bridge *args:    (example "async_bridge" args)
 async-streamext *args: (example "async_streamext" args)
 async-xdp *args:       cargo run -p netring --example async_xdp --features tokio,af-xdp -- {{args}}
 async-xdp-busy *args:  cargo run -p netring --example async_xdp_busy_poll --features tokio,af-xdp -- {{args}}
+async-xdp-self *args:  cargo run -p netring --example async_xdp_self_loaded --features tokio,af-xdp,xdp-loader -- {{args}}
 async-metrics *args:   cargo run -p netring --example async_metrics --features tokio,metrics -- {{args}}
 channel *args:      (example "channel_consumer" args)
 ebpf *args:         (example "ebpf_filter" args)

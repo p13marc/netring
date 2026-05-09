@@ -35,7 +35,10 @@ recipe. No external program loading, no native libs.
 
 ## Status
 
-Not started.
+✅ Phase 1 done (default program + RAII attachment + builder).
+Deferred to follow-ups: `with_program(prog)` for custom programs,
+`with_xsk_map(&map)` for multi-queue sharing, hardware offload
+validation.
 
 ## Prerequisites
 

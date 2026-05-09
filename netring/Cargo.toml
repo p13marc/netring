@@ -43,6 +43,10 @@ etherparse = { workspace = true, optional = true }
 pcap-file = { workspace = true, optional = true }
 metrics = { workspace = true, optional = true }
 
+# Optional XDP program loader (plan 12). Pure Rust; pulls aya for
+# `bpf(2)` / netlink wrappers and XSKMAP map plumbing.
+aya = { version = "0.13", optional = true }
+
 [dev-dependencies]
 env_logger = "0.11"
 divan = "0.1"
@@ -59,6 +63,11 @@ parse = ["dep:etherparse", "flowscope/extractors"]
 pcap = ["dep:pcap-file"]
 metrics = ["dep:metrics"]
 af-xdp = []
+# Built-in XDP redirect-all program loader for AF_XDP. Pulls `aya`.
+# Lets `XdpSocketBuilder::with_default_program()` create an XSKMAP,
+# load the program, attach it to the interface, and register the
+# socket — no external program loader required.
+xdp-loader = ["af-xdp", "dep:aya"]
 nightly = []
 integration-tests = []
 # Flow & session tracking. `flow + tokio` enables `AsyncCapture::flow_stream`.
@@ -84,6 +93,10 @@ required-features = ["tokio", "af-xdp"]
 [[example]]
 name = "async_xdp_busy_poll"
 required-features = ["tokio", "af-xdp"]
+
+[[example]]
+name = "async_xdp_self_loaded"
+required-features = ["tokio", "af-xdp", "xdp-loader"]
 
 [[example]]
 name = "async_metrics"

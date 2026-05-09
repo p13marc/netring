@@ -2,6 +2,45 @@
 
 ## Unreleased
 
+### Built-in XDP program loader for AF_XDP (plan 12)
+
+`XdpSocketBuilder::with_default_program()` makes AF_XDP self-contained:
+the builder loads a pre-compiled redirect-all XDP program, attaches
+it to the interface, and registers the AF_XDP socket on its embedded
+XSKMAP — all in one call. Previously every AF_XDP user had to load
+and attach an XDP program externally (via aya, libxdp, bpftool); now
+you don't.
+
+- New optional Cargo feature `xdp-loader = ["af-xdp", "dep:aya"]`. Pulls
+  `aya` (pure Rust) for the runtime program-load and netlink-attach
+  machinery. With the feature off, netring builds without aya.
+- New module `netring::xdp` (gated): `default_program(max_queues)`,
+  `XdpProgram`, `XdpAttachment` (RAII detach guard), `XdpFlags`
+  (`SKB_MODE` / `DRV_MODE` / `HW_MODE` / `REPLACE`).
+- New `XdpSocketBuilder` methods (gated): `with_default_program()`,
+  `xdp_attach_flags(...)`, `force_replace(true)`. Default attach mode
+  is `SKB_MODE` (works on every interface including `lo`); switch to
+  `DRV_MODE` for native-driver XDP on supported NICs.
+- The 5-instruction redirect-all program (`bpf_redirect_map(&xsks_map,
+  ctx->rx_queue_index, XDP_PASS)`) is hand-written in C and
+  pre-compiled to `redirect_all.bpf.o` (~1 KB ELF). The compiled
+  object is committed; only `clang` is needed to regenerate (and only
+  the maintainer ever does that). Consumers don't need clang/libbpf.
+- 3 unit tests verify ELF magic, BPF machine type, and presence of
+  the program and map symbols in the vendored object.
+- RAII teardown: dropping `XdpSocket` detaches the program from the
+  interface and unloads the map.
+- Example: `examples/async_xdp_self_loaded.rs`.
+
+Out of scope for this release (deferred follow-ups):
+- `XdpSocketBuilder::with_program(prog)` for caller-loaded custom aya
+  programs.
+- Multi-queue XSKMAP sharing (`with_xsk_map(&map)`).
+- Hardware offload validation for SmartNICs.
+
+References: <https://docs.kernel.org/networking/af_xdp.html>,
+<https://aya-rs.dev/book/>.
+
 ### AF_XDP / AF_PACKET busy-poll trio (plan 11)
 
 Expose Linux ≥ 5.11 socket options that close most of the latency

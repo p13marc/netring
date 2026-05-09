@@ -156,6 +156,10 @@ where
     /// [`flowscope::SessionParser`] built by `factory`; whatever
     /// messages the parser returns are surfaced as
     /// [`flowscope::SessionEvent::Application`].
+    ///
+    /// The current tracker [`FlowTrackerConfig`] is preserved across
+    /// the conversion — `cap.flow_stream(ext).with_config(cfg).session_stream(parser)`
+    /// runs the session-level tracker with `cfg`.
     pub fn session_stream<F>(
         self,
         factory: F,
@@ -163,13 +167,19 @@ where
     where
         F: flowscope::SessionParserFactory<E::Key>,
     {
+        let config = self.tracker.config().clone();
         let extractor = self.tracker.into_extractor();
-        crate::async_adapters::session_stream::SessionStream::new(self.cap, extractor, factory)
+        crate::async_adapters::session_stream::SessionStream::new_with_config(
+            self.cap, extractor, factory, config,
+        )
     }
 
     /// Convert into a stream of typed L7 messages from packet-oriented
     /// (UDP) protocols. Each UDP payload is fed to a per-flow
     /// [`flowscope::DatagramParser`].
+    ///
+    /// As with [`session_stream`](Self::session_stream), the tracker
+    /// config is preserved across the conversion.
     pub fn datagram_stream<F>(
         self,
         factory: F,
@@ -177,8 +187,11 @@ where
     where
         F: flowscope::DatagramParserFactory<E::Key>,
     {
+        let config = self.tracker.config().clone();
         let extractor = self.tracker.into_extractor();
-        crate::async_adapters::datagram_stream::DatagramStream::new(self.cap, extractor, factory)
+        crate::async_adapters::datagram_stream::DatagramStream::new_with_config(
+            self.cap, extractor, factory, config,
+        )
     }
 }
 
@@ -324,7 +337,9 @@ where
                         {
                             let fut = match reason_copy {
                                 EndReason::Fin | EndReason::IdleTimeout => r.fin(),
-                                EndReason::Rst | EndReason::Evicted => r.rst(),
+                                EndReason::Rst
+                                | EndReason::Evicted
+                                | EndReason::BufferOverflow => r.rst(),
                             };
                             drop(r);
                             found_fut = Some(fut);

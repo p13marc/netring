@@ -37,7 +37,11 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     while let Some(evt) = stream.next().await {
         let evt = evt?;
         // Inline filter: protocol + (optional) port match.
-        let key = evt.key();
+        // `FlowEvent::key()` is `Option<&K>` (None for tracker-global
+        // anomalies); skip keyless events here.
+        let Some(key) = evt.key() else {
+            continue;
+        };
         if key.proto != want_proto {
             continue;
         }

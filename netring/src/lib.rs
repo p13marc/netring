@@ -92,9 +92,10 @@ pub mod flow {
 
     #[cfg(feature = "flow")]
     pub use flowscope::{
-        BufferedReassembler, BufferedReassemblerFactory, EndReason, FlowDriver, FlowEntry,
-        FlowEvent, FlowEvents, FlowSide, FlowState, FlowStats, FlowTracker, FlowTrackerConfig,
-        FlowTrackerStats, HistoryString, Reassembler, ReassemblerFactory,
+        AnomalyKind, BufferedReassembler, BufferedReassemblerFactory, EndReason, FlowDriver,
+        FlowEntry, FlowEvent, FlowEvents, FlowSessionDriver, FlowSide, FlowState, FlowStats,
+        FlowTracker, FlowTrackerConfig, FlowTrackerStats, HistoryString, OverflowPolicy,
+        Reassembler, ReassemblerFactory,
     };
 
     /// Async reassembly types for tokio integration.

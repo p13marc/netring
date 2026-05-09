@@ -1,5 +1,77 @@
 # Changelog
 
+## 0.9.0 — flowscope 0.2, config-aware session streams, dedup + pcap hardening
+
+This release pulls in [flowscope 0.2](https://crates.io/crates/flowscope/0.2.0)'s
+reassembly observability work and fixes a config-loss bug in the
+session/datagram async builder chain. Closes feedback items F1, F2, F4
+and F5 from des-rs's wishlist (`plans/feedback-from-des-rs-2026-05-09.md`).
+F3 (netns capture) is intentionally not landed — see that plan for the
+nlink-based composition recipe.
+
+### Breaking — flowscope 0.2 surface
+
+- **`FlowEvent::key()` now returns `Option<&K>`** (was `&K`). For non-
+  `Anomaly` events the value is always `Some(_)`; pattern-matching is
+  unaffected. Code that called `event.key()` directly on a re-exported
+  `FlowEvent` needs `event.key().expect(...)` or pattern-match.
+- **`EndReason::BufferOverflow`** is a new variant. Exhaustive matches
+  over `EndReason` need a new arm. netring treats `BufferOverflow`
+  like `Rst` for cleanup semantics.
+- **`#[non_exhaustive]`** on `FlowStats`, `FlowTrackerConfig`,
+  `AnomalyKind`, `OverflowPolicy`. Construct via `Default::default()`
+  + field assignment instead of struct literals.
+- **`FlowEvent::Anomaly { key, kind, ts }`** is a new variant.
+  `FlowStream` passes it through verbatim; `SessionStream` and
+  `DatagramStream` log it via `tracing::warn!` (target `netring::flow`)
+  rather than surface it as a `SessionEvent`. Use `FlowStream` directly
+  for structured access.
+
+### `SessionStream::with_config` / `DatagramStream::with_config`
+
+Both async session-level streams gain a builder-style `with_config`
+method that mirrors `FlowStream::with_config`. Use this to set the
+flowscope-0.2 reassembler buffer cap and overflow policy on the
+session path.
+
+### Bug fix — config propagation through session_stream / datagram_stream
+
+Before this release, `cap.flow_stream(ext).with_config(cfg).session_stream(parser)`
+silently lost `cfg` during the `FlowStream → SessionStream` transition
+(the inner `FlowTracker` was discarded and rebuilt with defaults). The
+config now propagates correctly. Same for `datagram_stream`.
+
+This was invisible under flowscope 0.1 (no buffer-cap fields existed
+to lose) but matters under 0.2.
+
+### New re-exports
+
+Under the `flow` feature gate: `AnomalyKind`, `FlowSessionDriver`,
+`OverflowPolicy`. `FlowSessionDriver` is the sync mirror of
+`SessionStream` for offline pcap replay.
+
+### Hardening tests
+
+- `tests/dedup_stress.rs` — 10k structured-payload TCP-shaped packets
+  at 1 kHz and 2 kHz cadence assert `Dedup::loopback().dropped() == 0`.
+  Closes the theoretical xxh3-64-collision concern for high-cadence
+  TCP traffic.
+- `pcap::tests::round_trip_preserves_nanosecond_timestamp` — explicit
+  byte-for-byte timestamp round-trip via `CaptureWriter` →
+  `pcap_file::pcap::PcapReader`. Confirms nanosecond precision is
+  preserved across write → read.
+
+### Internal
+
+- `flowscope` dep bumped from `0.1` to `0.2` (default features still off).
+- `flow_stream.rs:325-328` and `session_stream.rs:194` match arms
+  extended for `EndReason::BufferOverflow`.
+- `SessionStream::new` / `DatagramStream::new` removed in favor of
+  `new_with_config(extractor, factory, config)` (private constructors;
+  no public-API impact).
+
+---
+
 ## 0.8.0 — XDP loader, busy-poll trio, broadcast, flowscope split
 
 A feature-additive release. New AF_XDP self-contained loader (no more

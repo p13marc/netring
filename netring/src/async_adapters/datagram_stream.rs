@@ -33,8 +33,8 @@ use std::time::Duration;
 
 use ahash::RandomState;
 use flowscope::{
-    DatagramParser, DatagramParserFactory, FlowEvent, FlowExtractor, FlowTracker, L4Proto,
-    Orientation, SessionEvent, Timestamp,
+    DatagramParser, DatagramParserFactory, FlowEvent, FlowExtractor, FlowTracker,
+    FlowTrackerConfig, L4Proto, Orientation, SessionEvent, Timestamp,
 };
 use futures_core::Stream;
 
@@ -66,8 +66,13 @@ where
     E::Key: Eq + std::hash::Hash + Clone + Send + 'static,
     F: DatagramParserFactory<E::Key>,
 {
-    pub(crate) fn new(cap: AsyncCapture<S>, extractor: E, factory: F) -> Self {
-        let tracker = FlowTracker::new(extractor);
+    pub(crate) fn new_with_config(
+        cap: AsyncCapture<S>,
+        extractor: E,
+        factory: F,
+        config: FlowTrackerConfig,
+    ) -> Self {
+        let tracker = FlowTracker::with_config(extractor, config);
         let sweep = tokio::time::interval(tracker.config().sweep_interval);
         Self {
             cap,
@@ -77,6 +82,17 @@ where
             pending: VecDeque::new(),
             sweep,
         }
+    }
+
+    /// Replace the inner [`FlowTracker`]'s config in place.
+    ///
+    /// Mirrors [`FlowStream::with_config`](super::flow_stream::FlowStream::with_config).
+    /// Re-arms the sweep timer if `sweep_interval` changed.
+    pub fn with_config(mut self, config: FlowTrackerConfig) -> Self {
+        let new_interval = config.sweep_interval;
+        self.tracker.set_config(config);
+        self.sweep = tokio::time::interval(new_interval);
+        self
     }
 
     /// Borrow the inner tracker (stats / introspection).
@@ -194,6 +210,13 @@ fn convert_event<K, P>(
             // Datagram parsers have no fin/rst; just drop.
             parsers.remove(&key);
             pending.push_back(SessionEvent::Closed { key, reason, stats });
+        }
+        FlowEvent::Anomaly { kind, ts, .. } => {
+            tracing::warn!(
+                target: "netring::flow",
+                ?kind, ?ts,
+                "flow tracker anomaly (use FlowStream for structured handling)"
+            );
         }
         _ => {}
     }

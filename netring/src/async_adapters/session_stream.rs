@@ -40,8 +40,8 @@ use std::time::Duration;
 
 use ahash::RandomState;
 use flowscope::{
-    EndReason, FlowEvent, FlowExtractor, FlowSide, FlowTracker, SessionEvent, SessionParser,
-    SessionParserFactory, Timestamp,
+    EndReason, FlowEvent, FlowExtractor, FlowSide, FlowTracker, FlowTrackerConfig, SessionEvent,
+    SessionParser, SessionParserFactory, Timestamp,
 };
 use futures_core::Stream;
 
@@ -73,8 +73,13 @@ where
     E::Key: Eq + std::hash::Hash + Clone + Send + 'static,
     F: SessionParserFactory<E::Key>,
 {
-    pub(crate) fn new(cap: AsyncCapture<S>, extractor: E, factory: F) -> Self {
-        let tracker = FlowTracker::new(extractor);
+    pub(crate) fn new_with_config(
+        cap: AsyncCapture<S>,
+        extractor: E,
+        factory: F,
+        config: FlowTrackerConfig,
+    ) -> Self {
+        let tracker = FlowTracker::with_config(extractor, config);
         let sweep = tokio::time::interval(tracker.config().sweep_interval);
         Self {
             cap,
@@ -84,6 +89,19 @@ where
             pending: VecDeque::new(),
             sweep,
         }
+    }
+
+    /// Replace the inner [`FlowTracker`]'s config in place.
+    ///
+    /// Mirrors [`FlowStream::with_config`](super::flow_stream::FlowStream::with_config).
+    /// Use this to set the per-side reassembler buffer cap and overflow
+    /// policy for the session path. Re-arms the sweep timer if
+    /// `sweep_interval` changed.
+    pub fn with_config(mut self, config: FlowTrackerConfig) -> Self {
+        let new_interval = config.sweep_interval;
+        self.tracker.set_config(config);
+        self.sweep = tokio::time::interval(new_interval);
+        self
     }
 
     /// Borrow the inner tracker (stats / introspection).
@@ -210,13 +228,25 @@ fn convert_event<K, P>(
                             });
                         }
                     }
-                    EndReason::Rst | EndReason::Evicted => {
+                    EndReason::Rst | EndReason::Evicted | EndReason::BufferOverflow => {
                         parser.rst_initiator();
                         parser.rst_responder();
                     }
                 }
             }
             pending.push_back(SessionEvent::Closed { key, reason, stats });
+        }
+        FlowEvent::Anomaly { kind, ts, .. } => {
+            // SessionStream's typed surface (`SessionEvent`) has no Anomaly
+            // variant, so we surface it via tracing instead of dropping it
+            // silently. Use `FlowStream` directly for structured access; the
+            // `Closed` event still carries `EndReason::BufferOverflow` when
+            // applicable.
+            tracing::warn!(
+                target: "netring::flow",
+                ?kind, ?ts,
+                "flow tracker anomaly (use FlowStream for structured handling)"
+            );
         }
         // Lifecycle-internal events (Packet, Established, StateChange) are not
         // surfaced — SessionStream's contract is "messages and lifecycle endpoints".
@@ -229,4 +259,81 @@ fn current_timestamp() -> Timestamp {
         .duration_since(std::time::UNIX_EPOCH)
         .unwrap_or(Duration::ZERO);
     Timestamp::new(now.as_secs() as u32, now.subsec_nanos())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use flowscope::{AnomalyKind, FlowStats};
+
+    #[derive(Default)]
+    struct DummyParser;
+
+    impl SessionParser for DummyParser {
+        type Message = ();
+        fn feed_initiator(&mut self, _: &[u8]) -> Vec<()> {
+            Vec::new()
+        }
+        fn feed_responder(&mut self, _: &[u8]) -> Vec<()> {
+            Vec::new()
+        }
+    }
+
+    fn ts() -> Timestamp {
+        Timestamp::new(0, 0)
+    }
+
+    #[test]
+    fn buffer_overflow_close_emits_closed_event() {
+        let mut parsers: HashMap<u32, DummyParser, RandomState> =
+            HashMap::with_hasher(RandomState::new());
+        parsers.insert(7, DummyParser);
+        let mut pending: VecDeque<SessionEvent<u32, ()>> = VecDeque::new();
+
+        convert_event::<u32, DummyParser>(
+            FlowEvent::Ended {
+                key: 7,
+                reason: EndReason::BufferOverflow,
+                stats: FlowStats::default(),
+                history: Default::default(),
+            },
+            &mut parsers,
+            &mut pending,
+        );
+
+        assert_eq!(pending.len(), 1);
+        match pending.pop_front().unwrap() {
+            SessionEvent::Closed { reason, key, .. } => {
+                assert!(matches!(reason, EndReason::BufferOverflow));
+                assert_eq!(key, 7);
+            }
+            other => panic!("expected Closed, got {other:?}"),
+        }
+        // Parser should have been removed (the rst path takes ownership).
+        assert!(!parsers.contains_key(&7));
+    }
+
+    #[test]
+    fn anomaly_event_does_not_emit_session_event() {
+        let mut parsers: HashMap<u32, DummyParser, RandomState> =
+            HashMap::with_hasher(RandomState::new());
+        let mut pending: VecDeque<SessionEvent<u32, ()>> = VecDeque::new();
+
+        convert_event::<u32, DummyParser>(
+            FlowEvent::Anomaly {
+                key: Some(42),
+                kind: AnomalyKind::OutOfOrderSegment {
+                    side: FlowSide::Initiator,
+                    count: 3,
+                },
+                ts: ts(),
+            },
+            &mut parsers,
+            &mut pending,
+        );
+
+        // Anomaly is not surfaced through the typed SessionEvent surface
+        // (it's logged via tracing instead).
+        assert!(pending.is_empty());
+    }
 }

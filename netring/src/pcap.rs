@@ -154,4 +154,29 @@ mod tests {
         assert_eq!(record.data.as_ref(), &[1, 2, 3, 4, 5]);
         assert_eq!(record.orig_len, 100);
     }
+
+    /// Closes feedback item F5 from des-rs: confirm that nanosecond
+    /// timestamps survive a write → read cycle byte-for-byte. Cross-
+    /// site forensic ordering depends on full nanosecond precision,
+    /// so a microsecond-truncating regression must trip a test.
+    #[test]
+    fn round_trip_preserves_nanosecond_timestamp() {
+        let ts_in = Timestamp::new(1_700_000_000, 123_456_789);
+        let mut buf = Vec::new();
+        {
+            let cursor = Cursor::new(&mut buf);
+            let mut w = CaptureWriter::create(cursor).expect("create");
+            let mut pkt = make_owned(vec![1, 2, 3, 4, 5]);
+            pkt.timestamp = ts_in;
+            w.write_owned(&pkt).expect("write");
+        }
+        let cursor = Cursor::new(&buf);
+        let mut reader = pcap_file::pcap::PcapReader::new(cursor).expect("reader");
+        let record = reader.next_packet().expect("first").expect("record");
+        let expected = Duration::new(ts_in.sec as u64, ts_in.nsec);
+        assert_eq!(
+            record.timestamp, expected,
+            "nanosecond precision lost across pcap round-trip"
+        );
+    }
 }

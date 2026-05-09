@@ -337,9 +337,9 @@ where
                         {
                             let fut = match reason_copy {
                                 EndReason::Fin | EndReason::IdleTimeout => r.fin(),
-                                EndReason::Rst
-                                | EndReason::Evicted
-                                | EndReason::BufferOverflow => r.rst(),
+                                EndReason::Rst | EndReason::Evicted | EndReason::BufferOverflow => {
+                                    r.rst()
+                                }
                             };
                             drop(r);
                             found_fut = Some(fut);

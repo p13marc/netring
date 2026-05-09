@@ -23,8 +23,8 @@ mod helpers;
 use std::time::Duration;
 
 use flowscope::{FlowTrackerConfig, OverflowPolicy, SessionParser, SessionParserFactory};
-use netring::{AsyncCapture, CaptureBuilder};
 use netring::flow::extract::FiveTuple;
+use netring::{AsyncCapture, CaptureBuilder};
 
 #[derive(Default, Clone)]
 struct StubParser;

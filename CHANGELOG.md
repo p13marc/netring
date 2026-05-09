@@ -2,6 +2,28 @@
 
 ## Unreleased
 
+### `XdpProgram::from_aya` — caller-loaded XDP programs (plan 12 phase 2)
+
+Closes the gap for users who compile their own XDP program (via
+`aya-bpf` / `bpf-linker`) and want netring to handle the kernel
+attach + AF_XDP socket registration + RAII teardown. Previously,
+`XdpProgram` could only be constructed via the built-in
+`default_program()`; now users can wrap any pre-loaded `aya::Ebpf`:
+
+```rust,ignore
+let bpf = aya::Ebpf::load(MY_BYTECODE)?;
+let mut prog = XdpProgram::from_aya(bpf, "my_xdp", "xsks_map");
+prog.register(queue_id, &xsk)?;
+let _attachment = prog.attach("eth0", XdpFlags::DRV_MODE)?;
+```
+
+Trivial — exposes the existing internal constructor as `from_aya`.
+The user's program must define a `BPF_MAP_TYPE_XSKMAP` and call
+`bpf_redirect_map(&xsks_map, ctx->rx_queue_index, ...)`.
+
+Still deferred from plan 12: `with_xsk_map(&map)` for multi-queue
+shared XSKMAP and a CAP_BPF integration test.
+
 ### `FlowBroadcast` — multi-subscriber flow events (plan 50.6)
 
 `FlowStream::broadcast(buffer)` converts a single-consumer flow

@@ -69,6 +69,38 @@ impl XdpProgram {
         }
     }
 
+    /// Wrap a caller-loaded `aya::Ebpf` for use with netring's XDP
+    /// attach + register + RAII teardown.
+    ///
+    /// Use this when you've compiled your own XDP program (e.g. via
+    /// `aya-bpf` and `bpf-linker`) and want netring to handle the
+    /// kernel attach + AF_XDP socket registration. Your program
+    /// must:
+    ///
+    /// 1. Define a `BPF_MAP_TYPE_XSKMAP` and use it in a
+    ///    `bpf_redirect_map(&xsks_map, ctx->rx_queue_index, ...)`
+    ///    call.
+    /// 2. Be loaded by aya (`aya::Ebpf::load(...)`) before you call
+    ///    this.
+    ///
+    /// `program_name` is the BPF program symbol name (the Rust
+    /// `#[xdp(name = "...")]` or C `SEC("xdp")` function name).
+    /// `map_name` is the XSKMAP's variable name in your source.
+    ///
+    /// ```no_run,ignore
+    /// use aya::Ebpf;
+    /// use netring::xdp::{XdpFlags, XdpProgram};
+    ///
+    /// let bpf = Ebpf::load(MY_BYTECODE)?;
+    /// let mut prog = XdpProgram::from_aya(bpf, "my_xdp", "xsks_map");
+    /// // build an XdpSocket as usual, then:
+    /// prog.register(queue_id, &xsk)?;
+    /// let _attachment = prog.attach("eth0", XdpFlags::DRV_MODE)?;
+    /// ```
+    pub fn from_aya(bpf: Ebpf, program_name: &str, map_name: &str) -> Self {
+        Self::new(bpf, program_name, map_name)
+    }
+
     /// Borrow the program's `XskMap` for setting/unsetting socket fds.
     pub fn xsk_map(&mut self) -> Result<XskMap<&mut aya::maps::MapData>, Error> {
         let map = self

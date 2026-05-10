@@ -47,8 +47,7 @@ async fn main() -> Result<(), netring::Error> {
     eprintln!("loading {bytecode_path} via aya, attaching to {iface}");
     let bytes = std::fs::read(&bytecode_path)
         .map_err(|e| netring::Error::Config(format!("read bytecode: {e}")))?;
-    let bpf = Ebpf::load(&bytes)
-        .map_err(|e| netring::Error::Config(format!("aya load: {e}")))?;
+    let bpf = Ebpf::load(&bytes).map_err(|e| netring::Error::Config(format!("aya load: {e}")))?;
 
     // Adjust these to match the symbol names in your bytecode.
     let prog_name = std::env::var("XDP_PROG_NAME").unwrap_or_else(|_| "xdp_sock_prog".into());

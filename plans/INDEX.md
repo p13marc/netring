@@ -45,6 +45,7 @@ detail; design wins for "why is this even shaped this way."
 | [`15-dedup-and-pcap-hardening.md`](./15-dedup-and-pcap-hardening.md) | Dedup stress test (10k @ 1 kHz same-direction) + explicit pcap nanosecond round-trip assertion | ✅ done (0.9.0) |
 | [`16-session-stream-reassembly.md`](./16-session-stream-reassembly.md) | `SessionStream` runs `BufferedReassembler` per (flow, side) so length-prefixed binary protocols (DES PSMSG etc.) are correct on the live API; honours `FlowTrackerConfig::max_reassembler_buffer` + `overflow_policy` | ✅ done (0.10.0; closes G1 from des-rs analysis) |
 | [`17-dedup-flow-chain.md`](./17-dedup-flow-chain.md) | `FlowStream::with_dedup(Dedup)` (+ same on `SessionStream`, `DatagramStream`) so loopback dedup composes with the flow / session pipeline | ✅ done (0.10.0; closes G2 from des-rs analysis) |
+| [`18-bpf-builder.md`](./18-bpf-builder.md) | `BpfFilter::builder()` — typed cBPF compiler covering ~90 % of common filters (TCP/UDP/host/port/net/VLAN, AND/OR/NOT). Closes the [156a nlink-lab proposal](./156a-netring-bpf-builder-proposal.md): downstream consumers can drop their `tcpdump -dd` runtime shell-out. | not started |
 
 Both 11 and 12 close the two gaps identified in
 [flowscope's DPI architecture research](https://github.com/p13marc/flowscope/blob/master/plans/DPI_ARCHITECTURE.md):

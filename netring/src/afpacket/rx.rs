@@ -623,8 +623,27 @@ impl CaptureBuilder {
     }
 
     /// Attach a classic BPF filter.
-    pub fn bpf_filter(mut self, insns: Vec<BpfInsn>) -> Self {
-        self.bpf_filter = Some(insns);
+    ///
+    /// Pair with the typed [`BpfFilter::builder`] API:
+    ///
+    /// ```no_run
+    /// use netring::{BpfFilter, Capture};
+    ///
+    /// let filter = BpfFilter::builder()
+    ///     .tcp()
+    ///     .dst_port(443)
+    ///     .build()
+    ///     .unwrap();
+    /// let cap = Capture::builder()
+    ///     .interface("eth0")
+    ///     .bpf_filter(filter)
+    ///     .build();
+    /// ```
+    ///
+    /// To attach pre-built bytecode (e.g. from `tcpdump -dd`), wrap it
+    /// in [`BpfFilter::new`] first.
+    pub fn bpf_filter(mut self, filter: BpfFilter) -> Self {
+        self.bpf_filter = Some(filter.into_instructions());
         self
     }
 

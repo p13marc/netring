@@ -109,6 +109,39 @@ works on any source of `&[u8]` frames.
 `tls` (TLS handshake observation, optional JA3), `dns` (DNS-over-UDP
 parser + correlator), and `pcap` (offline replay).
 
+## BPF filtering
+
+netring ships a typed classic-BPF builder — no shelling out to
+`tcpdump -dd`, no native-library deps:
+
+```rust,no_run
+use netring::{BpfFilter, Capture};
+
+let filter = BpfFilter::builder()
+    .tcp()
+    .dst_port(443)
+    .or(|b| b.udp().dst_port(53))
+    .build()
+    .unwrap();
+
+let cap = Capture::builder()
+    .interface("eth0")
+    .bpf_filter(filter)
+    .build()
+    .unwrap();
+```
+
+Vocabulary: `eth_type` / `ipv4` / `ipv6` / `arp`, `vlan` / `vlan_id`,
+`ip_proto` / `tcp` / `udp` / `icmp`, `src_host` / `dst_host` / `host`,
+`src_net` / `dst_net` / `net`, `src_port` / `dst_port` / `port`,
+plus `negate()` and `or(|b| ...)`. See
+[`examples/bpf_filter.rs`](examples/bpf_filter.rs) for a runnable
+demo. The escape hatch `BpfFilter::new(insns)` still accepts raw
+bytecode from `tcpdump -dd` or any other source.
+
+`BpfFilter::matches(&[u8]) -> bool` runs the bytecode in pure Rust
+for offline validation against pcap data.
+
 ## Sync API
 
 The sync types power the async wrappers and are also usable directly:

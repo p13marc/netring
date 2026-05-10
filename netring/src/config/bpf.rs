@@ -104,6 +104,11 @@ impl BpfFilter {
         &self.instructions
     }
 
+    /// Consume the filter, returning its instruction vector.
+    pub fn into_instructions(self) -> Vec<BpfInsn> {
+        self.instructions
+    }
+
     /// Number of instructions.
     pub fn len(&self) -> usize {
         self.instructions.len()

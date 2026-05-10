@@ -1,5 +1,108 @@
 # Changelog
 
+## 0.11.0 — Typed BPF filter builder
+
+Plan 18. Replaces runtime `tcpdump -dd` shell-outs in downstream
+consumers (e.g. nlink-lab) with an in-tree typed builder. Pure Rust,
+no native deps, no `unsafe` in new code, no panics on bad input.
+
+### New — `BpfFilter::builder()`
+
+A small typed vocabulary that compiles to classic BPF (`SO_ATTACH_FILTER`)
+bytecode without external tools or libraries:
+
+```rust
+use netring::{BpfFilter, Capture};
+
+let filter = BpfFilter::builder()
+    .tcp()
+    .dst_port(443)
+    .or(|b| b.udp().dst_port(53))
+    .build()?;
+
+let cap = Capture::builder()
+    .interface("eth0")
+    .bpf_filter(filter)
+    .build()?;
+```
+
+Supported fragments: `eth_type` / `ipv4` / `ipv6` / `arp`, `vlan` /
+`vlan_id`, `ip_proto` / `tcp` / `udp` / `icmp`, `src_host` / `dst_host`
+/ `host`, `src_net` / `dst_net` / `net`, `src_port` / `dst_port` /
+`port`, plus `negate()` and `or(|b| ...)` composition. The empty
+builder accepts every packet.
+
+The compiler:
+
+- auto-inserts an implicit IPv4 ethertype when only L4 fragments are
+  named,
+- rejects conflicting fragments at `build()` time
+  (`tcp` + `udp` without `or`, `ipv4` + `ipv6`, multiple `vlan`),
+- handles VLAN-tagged frames (`MatchFrag::Vlan` shifts subsequent
+  offsets by +4),
+- rejects IPv4 fragmented packets when an L4 port is asserted,
+- emits `BPF_LDX_B_MSH` for variable IPv4 IHL,
+- treats IPv6 as a fixed 40-byte header (no IHL trick),
+- caps output at `BPF_MAXINSNS = 4096` and the cBPF 8-bit jump-offset
+  limit (`BuildError::JumpTooFar` / `TooManyInstructions` otherwise).
+
+### New — `IpNet`
+
+Zero-dep `pub struct IpNet { addr: IpAddr, prefix: u8 }` with
+`FromStr` (`"10.0.0.0/24"`, bare addresses default to /32 or /128).
+Used by `src_net` / `dst_net` / `net` builder methods. Living in
+`netring::config::ipnet`, re-exported at the crate root.
+
+### Software interpreter — `BpfFilter::matches`
+
+`BpfFilter::matches(&[u8]) -> bool` runs the bytecode against an
+ethernet frame entirely in safe Rust (no kernel round-trip), used
+internally by the proptests and useful for offline filter validation
+(e.g. testing filter logic against pcap data without a live socket).
+Implements the opcode subset the builder emits; fail-closed on
+unknown opcodes / out-of-bounds loads.
+
+### Breaking — `BpfFilter::new` is now fallible
+
+`BpfFilter::new(insns: Vec<BpfInsn>) -> Result<Self, BuildError>`.
+Previously infallible. Bytecode is now validated against
+`BPF_MAXINSNS` and rejected with `BuildError::TooManyInstructions`.
+This is the escape hatch for callers who already have raw bytecode
+from `tcpdump -dd` or another source — wrap it once and reuse.
+
+### Breaking — `CaptureBuilder::bpf_filter`
+
+Now takes `BpfFilter` instead of `Vec<BpfInsn>`. Migration:
+
+```rust
+// before
+.bpf_filter(insns)
+// after — typed builder
+.bpf_filter(BpfFilter::builder().tcp().dst_port(443).build()?)
+// after — escape hatch (raw bytecode)
+.bpf_filter(BpfFilter::new(insns)?)
+```
+
+### Tests
+
+- `netring/tests/bpf_builder_proptest.rs` — 10 proptest invariants
+  for the compose algebra: builder doesn't panic, empty accepts all,
+  `negate(F)` is the complement of `F`, double-negate is identity,
+  OR is union, AND is intersection, adding a fragment is monotonic,
+  the `BpfFilter::new` round-trip is clean, `src_net` matches the
+  expected subset, `dst_port` match is exact. 256 cases per property
+  by default; stress with `PROPTEST_CASES=10000 cargo test ...`.
+- `netring/src/config/bpf_interp.rs` — 28 unit tests for the
+  interpreter (every opcode + boundary cases).
+- 157 lib tests pass; clippy clean.
+
+### Example
+
+`netring/examples/bpf_filter.rs` — end-to-end demo of the typed
+builder attached to `Capture::builder()`.
+
+---
+
 ## 0.10.0 — Session reassembly + chained dedup
 
 Closes the two gaps surfaced by des-rs's second-round analysis at

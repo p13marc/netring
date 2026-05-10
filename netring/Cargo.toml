@@ -1,6 +1,6 @@
 [package]
 name = "netring"
-version = "0.10.0"
+version = "0.11.0"
 edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
@@ -53,6 +53,7 @@ criterion = { version = "0.5", features = ["html_reports"] }
 etherparse = "0.16"
 core_affinity = "0.8"
 futures = "0.3"
+proptest = "1"
 
 [features]
 default = []

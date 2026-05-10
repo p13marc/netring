@@ -20,8 +20,20 @@ built on AF_PACKET with TPACKET_V3 (block-based mmap ring buffers) and AF_XDP.
 
 ## Implementation Status
 
-**Active.** netring 0.7.0 published; 0.8.0 prepared (this branch).
-~140 tests, ~12 examples, zero warnings.
+**Active.** netring 0.10.0 published; 0.11.0 prepared (this branch).
+~167 tests, ~30 examples, zero warnings.
+
+### Recent additions (0.11.0)
+
+- **Plan 18**: Typed `BpfFilter::builder()` — a fluent in-tree
+  compiler from a small match vocabulary (`tcp`, `udp`, `vlan`,
+  `host`, `net`, `port`, `negate`, `or`) to classic BPF bytecode.
+  No external tools (no `tcpdump -dd`), no native deps (no libpcap,
+  libbpf, clang), no `unsafe`, no panics. `BpfFilter::matches`
+  software interpreter for offline validation. `BpfFilter::new`
+  becomes fallible (`Result<_, BuildError>`); `CaptureBuilder::bpf_filter`
+  takes a `BpfFilter` directly. See `plans/18-bpf-builder.md` and
+  `examples/bpf_filter.rs`.
 
 ### Recent additions (0.8.0)
 
@@ -78,6 +90,13 @@ just ci-full         # setcap + full test suite
 - `src/traits.rs` — PacketSource, PacketSink, AsyncPacketSource traits
 - `src/packet.rs` — Packet, PacketBatch, BatchIter, Timestamp, PacketStatus
 - `src/dedup.rs` — Loopback dedup primitive (plan 10)
+- `src/config/` — Config types module
+  - `bpf.rs` — `BpfFilter` + `BpfInsn` + `BuildError`
+  - `bpf_builder.rs` — Typed `BpfFilterBuilder` + `MatchFrag` IR
+  - `bpf_compile.rs` — Symbolic-IR cBPF compiler (plan 18)
+  - `bpf_interp.rs` — Software cBPF interpreter (`BpfFilter::matches`)
+  - `ipnet.rs` — Zero-dep `IpNet` (addr + prefix)
+  - `mod.rs` — `FanoutMode` / `FanoutFlags` / `TimestampSource` / `RingProfile`
 - `src/error.rs` — Error enum (now includes `Loader` for `xdp-loader` feature)
 - `src/afpacket/rx.rs` — AfPacketRx + builder (busy-poll trio added in 0.8)
 - `src/afpacket/tx.rs` — AfPacketTx + builder (V1 frame-based TX)

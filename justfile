@@ -113,6 +113,7 @@ async-xdp-self *args:  cargo run -p netring --example async_xdp_self_loaded --fe
 async-metrics *args:   cargo run -p netring --example async_metrics --features tokio,metrics -- {{args}}
 channel *args:      (example "channel_consumer" args)
 ebpf *args:         (example "ebpf_filter" args)
+bpf-filter *args:   (example "bpf_filter" args)
 dpi *args:          (example "dpi" args)
 bridge *args:       (example "bridge" args)
 

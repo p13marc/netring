@@ -31,7 +31,10 @@ pub use afpacket::tx::{Injector, InjectorBuilder, TxSlot};
 pub use bridge::{
     Bridge, BridgeAction, BridgeBuilder, BridgeDirection, BridgeHandles, BridgeStats,
 };
-pub use config::{BpfFilter, BpfInsn, FanoutFlags, FanoutMode, RingProfile, TimestampSource};
+pub use config::{
+    BpfFilter, BpfFilterBuilder, BpfInsn, BuildError, FanoutFlags, FanoutMode, IpNet,
+    ParseIpNetError, RingProfile, TimestampSource,
+};
 pub use dedup::Dedup;
 pub use error::Error;
 pub use interface::{InterfaceInfo, interface_info};

@@ -3,7 +3,7 @@
 //! Wraps an [`AsyncCapture`] + [`FlowTracker`] + a per-(flow, side)
 //! [`BufferedReassembler`] + a per-flow [`SessionParser`]. On every TCP
 //! segment, the reassembler accumulates in-order bytes (dropping out-of-
-//! order segments per [`OverflowPolicy`]); on the corresponding
+//! order segments per [`flowscope::OverflowPolicy`]); on the corresponding
 //! [`FlowEvent::Packet`] the reassembler is drained and bytes are fed to
 //! the parser via `feed_initiator` / `feed_responder`. Parser-emitted
 //! messages surface as [`SessionEvent::Application`]; flow lifecycle
@@ -11,7 +11,7 @@
 //!
 //! Honours [`FlowTrackerConfig::max_reassembler_buffer`] +
 //! [`FlowTrackerConfig::overflow_policy`]: under
-//! [`OverflowPolicy::DropFlow`] a per-side cap breach poisons the
+//! [`flowscope::OverflowPolicy::DropFlow`] a per-side cap breach poisons the
 //! reassembler, the tracker emits an `Ended { reason: BufferOverflow }`
 //! event, and consumers see a `SessionEvent::Closed` with that reason.
 //!

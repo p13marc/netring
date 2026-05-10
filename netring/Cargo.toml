@@ -99,6 +99,10 @@ name = "async_xdp_self_loaded"
 required-features = ["tokio", "af-xdp", "xdp-loader"]
 
 [[example]]
+name = "async_xdp_custom_program"
+required-features = ["tokio", "af-xdp", "xdp-loader"]
+
+[[example]]
 name = "async_metrics"
 required-features = ["tokio", "metrics"]
 

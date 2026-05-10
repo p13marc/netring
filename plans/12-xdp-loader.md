@@ -35,10 +35,13 @@ recipe. No external program loading, no native libs.
 
 ## Status
 
-✅ Phase 1 done (default program + RAII attachment + builder).
-Deferred to follow-ups: `with_program(prog)` for custom programs,
-`with_xsk_map(&map)` for multi-queue sharing, hardware offload
-validation.
+✅ Phase 1 done (default program + RAII attachment + builder, 0.8.0).
+✅ Phase 2 `with_program(prog)` for caller-loaded programs (0.11.0)
+  — `XdpProgram::from_aya(...)` + `XdpSocketBuilder::with_program(...)`
+  with mutual-exclusivity enforcement against `with_default_program()`.
+Deferred to follow-ups: `with_xsk_map(&map)` for multi-queue
+shared-map sharing (manual `XdpProgram::register` + `attach` already
+covers this case for now), hardware offload validation.
 
 ## Prerequisites
 

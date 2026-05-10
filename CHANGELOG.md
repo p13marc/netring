@@ -1,12 +1,58 @@
 # Changelog
 
-## 0.11.0 — Typed BPF filter builder
+## 0.11.0 — Typed BPF filter builder + custom XDP programs
 
-Plan 18. Replaces runtime `tcpdump -dd` shell-outs in downstream
-consumers (e.g. nlink-lab) with an in-tree typed builder. Pure Rust,
-no native deps, no `unsafe` in new code, no panics on bad input.
+Plan 18 (BPF builder) and plan 12 phase 2 (caller-loaded XDP
+programs).
 
-### New — `BpfFilter::builder()`
+### New — `XdpSocketBuilder::with_program(prog)`
+
+Plan 12 phase 2. The builder now accepts a caller-supplied
+[`XdpProgram`] in addition to the built-in
+`with_default_program()`. Use this when you've compiled your own
+XDP program (via `aya-bpf` + `bpf-linker`, or
+`clang -target bpf`) — netring takes care of registering the socket
+on the program's XSKMAP, attaching the program to the interface,
+and detaching on `XdpSocket` drop.
+
+```rust,ignore
+use aya::Ebpf;
+use netring::xdp::{XdpFlags, XdpProgram};
+use netring::XdpSocket;
+
+let bpf = Ebpf::load(MY_BYTECODE)?;
+let prog = XdpProgram::from_aya(bpf, "my_xdp", "xsks_map");
+
+let xsk = XdpSocket::builder()
+    .interface("eth0")
+    .queue_id(0)
+    .with_program(prog)
+    .xdp_attach_flags(XdpFlags::DRV_MODE)
+    .build()?;
+```
+
+Mutually exclusive with `with_default_program()` — `build()` errors
+with `LoaderError::ExclusiveBuilderOptions` if both are set. For
+multi-queue capture (one program serving many sockets) keep using
+the manual `XdpProgram::register` + `XdpProgram::attach` pattern
+where you own the attachment lifetime.
+
+`XdpSocketBuilder` no longer derives `Clone` (the `XdpProgram` it
+optionally holds is not cloneable). Builders are typically consumed
+once anyway; let me know if this bites.
+
+See `netring/examples/async_xdp_custom_program.rs` for the full
+end-to-end recipe.
+
+---
+
+### Plan 18 — typed BPF filter builder
+
+Replaces runtime `tcpdump -dd` shell-outs in downstream consumers
+(e.g. nlink-lab) with an in-tree typed builder. Pure Rust, no native
+deps, no `unsafe` in new code, no panics on bad input.
+
+#### New — `BpfFilter::builder()`
 
 A small typed vocabulary that compiles to classic BPF (`SO_ATTACH_FILTER`)
 bytecode without external tools or libraries:
@@ -46,14 +92,14 @@ The compiler:
 - caps output at `BPF_MAXINSNS = 4096` and the cBPF 8-bit jump-offset
   limit (`BuildError::JumpTooFar` / `TooManyInstructions` otherwise).
 
-### New — `IpNet`
+#### New — `IpNet`
 
 Zero-dep `pub struct IpNet { addr: IpAddr, prefix: u8 }` with
 `FromStr` (`"10.0.0.0/24"`, bare addresses default to /32 or /128).
 Used by `src_net` / `dst_net` / `net` builder methods. Living in
 `netring::config::ipnet`, re-exported at the crate root.
 
-### Software interpreter — `BpfFilter::matches`
+#### Software interpreter — `BpfFilter::matches`
 
 `BpfFilter::matches(&[u8]) -> bool` runs the bytecode against an
 ethernet frame entirely in safe Rust (no kernel round-trip), used
@@ -62,7 +108,7 @@ internally by the proptests and useful for offline filter validation
 Implements the opcode subset the builder emits; fail-closed on
 unknown opcodes / out-of-bounds loads.
 
-### Breaking — `BpfFilter::new` is now fallible
+#### Breaking — `BpfFilter::new` is now fallible
 
 `BpfFilter::new(insns: Vec<BpfInsn>) -> Result<Self, BuildError>`.
 Previously infallible. Bytecode is now validated against
@@ -70,7 +116,7 @@ Previously infallible. Bytecode is now validated against
 This is the escape hatch for callers who already have raw bytecode
 from `tcpdump -dd` or another source — wrap it once and reuse.
 
-### Breaking — `CaptureBuilder::bpf_filter`
+#### Breaking — `CaptureBuilder::bpf_filter`
 
 Now takes `BpfFilter` instead of `Vec<BpfInsn>`. Migration:
 
@@ -83,7 +129,7 @@ Now takes `BpfFilter` instead of `Vec<BpfInsn>`. Migration:
 .bpf_filter(BpfFilter::new(insns)?)
 ```
 
-### Tests
+#### Tests
 
 - `netring/tests/bpf_builder_proptest.rs` — 10 proptest invariants
   for the compose algebra: builder doesn't panic, empty accepts all,
@@ -94,12 +140,15 @@ Now takes `BpfFilter` instead of `Vec<BpfInsn>`. Migration:
   by default; stress with `PROPTEST_CASES=10000 cargo test ...`.
 - `netring/src/config/bpf_interp.rs` — 28 unit tests for the
   interpreter (every opcode + boundary cases).
-- 157 lib tests pass; clippy clean.
+- 183 lib tests pass; clippy clean across default and
+  `tokio,af-xdp,flow,parse,pcap,metrics,xdp-loader`.
 
-### Example
+#### Example
 
 `netring/examples/bpf_filter.rs` — end-to-end demo of the typed
 builder attached to `Capture::builder()`.
+`netring/examples/async_xdp_custom_program.rs` — illustrative
+end-to-end use of `with_program()` for a caller-loaded XDP program.
 
 ---
 

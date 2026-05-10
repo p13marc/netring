@@ -31,7 +31,7 @@ impl BpfFilter {
     /// - `BPF_LD | BPF_H | BPF_ABS` (0x28) — load 16-bit at offset k
     /// - `BPF_LD | BPF_B | BPF_ABS` (0x30) — load 8-bit at offset k
     /// - `BPF_LD | BPF_H | BPF_IND` (0x48) — load 16-bit at X+k
-    /// - `BPF_LDX | BPF_B | BPF_MSH` (0xb1) — X = 4 * (mem[k] & 0xf)
+    /// - `BPF_LDX | BPF_B | BPF_MSH` (0xb1) — X = 4 * (mem\[k\] & 0xf)
     /// - `BPF_ALU | BPF_AND | BPF_K` (0x54) — A &= k
     /// - `BPF_JMP | BPF_JEQ | BPF_K` (0x15) — pc += jt if A==k else pc += jf
     /// - `BPF_JMP | BPF_JSET | BPF_K` (0x45) — pc += jt if A&k!=0 else pc += jf

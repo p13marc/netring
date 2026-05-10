@@ -39,7 +39,7 @@ detail; design wins for "why is this even shaped this way."
 |------|------|--------|
 | [`10-dedup.md`](./10-dedup.md) | `Dedup` primitive + `dedup_stream()` for `lo` | ✅ done (folded into 0.7.0) |
 | [`11-busy-poll-prefer.md`](./11-busy-poll-prefer.md) | `SO_PREFER_BUSY_POLL` + `SO_BUSY_POLL_BUDGET` for AF_PACKET + AF_XDP (kernel 5.11+) | ✅ done |
-| [`12-xdp-loader.md`](./12-xdp-loader.md) | Built-in XDP redirect-all program loader via optional `aya` (pure Rust, feature-gated) | ✅ phase 1 done; `with_program` + multi-queue sharing deferred |
+| [`12-xdp-loader.md`](./12-xdp-loader.md) | Built-in XDP redirect-all program loader via optional `aya` (pure Rust, feature-gated) | ✅ phase 1 done (0.8.0); ✅ phase 2 `with_program(...)` done (0.11.0); multi-queue shared-map sharing remains deferred |
 | [`13-flowscope-0.2-bump.md`](./13-flowscope-0.2-bump.md) | Bump flowscope dep to 0.2; handle the breaking changes inside async adapters; surface `Anomaly` events | ✅ done (0.9.0) |
 | [`14-config-aware-async-streams.md`](./14-config-aware-async-streams.md) | Fix silent config loss across `flow_stream → session_stream`; add `with_config` to `SessionStream`/`DatagramStream` | ✅ done (0.9.0) |
 | [`15-dedup-and-pcap-hardening.md`](./15-dedup-and-pcap-hardening.md) | Dedup stress test (10k @ 1 kHz same-direction) + explicit pcap nanosecond round-trip assertion | ✅ done (0.9.0) |

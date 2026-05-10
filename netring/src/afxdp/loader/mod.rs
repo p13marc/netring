@@ -41,6 +41,20 @@ mod program;
 pub use default_program::default_program;
 pub use program::{XdpAttachment, XdpFlags, XdpProgram};
 
+/// Returns `Err(ExclusiveBuilderOptions)` if both the built-in and a
+/// caller-supplied XDP program were requested. Pulled out for unit
+/// testability without constructing a real `XdpProgram`.
+pub(crate) fn check_program_conflict(
+    attach_default: bool,
+    has_program: bool,
+) -> Result<(), LoaderError> {
+    if attach_default && has_program {
+        Err(LoaderError::ExclusiveBuilderOptions)
+    } else {
+        Ok(())
+    }
+}
+
 /// Errors specific to the XDP loader.
 #[derive(Debug, thiserror::Error)]
 pub enum LoaderError {
@@ -57,7 +71,7 @@ pub enum LoaderError {
     MapMissing(&'static str),
 
     /// Builder options that are mutually exclusive were both set.
-    #[error("with_default_program() conflicts with with_xsk_map()")]
+    #[error("with_default_program() conflicts with with_program()")]
     ExclusiveBuilderOptions,
 }
 

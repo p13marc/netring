@@ -7,7 +7,7 @@
 //!   [`BpfFilterBuilder`](crate::config::BpfFilterBuilder) covering
 //!   ~90 % of common filter expressions (TCP/UDP/ICMP, host, port,
 //!   net, VLAN, AND/OR/NOT) without external tools.
-//! - **Escape hatch**: [`BpfFilter::new(Vec<BpfInsn>)`] takes raw
+//! - **Escape hatch**: [`BpfFilter::new`] takes raw
 //!   instructions for filters outside the builder's vocabulary.
 //!   Generate them with `tcpdump -dd "<expression>"` and paste in,
 //!   or hand-roll. Validates the kernel

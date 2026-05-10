@@ -34,6 +34,13 @@ built on AF_PACKET with TPACKET_V3 (block-based mmap ring buffers) and AF_XDP.
   becomes fallible (`Result<_, BuildError>`); `CaptureBuilder::bpf_filter`
   takes a `BpfFilter` directly. See `plans/18-bpf-builder.md` and
   `examples/bpf_filter.rs`.
+- **Plan 12 phase 2**: `XdpSocketBuilder::with_program(XdpProgram)`
+  for caller-loaded XDP programs (compiled via `aya-bpf` /
+  `bpf-linker` / `clang -target bpf`). Same orchestration as
+  `with_default_program()` (register socket on map → attach program
+  → RAII detach on drop) but pointing at user-supplied bytecode.
+  Mutually exclusive with `with_default_program()`. See
+  `examples/async_xdp_custom_program.rs`.
 
 ### Recent additions (0.8.0)
 

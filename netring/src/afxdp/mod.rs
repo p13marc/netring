@@ -128,7 +128,7 @@ pub enum XdpMode {
 /// xdp.send(&[0xff; 64]).unwrap();
 /// xdp.flush().unwrap();
 /// ```
-#[derive(Debug, Clone)]
+#[derive(Debug)]
 #[must_use]
 pub struct XdpSocketBuilder {
     interface: Option<String>,
@@ -150,6 +150,10 @@ pub struct XdpSocketBuilder {
     attach_flags: loader::XdpFlags,
     #[cfg(feature = "xdp-loader")]
     force_replace: bool,
+    /// Caller-supplied XDP program to register + attach during `build()`.
+    /// Mutually exclusive with `attach_default`.
+    #[cfg(feature = "xdp-loader")]
+    program: Option<loader::XdpProgram>,
 }
 
 impl Default for XdpSocketBuilder {
@@ -171,6 +175,8 @@ impl Default for XdpSocketBuilder {
             attach_flags: loader::XdpFlags::SKB_MODE, // safest default; works on lo
             #[cfg(feature = "xdp-loader")]
             force_replace: false,
+            #[cfg(feature = "xdp-loader")]
+            program: None,
         }
     }
 }
@@ -268,6 +274,54 @@ impl XdpSocketBuilder {
         self
     }
 
+    /// Use a caller-loaded XDP program. Like
+    /// [`with_default_program`](Self::with_default_program) but for
+    /// programs you've compiled and loaded yourself (e.g. via
+    /// `aya-bpf` + `bpf-linker`). The program must contain a
+    /// `BPF_MAP_TYPE_XSKMAP` and call
+    /// `bpf_redirect_map(&xsks_map, ctx->rx_queue_index, ...)`.
+    ///
+    /// On `build()`, netring registers this socket on the program's
+    /// XSKMAP at the configured `queue_id`, then attaches the program
+    /// to the interface using `xdp_attach_flags` /
+    /// `force_replace`. The attachment lives as long as the
+    /// returned `XdpSocket` (RAII detach on drop).
+    ///
+    /// Mutually exclusive with [`with_default_program`](Self::with_default_program);
+    /// `build()` returns an error if both are set.
+    ///
+    /// For the multi-queue case (one program serving many sockets),
+    /// don't use this method — instead manage [`XdpProgram::attach`]
+    /// and [`XdpProgram::register`] manually so the attachment lives
+    /// across socket lifetimes.
+    ///
+    /// ```no_run
+    /// # #[cfg(all(feature = "af-xdp", feature = "xdp-loader"))]
+    /// # fn main() -> Result<(), netring::Error> {
+    /// use aya::Ebpf;
+    /// use netring::xdp::{XdpFlags, XdpProgram};
+    /// use netring::XdpSocket;
+    ///
+    /// let bytecode: &[u8] = b""; // your compiled program
+    /// let bpf = Ebpf::load(bytecode).unwrap();
+    /// let prog = XdpProgram::from_aya(bpf, "xdp_sock_prog", "xsks_map");
+    ///
+    /// let xsk = XdpSocket::builder()
+    ///     .interface("eth0")
+    ///     .queue_id(0)
+    ///     .with_program(prog)
+    ///     .xdp_attach_flags(XdpFlags::DRV_MODE)
+    ///     .build()?;
+    /// # Ok(()) }
+    /// # #[cfg(not(all(feature = "af-xdp", feature = "xdp-loader")))]
+    /// # fn main() {}
+    /// ```
+    #[cfg(feature = "xdp-loader")]
+    pub fn with_program(mut self, prog: loader::XdpProgram) -> Self {
+        self.program = Some(prog);
+        self
+    }
+
     /// Set the XDP attach flags used by [`with_default_program`](Self::with_default_program).
     /// Default: `SKB_MODE`.
     #[cfg(feature = "xdp-loader")]
@@ -343,7 +397,7 @@ impl XdpSocketBuilder {
     /// - [`Error::Socket`], [`Error::SockOpt`], [`Error::Mmap`], [`Error::Bind`]
     ///   for the respective syscall failures
     #[cfg(feature = "af-xdp")]
-    pub fn build(self) -> Result<XdpSocket, Error> {
+    pub fn build(mut self) -> Result<XdpSocket, Error> {
         let iface = self.validate()?;
         let ifindex = crate::afpacket::socket::resolve_interface(iface)? as u32;
 
@@ -500,23 +554,32 @@ impl XdpSocketBuilder {
             _xdp_attachment: None,
         };
 
-        // Optionally load + attach the default redirect-all XDP program
-        // and register this socket on its XSKMAP.
+        // Optionally load + attach an XDP program (built-in or
+        // caller-supplied) and register this socket on its XSKMAP.
         #[cfg(feature = "xdp-loader")]
-        if self.attach_default {
-            let iface = self.interface.as_deref().unwrap_or("");
-            let flags = if self.force_replace {
-                self.attach_flags | loader::XdpFlags::REPLACE
+        {
+            loader::check_program_conflict(self.attach_default, self.program.is_some())?;
+            let prog: Option<loader::XdpProgram> = if let Some(p) = self.program.take() {
+                Some(p)
+            } else if self.attach_default {
+                Some(loader::default_program(/* max_queues */ 256)?)
             } else {
-                self.attach_flags
+                None
             };
-            let mut prog = loader::default_program(/* max_queues */ 256)?;
-            // Register *before* attach: the kernel program reads
-            // map[queue_id] on the very first packet, so any race in
-            // the other order risks dropping the first batch.
-            prog.register(self.queue_id, &socket)?;
-            let attachment = prog.attach(iface, flags)?;
-            socket._xdp_attachment = Some(attachment);
+            if let Some(mut prog) = prog {
+                let iface = self.interface.as_deref().unwrap_or("");
+                let flags = if self.force_replace {
+                    self.attach_flags | loader::XdpFlags::REPLACE
+                } else {
+                    self.attach_flags
+                };
+                // Register *before* attach: the kernel program reads
+                // map[queue_id] on the very first packet, so any race
+                // in the other order risks dropping the first batch.
+                prog.register(self.queue_id, &socket)?;
+                let attachment = prog.attach(iface, flags)?;
+                socket._xdp_attachment = Some(attachment);
+            }
         }
 
         Ok(socket)
@@ -979,6 +1042,30 @@ mod tests {
 
         let b = XdpSocketBuilder::default().mode(XdpMode::Custom { prefill: 256 });
         assert_eq!(b.mode, XdpMode::Custom { prefill: 256 });
+    }
+
+    #[cfg(feature = "xdp-loader")]
+    #[test]
+    fn check_program_conflict_helper() {
+        use loader::check_program_conflict;
+        // Default state — neither set — is fine.
+        assert!(check_program_conflict(false, false).is_ok());
+        // Either set alone is fine.
+        assert!(check_program_conflict(true, false).is_ok());
+        assert!(check_program_conflict(false, true).is_ok());
+        // Both set is the only conflict.
+        let err = check_program_conflict(true, true).unwrap_err();
+        assert!(format!("{err}").contains("conflicts"));
+    }
+
+    #[cfg(feature = "xdp-loader")]
+    #[test]
+    fn builder_with_default_program_chains() {
+        let b = XdpSocketBuilder::default()
+            .interface("lo")
+            .with_default_program();
+        assert!(b.attach_default);
+        assert!(b.program.is_none());
     }
 
     /// Compute the prefill count the same way `build()` does, in isolation,

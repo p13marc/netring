@@ -39,11 +39,20 @@ use flowscope::{
 use futures_core::Stream;
 
 use crate::async_adapters::tokio_adapter::AsyncCapture;
+use crate::dedup::Dedup;
 use crate::error::Error;
 use crate::traits::PacketSource;
 
 /// Async stream of [`SessionEvent`]s produced by feeding UDP
 /// payloads through a per-flow [`DatagramParser`].
+///
+/// UDP datagrams are atomic — there is no concept of out-of-order
+/// segments or partial frames. The
+/// [`FlowTrackerConfig::max_reassembler_buffer`] /
+/// [`overflow_policy`](FlowTrackerConfig::overflow_policy) fields are
+/// ignored on this stream (they apply to TCP reassembly under
+/// [`SessionStream`](super::session_stream::SessionStream) only). The
+/// per-flow LRU eviction (`max_flows`) and idle timeouts still apply.
 pub struct DatagramStream<S, E, F>
 where
     S: PacketSource + std::os::unix::io::AsRawFd,
@@ -57,6 +66,7 @@ where
     parsers: HashMap<E::Key, F::Parser, RandomState>,
     pending: VecDeque<SessionEvent<E::Key, <F::Parser as DatagramParser>::Message>>,
     sweep: tokio::time::Interval,
+    dedup: Option<Dedup>,
 }
 
 impl<S, E, F> DatagramStream<S, E, F>
@@ -81,18 +91,54 @@ where
             parsers: HashMap::with_hasher(RandomState::new()),
             pending: VecDeque::new(),
             sweep,
+            dedup: None,
         }
+    }
+
+    pub(crate) fn new_with_config_and_dedup(
+        cap: AsyncCapture<S>,
+        extractor: E,
+        factory: F,
+        config: FlowTrackerConfig,
+        dedup: Option<Dedup>,
+    ) -> Self {
+        let mut s = Self::new_with_config(cap, extractor, factory, config);
+        s.dedup = dedup;
+        s
     }
 
     /// Replace the inner [`FlowTracker`]'s config in place.
     ///
     /// Mirrors [`FlowStream::with_config`](super::flow_stream::FlowStream::with_config).
-    /// Re-arms the sweep timer if `sweep_interval` changed.
+    /// Re-arms the sweep timer if `sweep_interval` changed. UDP
+    /// datagrams don't use `max_reassembler_buffer` /
+    /// `overflow_policy` — those fields are ignored on this stream.
     pub fn with_config(mut self, config: FlowTrackerConfig) -> Self {
         let new_interval = config.sweep_interval;
         self.tracker.set_config(config);
         self.sweep = tokio::time::interval(new_interval);
         self
+    }
+
+    /// Apply per-packet deduplication before flow tracking. Useful for
+    /// capturing on `lo` where each packet appears twice
+    /// ([`PACKET_OUTGOING`](crate::PacketDirection::Outgoing) +
+    /// [`PACKET_HOST`](crate::PacketDirection::Host)).
+    ///
+    /// Replaces any previously-set dedup; counters reset.
+    pub fn with_dedup(mut self, dedup: Dedup) -> Self {
+        self.dedup = Some(dedup);
+        self
+    }
+
+    /// Borrow the embedded dedup if any was set via [`with_dedup`](Self::with_dedup).
+    pub fn dedup(&self) -> Option<&Dedup> {
+        self.dedup.as_ref()
+    }
+
+    /// Borrow the embedded dedup mutably.
+    pub fn dedup_mut(&mut self) -> Option<&mut Dedup> {
+        self.dedup.as_mut()
     }
 
     /// Borrow the inner tracker (stats / introspection).
@@ -140,6 +186,13 @@ where
                 let inner = guard.get_inner_mut();
                 if let Some(batch) = inner.next_batch() {
                     for pkt in &batch {
+                        // Plan 17: optional pre-tracking dedup.
+                        if let Some(d) = this.dedup.as_mut()
+                            && !d.keep(&pkt)
+                        {
+                            continue;
+                        }
+
                         let view = pkt.view();
                         let view_ts = view.timestamp;
                         let frame = view.frame;

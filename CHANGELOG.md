@@ -1,5 +1,108 @@
 # Changelog
 
+## 0.10.0 — Session reassembly + chained dedup
+
+Closes the two gaps surfaced by des-rs's second-round analysis at
+`des-rs/des-discovery/reports/des-capture-rewrite-analysis-2026-05-09.md`
+(items F6 and F7). Both gaps were on the live-capture path only —
+flowscope's offline `FlowSessionDriver` already covered the same
+ground for pcap replay.
+
+### Behavioural change — `SessionStream` reassembles TCP
+
+Plan 16. Before 0.10, `SessionStream::poll_next` fed raw TCP payloads
+straight to `SessionParser::feed_*` in arrival order. That worked
+fine for the shipped HTTP / TLS / DNS-TCP parsers (each does its own
+per-side buffering), but **silently double-parsed retransmits and
+loopback duplicates** for any length-prefixed binary protocol — DES
+PSMSG, custom user wire formats, anything that treats "duplicate
+bytes" as "two valid frames".
+
+After 0.10, `SessionStream` holds a `BufferedReassembler` per
+`(flow, side)` (mirroring flowscope's sync `FlowSessionDriver`):
+
+- Each TCP segment goes through `BufferedReassembler::segment`.
+  Out-of-order segments are dropped per [`OverflowPolicy`].
+- On `FlowEvent::Packet`, the reassembler is drained and bytes flow
+  to the parser.
+- On `FlowEvent::Ended { reason: Fin | IdleTimeout }`, residual
+  bytes are drained and fed before `parser.fin_*` is called.
+- On `FlowEvent::Ended { reason: Rst | Evicted | BufferOverflow }`,
+  the reassembler is dropped without drain (suspect data) and
+  `parser.rst_*` is called.
+
+Honours `FlowTrackerConfig::max_reassembler_buffer` +
+`overflow_policy` automatically — set them via the existing
+`with_config(cfg)` chain (`flow_stream(ext).with_config(cfg).session_stream(parser)`)
+and per-side caps + `EndReason::BufferOverflow` flow termination
+behave the same as on the offline `FlowSessionDriver`.
+
+**For the four shipped parsers (HTTP / TLS / DNS-TCP / DNS-UDP)
+this is a no-op semantically** — they re-buffer internally; the
+extra `extend_from_slice` is the only cost. **For users with custom
+binary `SessionParser` implementations** this is a correctness fix.
+Users who relied on arrival-order semantics (e.g. counting
+retransmits) need to handle that downstream of the parser now.
+
+### `with_dedup(Dedup)` on the flow / session pipeline
+
+Plan 17. Before 0.10, `cap.dedup_stream(d)` and `cap.flow_stream(e)`
+were sibling methods — calling one consumed the capture and the
+other was unreachable. After 0.10:
+
+- `FlowStream::with_dedup(d)` — chainable builder.
+- `SessionStream::with_dedup(d)` / `DatagramStream::with_dedup(d)` —
+  same shape on the session-level streams.
+- Dedup is carried forward through `with_state` /
+  `with_async_reassembler` / `session_stream` / `datagram_stream`
+  transitions on `FlowStream`.
+- `dedup()` / `dedup_mut()` accessors return `Option<&Dedup>` /
+  `Option<&mut Dedup>` for inspecting `seen()` / `dropped()`
+  counters at runtime.
+
+Typical loopback-aware DES capture wiring is now:
+
+```rust
+let mut s = AsyncCapture::open("lo")?
+    .flow_stream(FiveTuple::bidirectional())
+    .with_dedup(Dedup::loopback())
+    .with_config(cfg)
+    .session_stream(DesSessionParser::default());
+```
+
+`AsyncCapture::dedup_stream` and the standalone `DedupStream<S>` are
+unchanged for users who only want dedup'd packets without flow
+tracking.
+
+### Tests
+
+- `netring/tests/with_dedup_propagation.rs` — six integration tests
+  (gated on `integration-tests`) confirming dedup carries through
+  every transition + accessor surface.
+- `netring/src/async_adapters/session_stream.rs` — eight new unit
+  tests covering `process_session_event` for `Started`, `Packet`
+  (drain path), `Packet` with no reassembler, `Ended` (Fin) with
+  residual drain, `Ended` (BufferOverflow) without drain, `Ended`
+  (Rst) without drain, `Anomaly` (no event), and the
+  `build_reassembler_factory` cap/policy plumbing.
+- All 124 lib unit tests pass; clippy clean across `tokio,flow` and
+  `--all-features` with `-D warnings`.
+
+### Migration notes
+
+Internal API change: `SessionStream::new_with_config` and
+`DatagramStream::new_with_config` are unchanged externally
+(`pub(crate)`); they gained sibling
+`new_with_config_and_dedup` constructors used by
+`FlowStream::session_stream` / `datagram_stream`. No public-API
+breakage.
+
+The `SessionStream` behavioural change (reassembly between tracker
+and parser) is the only user-visible delta. The shipped parsers are
+unaffected.
+
+---
+
 ## 0.9.0 — flowscope 0.2, config-aware session streams, dedup + pcap hardening
 
 This release pulls in [flowscope 0.2](https://crates.io/crates/flowscope/0.2.0)'s

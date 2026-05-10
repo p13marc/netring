@@ -43,6 +43,8 @@ detail; design wins for "why is this even shaped this way."
 | [`13-flowscope-0.2-bump.md`](./13-flowscope-0.2-bump.md) | Bump flowscope dep to 0.2; handle the breaking changes inside async adapters; surface `Anomaly` events | ✅ done (0.9.0) |
 | [`14-config-aware-async-streams.md`](./14-config-aware-async-streams.md) | Fix silent config loss across `flow_stream → session_stream`; add `with_config` to `SessionStream`/`DatagramStream` | ✅ done (0.9.0) |
 | [`15-dedup-and-pcap-hardening.md`](./15-dedup-and-pcap-hardening.md) | Dedup stress test (10k @ 1 kHz same-direction) + explicit pcap nanosecond round-trip assertion | ✅ done (0.9.0) |
+| [`16-session-stream-reassembly.md`](./16-session-stream-reassembly.md) | `SessionStream` runs `BufferedReassembler` per (flow, side) so length-prefixed binary protocols (DES PSMSG etc.) are correct on the live API; honours `FlowTrackerConfig::max_reassembler_buffer` + `overflow_policy` | ✅ done (0.10.0; closes G1 from des-rs analysis) |
+| [`17-dedup-flow-chain.md`](./17-dedup-flow-chain.md) | `FlowStream::with_dedup(Dedup)` (+ same on `SessionStream`, `DatagramStream`) so loopback dedup composes with the flow / session pipeline | ✅ done (0.10.0; closes G2 from des-rs analysis) |
 
 Both 11 and 12 close the two gaps identified in
 [flowscope's DPI architecture research](https://github.com/p13marc/flowscope/blob/master/plans/DPI_ARCHITECTURE.md):

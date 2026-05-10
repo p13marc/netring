@@ -35,6 +35,7 @@ use futures_core::Stream;
 
 use crate::async_adapters::async_reassembler::{AsyncReassembler, AsyncReassemblerFactory};
 use crate::async_adapters::tokio_adapter::AsyncCapture;
+use crate::dedup::Dedup;
 use crate::error::Error;
 use crate::traits::PacketSource;
 
@@ -75,6 +76,7 @@ where
     pending: VecDeque<FlowEvent<E::Key>>,
     sweep: tokio::time::Interval,
     reassembler: R,
+    dedup: Option<Dedup>,
 }
 
 impl<S, E> FlowStream<S, E, (), NoReassembler>
@@ -91,6 +93,7 @@ where
             pending: VecDeque::new(),
             sweep: tokio::time::interval(sweep_interval),
             reassembler: NoReassembler,
+            dedup: None,
         }
     }
 
@@ -108,6 +111,7 @@ where
             pending: VecDeque::new(),
             sweep: self.sweep,
             reassembler: NoReassembler,
+            dedup: self.dedup,
         }
     }
 }
@@ -141,6 +145,7 @@ where
                 pending_payloads: VecDeque::new(),
                 pending_future: None,
             },
+            dedup: self.dedup,
         }
     }
 }
@@ -168,9 +173,10 @@ where
         F: flowscope::SessionParserFactory<E::Key>,
     {
         let config = self.tracker.config().clone();
+        let dedup = self.dedup;
         let extractor = self.tracker.into_extractor();
-        crate::async_adapters::session_stream::SessionStream::new_with_config(
-            self.cap, extractor, factory, config,
+        crate::async_adapters::session_stream::SessionStream::new_with_config_and_dedup(
+            self.cap, extractor, factory, config, dedup,
         )
     }
 
@@ -179,7 +185,8 @@ where
     /// [`flowscope::DatagramParser`].
     ///
     /// As with [`session_stream`](Self::session_stream), the tracker
-    /// config is preserved across the conversion.
+    /// config and any dedup set via [`with_dedup`](Self::with_dedup)
+    /// are preserved across the conversion.
     pub fn datagram_stream<F>(
         self,
         factory: F,
@@ -188,9 +195,10 @@ where
         F: flowscope::DatagramParserFactory<E::Key>,
     {
         let config = self.tracker.config().clone();
+        let dedup = self.dedup;
         let extractor = self.tracker.into_extractor();
-        crate::async_adapters::datagram_stream::DatagramStream::new_with_config(
-            self.cap, extractor, factory, config,
+        crate::async_adapters::datagram_stream::DatagramStream::new_with_config_and_dedup(
+            self.cap, extractor, factory, config, dedup,
         )
     }
 }
@@ -210,6 +218,36 @@ where
         self.tracker.set_config(config);
         self.sweep = tokio::time::interval(new_interval);
         self
+    }
+
+    /// Apply per-packet deduplication before flow tracking.
+    ///
+    /// Useful for capturing on `lo` where each packet appears twice
+    /// ([`PACKET_OUTGOING`](crate::PacketDirection::Outgoing) +
+    /// [`PACKET_HOST`](crate::PacketDirection::Host)); pair with
+    /// [`Dedup::loopback`](crate::Dedup::loopback).
+    ///
+    /// The dedup is carried through subsequent
+    /// [`session_stream`](Self::session_stream) /
+    /// [`datagram_stream`](Self::datagram_stream) /
+    /// [`with_async_reassembler`](Self::with_async_reassembler) /
+    /// [`with_state`](Self::with_state) transitions.
+    ///
+    /// Replaces any previously-set dedup; counters reset.
+    pub fn with_dedup(mut self, dedup: Dedup) -> Self {
+        self.dedup = Some(dedup);
+        self
+    }
+
+    /// Borrow the embedded dedup if any was set via [`with_dedup`](Self::with_dedup).
+    pub fn dedup(&self) -> Option<&Dedup> {
+        self.dedup.as_ref()
+    }
+
+    /// Borrow the embedded dedup mutably (e.g. to inspect counters
+    /// `dropped()` / `seen()`).
+    pub fn dedup_mut(&mut self) -> Option<&mut Dedup> {
+        self.dedup.as_mut()
     }
 
     /// Borrow the inner tracker (for stats / introspection).
@@ -262,6 +300,13 @@ where
                 let inner = guard.get_inner_mut();
                 if let Some(batch) = inner.next_batch() {
                     for pkt in &batch {
+                        // Plan 17: optional pre-tracking dedup.
+                        if let Some(d) = this.dedup.as_mut()
+                            && !d.keep(&pkt)
+                        {
+                            continue;
+                        }
+
                         let view = pkt.view();
                         let evts: FlowEvents<E::Key> = this.tracker.track(view);
                         for ev in evts {
@@ -377,6 +422,13 @@ where
                 let inner = guard.get_inner_mut();
                 if let Some(batch) = inner.next_batch() {
                     for pkt in &batch {
+                        // Plan 17: optional pre-tracking dedup.
+                        if let Some(d) = this.dedup.as_mut()
+                            && !d.keep(&pkt)
+                        {
+                            continue;
+                        }
+
                         let view = pkt.view();
                         let payloads = &mut this.reassembler.pending_payloads;
                         let evts: FlowEvents<E::Key> =

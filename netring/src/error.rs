@@ -45,6 +45,12 @@ pub enum Error {
     #[cfg(feature = "xdp-loader")]
     #[error("XDP loader: {0}")]
     Loader(String),
+
+    /// BPF filter construction failed (e.g., oversize program,
+    /// conflicting fragments). Bubbled up from
+    /// [`BpfFilter::new`](crate::BpfFilter::new) and the typed builder.
+    #[error("BPF filter: {0}")]
+    Bpf(#[from] crate::config::BuildError),
 }
 
 /// Convenience alias used throughout the crate.

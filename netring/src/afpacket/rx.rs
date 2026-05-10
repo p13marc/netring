@@ -763,7 +763,7 @@ fn build_inner(b: &CaptureBuilder, block_count: usize) -> Result<Capture, Error>
         fanout::join_fanout(fd.as_fd(), group_id, mode, b.fanout_flags)?;
     }
     if let Some(insns) = &b.bpf_filter {
-        let filt = BpfFilter::new(insns.clone());
+        let filt = BpfFilter::new(insns.clone())?;
         filter::attach_bpf_filter(fd.as_fd(), &filt)?;
     }
 

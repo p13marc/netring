@@ -77,8 +77,10 @@ mod tests {
 
     #[test]
     fn empty_filter_rejected() {
-        let filter = BpfFilter::new(vec![]);
-        // We can't call attach without a real fd, but we can test validation
+        // BpfFilter::new now returns Result; empty input is OK
+        // (the kernel accepts a zero-instruction filter — the
+        // attach path checks separately).
+        let filter = BpfFilter::new(vec![]).unwrap();
         assert!(filter.is_empty());
     }
 
@@ -92,7 +94,8 @@ mod tests {
                 k: 0,
             })
             .collect();
-        let filter = BpfFilter::new(insns);
-        assert!(filter.len() > BPF_MAXINSNS);
+        // BpfFilter::new now rejects oversize at construction time
+        // (matches the kernel's BPF_MAXINSNS limit).
+        assert!(BpfFilter::new(insns).is_err());
     }
 }

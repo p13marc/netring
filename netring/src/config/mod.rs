@@ -1,6 +1,16 @@
-//! Configuration types: fanout, BPF filters, timestamps.
+//! Configuration types: fanout, BPF filters, timestamps, ring profiles.
 
 use crate::afpacket::ffi;
+
+pub mod bpf;
+pub mod bpf_builder;
+pub(crate) mod bpf_compile;
+pub mod bpf_interp;
+pub mod ipnet;
+
+pub use bpf::{BpfFilter, BpfInsn, BuildError};
+pub use bpf_builder::BpfFilterBuilder;
+pub use ipnet::{IpNet, ParseIpNetError};
 
 /// Fanout distribution mode for multi-socket packet sharing.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -22,8 +32,7 @@ pub enum FanoutMode {
     /// The program receives the packet and returns the socket index
     /// (0-based) within the fanout group. After building the socket with
     /// `.fanout(FanoutMode::Ebpf, group_id)`, attach the program via
-    /// [`Capture::attach_fanout_ebpf()`](crate::Capture::attach_fanout_ebpf)
-    /// or [`Capture::attach_fanout_ebpf()`](crate::Capture::attach_fanout_ebpf).
+    /// [`Capture::attach_fanout_ebpf()`](crate::Capture::attach_fanout_ebpf).
     Ebpf,
 }
 
@@ -77,75 +86,6 @@ impl TimestampSource {
             Self::RawHardware => 1,
             Self::SysHardware => 2,
         }
-    }
-}
-
-/// A single classic BPF instruction.
-///
-/// Identical layout to `libc::sock_filter`. Generate with `tcpdump -dd`.
-#[repr(C)]
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct BpfInsn {
-    /// Instruction opcode.
-    pub code: u16,
-    /// Jump-if-true offset.
-    pub jt: u8,
-    /// Jump-if-false offset.
-    pub jf: u8,
-    /// Generic constant.
-    pub k: u32,
-}
-
-impl From<BpfInsn> for libc::sock_filter {
-    fn from(insn: BpfInsn) -> Self {
-        libc::sock_filter {
-            code: insn.code,
-            jt: insn.jt,
-            jf: insn.jf,
-            k: insn.k,
-        }
-    }
-}
-
-impl From<libc::sock_filter> for BpfInsn {
-    fn from(sf: libc::sock_filter) -> Self {
-        Self {
-            code: sf.code,
-            jt: sf.jt,
-            jf: sf.jf,
-            k: sf.k,
-        }
-    }
-}
-
-/// A classic BPF filter program for kernel-level packet filtering.
-///
-/// Generate instructions with `tcpdump -dd "expression"`.
-/// For eBPF, use `aya` and attach to the socket fd via `AsFd`.
-#[derive(Debug, Clone)]
-pub struct BpfFilter {
-    instructions: Vec<BpfInsn>,
-}
-
-impl BpfFilter {
-    /// Create a filter from raw BPF instructions.
-    pub fn new(instructions: Vec<BpfInsn>) -> Self {
-        Self { instructions }
-    }
-
-    /// The instruction slice.
-    pub fn instructions(&self) -> &[BpfInsn] {
-        &self.instructions
-    }
-
-    /// Number of instructions.
-    pub fn len(&self) -> usize {
-        self.instructions.len()
-    }
-
-    /// Whether the filter has no instructions.
-    pub fn is_empty(&self) -> bool {
-        self.instructions.is_empty()
     }
 }
 
@@ -232,49 +172,6 @@ mod tests {
     fn timestamp_source_default() {
         assert_eq!(TimestampSource::default(), TimestampSource::Software);
         assert_eq!(TimestampSource::Software.as_raw(), 0);
-    }
-
-    #[test]
-    fn bpf_insn_matches_sock_filter() {
-        assert_eq!(
-            std::mem::size_of::<BpfInsn>(),
-            std::mem::size_of::<libc::sock_filter>()
-        );
-    }
-
-    #[test]
-    fn bpf_insn_roundtrip() {
-        let insn = BpfInsn {
-            code: 0x28,
-            jt: 0,
-            jf: 0,
-            k: 12,
-        };
-        let sf: libc::sock_filter = insn.into();
-        let back: BpfInsn = sf.into();
-        assert_eq!(insn, back);
-    }
-
-    #[test]
-    fn bpf_filter_accessors() {
-        let insns = vec![
-            BpfInsn {
-                code: 0x28,
-                jt: 0,
-                jf: 0,
-                k: 12,
-            },
-            BpfInsn {
-                code: 0x06,
-                jt: 0,
-                jf: 0,
-                k: 0xFFFF,
-            },
-        ];
-        let filter = BpfFilter::new(insns.clone());
-        assert_eq!(filter.len(), 2);
-        assert!(!filter.is_empty());
-        assert_eq!(filter.instructions(), &insns);
     }
 
     #[test]

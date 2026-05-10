@@ -225,6 +225,8 @@ mod tests {
             BpfFilter::MAX_INSNS + 1
         ];
         let err = BpfFilter::new(oversize).unwrap_err();
-        assert!(matches!(err, BuildError::TooManyInstructions { count } if count == BpfFilter::MAX_INSNS + 1));
+        assert!(
+            matches!(err, BuildError::TooManyInstructions { count } if count == BpfFilter::MAX_INSNS + 1)
+        );
     }
 }

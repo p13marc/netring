@@ -313,6 +313,199 @@ mod tests {
         assert!(!f.matches(&pkt));
     }
 
+    fn synth_eth_ipv4_udp(
+        src_ip: [u8; 4],
+        dst_ip: [u8; 4],
+        src_port: u16,
+        dst_port: u16,
+    ) -> Vec<u8> {
+        let mut f = synth_eth_ipv4_tcp(src_ip, dst_ip, src_port, dst_port);
+        f[23] = 17; // IP proto = UDP
+        // UDP header: src(2), dst(2), len(2), cksum(2). Reuse first
+        // 8 bytes of TCP space.
+        f
+    }
+
+    /// Wrap a synthetic IPv4/TCP frame in an 802.1Q VLAN tag.
+    /// Inserts 4 bytes [0x8100, TCI] between src MAC and ethtype.
+    fn synth_vlan_eth_ipv4_tcp(
+        vlan_id: u16,
+        src_ip: [u8; 4],
+        dst_ip: [u8; 4],
+        src_port: u16,
+        dst_port: u16,
+    ) -> Vec<u8> {
+        let inner = synth_eth_ipv4_tcp(src_ip, dst_ip, src_port, dst_port);
+        let mut f = Vec::with_capacity(inner.len() + 4);
+        // dst MAC + src MAC (12 bytes from inner).
+        f.extend_from_slice(&inner[0..12]);
+        // VLAN tag: 0x8100 + TCI. TCI = priority(3) + DEI(1) +
+        // VLAN ID(12). For tests we set priority/DEI to 0.
+        f.extend_from_slice(&0x8100u16.to_be_bytes());
+        f.extend_from_slice(&(vlan_id & 0x0FFF).to_be_bytes());
+        // Inner ethertype + IP header + TCP header (rest of inner).
+        f.extend_from_slice(&inner[12..]);
+        f
+    }
+
+    #[test]
+    fn or_tcp80_or_udp53_accepts_both() {
+        let f = Filter::builder()
+            .tcp()
+            .port(80)
+            .or(|b| b.udp().port(53))
+            .build()
+            .unwrap();
+        let tcp_80 = synth_eth_ipv4_tcp([1, 1, 1, 1], [2, 2, 2, 2], 1234, 80);
+        let udp_53 = synth_eth_ipv4_udp([1, 1, 1, 1], [2, 2, 2, 2], 1234, 53);
+        let tcp_443 = synth_eth_ipv4_tcp([1, 1, 1, 1], [2, 2, 2, 2], 1234, 443);
+        let udp_99 = synth_eth_ipv4_udp([1, 1, 1, 1], [2, 2, 2, 2], 1234, 99);
+        assert!(f.matches(&tcp_80), "TCP 80 should match");
+        assert!(f.matches(&udp_53), "UDP 53 should match");
+        assert!(!f.matches(&tcp_443), "TCP 443 should not match");
+        assert!(!f.matches(&udp_99), "UDP 99 should not match");
+    }
+
+    #[test]
+    fn negate_inverts_match() {
+        // "not arp" — accepts everything except ARP.
+        let f = Filter::builder().arp().negate().build().unwrap();
+        let mut arp = vec![0u8; 42];
+        arp[12..14].copy_from_slice(&0x0806u16.to_be_bytes());
+        let ip_pkt = synth_eth_ipv4_tcp([1, 1, 1, 1], [2, 2, 2, 2], 1234, 80);
+        assert!(!f.matches(&arp));
+        assert!(f.matches(&ip_pkt));
+    }
+
+    #[test]
+    fn vlan_and_tcp_port_matches_vlan_tagged() {
+        let f = Filter::builder().vlan().tcp().dst_port(80).build().unwrap();
+        let vlan_tcp = synth_vlan_eth_ipv4_tcp(100, [1, 1, 1, 1], [2, 2, 2, 2], 1234, 80);
+        let plain_tcp = synth_eth_ipv4_tcp([1, 1, 1, 1], [2, 2, 2, 2], 1234, 80);
+        assert!(f.matches(&vlan_tcp), "VLAN-tagged TCP/80 should match");
+        assert!(
+            !f.matches(&plain_tcp),
+            "untagged TCP/80 should NOT match a vlan-required filter"
+        );
+    }
+
+    #[test]
+    fn vlan_id_match() {
+        let f = Filter::builder().vlan().vlan_id(100).build().unwrap();
+        let vlan_100 = synth_vlan_eth_ipv4_tcp(100, [1, 1, 1, 1], [2, 2, 2, 2], 1234, 80);
+        let vlan_200 = synth_vlan_eth_ipv4_tcp(200, [1, 1, 1, 1], [2, 2, 2, 2], 1234, 80);
+        assert!(f.matches(&vlan_100));
+        assert!(!f.matches(&vlan_200));
+    }
+
+    /// Build a synthetic Ethernet+IPv6+TCP frame. 74 bytes total.
+    fn synth_eth_ipv6_tcp(
+        src_ip: [u8; 16],
+        dst_ip: [u8; 16],
+        src_port: u16,
+        dst_port: u16,
+    ) -> Vec<u8> {
+        let mut f = Vec::with_capacity(74);
+        f.extend_from_slice(&[0u8; 12]); // dst+src MAC
+        f.extend_from_slice(&0x86ddu16.to_be_bytes()); // ethtype = IPv6
+        // IPv6 header (40 bytes):
+        f.push(0x60); // version 6, traffic class top
+        f.push(0); // traffic class bottom + flow label top
+        f.extend_from_slice(&[0u8; 2]); // flow label rest
+        f.extend_from_slice(&20u16.to_be_bytes()); // payload length (TCP hdr only)
+        f.push(6); // next header = TCP
+        f.push(64); // hop limit
+        f.extend_from_slice(&src_ip);
+        f.extend_from_slice(&dst_ip);
+        // TCP header:
+        f.extend_from_slice(&src_port.to_be_bytes());
+        f.extend_from_slice(&dst_port.to_be_bytes());
+        f.extend_from_slice(&0u32.to_be_bytes());
+        f.extend_from_slice(&0u32.to_be_bytes());
+        f.push(0x50);
+        f.push(0x02);
+        f.extend_from_slice(&8192u16.to_be_bytes());
+        f.extend_from_slice(&0u16.to_be_bytes());
+        f.extend_from_slice(&0u16.to_be_bytes());
+        f
+    }
+
+    #[test]
+    fn ipv6_filter_matches_ipv6_packet() {
+        let f = Filter::builder().ipv6().build().unwrap();
+        let pkt = synth_eth_ipv6_tcp(
+            [0x20, 0x01, 0x0d, 0xb8, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1],
+            [0x20, 0x01, 0x0d, 0xb8, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 2],
+            1234,
+            80,
+        );
+        assert!(f.matches(&pkt));
+    }
+
+    #[test]
+    fn ipv6_tcp_dst_port_match() {
+        let f = Filter::builder().ipv6().tcp().dst_port(80).build().unwrap();
+        let pkt_yes = synth_eth_ipv6_tcp(
+            [0x20, 0x01, 0x0d, 0xb8, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1],
+            [0x20, 0x01, 0x0d, 0xb8, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 2],
+            1234,
+            80,
+        );
+        let pkt_no = synth_eth_ipv6_tcp(
+            [0x20, 0x01, 0x0d, 0xb8, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1],
+            [0x20, 0x01, 0x0d, 0xb8, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 2],
+            1234,
+            443,
+        );
+        assert!(f.matches(&pkt_yes));
+        assert!(!f.matches(&pkt_no));
+    }
+
+    #[test]
+    fn ipv6_src_host_match() {
+        let target: std::net::IpAddr = "2001:db8::1".parse().unwrap();
+        let f = Filter::builder().ipv6().src_host(target).build().unwrap();
+        let pkt_yes = synth_eth_ipv6_tcp(
+            [0x20, 0x01, 0x0d, 0xb8, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1],
+            [0x20, 0x01, 0x0d, 0xb8, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 2],
+            1234,
+            80,
+        );
+        let pkt_no = synth_eth_ipv6_tcp(
+            [0x20, 0x01, 0x0d, 0xb8, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 99],
+            [0x20, 0x01, 0x0d, 0xb8, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 2],
+            1234,
+            80,
+        );
+        assert!(f.matches(&pkt_yes));
+        assert!(!f.matches(&pkt_no));
+    }
+
+    #[test]
+    fn ipv6_any_host_matches_either_direction() {
+        let target: std::net::IpAddr = "2001:db8::5".parse().unwrap();
+        let f = Filter::builder().ipv6().host(target).build().unwrap();
+        let addr_a = [0x20, 0x01, 0x0d, 0xb8, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 5];
+        let addr_b = [0x20, 0x01, 0x0d, 0xb8, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 99];
+        let pkt_src = synth_eth_ipv6_tcp(addr_a, addr_b, 1234, 80);
+        let pkt_dst = synth_eth_ipv6_tcp(addr_b, addr_a, 1234, 80);
+        let pkt_neither = synth_eth_ipv6_tcp(addr_b, addr_b, 1234, 80);
+        assert!(f.matches(&pkt_src));
+        assert!(f.matches(&pkt_dst));
+        assert!(!f.matches(&pkt_neither));
+    }
+
+    #[test]
+    fn double_negate_is_identity() {
+        let plain = Filter::builder().tcp().build().unwrap();
+        let double = Filter::builder().tcp().negate().negate().build().unwrap();
+        let pkt_yes = synth_eth_ipv4_tcp([1, 1, 1, 1], [2, 2, 2, 2], 1234, 80);
+        let mut pkt_no = pkt_yes.clone();
+        pkt_no[23] = 17; // UDP
+        assert_eq!(plain.matches(&pkt_yes), double.matches(&pkt_yes));
+        assert_eq!(plain.matches(&pkt_no), double.matches(&pkt_no));
+    }
+
     #[test]
     fn out_of_bounds_load_drops() {
         // ldh [100] on a 64-byte frame → out of bounds.

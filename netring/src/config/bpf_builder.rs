@@ -242,9 +242,7 @@ mod tests {
 
     #[test]
     fn or_collects_branch() {
-        let b = BpfFilterBuilder::new()
-            .tcp()
-            .or(|b| b.udp().port(53));
+        let b = BpfFilterBuilder::new().tcp().or(|b| b.udp().port(53));
         assert_eq!(b.or_branches.len(), 1);
         assert_eq!(
             b.or_branches[0].fragments,

@@ -15,6 +15,10 @@ pub mod metrics;
 pub mod packet;
 #[cfg(feature = "pcap")]
 pub mod pcap;
+#[cfg(all(feature = "pcap", feature = "tokio", feature = "flow"))]
+pub mod pcap_flow;
+#[cfg(all(feature = "pcap", feature = "tokio"))]
+pub mod pcap_source;
 #[cfg(all(feature = "pcap", feature = "tokio"))]
 pub mod pcap_tap;
 pub mod stats;
@@ -128,5 +132,9 @@ pub use async_adapters::multi_streams::{
 };
 #[cfg(feature = "tokio")]
 pub use async_adapters::stream_capture::StreamCapture;
+#[cfg(all(feature = "pcap", feature = "tokio", feature = "flow"))]
+pub use pcap_flow::PcapFlowStream;
+#[cfg(all(feature = "pcap", feature = "tokio"))]
+pub use pcap_source::{AsyncPcapConfig, AsyncPcapSource, PcapFormat};
 #[cfg(all(feature = "pcap", feature = "tokio"))]
 pub use pcap_tap::{PcapTap, TapErrorPolicy};

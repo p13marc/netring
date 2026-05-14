@@ -25,7 +25,22 @@ This plan supersedes the earlier draft `26-async-pcap-source`.
 
 ## Status
 
-Planned — targets 0.13.0.
+Done — landing in 0.13.0.
+
+**Implementation note**: shipped via the simpler design — mpsc
+channel + `spawn_blocking` reader — rather than the planned
+eventfd-backed `PacketBatch::Owned` refactor. The eventfd design
+would require enum-wrapping `PacketBatch<'a>` (which is tied to
+mmap memory in the existing AF_PACKET path) and would risk
+destabilising the live-capture surface. The mpsc design ships a
+distinct `AsyncPcapSource: Stream<Item = OwnedPacket>` plus a
+thin `PcapFlowStream` bridge (mirrors `FlowStream`'s builder
+methods for the offline-meaningful subset: `with_config`,
+`with_idle_timeout_fn`, `tracker()`, `packets_read()`). Live and
+offline pipelines unify via a generic consumer over
+`Stream<Item = FlowEvent<K>>`. The unified `PacketSource + AsFd`
+approach can come in a follow-up plan if real adoption signal
+arrives.
 
 ## Prerequisites
 

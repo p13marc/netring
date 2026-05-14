@@ -48,6 +48,7 @@ aya = { version = "0.13", optional = true }
 
 [dev-dependencies]
 env_logger = "0.11"
+tempfile = "3"
 divan = "0.1"
 criterion = { version = "0.5", features = ["html_reports"] }
 etherparse = "0.16"
@@ -153,6 +154,10 @@ required-features = ["tokio", "flow", "parse"]
 [[example]]
 name = "async_multi_interface"
 required-features = ["tokio", "flow", "parse"]
+
+[[example]]
+name = "async_pcap_replay"
+required-features = ["tokio", "flow", "parse", "pcap"]
 
 [[bench]]
 name = "throughput"

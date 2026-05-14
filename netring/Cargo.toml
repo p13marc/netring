@@ -146,6 +146,14 @@ required-features = ["tokio", "flow", "parse", "pcap"]
 name = "async_filter"
 required-features = ["tokio", "flow", "parse"]
 
+[[example]]
+name = "async_fanout_workers"
+required-features = ["tokio", "flow", "parse"]
+
+[[example]]
+name = "async_multi_interface"
+required-features = ["tokio", "flow", "parse"]
+
 [[bench]]
 name = "throughput"
 harness = false

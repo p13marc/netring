@@ -120,6 +120,12 @@ pub use async_adapters::conversation::{Conversation, ConversationChunk, Conversa
 pub use async_adapters::flow_broadcast::{BroadcastRecvError, FlowBroadcast, FlowSubscriber};
 #[cfg(all(feature = "tokio", feature = "flow"))]
 pub use async_adapters::flow_stream::{AsyncReassemblerSlot, FlowStream, NoReassembler};
+#[cfg(all(feature = "tokio", feature = "flow"))]
+pub use async_adapters::multi_capture::AsyncMultiCapture;
+#[cfg(all(feature = "tokio", feature = "flow"))]
+pub use async_adapters::multi_streams::{
+    MultiDatagramStream, MultiFlowStream, MultiSessionStream, TaggedEvent,
+};
 #[cfg(feature = "tokio")]
 pub use async_adapters::stream_capture::StreamCapture;
 #[cfg(all(feature = "pcap", feature = "tokio"))]

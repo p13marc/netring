@@ -434,6 +434,8 @@ cargo run --example async_filter          --features "tokio,flow,parse" -- eth0 
 cargo run --example async_fanout_workers  --features "tokio,flow,parse" -- eth0 4
 cargo run --example async_multi_interface --features "tokio,flow,parse" -- lo eth0
 cargo run --example async_pcap_replay     --features "tokio,flow,parse,pcap" -- trace.pcap 1.0
+# 0.13.1 — async sibling of stats_monitor (StreamCapture::capture_stats demo):
+cargo run --example async_stats_monitor   --features "tokio,flow,parse" -- eth0 30
 ```
 
 ## Documentation

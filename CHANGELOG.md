@@ -1,5 +1,73 @@
 # Changelog
 
+## 0.13.1 — MSRV bump + clippy 1.95 cleanup
+
+Patch release. No API changes, no new features — strictly
+toolchain hygiene plus one async example added during the audit.
+
+### MSRV: 1.85 → 1.95
+
+The flow-tracker / pcap-tap / multi-streams hot paths shipped in
+0.13.0 already used `if let X && let Y` let-chains (stabilized in
+Rust 1.88) under stable, but the workspace `rust-version` still
+declared 1.85 and the CI matrix tested against it. The Unit Tests
+(1.85) job rightly rejected the code with E0658.
+
+Rather than refactor the let-chains to nested `if let` blocks,
+the MSRV is raised to 1.95 so the codebase can track current
+stable idioms directly. This affects only the lower bound of the
+supported toolchain — users on stable Rust (1.88+) are unaffected.
+
+### Clippy 1.95 lint cleanup
+
+The 1.95 toolchain promoted two lints under `-D warnings`:
+
+- **`clippy::manual_is_multiple_of`** — fixed 8 sites
+  (`afpacket/{mod,rx}.rs`, `config/mod.rs`, plus 5 examples)
+  by replacing `n % m == 0` / `n % m != 0` idioms with
+  `n.is_multiple_of(m)` / `!n.is_multiple_of(m)`.
+- **`clippy::collapsible_if`** — 1.95 now folds through
+  let-chain bindings, so 4 nested `if let X { if let Y { ... } }`
+  blocks were collapsed to `if let X && let Y { ... }`. Sites:
+  `afxdp/mod.rs` (AF_XDP prefill), `flow_broadcast.rs` (×2
+  test-only timeout + .is_some() pairs), `examples/fanout.rs`
+  (thread pinning).
+
+### New example
+
+- `async_stats_monitor.rs` — the async sibling of the existing
+  sync `stats_monitor`. Demonstrates plan 20's
+  `StreamCapture::capture_stats` /
+  `capture_cumulative_stats` polling on a live `FlowStream`,
+  printing per-second kernel-ring counters alongside flow
+  start/end counts without disrupting the consumer.
+
+### Test fixture fix
+
+`tests/bpf_filter_lifecycle.rs` — the two `AsyncCapture::open_with_filter`
+tests were `#[test]` and constructed the capture outside any
+tokio runtime, so `AsyncFd::new` panicked with "no reactor
+running". Switched to `#[tokio::test(flavor = "current_thread")]`
+and removed the manual `Runtime::block_on`. No production-code
+change.
+
+### CI plumbing
+
+- Matrix `rust: [stable, "1.85"]` → `[stable, "1.95"]`.
+- `stream_capture.rs` doctest moved from a `flow`-feature example
+  (`flow_stream`) to a feature-agnostic one (`dedup_stream`) so
+  it compiles under CI's `tokio,channel` test command.
+- Two `redundant explicit link target` rustdoc errors fixed
+  (`stream_capture.rs:84` `Error::SockOpt`; `pcap_flow.rs:3`
+  `AsyncPcapSource`).
+
+### Upgrade guidance
+
+`cargo update -p netring`. No source changes required for any
+consumer already on Rust 1.95+.
+
+---
+
 ## 0.13.0 — async-stream maturity: observability, BPF ergonomics, multi-source, offline replay
 
 Four consolidated plans (20-23) closing the seven feedback items

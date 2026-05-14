@@ -20,8 +20,32 @@ built on AF_PACKET with TPACKET_V3 (block-based mmap ring buffers) and AF_XDP.
 
 ## Implementation Status
 
-**Active.** netring 0.12.0 published; 0.13.0 prepared (this branch).
-~225 tests, ~36 examples, zero warnings.
+**Active.** netring 0.13.0 published; 0.13.1 prepared (this branch).
+~225 tests, ~37 examples, zero warnings.
+
+### Recent additions (0.13.1)
+
+Patch release — no API changes, no new features.
+
+- **MSRV raised to 1.95** (was 1.85 in 0.13.0). Reason: the
+  flow-tracker / pcap-tap / multi-streams hot paths already used
+  `if let X && let Y` let-chains (stabilized in 1.88), and the
+  Rust 1.95 clippy promoted `clippy::manual_is_multiple_of` and
+  refined `clippy::collapsible_if` to fire through let-chain
+  bindings. Bumping MSRV to 1.95 lets the codebase track current
+  stable idioms directly.
+- **Code-quality**: 8 `n % m == 0` → `n.is_multiple_of(m)`
+  conversions across `afpacket/`, `config/`, and 5 examples;
+  4 nested-`if let` blocks collapsed to let-chains. Clippy clean
+  under `-D warnings` for default + `tokio,channel` +
+  `--all-features` matrices.
+- **CI**: pinned matrix `rust: [stable, "1.95"]`. Test fixture
+  for `bpf_filter_lifecycle` now uses `#[tokio::test]` so
+  `AsyncCapture::open_with_filter` sees the runtime it needs.
+- **New example**: `async_stats_monitor.rs` — async sibling of
+  `stats_monitor.rs`. Demonstrates `StreamCapture::capture_stats()`
+  /`capture_cumulative_stats()` polling on a live `FlowStream`
+  without disrupting the consumer. Builds on plan 20.
 
 ### Recent additions (0.13.0)
 

@@ -1,5 +1,117 @@
 # Changelog
 
+## 0.13.0 — async-stream maturity: observability, BPF ergonomics, multi-source, offline replay
+
+Four consolidated plans (20-23) closing the seven feedback items
+from des-rs's 2026-05-14 round. The release is feature-additive
+on the existing types; one minor convention break inside the async
+adapter modules (private `from_tracker` signatures gained a `tap`
+parameter — `pub(crate)`, no external impact).
+
+### Plan 20 — `StreamCapture` trait + pcap tap
+
+- **New** sealed `StreamCapture` trait gives `FlowStream`,
+  `SessionStream`, `DatagramStream`, and `DedupStream` a uniform
+  `capture()` accessor. Default-methoded `capture_stats()` /
+  `capture_cumulative_stats()` make kernel ring counters reachable
+  even after the capture has been moved into a stream — closes
+  des-rs F#2 (silent packet loss invisibility).
+- **New** `with_pcap_tap(writer)` / `with_pcap_tap_policy(writer,
+  policy)` builders on all four stream types. Records each packet
+  to a `CaptureWriter` **before** the flow tracker processes it;
+  tap survives `session_stream` / `datagram_stream` /
+  `with_async_reassembler` / `with_state` conversions — closes
+  des-rs F#3 (single-invocation decode + record).
+- **New** `TapErrorPolicy { Continue (default), DropTap, FailStream }`
+  for disk-full handling. `Continue` logs via `tracing::warn!` and
+  keeps recording; `DropTap` retires the tap; `FailStream` surfaces
+  an `Err` from the next poll.
+
+### Plan 21 — BPF filter ergonomics
+
+- **New** `PacketSetFilter` trait scoping atomic in-kernel BPF
+  filter replacement to AF_PACKET-backed sources only. `Capture`
+  implements it; `XdpSocket` does not, so
+  `AsyncCapture<XdpSocket>` does not even expose `set_filter` —
+  trait-bound gating, no runtime `unimplemented!`.
+- **New** `Capture::set_filter(&BpfFilter)` — kernel handles
+  atomic replacement via `SO_ATTACH_FILTER`.
+- **New** `AsyncCapture::open_with_filter(iface, BpfFilter)`
+  one-call constructor.
+- **New** `AsyncCapture::set_filter(&BpfFilter)` for AF_PACKET-backed
+  captures.
+- Composes with plan 20: `stream.capture().set_filter(&new_filter)`
+  swaps the filter from inside a running stream.
+- Closes des-rs F#1 (kernel-side filter on a 10-GbE DES sniffer
+  drops CPU from ~30 % to ~1 %) and F#7 (dynamic filter swap).
+
+### Plan 22 — Multi-source capture
+
+- **New** `AsyncMultiCapture` type with five constructors:
+  - `open(&[ifaces])` — multi-interface capture.
+  - `open_with_filter(&[ifaces], BpfFilter)` — same + shared
+    filter.
+  - `open_workers(iface, n, group_id)` — `FanoutMode::Cpu`
+    workers on one interface.
+  - `open_workers_with_mode(iface, n, group_id, mode)` — explicit
+    fanout mode.
+  - `from_captures(vec, labels)` — heterogeneous setups.
+- **New** `MultiFlowStream<E>`, `MultiSessionStream<E, F>`,
+  `MultiDatagramStream<E, F>` fan in N per-source streams via a
+  custom round-robin select (no `futures::stream::select_all`
+  dep). Yield `TaggedEvent { source_idx, event }`.
+- **New** per-source and aggregate capture stats accessors on each
+  Multi* type: `per_source_capture_stats()` + `capture_stats()`.
+- **New** `docs/scaling.md` covers the `FanoutMode` decision
+  matrix, the canonical recipe with thread pinning, and seven
+  anti-patterns (FANOUT_HASH on skewed traffic, PACKET_FANOUT on
+  `lo`, wrong worker/queue ratios, …).
+- Closes des-rs F#5 (multi-interface) + F#6 (scaling docs).
+
+### Plan 23 — `AsyncPcapSource` + `PcapFlowStream`
+
+- **New** `AsyncPcapSource` reads pcap and pcapng files
+  asynchronously via tokio `mpsc` channel fed from a
+  `spawn_blocking` task running the sync `pcap_file` reader.
+  Auto-detects format at open.
+- **New** `AsyncPcapConfig { replay_speed, queue_depth,
+  loop_at_eof }`. Pacing replays at recorded wire rate (or a
+  scaled multiple); EOF-loop for stress testing.
+- **New** `PcapFormat::{LegacyPcap, Pcapng}` returned by
+  `source.format()`.
+- **New** `PcapFlowStream<E>` bridges the source's `OwnedPacket`
+  output to a flowscope `FlowTracker`. Yields `FlowEvent`s through
+  the same `Stream` trait as a live `FlowStream`. Mirrors the
+  offline-meaningful subset of the builder methods.
+- Live + offline pipelines unify via a generic consumer over
+  `Stream<Item = Result<FlowEvent<K>, Error>>` — same
+  downstream signature.
+- Closes des-rs F#4 (offline replay through the same chain).
+
+### Examples
+
+Four new examples:
+
+- `async_flow_with_tap` (plan 20).
+- `async_filter` (plan 21).
+- `async_fanout_workers` + `async_multi_interface` (plan 22).
+- `async_pcap_replay` (plan 23).
+
+### Internal
+
+- New `pcap_tap`, `pcap_source`, `pcap_flow` modules — all behind
+  `pcap + tokio` (or `+ flow` for `pcap_flow`).
+- New `multi_capture`, `multi_streams` modules under
+  `async_adapters/`.
+- New `stream_capture` module (always available under `tokio`).
+- `SessionStream::from_tracker` / `DatagramStream::from_tracker`
+  signatures gained a `#[cfg(feature = "pcap")] tap` parameter
+  — `pub(crate)`, no external break.
+- `tempfile = "3"` added to dev-dependencies for offline-pcap
+  fixtures.
+
+---
+
 ## 0.12.0 — flowscope 0.3 + per-key idle timeouts + structured anomalies
 
 Plan 19. Bumps `flowscope` from 0.2 to 0.3 and exposes the new

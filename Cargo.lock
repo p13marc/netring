@@ -826,7 +826,7 @@ dependencies = [
 
 [[package]]
 name = "netring"
-version = "0.12.0"
+version = "0.13.0"
 dependencies = [
  "ahash",
  "aya",
@@ -846,6 +846,7 @@ dependencies = [
  "nix",
  "pcap-file",
  "proptest",
+ "tempfile",
  "thiserror 2.0.18",
  "tokio",
  "tokio-stream",

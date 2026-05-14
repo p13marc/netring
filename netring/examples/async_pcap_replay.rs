@@ -24,7 +24,9 @@ use netring::{AsyncPcapConfig, AsyncPcapSource};
 #[tokio::main(flavor = "current_thread")]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let mut args = env::args().skip(1);
-    let path = args.next().ok_or("usage: async_pcap_replay <pcap> [speed]")?;
+    let path = args
+        .next()
+        .ok_or("usage: async_pcap_replay <pcap> [speed]")?;
     let replay_speed: f32 = args.next().and_then(|s| s.parse().ok()).unwrap_or(0.0);
 
     let cfg = AsyncPcapConfig {

@@ -17,11 +17,10 @@
 //! callers reach back through:
 //!
 //! ```no_run
-//! # use netring::{AsyncCapture, StreamCapture};
-//! # use netring::flow::extract::FiveTuple;
+//! # use netring::{AsyncCapture, Dedup, StreamCapture};
 //! # async fn _ex() -> Result<(), netring::Error> {
 //! let cap = AsyncCapture::open("eth0")?;
-//! let stream = cap.flow_stream(FiveTuple::bidirectional());
+//! let stream = cap.dedup_stream(Dedup::loopback());
 //!
 //! // Poll kernel ring stats while the stream is running:
 //! let stats = stream.capture_stats()?;
@@ -81,7 +80,7 @@ pub trait StreamCapture: Sealed {
     ///
     /// # Errors
     ///
-    /// Returns [`Error::SockOpt`](crate::Error::SockOpt) if
+    /// Returns [`crate::Error::SockOpt`] if
     /// `getsockopt(PACKET_STATISTICS)` fails — typically only when
     /// the socket has been closed.
     fn capture_stats(&self) -> Result<CaptureStats, Error> {

@@ -13,8 +13,8 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Duration;
 
 use futures::StreamExt;
-use netring::flow::extract::FiveTuple;
 use netring::AsyncMultiCapture;
+use netring::flow::extract::FiveTuple;
 
 const GROUP_ID: u16 = 0xDE57;
 

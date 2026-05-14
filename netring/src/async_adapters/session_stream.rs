@@ -170,9 +170,7 @@ where
     /// [`FlowStream::with_idle_timeout_fn`](super::flow_stream::FlowStream::with_idle_timeout_fn).
     pub fn with_idle_timeout_fn<G>(mut self, f: G) -> Self
     where
-        G: Fn(&E::Key, Option<flowscope::L4Proto>) -> Option<std::time::Duration>
-            + Send
-            + 'static,
+        G: Fn(&E::Key, Option<flowscope::L4Proto>) -> Option<std::time::Duration> + Send + 'static,
     {
         self.tracker.set_idle_timeout_fn(f);
         self

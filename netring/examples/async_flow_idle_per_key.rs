@@ -27,7 +27,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .and_then(|s| s.parse().ok())
         .unwrap_or(10);
 
-    eprintln!("Flow tracking on {iface} for {seconds}s. DNS idle=5s, default protocol idle for everything else.");
+    eprintln!(
+        "Flow tracking on {iface} for {seconds}s. DNS idle=5s, default protocol idle for everything else."
+    );
 
     let cap = AsyncCapture::open(&iface)?;
     let mut stream = cap

@@ -479,7 +479,10 @@ where
 
 /// Plan 19: clamp a packet view's timestamp against a running max
 /// if monotonic mode is enabled. No-op when `state` is `None`.
-pub(crate) fn clamp_view<'a>(view: PacketView<'a>, state: &mut Option<Timestamp>) -> PacketView<'a> {
+pub(crate) fn clamp_view<'a>(
+    view: PacketView<'a>,
+    state: &mut Option<Timestamp>,
+) -> PacketView<'a> {
     let Some(last) = state.as_mut() else {
         return view;
     };

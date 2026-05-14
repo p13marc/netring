@@ -130,12 +130,8 @@ async fn unified_pipeline_via_generic_function() {
     /// Generic consumer that takes any stream of FlowEvents.
     async fn count_started<S>(stream: S) -> usize
     where
-        S: Stream<
-                Item = Result<
-                    FlowEvent<flowscope::extract::FiveTupleKey>,
-                    netring::Error,
-                >,
-            > + Unpin,
+        S: Stream<Item = Result<FlowEvent<flowscope::extract::FiveTupleKey>, netring::Error>>
+            + Unpin,
     {
         let mut started = 0;
         let mut s = stream;

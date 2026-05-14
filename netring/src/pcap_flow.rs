@@ -1,6 +1,6 @@
 //! [`PcapFlowStream`] — flow tracking over offline pcap files.
 //!
-//! Bridges [`AsyncPcapSource`](crate::pcap_source::AsyncPcapSource)'s
+//! Bridges [`crate::pcap_source::AsyncPcapSource`]'s
 //! `OwnedPacket` output to flowscope's `FlowTracker`, yielding
 //! [`FlowEvent`]s through the same `Stream` trait as a live
 //! [`FlowStream`](crate::FlowStream).

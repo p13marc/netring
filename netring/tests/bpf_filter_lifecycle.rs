@@ -27,8 +27,8 @@ async fn open_with_filter_attaches_before_first_packet() {
 
     // `AsyncCapture::open_with_filter` calls `AsyncFd::new` internally,
     // which needs a running tokio reactor — hence `#[tokio::test]`.
-    let mut cap = AsyncCapture::open_with_filter(helpers::LOOPBACK, filter)
-        .expect("open_with_filter");
+    let mut cap =
+        AsyncCapture::open_with_filter(helpers::LOOPBACK, filter).expect("open_with_filter");
 
     // Send to the non-matching port first — kernel should drop it.
     helpers::send_udp_to_loopback(port_miss, marker.as_bytes(), 3);

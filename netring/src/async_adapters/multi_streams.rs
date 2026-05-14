@@ -15,12 +15,12 @@ use flowscope::{
 };
 use futures_core::Stream;
 
+use crate::Capture;
 use crate::async_adapters::datagram_stream::DatagramStream;
 use crate::async_adapters::flow_stream::{FlowStream, NoReassembler};
 use crate::async_adapters::session_stream::SessionStream;
 use crate::error::Error;
 use crate::stats::CaptureStats;
-use crate::Capture;
 
 /// An event annotated with the source it came from within an
 /// [`AsyncMultiCapture`](super::multi_capture::AsyncMultiCapture).
@@ -68,10 +68,7 @@ where
     /// Poll all alive streams in round-robin order. Yields the first
     /// `Ready` (Item or Err). Drops `None` slots; returns
     /// `Poll::Ready(None)` when all slots are exhausted.
-    fn poll_next_select(
-        &mut self,
-        cx: &mut Context<'_>,
-    ) -> Poll<Option<(u16, Result<T, Error>)>> {
+    fn poll_next_select(&mut self, cx: &mut Context<'_>) -> Poll<Option<(u16, Result<T, Error>)>> {
         let n = self.streams.len();
         if n == 0 {
             return Poll::Ready(None);
@@ -137,9 +134,7 @@ where
 
     /// Human-readable label for `source_idx`.
     pub fn label(&self, source_idx: u16) -> Option<&str> {
-        self.labels
-            .get(source_idx as usize)
-            .map(|s| s.as_str())
+        self.labels.get(source_idx as usize).map(|s| s.as_str())
     }
 
     /// Number of sources still being polled (haven't returned `None`
@@ -237,7 +232,10 @@ where
     ) -> Self {
         let streams = captures
             .into_iter()
-            .map(|cap| cap.flow_stream(extractor.clone()).session_stream(factory.clone()))
+            .map(|cap| {
+                cap.flow_stream(extractor.clone())
+                    .session_stream(factory.clone())
+            })
             .collect();
         Self {
             select: SelectState::new(streams),
@@ -247,9 +245,7 @@ where
 
     /// Human-readable label for `source_idx`.
     pub fn label(&self, source_idx: u16) -> Option<&str> {
-        self.labels
-            .get(source_idx as usize)
-            .map(|s| s.as_str())
+        self.labels.get(source_idx as usize).map(|s| s.as_str())
     }
 
     /// Number of sources still being polled (haven't returned `None`
@@ -266,7 +262,12 @@ where
             .streams
             .iter()
             .enumerate()
-            .map(|(i, slot)| (self.labels[i].clone(), slot.as_ref().map(|s| s.capture_stats())))
+            .map(|(i, slot)| {
+                (
+                    self.labels[i].clone(),
+                    slot.as_ref().map(|s| s.capture_stats()),
+                )
+            })
             .collect()
     }
 
@@ -355,9 +356,7 @@ where
 
     /// Human-readable label for `source_idx`.
     pub fn label(&self, source_idx: u16) -> Option<&str> {
-        self.labels
-            .get(source_idx as usize)
-            .map(|s| s.as_str())
+        self.labels.get(source_idx as usize).map(|s| s.as_str())
     }
 
     /// Number of sources still being polled (haven't returned `None`
@@ -374,7 +373,12 @@ where
             .streams
             .iter()
             .enumerate()
-            .map(|(i, slot)| (self.labels[i].clone(), slot.as_ref().map(|s| s.capture_stats())))
+            .map(|(i, slot)| {
+                (
+                    self.labels[i].clone(),
+                    slot.as_ref().map(|s| s.capture_stats()),
+                )
+            })
             .collect()
     }
 
@@ -437,11 +441,7 @@ impl super::multi_capture::AsyncMultiCapture {
     }
 
     /// Convert into a [`MultiSessionStream`].
-    pub fn session_stream<E, F>(
-        self,
-        extractor: E,
-        factory: F,
-    ) -> MultiSessionStream<E, F>
+    pub fn session_stream<E, F>(self, extractor: E, factory: F) -> MultiSessionStream<E, F>
     where
         E: FlowExtractor + Clone + Unpin + Send + 'static,
         E::Key: Eq + std::hash::Hash + Clone + Unpin + Send + 'static,
@@ -454,11 +454,7 @@ impl super::multi_capture::AsyncMultiCapture {
     }
 
     /// Convert into a [`MultiDatagramStream`].
-    pub fn datagram_stream<E, F>(
-        self,
-        extractor: E,
-        factory: F,
-    ) -> MultiDatagramStream<E, F>
+    pub fn datagram_stream<E, F>(self, extractor: E, factory: F) -> MultiDatagramStream<E, F>
     where
         E: FlowExtractor + Clone + Unpin + Send + 'static,
         E::Key: Eq + std::hash::Hash + Clone + Unpin + Send + 'static,
@@ -470,4 +466,3 @@ impl super::multi_capture::AsyncMultiCapture {
         MultiDatagramStream::new(captures, labels, extractor, factory)
     }
 }
-

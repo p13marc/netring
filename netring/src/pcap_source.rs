@@ -41,8 +41,8 @@ use std::fs::File;
 use std::io::{BufReader, Read};
 use std::path::{Path, PathBuf};
 use std::pin::Pin;
-use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::task::{Context, Poll};
 use std::time::{Duration, Instant};
 
@@ -164,9 +164,7 @@ impl Stream for AsyncPcapSource {
 // ── format detection ─────────────────────────────────────────────
 
 /// PCAP magic numbers (any endian, microsecond or nanosecond).
-const PCAP_MAGICS: &[u32] = &[
-    0xa1b2_c3d4, 0xd4c3_b2a1, 0xa1b2_3c4d, 0x4d3c_b2a1,
-];
+const PCAP_MAGICS: &[u32] = &[0xa1b2_c3d4, 0xd4c3_b2a1, 0xa1b2_3c4d, 0x4d3c_b2a1];
 
 /// PCAPNG Section Header Block type.
 const PCAPNG_SHB: u32 = 0x0a0d_0d0a;
@@ -355,7 +353,7 @@ mod tests {
     use tempfile::NamedTempFile;
 
     fn write_legacy_pcap(packets: &[(Timestamp, Vec<u8>)]) -> NamedTempFile {
-        use pcap_file::pcap::{PcapPacket, PcapWriter, PcapHeader};
+        use pcap_file::pcap::{PcapHeader, PcapPacket, PcapWriter};
         let file = NamedTempFile::new().expect("tempfile");
         let header = PcapHeader {
             version_major: 2,
@@ -367,8 +365,8 @@ mod tests {
             ts_resolution: pcap_file::TsResolution::NanoSecond,
             endianness: pcap_file::Endianness::native(),
         };
-        let mut writer = PcapWriter::with_header(file.reopen().unwrap(), header)
-            .expect("PcapWriter");
+        let mut writer =
+            PcapWriter::with_header(file.reopen().unwrap(), header).expect("PcapWriter");
         for (ts, data) in packets {
             let pkt = PcapPacket::new_owned(
                 Duration::new(ts.sec as u64, ts.nsec),
@@ -446,5 +444,4 @@ mod tests {
         let fmt = sniff_format(f.path()).expect("sniff");
         assert_eq!(fmt, PcapFormat::Pcapng);
     }
-
 }

@@ -7,9 +7,9 @@
 use std::env;
 
 use futures::StreamExt;
+use netring::AsyncMultiCapture;
 use netring::flow::FlowEvent;
 use netring::flow::extract::FiveTuple;
-use netring::AsyncMultiCapture;
 
 #[tokio::main(flavor = "current_thread")]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
@@ -28,9 +28,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     while let Some(evt) = stream.next().await {
         match evt {
             Ok(tagged) => {
-                let iface = stream
-                    .label(tagged.source_idx)
-                    .unwrap_or("?");
+                let iface = stream.label(tagged.source_idx).unwrap_or("?");
                 match tagged.event {
                     FlowEvent::Started { key, .. } => {
                         println!("[{iface}] + {a} <-> {b}", a = key.a, b = key.b);

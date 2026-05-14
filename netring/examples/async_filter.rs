@@ -21,10 +21,7 @@ use netring::{AsyncCapture, BpfFilter, StreamCapture};
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let mut args = env::args().skip(1);
     let iface = args.next().unwrap_or_else(|| "lo".to_string());
-    let port: u16 = args
-        .next()
-        .and_then(|s| s.parse().ok())
-        .unwrap_or(80);
+    let port: u16 = args.next().and_then(|s| s.parse().ok()).unwrap_or(80);
 
     let initial = BpfFilter::builder().tcp().dst_port(port).build()?;
     println!("listening on {iface}, initial filter: tcp dst port {port}");

@@ -15,8 +15,8 @@ mod helpers;
 use std::time::Duration;
 
 use futures::StreamExt;
-use netring::flow::extract::FiveTuple;
 use netring::AsyncMultiCapture;
+use netring::flow::extract::FiveTuple;
 
 #[test]
 fn open_two_lo_captures_yields_tagged_events() {

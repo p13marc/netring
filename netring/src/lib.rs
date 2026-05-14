@@ -46,7 +46,7 @@ pub use packet::{
 // Always re-exported — needed for `Packet::view()`.
 pub use flowscope::PacketView;
 pub use stats::CaptureStats;
-pub use traits::{PacketSink, PacketSource};
+pub use traits::{PacketSetFilter, PacketSink, PacketSource};
 
 // AF_XDP
 #[cfg(feature = "af-xdp")]

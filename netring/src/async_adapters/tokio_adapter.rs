@@ -109,6 +109,72 @@ impl AsyncCapture<crate::Capture> {
     pub fn open(interface: &str) -> Result<Self, Error> {
         Self::new(crate::Capture::open(interface)?)
     }
+
+    /// Plan 21: open an async AF_PACKET capture on `interface` with
+    /// `filter` installed before the first batch hits the ring.
+    ///
+    /// One-call equivalent of:
+    ///
+    /// ```ignore
+    /// AsyncCapture::new(
+    ///     Capture::builder()
+    ///         .interface(interface)
+    ///         .bpf_filter(filter)
+    ///         .build()?
+    /// )
+    /// ```
+    ///
+    /// For non-default block sizes, fanout, busy-poll, or other
+    /// builder knobs, fall back to the full `Capture::builder()`
+    /// path.
+    ///
+    /// # Examples
+    ///
+    /// ```no_run
+    /// # fn _ex() -> Result<(), netring::Error> {
+    /// use netring::{AsyncCapture, BpfFilter};
+    /// let filter = BpfFilter::builder().tcp().dst_port(443).build()?;
+    /// let _cap = AsyncCapture::open_with_filter("eth0", filter)?;
+    /// # Ok(()) }
+    /// ```
+    pub fn open_with_filter(
+        interface: &str,
+        filter: crate::config::BpfFilter,
+    ) -> Result<Self, Error> {
+        let rx = crate::Capture::builder()
+            .interface(interface)
+            .bpf_filter(filter)
+            .build()?;
+        Self::new(rx)
+    }
+}
+
+impl<S> AsyncCapture<S>
+where
+    S: PacketSource + AsRawFd + crate::traits::PacketSetFilter,
+{
+    /// Plan 21: replace the BPF filter on the underlying source.
+    /// Atomic at the kernel level — no race window where the old
+    /// filter has been removed and the new one not yet installed.
+    ///
+    /// Only available for AF_PACKET-backed captures (the
+    /// [`PacketSetFilter`](crate::traits::PacketSetFilter) trait
+    /// bound excludes `XdpSocket`, where filtering lives in the
+    /// XDP program instead).
+    ///
+    /// # Examples
+    ///
+    /// ```no_run
+    /// # async fn _ex() -> Result<(), netring::Error> {
+    /// use netring::{AsyncCapture, BpfFilter};
+    /// let cap = AsyncCapture::open("eth0")?;
+    /// let new_filter = BpfFilter::builder().tcp().dst_port(8443).build()?;
+    /// cap.set_filter(&new_filter)?;
+    /// # Ok(()) }
+    /// ```
+    pub fn set_filter(&self, filter: &crate::config::BpfFilter) -> Result<(), Error> {
+        self.inner.get_ref().set_filter(filter)
+    }
 }
 
 impl<S: PacketSource + AsRawFd> AsyncCapture<S> {

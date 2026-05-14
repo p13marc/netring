@@ -190,6 +190,24 @@ impl Capture {
         filter::detach_bpf_filter(self.fd.as_fd())
     }
 
+    /// Plan 21: replace the BPF filter on this capture without
+    /// disturbing the ring buffer or any in-flight user-space
+    /// stream. Atomic at the kernel level — there's no window
+    /// where the old filter has been removed and the new one not
+    /// yet installed.
+    ///
+    /// To **remove** a filter without replacing it, use
+    /// [`detach_filter`](Self::detach_filter).
+    ///
+    /// **Note**: any packets already buffered in the ring at the
+    /// moment of the swap were captured under the old filter. For
+    /// strict cutover, drain a few batches after `set_filter` or
+    /// install a `(old OR new)` filter first, drain old matches,
+    /// then narrow.
+    pub fn set_filter(&self, filter: &crate::config::BpfFilter) -> Result<(), Error> {
+        filter::attach_bpf_filter(self.fd.as_fd(), filter)
+    }
+
     // ── Advanced ─────────────────────────────────────────────────────────
 
     /// Mmap base pointer for advanced use (e.g., `madvise`).
@@ -287,6 +305,13 @@ impl PacketSource for Capture {
 
     fn cumulative_stats(&self) -> Result<CaptureStats, Error> {
         Capture::cumulative_stats(self)
+    }
+}
+
+// Plan 21: Capture supports atomic BPF filter swap.
+impl crate::traits::PacketSetFilter for Capture {
+    fn set_filter(&self, filter: &crate::config::BpfFilter) -> Result<(), Error> {
+        Capture::set_filter(self, filter)
     }
 }
 

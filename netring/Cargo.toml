@@ -142,6 +142,10 @@ required-features = ["tokio", "flow"]
 name = "async_flow_with_tap"
 required-features = ["tokio", "flow", "parse", "pcap"]
 
+[[example]]
+name = "async_filter"
+required-features = ["tokio", "flow", "parse"]
+
 [[bench]]
 name = "throughput"
 harness = false

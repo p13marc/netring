@@ -152,3 +152,28 @@ pub trait AsyncPacketSource: AsFd {
         &mut self,
     ) -> impl std::future::Future<Output = Result<PacketBatch<'_>, Error>> + Send;
 }
+
+/// Packet sources that support atomic BPF filter replacement on a
+/// running socket (AF_PACKET semantics: `setsockopt(SO_ATTACH_FILTER)`).
+///
+/// Implemented for [`crate::Capture`]. **Not** implemented for AF_XDP
+/// sockets — XDP filtering happens in the XDP program, not via
+/// `SO_ATTACH_FILTER`.
+///
+/// Use via [`crate::Capture::set_filter`] directly, or via
+/// [`crate::AsyncCapture::set_filter`] (where the trait bound gates
+/// the method to AF_PACKET-backed captures only).
+pub trait PacketSetFilter {
+    /// Replace the BPF filter on this source without disturbing the
+    /// ring buffer or the user-space stream. The kernel handles
+    /// atomic replacement of any prior filter.
+    ///
+    /// To remove the filter, see implementation-specific accessors
+    /// (e.g. [`crate::Capture::detach_filter`]).
+    ///
+    /// # Errors
+    ///
+    /// Returns [`Error::Config`] if the filter is empty or oversized;
+    /// [`Error::SockOpt`] if the `setsockopt` call fails.
+    fn set_filter(&self, filter: &crate::config::BpfFilter) -> Result<(), Error>;
+}

@@ -20,8 +20,39 @@ built on AF_PACKET with TPACKET_V3 (block-based mmap ring buffers) and AF_XDP.
 
 ## Implementation Status
 
-**Active.** netring 0.11.0 published; 0.12.0 prepared (this branch).
-~185 tests, ~31 examples, zero warnings.
+**Active.** netring 0.12.0 published; 0.13.0 prepared (this branch).
+~225 tests, ~36 examples, zero warnings.
+
+### Recent additions (0.13.0)
+
+Four consolidated plans (20-23) closing all 7 items from des-rs's
+2026-05-14 feedback round.
+
+- **Plan 20**: Sealed `StreamCapture` trait gives `FlowStream`,
+  `SessionStream`, `DatagramStream`, `DedupStream` a uniform
+  `capture()` accessor with default-methoded `capture_stats()` /
+  `capture_cumulative_stats()`. Plus `with_pcap_tap(writer)` +
+  `TapErrorPolicy { Continue, DropTap, FailStream }` builders on
+  each stream type — records each packet to `CaptureWriter` before
+  the flow tracker processes it; tap survives session/datagram/
+  with_async_reassembler conversions.
+- **Plan 21**: New `PacketSetFilter` trait (implemented for
+  `Capture`, not for `XdpSocket`). `Capture::set_filter` +
+  `AsyncCapture::set_filter` for atomic in-kernel BPF swap.
+  `AsyncCapture::open_with_filter(iface, filter)` one-call
+  constructor. Composes with plan 20 via
+  `stream.capture().set_filter(&new_filter)`.
+- **Plan 22**: `AsyncMultiCapture` with five constructors
+  (multi-interface, fanout-group workers, heterogeneous). Three
+  `Multi*Stream` types yielding `TaggedEvent { source_idx, event }`
+  via custom round-robin select (no `futures-util` dep). Per-source
+  and aggregate `capture_stats`. New `docs/scaling.md` with
+  `FanoutMode` decision matrix and 7 anti-patterns.
+- **Plan 23**: `AsyncPcapSource` reads PCAP/PCAPNG via mpsc channel
+  fed by `spawn_blocking` task. Format auto-detect; optional
+  packet-timestamp pacing; loop-at-eof. `PcapFlowStream` bridges to
+  flowscope `FlowTracker`. Live + offline pipelines unify via
+  generic `Stream<Item = FlowEvent<K>>` consumer.
 
 ### Recent additions (0.12.0)
 
@@ -145,6 +176,16 @@ just ci-full         # setcap + full test suite
   - `conversation.rs` — `Conversation<K>` aggregate
   - `dedup_stream.rs` — loopback dedup async wrapper
   - `async_reassembler.rs` — async TCP reassembly hook
+  - `stream_capture.rs` — sealed `StreamCapture` trait (plan 20)
+  - `multi_capture.rs` — `AsyncMultiCapture` + constructors (plan 22)
+  - `multi_streams.rs` — `MultiFlowStream`/`MultiSessionStream`/
+    `MultiDatagramStream` + `TaggedEvent` (plan 22)
+- `src/pcap_tap.rs` — `PcapTap` + `TapErrorPolicy` (plan 20; `pcap + tokio`)
+- `src/pcap_source.rs` — `AsyncPcapSource` + `AsyncPcapConfig` +
+  `PcapFormat` (plan 23; `pcap + tokio`)
+- `src/pcap_flow.rs` — `PcapFlowStream` bridge to flowscope
+  (plan 23; `pcap + tokio + flow`)
+- `docs/scaling.md` — fanout decision matrix + anti-patterns (plan 22)
 
 ## Architecture
 
@@ -183,12 +224,17 @@ just ci-full         # setcap + full test suite
 For the next `cargo publish` of netring:
 
 1. Ensure `flowscope` is published to crates.io at the version netring
-   needs (currently `0.1`).
-2. Swap netring's git dep on `flowscope` for a version dep:
-   `flowscope = "0.1"` (default features false; same feature
-   selectors as today).
+   needs (currently `0.3`).
+2. Verify `netring/Cargo.toml`'s `flowscope` version dep matches
+   (default features false; same feature selectors as today).
 3. Bump `netring/Cargo.toml` `version` if more changes have landed
    beyond what's in this CHANGELOG.
 4. `cargo publish -p netring --dry-run` to verify the package
    contents.
 5. `cargo publish -p netring`.
+
+**Known operator gotcha**: on at least one dev machine
+`~/.cargo/credentials.toml` is an empty root-owned directory (likely
+a misconfigured Docker volume mount). `cargo publish` fails with
+"Is a directory". Workarounds: `export CARGO_REGISTRY_TOKEN=<token>`
+or `sudo rmdir ~/.cargo/credentials.toml && cargo login`.

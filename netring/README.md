@@ -11,7 +11,7 @@ mostly used as the underlying source for the async wrappers.
 
 ```toml
 [dependencies]
-netring = { version = "0.8", features = ["tokio"] }
+netring = { version = "0.13", features = ["tokio"] }
 ```
 
 ```rust,no_run
@@ -72,7 +72,7 @@ considerations.
 
 ```toml
 [dependencies]
-netring = { version = "0.8", features = ["tokio", "flow"] }
+netring = { version = "0.13", features = ["tokio", "flow"] }
 futures = "0.3"
 ```
 
@@ -108,6 +108,136 @@ works on any source of `&[u8]` frames.
 `flowscope` also ships feature-gated L7 modules: `http` (HTTP/1.x),
 `tls` (TLS handshake observation, optional JA3), `dns` (DNS-over-UDP
 parser + correlator), and `pcap` (offline replay).
+
+## Stream observability
+
+Every async stream type — `FlowStream`, `SessionStream`,
+`DatagramStream`, `DedupStream` — implements the sealed
+[`StreamCapture`] trait. That gives uniform access to kernel ring
+stats and the underlying `AsyncCapture` even after the stream has
+consumed it:
+
+```rust,ignore
+use netring::{AsyncCapture, BpfFilter, StreamCapture};
+use netring::flow::extract::FiveTuple;
+
+let cap = AsyncCapture::open("eth0")?;
+let stream = cap.flow_stream(FiveTuple::bidirectional());
+
+// Kernel ring stats while the stream runs:
+let stats = stream.capture_stats()?;
+println!("ring drops: {}", stats.drops);
+
+// Atomic BPF filter swap on a running stream:
+let new_filter = BpfFilter::builder().tcp().dst_port(443).build()?;
+stream.capture().set_filter(&new_filter)?;
+```
+
+Pair with `with_pcap_tap(writer)` on any of the four stream types
+to record raw frames **before** the flow tracker processes them —
+decoded events and a wire-faithful capture file from one invocation:
+
+```rust,ignore
+use std::fs::File;
+use std::io::BufWriter;
+use netring::pcap::CaptureWriter;
+
+let writer = CaptureWriter::create(BufWriter::new(File::create("trace.pcap")?))?;
+let stream = cap
+    .flow_stream(FiveTuple::bidirectional())
+    .with_pcap_tap(writer);
+```
+
+`TapErrorPolicy::{Continue (default), DropTap, FailStream}`
+controls disk-full / I/O-glitch handling.
+
+## BPF filter ergonomics
+
+`AsyncCapture::open_with_filter` is the one-call sugar for the
+common case:
+
+```rust,no_run
+use netring::{AsyncCapture, BpfFilter};
+
+let filter = BpfFilter::builder().tcp().dst_port(15987).build().unwrap();
+let _cap = AsyncCapture::open_with_filter("eth0", filter).unwrap();
+```
+
+For runtime filter swaps without tearing down the kernel ring:
+
+```rust,no_run
+use netring::{AsyncCapture, BpfFilter};
+
+let cap = AsyncCapture::open("eth0").unwrap();
+let new = BpfFilter::builder().tcp().dst_port(8443).build().unwrap();
+cap.set_filter(&new).unwrap();  // atomic in-kernel replacement
+```
+
+`set_filter` is gated to AF_PACKET-backed captures via the
+`PacketSetFilter` trait; `AsyncCapture<XdpSocket>` doesn't expose
+it (XDP filtering belongs in the XDP program).
+
+## Multi-source capture
+
+`AsyncMultiCapture` fans in N captures of two shapes — multiple
+interfaces, or one interface with a fanout-group worker pool — into
+a single tagged stream:
+
+```rust,ignore
+use futures::StreamExt;
+use netring::AsyncMultiCapture;
+use netring::flow::extract::FiveTuple;
+
+// Multi-interface gateway:
+let multi = AsyncMultiCapture::open(["eth0", "eth1"])?;
+let mut stream = multi.flow_stream(FiveTuple::bidirectional());
+while let Some(tagged) = stream.next().await {
+    let evt = tagged?;
+    let iface = stream.label(evt.source_idx).unwrap_or("?");
+    println!("[{iface}] {:?}", evt.event);
+}
+
+// Worker pool scaling (FanoutMode::Cpu by default):
+let workers = AsyncMultiCapture::open_workers("eth0", 4, 0xDE57)?;
+```
+
+Per-source breakdown and aggregate stats:
+
+```rust,ignore
+let agg = stream.capture_stats();
+for (label, stats) in stream.per_source_capture_stats() { /* ... */ }
+```
+
+See [`docs/scaling.md`](docs/scaling.md) for the canonical multi-core
+recipe, the `FanoutMode` decision matrix, and 7 anti-patterns
+(including the `FANOUT_HASH`-on-skewed-traffic and `PACKET_FANOUT`
+-on-`lo` gotchas).
+
+## Offline replay
+
+`AsyncPcapSource` reads PCAP and PCAPNG files asynchronously (format
+auto-detected at open) and yields `OwnedPacket`s through a tokio
+`Stream`. The companion `PcapFlowStream` bridges to the same
+flowscope `FlowTracker` used by live capture, so the same downstream
+code runs both live and offline:
+
+```rust,ignore
+use futures::StreamExt;
+use netring::AsyncPcapSource;
+use netring::flow::extract::FiveTuple;
+
+let source = AsyncPcapSource::open("trace.pcap").await?;
+let mut events = source.flow_events(FiveTuple::bidirectional());
+while let Some(evt) = events.next().await {
+    let _ = evt?;
+}
+```
+
+`AsyncPcapConfig` controls pacing (`replay_speed = 1.0` for wire
+rate, `2.0` for double speed, `0.0` for as-fast-as-possible) and
+`loop_at_eof` for stress testing.
+
+[`StreamCapture`]: https://docs.rs/netring/latest/netring/trait.StreamCapture.html
 
 ## BPF filtering
 
@@ -297,10 +427,19 @@ just async-pipeline eth0 4   # async capture → tokio::mpsc → 4 worker tasks
 just async-bridge eth0 eth1  # async transparent bridge (Bridge::run_async)
 just ebpf                    # eBPF/aya integration demo (AsFd verification)
 cargo run --example xdp_send --features af-xdp -- lo  # AF_XDP TX-only (uses XdpMode::Tx)
+
+# 0.13.0 — stream observability, BPF ergonomics, multi-source, offline replay:
+cargo run --example async_flow_with_tap   --features "tokio,flow,parse,pcap" -- eth0 out.pcap
+cargo run --example async_filter          --features "tokio,flow,parse" -- eth0 80
+cargo run --example async_fanout_workers  --features "tokio,flow,parse" -- eth0 4
+cargo run --example async_multi_interface --features "tokio,flow,parse" -- lo eth0
+cargo run --example async_pcap_replay     --features "tokio,flow,parse,pcap" -- trace.pcap 1.0
 ```
 
 ## Documentation
 
+- [Scaling capture across cores](docs/scaling.md) — `FanoutMode`
+  decision matrix, multi-worker recipe, anti-patterns (added 0.13.0)
 - [Architecture](docs/ARCHITECTURE.md) — system design, lifetime model, ring layout
 - [API Overview](docs/API_OVERVIEW.md) — all types, methods, and configuration
 - [Tuning Guide](docs/TUNING_GUIDE.md) — performance profiles, system tuning, monitoring

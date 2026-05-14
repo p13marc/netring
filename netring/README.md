@@ -387,7 +387,7 @@ Reading stats resets the kernel counters — call periodically for rate calculat
 ## System Requirements
 
 - **Linux** kernel 3.2+ (for TPACKET_V3), 5.4+ (for AF_XDP)
-- **Rust** 1.85+ (edition 2024)
+- **Rust** 1.88+ (edition 2024)
 
 ### Capabilities
 

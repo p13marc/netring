@@ -5,7 +5,7 @@
 netring is a pure Rust library for zero-copy packet capture and injection on Linux,
 built on AF_PACKET with TPACKET_V3 (block-based mmap ring buffers) and AF_XDP.
 
-- Edition 2024, MSRV 1.85, Linux only
+- Edition 2024, MSRV 1.88 (let-chains in `if`), Linux only
 - Two API levels: high-level `Capture`/`Injector` and low-level `AfPacketRx`/`AfPacketTx`
 - AF_XDP backend via `XdpSocket` (feature: `af-xdp`) for kernel-bypass packet I/O
 - Optional self-contained AF_XDP via `xdp-loader` feature (loads + attaches a redirect-all

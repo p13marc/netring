@@ -47,10 +47,10 @@ plans/` or check the corresponding release commits.
 
 | Plan | Goal | Status |
 |------|------|--------|
-| [`20-stream-observability.md`](./20-stream-observability.md) | Sealed `StreamCapture` trait + `capture()`/`capture_stats()`/`capture_cumulative_stats()` on all four async stream types. `with_pcap_tap(writer)` + `TapErrorPolicy { Continue, DropTap, FailStream }`. Closes des-rs F#2 + F#3. | ✅ done (0.13.0) |
-| [`21-bpf-filter-ergonomics.md`](./21-bpf-filter-ergonomics.md) | `PacketSetFilter` trait. `Capture::set_filter` + `AsyncCapture::set_filter` for atomic in-kernel BPF swap. `AsyncCapture::open_with_filter(iface, filter)`. Composes via `stream.capture().set_filter(...)`. Closes des-rs F#1 + F#7. | ✅ done (0.13.0) |
-| [`22-multi-source-capture.md`](./22-multi-source-capture.md) | `AsyncMultiCapture` with `open`/`open_workers`/`from_captures`. Three `Multi*Stream` types yielding `TaggedEvent { source_idx, event }`. Per-source + aggregate stats. New `docs/scaling.md` with FanoutMode decision matrix and 7 anti-patterns. Closes des-rs F#5 + F#6. | ✅ done (0.13.0) |
-| [`23-async-pcap-source.md`](./23-async-pcap-source.md) | `AsyncPcapSource` (mpsc + spawn_blocking, PCAP/PCAPNG auto-detect, replay pacing) + `PcapFlowStream` bridge. Live + offline pipelines unify via `Stream<Item = FlowEvent<K>>`. Closes des-rs F#4. | ✅ done (0.13.0) |
+| [`20-stream-observability.md`](./20-stream-observability.md) | Sealed `StreamCapture` trait + `capture()`/`capture_stats()`/`capture_cumulative_stats()` on all four async stream types. `with_pcap_tap(writer)` + `TapErrorPolicy { Continue, DropTap, FailStream }`. Closes des-rs F#2 + F#3. | ✅ landed (0.13.0) |
+| [`21-bpf-filter-ergonomics.md`](./21-bpf-filter-ergonomics.md) | `PacketSetFilter` trait. `Capture::set_filter` + `AsyncCapture::set_filter` for atomic in-kernel BPF swap. `AsyncCapture::open_with_filter(iface, filter)`. Composes via `stream.capture().set_filter(...)`. Closes des-rs F#1 + F#7. | ✅ landed (0.13.0) |
+| [`22-multi-source-capture.md`](./22-multi-source-capture.md) | `AsyncMultiCapture` with `open`/`open_workers`/`from_captures`. Three `Multi*Stream` types yielding `TaggedEvent { source_idx, event }`. Per-source + aggregate stats + `alive_sources()`. New `docs/scaling.md` with FanoutMode decision matrix and 7 anti-patterns. Custom round-robin `SelectState` instead of `futures::stream::select_all` (dep-graph minimalism). Closes des-rs F#5 + F#6. | ✅ landed (0.13.0) |
+| [`23-async-pcap-source.md`](./23-async-pcap-source.md) | `AsyncPcapSource` (mpsc + spawn_blocking, PCAP/PCAPNG auto-detect, replay pacing) + `PcapFlowStream` bridge. Live + offline pipelines unify via `Stream<Item = FlowEvent<K>>`. Closes des-rs F#4. | ✅ landed (0.13.0) |
 
 ---
 

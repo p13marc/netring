@@ -23,7 +23,7 @@ This plan supersedes the earlier draft pair (`20-stream-capture-stats`
 
 ## Status
 
-Done — landing in 0.13.0.
+Done — landed in 0.13.0.
 
 ## Prerequisites
 

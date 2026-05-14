@@ -27,7 +27,21 @@ This plan supersedes the earlier draft pair
 
 ## Status
 
-Done — landing in 0.13.0.
+Done — landed in 0.13.0.
+
+**Implementation notes**:
+
+- The plan called for `futures::stream::select_all` to fan in N
+  per-source streams. The shipped implementation rolls a custom
+  `SelectState<S>` in `multi_streams.rs` instead — a round-robin
+  poll over `Vec<Option<S>>` with `None`-out on exhaustion. The
+  reason is dep-graph minimalism: `futures-util` would have become
+  a non-optional runtime dep for the multi-source feature, and the
+  ~50 LoC custom select preserves indices stably for the
+  `per_source_capture_stats` accessor (which `select_all` would
+  have hidden behind its opaque type).
+- Added an `alive_sources()` accessor on each Multi*Stream during
+  the post-release audit (decrements as sources hit EOF).
 
 ## Prerequisites
 

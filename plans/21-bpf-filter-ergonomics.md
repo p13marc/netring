@@ -24,7 +24,7 @@ This plan supersedes the earlier draft pair
 
 ## Status
 
-Done — landing in 0.13.0.
+Done — landed in 0.13.0.
 
 ## Prerequisites
 

@@ -25,7 +25,7 @@ This plan supersedes the earlier draft `26-async-pcap-source`.
 
 ## Status
 
-Done — landing in 0.13.0.
+Done — landed in 0.13.0.
 
 **Implementation note**: shipped via the simpler design — mpsc
 channel + `spawn_blocking` reader — rather than the planned

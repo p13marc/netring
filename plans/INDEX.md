@@ -29,7 +29,8 @@ detail; design wins for "why is this even shaped this way."
 
 | Range | Theme |
 |-------|-------|
-| 10–19 | Capture-side features (dedup, busy-poll, XDP loader, flowscope-version bumps, netns) |
+| 10–19 | Capture-side features (dedup, busy-poll, XDP loader, flowscope-version bumps, BPF builder) |
+| 20–29 | Async-stream maturity (`StreamCapture` trait, pcap tap, BPF filter ergonomics, multi-source, offline replay) |
 
 ---
 
@@ -47,6 +48,10 @@ detail; design wins for "why is this even shaped this way."
 | [`17-dedup-flow-chain.md`](./17-dedup-flow-chain.md) | `FlowStream::with_dedup(Dedup)` (+ same on `SessionStream`, `DatagramStream`) so loopback dedup composes with the flow / session pipeline | ✅ done (0.10.0; closes G2 from des-rs analysis) |
 | [`18-bpf-builder.md`](./18-bpf-builder.md) | `BpfFilter::builder()` — typed cBPF compiler covering ~90 % of common filters (TCP/UDP/host/port/net/VLAN, AND/OR/NOT). Closes the [156a nlink-lab proposal](./156a-netring-bpf-builder-proposal.md): downstream consumers can drop their `tcpdump -dd` runtime shell-out. | ✅ done (0.11.0) |
 | [`19-flowscope-0.3-bump.md`](./19-flowscope-0.3-bump.md) | Bump flowscope 0.2 → 0.3; handle `EndReason::ParseError` + `SessionEvent::Anomaly` (`#[non_exhaustive]` growth); expose `with_idle_timeout_fn`, `with_monotonic_timestamps`, `snapshot_flow_stats()` on `FlowStream` / `SessionStream` / `DatagramStream`. Replaces `tracing::warn!` anomaly drop with typed `SessionEvent::Anomaly` forwarding. | ✅ done (0.12.0) |
+| [`20-stream-observability.md`](./20-stream-observability.md) | Sealed `StreamCapture` trait giving `FlowStream` / `SessionStream` / `DatagramStream` / `DedupStream` a uniform `capture()` accessor with default-methoded `capture_stats()` / `capture_cumulative_stats()`. Plus `with_pcap_tap(writer)` + `TapErrorPolicy { Continue, DropTap, FailStream }` on each stream type. Closes des-rs F#2 + F#3. | Planned — 0.13.0 |
+| [`21-bpf-filter-ergonomics.md`](./21-bpf-filter-ergonomics.md) | `AsyncCapture::open_with_filter(iface, BpfFilter)` constructor + `Capture::set_filter` / `AsyncCapture::set_filter` for atomic in-kernel filter swap. New `PacketSetFilter` trait gates `set_filter` to AF_PACKET-backed captures (no XDP no-op). Composes with plan 20 via `stream.capture().set_filter(&new_filter)`. Closes des-rs F#1 + F#7. | Planned — 0.13.0 |
+| [`22-multi-source-capture.md`](./22-multi-source-capture.md) | One `AsyncMultiCapture` type, two constructors: `open(&[ifaces])` (multi-interface) and `open_workers(iface, n, group_id)` (fanout-group scaling). `MultiFlowStream` / `MultiSessionStream` / `MultiDatagramStream` yield `TaggedEvent { source_idx, event }`. Plus `docs/scaling.md` with `FANOUT_HASH`-on-skewed-traffic anti-pattern callout. Closes des-rs F#5 + F#6. | Planned — 0.13.0 |
+| [`23-async-pcap-source.md`](./23-async-pcap-source.md) | `AsyncPcapSource` implementing `PacketSource + AsFd` via eventfd-backed readiness. PCAPNG + legacy PCAP auto-detected at open. Optional packet-timestamp pacing. Same `flow_stream → session_stream` chain runs live or offline. Touches `PacketBatch` with a new owned-backing variant (internal). Closes des-rs F#4. | Planned — 0.13.0 |
 
 Both 11 and 12 close the two gaps identified in
 [flowscope's DPI architecture research](https://github.com/p13marc/flowscope/blob/master/plans/DPI_ARCHITECTURE.md):

@@ -45,6 +45,10 @@ where
     dedup: Dedup,
     /// Buffer of kept packets pending yield.
     pending: VecDeque<OwnedPacket>,
+    /// Plan 20: optional pcap tap. Records packets that pass dedup
+    /// before they're yielded to the consumer.
+    #[cfg(feature = "pcap")]
+    tap: Option<crate::pcap_tap::PcapTap>,
 }
 
 impl<S> DedupStream<S>
@@ -56,6 +60,8 @@ where
             cap,
             dedup,
             pending: VecDeque::new(),
+            #[cfg(feature = "pcap")]
+            tap: None,
         }
     }
 
@@ -68,6 +74,32 @@ where
     /// Borrow the embedded [`Dedup`] mutably.
     pub fn dedup_mut(&mut self) -> &mut Dedup {
         &mut self.dedup
+    }
+
+    /// Plan 20: tap every kept packet into `writer`. Packets that
+    /// the dedup drops are not recorded. Default error policy:
+    /// [`TapErrorPolicy::Continue`](crate::pcap_tap::TapErrorPolicy::Continue).
+    #[cfg(feature = "pcap")]
+    pub fn with_pcap_tap<W>(self, writer: crate::pcap::CaptureWriter<W>) -> Self
+    where
+        W: std::io::Write + Send + 'static,
+    {
+        self.with_pcap_tap_policy(writer, crate::pcap_tap::TapErrorPolicy::default())
+    }
+
+    /// Plan 20: variant of [`with_pcap_tap`](Self::with_pcap_tap)
+    /// with an explicit [`TapErrorPolicy`](crate::pcap_tap::TapErrorPolicy).
+    #[cfg(feature = "pcap")]
+    pub fn with_pcap_tap_policy<W>(
+        mut self,
+        writer: crate::pcap::CaptureWriter<W>,
+        policy: crate::pcap_tap::TapErrorPolicy,
+    ) -> Self
+    where
+        W: std::io::Write + Send + 'static,
+    {
+        self.tap = Some(crate::pcap_tap::PcapTap::new(writer, policy));
+        self
     }
 }
 
@@ -94,12 +126,26 @@ where
             let got_batch = {
                 let inner = guard.get_inner_mut();
                 if let Some(batch) = inner.next_batch() {
+                    #[cfg(feature = "pcap")]
+                    let mut tap_error: Option<Error> = None;
                     for pkt in &batch {
                         if this.dedup.keep(&pkt) {
+                            // Plan 20: pcap tap — record before yielding.
+                            #[cfg(feature = "pcap")]
+                            if let Some(tap) = this.tap.as_mut()
+                                && let Some(err) = tap.write_or_handle(&pkt)
+                            {
+                                tap_error = Some(err);
+                                break;
+                            }
                             this.pending.push_back(pkt.to_owned());
                         }
                     }
                     drop(batch);
+                    #[cfg(feature = "pcap")]
+                    if let Some(err) = tap_error {
+                        return Poll::Ready(Some(Err(err)));
+                    }
                     true
                 } else {
                     false
@@ -148,5 +194,22 @@ where
     /// ```
     pub fn dedup_stream(self, dedup: Dedup) -> DedupStream<S> {
         DedupStream::new(self, dedup)
+    }
+}
+
+// ── StreamCapture trait impl ───────────────────────────────────────
+
+use crate::async_adapters::stream_capture::{Sealed, StreamCapture};
+
+impl<S> Sealed for DedupStream<S> where S: PacketSource + std::os::unix::io::AsRawFd {}
+
+impl<S> StreamCapture for DedupStream<S>
+where
+    S: PacketSource + std::os::unix::io::AsRawFd,
+{
+    type Source = S;
+
+    fn capture(&self) -> &AsyncCapture<S> {
+        &self.cap
     }
 }

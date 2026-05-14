@@ -82,6 +82,12 @@ where
     /// to `max(view.timestamp, *self)` before flow extraction, so
     /// downstream consumers see a strictly non-decreasing timeline.
     monotonic_ts: Option<Timestamp>,
+    /// Plan 20: optional pcap tap. Captures packets to disk before
+    /// the flow tracker processes them. Survives `with_state`,
+    /// `with_async_reassembler`, `session_stream`, `datagram_stream`
+    /// conversions (same plumbing as `dedup`).
+    #[cfg(feature = "pcap")]
+    tap: Option<crate::pcap_tap::PcapTap>,
 }
 
 impl<S, E> FlowStream<S, E, (), NoReassembler>
@@ -100,6 +106,8 @@ where
             reassembler: NoReassembler,
             dedup: None,
             monotonic_ts: None,
+            #[cfg(feature = "pcap")]
+            tap: None,
         }
     }
 
@@ -119,6 +127,8 @@ where
             reassembler: NoReassembler,
             dedup: self.dedup,
             monotonic_ts: self.monotonic_ts,
+            #[cfg(feature = "pcap")]
+            tap: self.tap,
         }
     }
 }
@@ -154,6 +164,8 @@ where
             },
             dedup: self.dedup,
             monotonic_ts: self.monotonic_ts,
+            #[cfg(feature = "pcap")]
+            tap: self.tap,
         }
     }
 }
@@ -189,6 +201,8 @@ where
             factory,
             self.dedup,
             self.monotonic_ts,
+            #[cfg(feature = "pcap")]
+            self.tap,
         )
     }
 
@@ -214,6 +228,8 @@ where
             factory,
             self.dedup,
             self.monotonic_ts,
+            #[cfg(feature = "pcap")]
+            self.tap,
         )
     }
 }
@@ -335,6 +351,47 @@ where
     ) -> impl Iterator<Item = (&E::Key, &flowscope::FlowStats)> + '_ {
         self.tracker.all_flow_stats()
     }
+
+    /// Plan 20: tap every captured packet into `writer` before
+    /// passing it to the flow tracker. Default error policy:
+    /// [`TapErrorPolicy::Continue`](crate::pcap_tap::TapErrorPolicy::Continue).
+    ///
+    /// The tap is carried through `with_state`, `with_async_reassembler`,
+    /// `session_stream`, and `datagram_stream` conversions.
+    ///
+    /// For high-rate captures, wrap the writer in
+    /// [`std::io::BufWriter`] before passing it in:
+    ///
+    /// ```no_run
+    /// # use std::fs::File;
+    /// # use std::io::BufWriter;
+    /// # use netring::pcap::CaptureWriter;
+    /// # fn _ex() -> Result<(), Box<dyn std::error::Error>> {
+    /// let writer = CaptureWriter::create(BufWriter::new(File::create("out.pcap")?))?;
+    /// # let _ = writer; Ok(()) }
+    /// ```
+    #[cfg(feature = "pcap")]
+    pub fn with_pcap_tap<W>(self, writer: crate::pcap::CaptureWriter<W>) -> Self
+    where
+        W: std::io::Write + Send + 'static,
+    {
+        self.with_pcap_tap_policy(writer, crate::pcap_tap::TapErrorPolicy::default())
+    }
+
+    /// Plan 20: variant of [`with_pcap_tap`](Self::with_pcap_tap)
+    /// with an explicit [`TapErrorPolicy`](crate::pcap_tap::TapErrorPolicy).
+    #[cfg(feature = "pcap")]
+    pub fn with_pcap_tap_policy<W>(
+        mut self,
+        writer: crate::pcap::CaptureWriter<W>,
+        policy: crate::pcap_tap::TapErrorPolicy,
+    ) -> Self
+    where
+        W: std::io::Write + Send + 'static,
+    {
+        self.tap = Some(crate::pcap_tap::PcapTap::new(writer, policy));
+        self
+    }
 }
 
 // ── Stream impl: NoReassembler (plan 02 path) ──────────────────────
@@ -375,12 +432,26 @@ where
             let got_batch = {
                 let inner = guard.get_inner_mut();
                 if let Some(batch) = inner.next_batch() {
+                    #[cfg(feature = "pcap")]
+                    let mut tap_error: Option<Error> = None;
                     for pkt in &batch {
                         // Plan 17: optional pre-tracking dedup.
                         if let Some(d) = this.dedup.as_mut()
                             && !d.keep(&pkt)
                         {
                             continue;
+                        }
+
+                        // Plan 20: pcap tap — record what the tracker
+                        // is about to see. Skip duplicates (above)
+                        // so the recorded file matches the tracked
+                        // event stream.
+                        #[cfg(feature = "pcap")]
+                        if let Some(tap) = this.tap.as_mut()
+                            && let Some(err) = tap.write_or_handle(&pkt)
+                        {
+                            tap_error = Some(err);
+                            break;
                         }
 
                         let view = clamp_view(pkt.view(), &mut this.monotonic_ts);
@@ -390,6 +461,10 @@ where
                         }
                     }
                     drop(batch);
+                    #[cfg(feature = "pcap")]
+                    if let Some(err) = tap_error {
+                        return Poll::Ready(Some(Err(err)));
+                    }
                     true
                 } else {
                     false
@@ -519,12 +594,23 @@ where
             let got_batch = {
                 let inner = guard.get_inner_mut();
                 if let Some(batch) = inner.next_batch() {
+                    #[cfg(feature = "pcap")]
+                    let mut tap_error: Option<Error> = None;
                     for pkt in &batch {
                         // Plan 17: optional pre-tracking dedup.
                         if let Some(d) = this.dedup.as_mut()
                             && !d.keep(&pkt)
                         {
                             continue;
+                        }
+
+                        // Plan 20: pcap tap.
+                        #[cfg(feature = "pcap")]
+                        if let Some(tap) = this.tap.as_mut()
+                            && let Some(err) = tap.write_or_handle(&pkt)
+                        {
+                            tap_error = Some(err);
+                            break;
                         }
 
                         let view = clamp_view(pkt.view(), &mut this.monotonic_ts);
@@ -544,6 +630,10 @@ where
                         }
                     }
                     drop(batch);
+                    #[cfg(feature = "pcap")]
+                    if let Some(err) = tap_error {
+                        return Poll::Ready(Some(Err(err)));
+                    }
                     true
                 } else {
                     false
@@ -581,6 +671,31 @@ where
         E: FlowExtractor,
     {
         FlowStream::new(self, extractor)
+    }
+}
+
+// ── StreamCapture trait impl ───────────────────────────────────────
+
+use crate::async_adapters::stream_capture::{Sealed, StreamCapture};
+
+impl<S, E, U, R> Sealed for FlowStream<S, E, U, R>
+where
+    S: PacketSource + std::os::unix::io::AsRawFd,
+    E: FlowExtractor,
+    U: Send + 'static,
+{
+}
+
+impl<S, E, U, R> StreamCapture for FlowStream<S, E, U, R>
+where
+    S: PacketSource + std::os::unix::io::AsRawFd,
+    E: FlowExtractor,
+    U: Send + 'static,
+{
+    type Source = S;
+
+    fn capture(&self) -> &AsyncCapture<S> {
+        &self.cap
     }
 }
 

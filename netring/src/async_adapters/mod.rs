@@ -24,5 +24,8 @@ pub mod flow_stream;
 #[cfg(all(feature = "tokio", feature = "flow"))]
 pub mod session_stream;
 
+#[cfg(feature = "tokio")]
+pub mod stream_capture;
+
 #[cfg(feature = "channel")]
 pub mod channel;

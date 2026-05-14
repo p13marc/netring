@@ -138,6 +138,10 @@ required-features = ["tokio", "flow"]
 name = "async_flow_idle_per_key"
 required-features = ["tokio", "flow"]
 
+[[example]]
+name = "async_flow_with_tap"
+required-features = ["tokio", "flow", "parse", "pcap"]
+
 [[bench]]
 name = "throughput"
 harness = false

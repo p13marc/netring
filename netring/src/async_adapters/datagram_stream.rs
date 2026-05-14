@@ -69,6 +69,9 @@ where
     dedup: Option<Dedup>,
     /// Plan 19: monotonic-timestamp clamp state (`None` = off).
     monotonic_ts: Option<Timestamp>,
+    /// Plan 20: optional pcap tap.
+    #[cfg(feature = "pcap")]
+    tap: Option<crate::pcap_tap::PcapTap>,
 }
 
 impl<S, E, F> DatagramStream<S, E, F>
@@ -87,6 +90,7 @@ where
         factory: F,
         dedup: Option<Dedup>,
         monotonic_ts: Option<Timestamp>,
+        #[cfg(feature = "pcap")] tap: Option<crate::pcap_tap::PcapTap>,
     ) -> Self {
         let sweep = tokio::time::interval(tracker.config().sweep_interval);
         Self {
@@ -98,6 +102,8 @@ where
             sweep,
             dedup,
             monotonic_ts,
+            #[cfg(feature = "pcap")]
+            tap,
         }
     }
 
@@ -170,6 +176,32 @@ where
     ) -> impl Iterator<Item = (&E::Key, &flowscope::FlowStats)> + '_ {
         self.tracker.all_flow_stats()
     }
+
+    /// Plan 20: tap every captured packet into `writer` before
+    /// datagram parsing. Default error policy:
+    /// [`TapErrorPolicy::Continue`](crate::pcap_tap::TapErrorPolicy::Continue).
+    #[cfg(feature = "pcap")]
+    pub fn with_pcap_tap<W>(self, writer: crate::pcap::CaptureWriter<W>) -> Self
+    where
+        W: std::io::Write + Send + 'static,
+    {
+        self.with_pcap_tap_policy(writer, crate::pcap_tap::TapErrorPolicy::default())
+    }
+
+    /// Plan 20: variant of [`with_pcap_tap`](Self::with_pcap_tap)
+    /// with an explicit [`TapErrorPolicy`](crate::pcap_tap::TapErrorPolicy).
+    #[cfg(feature = "pcap")]
+    pub fn with_pcap_tap_policy<W>(
+        mut self,
+        writer: crate::pcap::CaptureWriter<W>,
+        policy: crate::pcap_tap::TapErrorPolicy,
+    ) -> Self
+    where
+        W: std::io::Write + Send + 'static,
+    {
+        self.tap = Some(crate::pcap_tap::PcapTap::new(writer, policy));
+        self
+    }
 }
 
 impl<S, E, F> Stream for DatagramStream<S, E, F>
@@ -213,12 +245,23 @@ where
             let got_batch = {
                 let inner = guard.get_inner_mut();
                 if let Some(batch) = inner.next_batch() {
+                    #[cfg(feature = "pcap")]
+                    let mut tap_error: Option<Error> = None;
                     for pkt in &batch {
                         // Plan 17: optional pre-tracking dedup.
                         if let Some(d) = this.dedup.as_mut()
                             && !d.keep(&pkt)
                         {
                             continue;
+                        }
+
+                        // Plan 20: pcap tap.
+                        #[cfg(feature = "pcap")]
+                        if let Some(tap) = this.tap.as_mut()
+                            && let Some(err) = tap.write_or_handle(&pkt)
+                        {
+                            tap_error = Some(err);
+                            break;
                         }
 
                         let view = crate::async_adapters::flow_stream::clamp_view(
@@ -264,6 +307,10 @@ where
                         }
                     }
                     drop(batch);
+                    #[cfg(feature = "pcap")]
+                    if let Some(err) = tap_error {
+                        return Poll::Ready(Some(Err(err)));
+                    }
                     true
                 } else {
                     false
@@ -367,4 +414,31 @@ fn peek_udp_payload(frame: &[u8]) -> Option<&[u8]> {
         return None;
     }
     Some(&frame[l4_offset + 8..l4_offset + udp_len])
+}
+
+// ── StreamCapture trait impl ───────────────────────────────────────
+
+use crate::async_adapters::stream_capture::{Sealed, StreamCapture};
+
+impl<S, E, F> Sealed for DatagramStream<S, E, F>
+where
+    S: PacketSource + std::os::unix::io::AsRawFd,
+    E: FlowExtractor,
+    E::Key: Eq + std::hash::Hash + Clone + Send + 'static,
+    F: DatagramParserFactory<E::Key>,
+{
+}
+
+impl<S, E, F> StreamCapture for DatagramStream<S, E, F>
+where
+    S: PacketSource + std::os::unix::io::AsRawFd,
+    E: FlowExtractor,
+    E::Key: Eq + std::hash::Hash + Clone + Send + 'static,
+    F: DatagramParserFactory<E::Key>,
+{
+    type Source = S;
+
+    fn capture(&self) -> &AsyncCapture<S> {
+        &self.cap
+    }
 }

@@ -15,6 +15,8 @@ pub mod metrics;
 pub mod packet;
 #[cfg(feature = "pcap")]
 pub mod pcap;
+#[cfg(all(feature = "pcap", feature = "tokio"))]
+pub mod pcap_tap;
 pub mod stats;
 pub mod traits;
 
@@ -118,3 +120,7 @@ pub use async_adapters::conversation::{Conversation, ConversationChunk, Conversa
 pub use async_adapters::flow_broadcast::{BroadcastRecvError, FlowBroadcast, FlowSubscriber};
 #[cfg(all(feature = "tokio", feature = "flow"))]
 pub use async_adapters::flow_stream::{AsyncReassemblerSlot, FlowStream, NoReassembler};
+#[cfg(feature = "tokio")]
+pub use async_adapters::stream_capture::StreamCapture;
+#[cfg(all(feature = "pcap", feature = "tokio"))]
+pub use pcap_tap::{PcapTap, TapErrorPolicy};

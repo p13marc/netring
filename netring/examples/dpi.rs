@@ -74,7 +74,7 @@ fn main() -> Result<(), netring::Error> {
         }
 
         // Print summary every 5 seconds
-        if start.elapsed().as_secs() > 0 && stats.total % 100 == 0 {
+        if start.elapsed().as_secs() > 0 && stats.total.is_multiple_of(100) {
             eprintln!("\n--- {stats} ---\n");
         }
     }

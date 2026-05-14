@@ -723,7 +723,7 @@ fn build_inner(b: &CaptureBuilder, block_count: usize) -> Result<Capture, Error>
     }
 
     let page_size = 4096usize;
-    if b.block_size % page_size != 0 {
+    if !b.block_size.is_multiple_of(page_size) {
         return Err(Error::Config(format!(
             "block_size {} is not a multiple of PAGE_SIZE ({})",
             b.block_size, page_size

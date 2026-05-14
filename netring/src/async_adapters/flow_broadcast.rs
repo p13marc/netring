@@ -213,10 +213,9 @@ mod tests {
                 std::future::poll_fn(|cx| Pin::new(&mut sub_a).poll_next(cx)).await
             })
             .await
+                && item.is_some()
             {
-                if item.is_some() {
-                    count_a += 1;
-                }
+                count_a += 1;
             }
         }
         for _ in 0..5 {
@@ -225,10 +224,9 @@ mod tests {
                 std::future::poll_fn(|cx| Pin::new(&mut sub_b).poll_next(cx)).await
             })
             .await
+                && item.is_some()
             {
-                if item.is_some() {
-                    count_b += 1;
-                }
+                count_b += 1;
             }
         }
         // Both subscribers should have received the events. (They

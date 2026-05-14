@@ -33,7 +33,7 @@ fn main() -> Result<(), netring::Error> {
             BridgeDirection::AtoB => count_a_to_b += 1,
             BridgeDirection::BtoA => count_b_to_a += 1,
         }
-        if (count_a_to_b + count_b_to_a) % 1000 == 0 {
+        if (count_a_to_b + count_b_to_a).is_multiple_of(1000) {
             eprintln!("A→B: {count_a_to_b}  B→A: {count_b_to_a}");
         }
         BridgeAction::Forward

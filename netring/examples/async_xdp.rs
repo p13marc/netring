@@ -45,7 +45,7 @@ async fn main() -> Result<(), netring::Error> {
         // send() awaits POLLOUT internally if UMEM/ring is exhausted.
         xdp.send(&frame).await?;
 
-        if i % 32 == 0 {
+        if i.is_multiple_of(32) {
             xdp.flush().await?;
         }
     }

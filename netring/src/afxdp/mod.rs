@@ -496,28 +496,28 @@ impl XdpSocketBuilder {
             XdpMode::Custom { prefill } => (prefill as usize).min(cap_avail),
         } as u32;
 
-        if prefill > 0 {
-            if let Some(tok) = fill.producer_reserve(prefill) {
-                let mut written = 0u32;
-                for i in 0..prefill {
-                    match umem.alloc_frame() {
-                        Some(addr) => {
-                            fill.write_at(tok, i, addr);
-                            written += 1;
-                        }
-                        None => break,
+        if prefill > 0
+            && let Some(tok) = fill.producer_reserve(prefill)
+        {
+            let mut written = 0u32;
+            for i in 0..prefill {
+                match umem.alloc_frame() {
+                    Some(addr) => {
+                        fill.write_at(tok, i, addr);
+                        written += 1;
                     }
+                    None => break,
                 }
-                // Even if we wrote fewer than reserved, the producer index
-                // was advanced by `n` in reserve — submit the original token.
-                // Unwritten descriptors carry stale data, which is fine as
-                // long as the kernel reads only `written` of them. In our
-                // case alloc_frame can't fail mid-loop because we capped
-                // prefill to umem.available() up front.
-                debug_assert_eq!(written, tok.n);
-                if written > 0 {
-                    fill.producer_submit(tok);
-                }
+            }
+            // Even if we wrote fewer than reserved, the producer index
+            // was advanced by `n` in reserve — submit the original token.
+            // Unwritten descriptors carry stale data, which is fine as
+            // long as the kernel reads only `written` of them. In our
+            // case alloc_frame can't fail mid-loop because we capped
+            // prefill to umem.available() up front.
+            debug_assert_eq!(written, tok.n);
+            if written > 0 {
+                fill.producer_submit(tok);
             }
         }
 

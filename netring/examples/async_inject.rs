@@ -50,7 +50,7 @@ async fn main() -> Result<(), netring::Error> {
 
         // Flush every 32 frames so the kernel actually drains the ring;
         // otherwise it would fill up and stall on backpressure.
-        if i % 32 == 0 {
+        if i.is_multiple_of(32) {
             atx.flush().await?;
         }
     }

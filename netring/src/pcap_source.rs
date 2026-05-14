@@ -351,7 +351,6 @@ fn pcap_packet_to_owned(data: &[u8], orig_len: u32, timestamp: Timestamp) -> Own
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::io::Cursor;
     use std::io::Write;
     use tempfile::NamedTempFile;
 
@@ -448,9 +447,4 @@ mod tests {
         assert_eq!(fmt, PcapFormat::Pcapng);
     }
 
-    /// Unused helper kept for future PCAPNG round-trip tests.
-    #[allow(dead_code)]
-    fn _cursor_helper(buf: &[u8]) -> Cursor<&[u8]> {
-        Cursor::new(buf)
-    }
 }

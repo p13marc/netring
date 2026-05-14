@@ -158,7 +158,3 @@ async fn unified_pipeline_via_generic_function() {
     let started = count_started(events).await;
     assert_eq!(started, 1);
 }
-
-/// Suppress unused-import lint on CaptureWriter when only used inside helpers.
-#[allow(dead_code)]
-fn _unused(_: &CaptureWriter<std::io::Cursor<Vec<u8>>>) {}

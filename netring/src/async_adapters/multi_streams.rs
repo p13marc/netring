@@ -6,7 +6,6 @@
 //! and siblings. Internal round-robin polling avoids the
 //! `futures::stream::select_all` dependency.
 
-use std::collections::VecDeque;
 use std::pin::Pin;
 use std::task::{Context, Poll};
 
@@ -57,7 +56,6 @@ impl<S> SelectState<S> {
         }
     }
 
-    #[allow(dead_code)]
     fn alive_count(&self) -> usize {
         self.streams.iter().filter(|s| s.is_some()).count()
     }
@@ -142,6 +140,12 @@ where
         self.labels
             .get(source_idx as usize)
             .map(|s| s.as_str())
+    }
+
+    /// Number of sources still being polled (haven't returned `None`
+    /// from their inner stream). Decrements as sources exhaust.
+    pub fn alive_sources(&self) -> usize {
+        self.select.alive_count()
     }
 
     /// Per-source kernel ring stats. One entry per source, in order;
@@ -248,6 +252,12 @@ where
             .map(|s| s.as_str())
     }
 
+    /// Number of sources still being polled (haven't returned `None`
+    /// from their inner stream). Decrements as sources exhaust.
+    pub fn alive_sources(&self) -> usize {
+        self.select.alive_count()
+    }
+
     /// Per-source kernel ring stats. See
     /// [`MultiFlowStream::per_source_capture_stats`].
     pub fn per_source_capture_stats(&self) -> Vec<(String, Option<Result<CaptureStats, Error>>)> {
@@ -348,6 +358,12 @@ where
         self.labels
             .get(source_idx as usize)
             .map(|s| s.as_str())
+    }
+
+    /// Number of sources still being polled (haven't returned `None`
+    /// from their inner stream). Decrements as sources exhaust.
+    pub fn alive_sources(&self) -> usize {
+        self.select.alive_count()
     }
 
     /// Per-source kernel ring stats. See
@@ -455,10 +471,3 @@ impl super::multi_capture::AsyncMultiCapture {
     }
 }
 
-// Pull VecDeque into scope for any future buffer needs; the import
-// is currently unused but documenting the design intent that
-// pending events could be buffered per-stream if needed.
-#[allow(dead_code)]
-fn _vecdeque_scope_hint() -> Option<VecDeque<()>> {
-    None
-}

@@ -79,8 +79,7 @@ Four consolidated plans (20-23) closing all 7 items from des-rs's
   libbpf, clang), no `unsafe`, no panics. `BpfFilter::matches`
   software interpreter for offline validation. `BpfFilter::new`
   becomes fallible (`Result<_, BuildError>`); `CaptureBuilder::bpf_filter`
-  takes a `BpfFilter` directly. See `plans/18-bpf-builder.md` and
-  `examples/bpf_filter.rs`.
+  takes a `BpfFilter` directly. See `examples/bpf_filter.rs`.
 - **Plan 12 phase 2**: `XdpSocketBuilder::with_program(XdpProgram)`
   for caller-loaded XDP programs (compiled via `aya-bpf` /
   `bpf-linker` / `clang -target bpf`). Same orchestration as

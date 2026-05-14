@@ -10,9 +10,10 @@
 //! Reference: <https://docs.kernel.org/networking/af_xdp.html>
 //!
 //! NOTE: This example needs an XDP program already attached to the
-//! interface that redirects packets into the AF_XDP socket. See
-//! plan 12 in `plans/12-xdp-loader.md` for the upcoming built-in
-//! loader. Until then, attach one externally (e.g. via `aya` or
+//! interface that redirects packets into the AF_XDP socket. For the
+//! self-contained option that loads + attaches a built-in redirect
+//! program, see `examples/async_xdp_self_loaded.rs` (the `xdp-loader`
+//! feature). Otherwise attach one externally (e.g. via `aya` or
 //! `xdp-loader`).
 //!
 //! Usage:

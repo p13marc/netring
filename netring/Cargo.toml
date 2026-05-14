@@ -1,6 +1,6 @@
 [package]
 name = "netring"
-version = "0.11.0"
+version = "0.12.0"
 edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
@@ -23,7 +23,7 @@ exclude = ["CLAUDE.md", "SPEC.md"]
 # pulls only `bitflags` + `thiserror` — both already in netring's tree.
 # The `parse` feature additionally enables `flowscope/extractors`,
 # `flow` enables `tracker`/`reassembler`/`session`.
-flowscope = { version = "0.2", default-features = false }
+flowscope = { version = "0.3", default-features = false }
 
 libc = { workspace = true }
 nix = { workspace = true }
@@ -132,6 +132,10 @@ required-features = ["tokio"]
 
 [[example]]
 name = "async_flow_conversations"
+required-features = ["tokio", "flow"]
+
+[[example]]
+name = "async_flow_idle_per_key"
 required-features = ["tokio", "flow"]
 
 [[bench]]

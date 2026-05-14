@@ -78,6 +78,8 @@ where
     pending: VecDeque<SessionEvent<E::Key, <F::Parser as SessionParser>::Message>>,
     sweep: tokio::time::Interval,
     dedup: Option<Dedup>,
+    /// Plan 19: monotonic-timestamp clamp state (`None` = off).
+    monotonic_ts: Option<Timestamp>,
 }
 
 impl<S, E, F> SessionStream<S, E, F>
@@ -87,14 +89,17 @@ where
     E::Key: Eq + std::hash::Hash + Clone + Send + 'static,
     F: SessionParserFactory<E::Key>,
 {
-    pub(crate) fn new_with_config(
+    /// Plan 19: move an existing [`FlowTracker`] into a `SessionStream`
+    /// without rebuilding it. Preserves `idle_timeout_fn` and any
+    /// in-flight flow state from the source `FlowStream`.
+    pub(crate) fn from_tracker(
         cap: AsyncCapture<S>,
-        extractor: E,
+        tracker: FlowTracker<E, ()>,
         parser_factory: F,
-        config: FlowTrackerConfig,
+        dedup: Option<Dedup>,
+        monotonic_ts: Option<Timestamp>,
     ) -> Self {
-        let reassembler_factory = build_reassembler_factory(&config);
-        let tracker = FlowTracker::with_config(extractor, config);
+        let reassembler_factory = build_reassembler_factory(tracker.config());
         let sweep = tokio::time::interval(tracker.config().sweep_interval);
         Self {
             cap,
@@ -105,20 +110,9 @@ where
             reassemblers: HashMap::with_hasher(RandomState::new()),
             pending: VecDeque::new(),
             sweep,
-            dedup: None,
+            dedup,
+            monotonic_ts,
         }
-    }
-
-    pub(crate) fn new_with_config_and_dedup(
-        cap: AsyncCapture<S>,
-        extractor: E,
-        parser_factory: F,
-        config: FlowTrackerConfig,
-        dedup: Option<Dedup>,
-    ) -> Self {
-        let mut s = Self::new_with_config(cap, extractor, parser_factory, config);
-        s.dedup = dedup;
-        s
     }
 
     /// Replace the inner [`FlowTracker`]'s config in place.
@@ -164,6 +158,37 @@ where
     pub fn tracker(&self) -> &FlowTracker<E, ()> {
         &self.tracker
     }
+
+    /// Override the per-flow idle timeout via a key predicate. See
+    /// [`FlowStream::with_idle_timeout_fn`](super::flow_stream::FlowStream::with_idle_timeout_fn).
+    pub fn with_idle_timeout_fn<G>(mut self, f: G) -> Self
+    where
+        G: Fn(&E::Key, Option<flowscope::L4Proto>) -> Option<std::time::Duration>
+            + Send
+            + 'static,
+    {
+        self.tracker.set_idle_timeout_fn(f);
+        self
+    }
+
+    /// Clamp NIC-supplied timestamps to a running max so the event
+    /// stream is strictly non-decreasing in time. See
+    /// [`FlowStream::with_monotonic_timestamps`](super::flow_stream::FlowStream::with_monotonic_timestamps).
+    pub fn with_monotonic_timestamps(mut self, enable: bool) -> Self {
+        self.monotonic_ts = if enable {
+            Some(Timestamp::default())
+        } else {
+            None
+        };
+        self
+    }
+
+    /// Borrow-iterator over live `(K, FlowStats)` pairs.
+    pub fn snapshot_flow_stats(
+        &self,
+    ) -> impl Iterator<Item = (&E::Key, &flowscope::FlowStats)> + '_ {
+        self.tracker.all_flow_stats()
+    }
 }
 
 impl<S, E, F> Stream for SessionStream<S, E, F>
@@ -186,7 +211,10 @@ where
             }
 
             if this.sweep.poll_tick(cx).is_ready() {
-                let now = current_timestamp();
+                let now = crate::async_adapters::flow_stream::clamp_now(
+                    current_timestamp(),
+                    &mut this.monotonic_ts,
+                );
                 let parsers = &mut this.parsers;
                 let parser_factory = &mut this.parser_factory;
                 let reassemblers = &mut this.reassemblers;
@@ -222,7 +250,10 @@ where
                             continue;
                         }
 
-                        let view = pkt.view();
+                        let view = crate::async_adapters::flow_stream::clamp_view(
+                            pkt.view(),
+                            &mut this.monotonic_ts,
+                        );
                         let parsers = &mut this.parsers;
                         let parser_factory = &mut this.parser_factory;
                         let reassemblers = &mut this.reassemblers;
@@ -382,7 +413,14 @@ fn process_session_event<K, F>(
                             });
                         }
                     }
-                    EndReason::Rst | EndReason::Evicted | EndReason::BufferOverflow => {
+                    EndReason::Rst
+                    | EndReason::Evicted
+                    | EndReason::BufferOverflow
+                    | EndReason::ParseError => {
+                        parser.rst_initiator();
+                        parser.rst_responder();
+                    }
+                    _ => {
                         parser.rst_initiator();
                         parser.rst_responder();
                     }
@@ -390,17 +428,12 @@ fn process_session_event<K, F>(
             }
             pending.push_back(SessionEvent::Closed { key, reason, stats });
         }
-        FlowEvent::Anomaly { kind, ts, .. } => {
-            // SessionStream's typed surface (`SessionEvent`) has no Anomaly
-            // variant, so we surface it via tracing instead of dropping it
-            // silently. Use `FlowStream` directly for structured access; the
-            // `Closed` event still carries `EndReason::BufferOverflow` when
-            // applicable.
-            tracing::warn!(
-                target: "netring::flow",
-                ?kind, ?ts,
-                "flow tracker anomaly (use FlowStream for structured handling)"
-            );
+        FlowEvent::Anomaly { key, kind, ts } => {
+            // Plan 19: forward as a typed `SessionEvent::Anomaly`. The
+            // `Closed` event still carries `EndReason::BufferOverflow` /
+            // `ParseError` when applicable, but the live anomaly is now
+            // first-class on the typed surface.
+            pending.push_back(SessionEvent::Anomaly { key, kind, ts });
         }
         // Established / StateChange are not surfaced — SessionStream's
         // contract is "messages and lifecycle endpoints".
@@ -640,7 +673,7 @@ mod tests {
     }
 
     #[test]
-    fn anomaly_event_does_not_emit_session_event() {
+    fn anomaly_event_forwards_as_session_anomaly() {
         let (mut parsers, mut factory, mut reassemblers, mut pending) = empty_state();
         process_session_event::<u32, EchoParser>(
             FlowEvent::Anomaly {
@@ -656,7 +689,14 @@ mod tests {
             &mut reassemblers,
             &mut pending,
         );
-        assert!(pending.is_empty());
+        assert_eq!(pending.len(), 1);
+        match pending.pop_front().unwrap() {
+            SessionEvent::Anomaly { key, kind, .. } => {
+                assert_eq!(key, Some(42));
+                assert!(matches!(kind, AnomalyKind::OutOfOrderSegment { .. }));
+            }
+            other => panic!("expected Anomaly, got {other:?}"),
+        }
     }
 
     #[test]

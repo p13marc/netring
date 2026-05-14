@@ -29,7 +29,8 @@ use ahash::RandomState;
 use bytes::Bytes;
 use flowscope::tracker::FlowEvents;
 use flowscope::{
-    EndReason, FlowEvent, FlowExtractor, FlowSide, FlowTracker, FlowTrackerConfig, Timestamp,
+    EndReason, FlowEvent, FlowExtractor, FlowSide, FlowTracker, FlowTrackerConfig, PacketView,
+    Timestamp,
 };
 use futures_core::Stream;
 
@@ -77,6 +78,10 @@ where
     sweep: tokio::time::Interval,
     reassembler: R,
     dedup: Option<Dedup>,
+    /// Plan 19: when `Some(_)`, every packet's timestamp is clamped
+    /// to `max(view.timestamp, *self)` before flow extraction, so
+    /// downstream consumers see a strictly non-decreasing timeline.
+    monotonic_ts: Option<Timestamp>,
 }
 
 impl<S, E> FlowStream<S, E, (), NoReassembler>
@@ -94,6 +99,7 @@ where
             sweep: tokio::time::interval(sweep_interval),
             reassembler: NoReassembler,
             dedup: None,
+            monotonic_ts: None,
         }
     }
 
@@ -112,6 +118,7 @@ where
             sweep: self.sweep,
             reassembler: NoReassembler,
             dedup: self.dedup,
+            monotonic_ts: self.monotonic_ts,
         }
     }
 }
@@ -146,6 +153,7 @@ where
                 pending_future: None,
             },
             dedup: self.dedup,
+            monotonic_ts: self.monotonic_ts,
         }
     }
 }
@@ -172,11 +180,15 @@ where
     where
         F: flowscope::SessionParserFactory<E::Key>,
     {
-        let config = self.tracker.config().clone();
-        let dedup = self.dedup;
-        let extractor = self.tracker.into_extractor();
-        crate::async_adapters::session_stream::SessionStream::new_with_config_and_dedup(
-            self.cap, extractor, factory, config, dedup,
+        // Plan 19: move the tracker over instead of rebuilding from
+        // the extractor. Preserves idle_timeout_fn, hot-cache, and
+        // any in-flight flows.
+        crate::async_adapters::session_stream::SessionStream::from_tracker(
+            self.cap,
+            self.tracker,
+            factory,
+            self.dedup,
+            self.monotonic_ts,
         )
     }
 
@@ -194,11 +206,14 @@ where
     where
         F: flowscope::DatagramParserFactory<E::Key>,
     {
-        let config = self.tracker.config().clone();
-        let dedup = self.dedup;
-        let extractor = self.tracker.into_extractor();
-        crate::async_adapters::datagram_stream::DatagramStream::new_with_config_and_dedup(
-            self.cap, extractor, factory, config, dedup,
+        // Plan 19: move the tracker over so `idle_timeout_fn` and
+        // in-flight flow state survive the conversion.
+        crate::async_adapters::datagram_stream::DatagramStream::from_tracker(
+            self.cap,
+            self.tracker,
+            factory,
+            self.dedup,
+            self.monotonic_ts,
         )
     }
 }
@@ -259,6 +274,67 @@ where
     pub fn tracker_mut(&mut self) -> &mut FlowTracker<E, U> {
         &mut self.tracker
     }
+
+    /// Override the per-flow idle timeout via a key predicate. The
+    /// closure receives `(&key, Option<L4Proto>)` and returns
+    /// `Option<Duration>`; `None` falls back to the per-protocol
+    /// defaults from [`FlowTrackerConfig`].
+    ///
+    /// Useful for protocols whose natural rhythm differs from the
+    /// default sweep cadence — e.g. interactive control flows that
+    /// stay alive long past the bulk-data idle threshold.
+    ///
+    /// ```no_run
+    /// # use std::time::Duration;
+    /// # use netring::AsyncCapture;
+    /// # use netring::flow::extract::FiveTuple;
+    /// # async fn ex() -> Result<(), Box<dyn std::error::Error>> {
+    /// let cap = AsyncCapture::open("eth0")?;
+    /// let stream = cap.flow_stream(FiveTuple::bidirectional())
+    ///     .with_idle_timeout_fn(|k, _l4| {
+    ///         if k.either_port(53) {
+    ///             Some(Duration::from_secs(5))
+    ///         } else {
+    ///             None
+    ///         }
+    ///     });
+    /// # let _ = stream;
+    /// # Ok(()) }
+    /// ```
+    pub fn with_idle_timeout_fn<F>(mut self, f: F) -> Self
+    where
+        F: Fn(&E::Key, Option<flowscope::L4Proto>) -> Option<Duration> + Send + 'static,
+    {
+        self.tracker.set_idle_timeout_fn(f);
+        self
+    }
+
+    /// Clamp NIC-supplied timestamps to a running max so the event
+    /// stream is strictly non-decreasing in time. Useful for log
+    /// correlation or replay pipelines that don't tolerate
+    /// step-backs. Default: off.
+    ///
+    /// The clamp also applies to the periodic sweep's `now` argument.
+    pub fn with_monotonic_timestamps(mut self, enable: bool) -> Self {
+        self.monotonic_ts = if enable {
+            Some(Timestamp::default())
+        } else {
+            None
+        };
+        self
+    }
+
+    /// Borrow-iterator over live `(K, FlowStats)` pairs. Patches in
+    /// reassembler high-watermark diagnostics. Lazy — pay only for
+    /// what you consume.
+    ///
+    /// Mirrors
+    /// [`flowscope::FlowTracker::all_flow_stats`].
+    pub fn snapshot_flow_stats(
+        &self,
+    ) -> impl Iterator<Item = (&E::Key, &flowscope::FlowStats)> + '_ {
+        self.tracker.all_flow_stats()
+    }
 }
 
 // ── Stream impl: NoReassembler (plan 02 path) ──────────────────────
@@ -281,7 +357,7 @@ where
             }
 
             if this.sweep.poll_tick(cx).is_ready() {
-                let now = current_timestamp();
+                let now = clamp_now(current_timestamp(), &mut this.monotonic_ts);
                 for ev in this.tracker.sweep(now) {
                     this.pending.push_back(ev);
                 }
@@ -307,7 +383,7 @@ where
                             continue;
                         }
 
-                        let view = pkt.view();
+                        let view = clamp_view(pkt.view(), &mut this.monotonic_ts);
                         let evts: FlowEvents<E::Key> = this.tracker.track(view);
                         for ev in evts {
                             this.pending.push_back(ev);
@@ -324,6 +400,26 @@ where
             }
         }
     }
+}
+
+/// Plan 19: clamp a packet view's timestamp against a running max
+/// if monotonic mode is enabled. No-op when `state` is `None`.
+pub(crate) fn clamp_view<'a>(view: PacketView<'a>, state: &mut Option<Timestamp>) -> PacketView<'a> {
+    let Some(last) = state.as_mut() else {
+        return view;
+    };
+    *last = (*last).max(view.timestamp);
+    PacketView::new(view.frame, *last)
+}
+
+/// Plan 19: clamp a sweep `now` argument against a running max if
+/// monotonic mode is enabled. No-op when `state` is `None`.
+pub(crate) fn clamp_now(now: Timestamp, state: &mut Option<Timestamp>) -> Timestamp {
+    let Some(last) = state.as_mut() else {
+        return now;
+    };
+    *last = (*last).max(now);
+    *last
 }
 
 // ── Stream impl: AsyncReassemblerSlot path ─────────────────────────
@@ -382,9 +478,11 @@ where
                         {
                             let fut = match reason_copy {
                                 EndReason::Fin | EndReason::IdleTimeout => r.fin(),
-                                EndReason::Rst | EndReason::Evicted | EndReason::BufferOverflow => {
-                                    r.rst()
-                                }
+                                EndReason::Rst
+                                | EndReason::Evicted
+                                | EndReason::BufferOverflow
+                                | EndReason::ParseError => r.rst(),
+                                _ => r.rst(),
                             };
                             drop(r);
                             found_fut = Some(fut);
@@ -402,7 +500,7 @@ where
 
             // 4. Sweep tick.
             if this.sweep.poll_tick(cx).is_ready() {
-                let now = current_timestamp();
+                let now = clamp_now(current_timestamp(), &mut this.monotonic_ts);
                 for ev in this.tracker.sweep(now) {
                     this.pending.push_back(ev);
                 }
@@ -429,7 +527,7 @@ where
                             continue;
                         }
 
-                        let view = pkt.view();
+                        let view = clamp_view(pkt.view(), &mut this.monotonic_ts);
                         let payloads = &mut this.reassembler.pending_payloads;
                         let evts: FlowEvents<E::Key> =
                             this.tracker
@@ -483,5 +581,60 @@ where
         E: FlowExtractor,
     {
         FlowStream::new(self, extractor)
+    }
+}
+
+#[cfg(test)]
+mod monotonic_tests {
+    use super::*;
+
+    #[test]
+    fn clamp_view_passthrough_when_off() {
+        let mut state: Option<Timestamp> = None;
+        let frame = [0u8; 4];
+        let ts = Timestamp::new(100, 0);
+        let v = PacketView::new(&frame, ts);
+        let out = clamp_view(v, &mut state);
+        assert_eq!(out.timestamp, ts);
+        assert!(state.is_none());
+    }
+
+    #[test]
+    fn clamp_view_advances_running_max() {
+        let mut state: Option<Timestamp> = Some(Timestamp::default());
+        let frame = [0u8; 4];
+        let t1 = Timestamp::new(100, 0);
+        let t2 = Timestamp::new(50, 0); // step backwards
+        let t3 = Timestamp::new(200, 0); // step forward
+
+        let v1 = clamp_view(PacketView::new(&frame, t1), &mut state);
+        assert_eq!(v1.timestamp, t1);
+        assert_eq!(state, Some(t1));
+
+        let v2 = clamp_view(PacketView::new(&frame, t2), &mut state);
+        assert_eq!(v2.timestamp, t1, "step-back clamps to running max");
+        assert_eq!(state, Some(t1));
+
+        let v3 = clamp_view(PacketView::new(&frame, t3), &mut state);
+        assert_eq!(v3.timestamp, t3, "step-forward advances running max");
+        assert_eq!(state, Some(t3));
+    }
+
+    #[test]
+    fn clamp_now_passthrough_when_off() {
+        let mut state: Option<Timestamp> = None;
+        let ts = Timestamp::new(42, 0);
+        assert_eq!(clamp_now(ts, &mut state), ts);
+        assert!(state.is_none());
+    }
+
+    #[test]
+    fn clamp_now_clamps_to_running_max() {
+        let mut state: Option<Timestamp> = Some(Timestamp::new(100, 0));
+        let clamped = clamp_now(Timestamp::new(50, 0), &mut state);
+        assert_eq!(clamped, Timestamp::new(100, 0));
+        let advanced = clamp_now(Timestamp::new(200, 0), &mut state);
+        assert_eq!(advanced, Timestamp::new(200, 0));
+        assert_eq!(state, Some(Timestamp::new(200, 0)));
     }
 }

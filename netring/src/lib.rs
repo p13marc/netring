@@ -94,6 +94,8 @@ pub mod flow {
     };
 
     #[cfg(feature = "flow")]
+    pub use flowscope::tracker::IdleTimeoutFn;
+    #[cfg(feature = "flow")]
     pub use flowscope::{
         AnomalyKind, BufferedReassembler, BufferedReassemblerFactory, EndReason, FlowDriver,
         FlowEntry, FlowEvent, FlowEvents, FlowSessionDriver, FlowSide, FlowState, FlowStats,

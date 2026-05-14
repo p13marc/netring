@@ -67,6 +67,8 @@ where
     pending: VecDeque<SessionEvent<E::Key, <F::Parser as DatagramParser>::Message>>,
     sweep: tokio::time::Interval,
     dedup: Option<Dedup>,
+    /// Plan 19: monotonic-timestamp clamp state (`None` = off).
+    monotonic_ts: Option<Timestamp>,
 }
 
 impl<S, E, F> DatagramStream<S, E, F>
@@ -76,13 +78,16 @@ where
     E::Key: Eq + std::hash::Hash + Clone + Send + 'static,
     F: DatagramParserFactory<E::Key>,
 {
-    pub(crate) fn new_with_config(
+    /// Plan 19: move an existing [`FlowTracker`] into a `DatagramStream`
+    /// without rebuilding it. Preserves `idle_timeout_fn` and any
+    /// in-flight flow state from the source `FlowStream`.
+    pub(crate) fn from_tracker(
         cap: AsyncCapture<S>,
-        extractor: E,
+        tracker: FlowTracker<E, ()>,
         factory: F,
-        config: FlowTrackerConfig,
+        dedup: Option<Dedup>,
+        monotonic_ts: Option<Timestamp>,
     ) -> Self {
-        let tracker = FlowTracker::with_config(extractor, config);
         let sweep = tokio::time::interval(tracker.config().sweep_interval);
         Self {
             cap,
@@ -91,20 +96,9 @@ where
             parsers: HashMap::with_hasher(RandomState::new()),
             pending: VecDeque::new(),
             sweep,
-            dedup: None,
+            dedup,
+            monotonic_ts,
         }
-    }
-
-    pub(crate) fn new_with_config_and_dedup(
-        cap: AsyncCapture<S>,
-        extractor: E,
-        factory: F,
-        config: FlowTrackerConfig,
-        dedup: Option<Dedup>,
-    ) -> Self {
-        let mut s = Self::new_with_config(cap, extractor, factory, config);
-        s.dedup = dedup;
-        s
     }
 
     /// Replace the inner [`FlowTracker`]'s config in place.
@@ -145,6 +139,37 @@ where
     pub fn tracker(&self) -> &FlowTracker<E, ()> {
         &self.tracker
     }
+
+    /// Override the per-flow idle timeout via a key predicate. See
+    /// [`FlowStream::with_idle_timeout_fn`](super::flow_stream::FlowStream::with_idle_timeout_fn).
+    pub fn with_idle_timeout_fn<G>(mut self, f: G) -> Self
+    where
+        G: Fn(&E::Key, Option<flowscope::L4Proto>) -> Option<std::time::Duration>
+            + Send
+            + 'static,
+    {
+        self.tracker.set_idle_timeout_fn(f);
+        self
+    }
+
+    /// Clamp NIC-supplied timestamps to a running max so the event
+    /// stream is strictly non-decreasing in time. See
+    /// [`FlowStream::with_monotonic_timestamps`](super::flow_stream::FlowStream::with_monotonic_timestamps).
+    pub fn with_monotonic_timestamps(mut self, enable: bool) -> Self {
+        self.monotonic_ts = if enable {
+            Some(Timestamp::default())
+        } else {
+            None
+        };
+        self
+    }
+
+    /// Borrow-iterator over live `(K, FlowStats)` pairs.
+    pub fn snapshot_flow_stats(
+        &self,
+    ) -> impl Iterator<Item = (&E::Key, &flowscope::FlowStats)> + '_ {
+        self.tracker.all_flow_stats()
+    }
 }
 
 impl<S, E, F> Stream for DatagramStream<S, E, F>
@@ -167,7 +192,10 @@ where
             }
 
             if this.sweep.poll_tick(cx).is_ready() {
-                let now = current_timestamp();
+                let now = crate::async_adapters::flow_stream::clamp_now(
+                    current_timestamp(),
+                    &mut this.monotonic_ts,
+                );
                 for ev in this.tracker.sweep(now) {
                     convert_event(ev, &mut this.parsers, &mut this.pending);
                 }
@@ -193,7 +221,10 @@ where
                             continue;
                         }
 
-                        let view = pkt.view();
+                        let view = crate::async_adapters::flow_stream::clamp_view(
+                            pkt.view(),
+                            &mut this.monotonic_ts,
+                        );
                         let view_ts = view.timestamp;
                         let frame = view.frame;
                         // Extract before track() so we have orientation
@@ -264,12 +295,9 @@ fn convert_event<K, P>(
             parsers.remove(&key);
             pending.push_back(SessionEvent::Closed { key, reason, stats });
         }
-        FlowEvent::Anomaly { kind, ts, .. } => {
-            tracing::warn!(
-                target: "netring::flow",
-                ?kind, ?ts,
-                "flow tracker anomaly (use FlowStream for structured handling)"
-            );
+        FlowEvent::Anomaly { key, kind, ts } => {
+            // Plan 19: forward as a typed `SessionEvent::Anomaly`.
+            pending.push_back(SessionEvent::Anomaly { key, kind, ts });
         }
         _ => {}
     }

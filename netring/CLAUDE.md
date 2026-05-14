@@ -20,8 +20,24 @@ built on AF_PACKET with TPACKET_V3 (block-based mmap ring buffers) and AF_XDP.
 
 ## Implementation Status
 
-**Active.** netring 0.10.0 published; 0.11.0 prepared (this branch).
-~167 tests, ~30 examples, zero warnings.
+**Active.** netring 0.11.0 published; 0.12.0 prepared (this branch).
+~185 tests, ~31 examples, zero warnings.
+
+### Recent additions (0.12.0)
+
+- **Plan 19**: flowscope 0.3 bump. New builder knobs on `FlowStream`
+  / `SessionStream` / `DatagramStream`: `with_idle_timeout_fn(F)`
+  (per-key idle timeout override), `with_monotonic_timestamps(bool)`
+  (strictly non-decreasing timestamp clamp), `snapshot_flow_stats()`
+  (live `(K, FlowStats)` iterator with reassembler high-watermark
+  diagnostics). **Breaking**: `SessionEvent::Anomaly` is now
+  forwarded as a typed event (previously `tracing::warn!`-and-drop);
+  `EndReason::ParseError` is new (treated like `Rst` internally);
+  `SessionParser::Message` / `DatagramParser::Message` require
+  `Debug` (upstream). `flow_stream(...).session_stream(...)` and
+  `.datagram_stream(...)` now move the tracker (preserving
+  `idle_timeout_fn` + hot-cache + in-flight flows) instead of
+  rebuilding it.
 
 ### Recent additions (0.11.0)
 

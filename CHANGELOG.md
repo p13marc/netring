@@ -1,5 +1,107 @@
 # Changelog
 
+## 0.12.0 — flowscope 0.3 + per-key idle timeouts + structured anomalies
+
+Plan 19. Bumps `flowscope` from 0.2 to 0.3 and exposes the new
+upstream knobs through netring's async stream surfaces.
+
+### Breaking changes
+
+- **`SessionEvent::Anomaly` is now forwarded** by `SessionStream`
+  and `DatagramStream`. Previously these arms went to
+  `tracing::warn!` and were dropped from the typed surface.
+  Consumers matching `SessionEvent` exhaustively need a new arm:
+
+  ```diff
+   match evt {
+       SessionEvent::Started { .. } => ...,
+       SessionEvent::Application { .. } => ...,
+       SessionEvent::Closed { .. } => ...,
+  +    SessionEvent::Anomaly { .. } => ...,  // new in netring 0.12.0
+  +    _ => ...,                              // forward-compatible
+   }
+  ```
+
+- **`EndReason::ParseError`** is a new variant on the re-exported
+  `flowscope::EndReason`. Exhaustive matches need an arm — treat
+  like `Rst` (parser poisoned; reassembler is reset). netring's
+  built-in handling already does this internally.
+- **`SessionParser::Message` / `DatagramParser::Message` require
+  `Debug`** (upstream change). Add `#[derive(Debug)]` to your
+  message type. All flowscope-shipped parsers already do.
+- **`SessionStream::new_with_config{,_and_dedup}` /
+  `DatagramStream::new_with_config{,_and_dedup}`** removed
+  (`pub(crate)` only — no external break). Replaced by
+  `from_tracker` which moves the existing `FlowTracker` over from
+  `FlowStream` so `idle_timeout_fn` and in-flight flow state
+  survive the conversion. The public `FlowStream::session_stream`
+  / `datagram_stream` entry points are unchanged.
+
+### New — per-key idle timeouts
+
+`FlowStream::with_idle_timeout_fn(F)` and the same on
+`SessionStream` / `DatagramStream`. Predicate receives
+`(&key, Option<L4Proto>)` and returns `Option<Duration>`; `None`
+falls back to the per-protocol defaults from `FlowTrackerConfig`.
+
+```rust
+let stream = cap
+    .flow_stream(FiveTuple::bidirectional())
+    .with_idle_timeout_fn(|k, _l4| {
+        if k.either_port(53) {
+            Some(Duration::from_secs(5))
+        } else {
+            None
+        }
+    });
+```
+
+### New — monotonic timestamps
+
+`FlowStream::with_monotonic_timestamps(true)` clamps NIC-supplied
+timestamps to a running max. Each subsequent `view.timestamp`
+becomes `max(view.timestamp, running_max)`; sweep `now` is
+clamped the same way. Useful when downstream consumers want a
+strictly non-decreasing timeline (log correlation, replay).
+Default: off (raw NIC timestamps flow through unmodified).
+
+Mirrored on `SessionStream::with_monotonic_timestamps` and
+`DatagramStream::with_monotonic_timestamps`.
+
+### New — `snapshot_flow_stats()` accessor
+
+Borrow-iterator over `(&K, &FlowStats)` for live flows on all
+three streams. Includes the new reassembler high-watermark fields.
+Lazy — pays only for what you consume.
+
+### Preserved state across stream conversions
+
+`FlowStream::session_stream(parser)` and `.datagram_stream(parser)`
+now move the underlying `FlowTracker` directly into the new stream
+instead of rebuilding it from the extractor. This preserves:
+
+- `idle_timeout_fn` (per-key timeout overrides)
+- hot-cache state (plan 41's monoflow fast-path)
+- in-flight flow records (in case the conversion happens after
+  some traffic has been seen)
+
+The `monotonic_ts` state also rides through.
+
+### Other
+
+- `FlowStats` now carries `reassembler_high_watermark_initiator`
+  and `_responder` (set on `Ended` events by flowscope 0.3).
+  Free passthrough through the existing `Ended { stats }` carrier.
+- New `netring::flow::IdleTimeoutFn` re-export (type alias for the
+  boxed predicate).
+- New `examples/async_flow_idle_per_key.rs` demonstrating the
+  per-key timeout + monotonic combo.
+- New `tests/flowscope_03_passthrough.rs` covering the builder
+  chain + conversion preservation.
+- New unit tests for the `clamp_view` / `clamp_now` helpers.
+
+---
+
 ## 0.11.0 — Typed BPF filter builder + custom XDP programs
 
 Plan 18 (BPF builder) and plan 12 phase 2 (caller-loaded XDP

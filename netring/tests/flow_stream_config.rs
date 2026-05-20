@@ -22,7 +22,9 @@ mod helpers;
 
 use std::time::Duration;
 
-use flowscope::{FlowTrackerConfig, OverflowPolicy, SessionParser, SessionParserFactory};
+use flowscope::{
+    FlowTrackerConfig, OverflowPolicy, SessionParser, SessionParserFactory, Timestamp,
+};
 use netring::flow::extract::FiveTuple;
 use netring::{AsyncCapture, CaptureBuilder};
 
@@ -31,10 +33,10 @@ struct StubParser;
 
 impl SessionParser for StubParser {
     type Message = ();
-    fn feed_initiator(&mut self, _: &[u8]) -> Vec<()> {
+    fn feed_initiator(&mut self, _: &[u8], _ts: Timestamp) -> Vec<()> {
         Vec::new()
     }
-    fn feed_responder(&mut self, _: &[u8]) -> Vec<()> {
+    fn feed_responder(&mut self, _: &[u8], _ts: Timestamp) -> Vec<()> {
         Vec::new()
     }
 }

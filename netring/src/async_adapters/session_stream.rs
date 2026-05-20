@@ -19,13 +19,13 @@
 //! # use futures::StreamExt;
 //! # use netring::AsyncCapture;
 //! # use netring::flow::extract::FiveTuple;
-//! # use flowscope::{FlowSide, SessionEvent, SessionParser};
+//! # use flowscope::{FlowSide, SessionEvent, SessionParser, Timestamp};
 //! # #[derive(Default, Clone)]
 //! # struct MyParser;
 //! # impl SessionParser for MyParser {
 //! #     type Message = ();
-//! #     fn feed_initiator(&mut self, _: &[u8]) -> Vec<()> { Vec::new() }
-//! #     fn feed_responder(&mut self, _: &[u8]) -> Vec<()> { Vec::new() }
+//! #     fn feed_initiator(&mut self, _: &[u8], _: Timestamp) -> Vec<()> { Vec::new() }
+//! #     fn feed_responder(&mut self, _: &[u8], _: Timestamp) -> Vec<()> { Vec::new() }
 //! # }
 //! # async fn ex() -> Result<(), Box<dyn std::error::Error>> {
 //! let cap = AsyncCapture::open("eth0")?;
@@ -250,7 +250,28 @@ where
                 let parser_factory = &mut this.parser_factory;
                 let reassemblers = &mut this.reassemblers;
                 let pending = &mut this.pending;
-                for ev in this.tracker.sweep(now) {
+
+                // Collect sweep events first; we want to fire `on_tick`
+                // on every still-live parser (including ones about to be
+                // closed by this sweep) *before* the Closed events land.
+                let sweep_events: Vec<_> = this.tracker.sweep(now).into_iter().collect();
+
+                // flowscope 0.4 `SessionParser::on_tick` — periodic
+                // time-driven hook. Default impl is a no-op; parsers
+                // that override it can emit timeout / unanswered-request
+                // messages attributed to the initiator side.
+                for (key, parser) in parsers.iter_mut() {
+                    for m in parser.on_tick(now) {
+                        pending.push_back(SessionEvent::Application {
+                            key: key.clone(),
+                            side: FlowSide::Initiator,
+                            message: m,
+                            ts: now,
+                        });
+                    }
+                }
+
+                for ev in sweep_events {
                     process_session_event::<E::Key, F>(
                         ev,
                         parsers,
@@ -392,8 +413,8 @@ fn process_session_event<K, F>(
                 .entry(key.clone())
                 .or_insert_with(|| parser_factory.new_parser(&key));
             let messages = match side {
-                FlowSide::Initiator => parser.feed_initiator(&drained),
-                FlowSide::Responder => parser.feed_responder(&drained),
+                FlowSide::Initiator => parser.feed_initiator(&drained, ts),
+                FlowSide::Responder => parser.feed_responder(&drained, ts),
             };
             for m in messages {
                 pending.push_back(SessionEvent::Application {
@@ -424,8 +445,8 @@ fn process_session_event<K, F>(
                             .entry(key.clone())
                             .or_insert_with(|| parser_factory.new_parser(&key));
                         let messages = match side {
-                            FlowSide::Initiator => parser.feed_initiator(&drained),
-                            FlowSide::Responder => parser.feed_responder(&drained),
+                            FlowSide::Initiator => parser.feed_initiator(&drained, stats.last_seen),
+                            FlowSide::Responder => parser.feed_responder(&drained, stats.last_seen),
                         };
                         for m in messages {
                             pending.push_back(SessionEvent::Application {
@@ -534,10 +555,10 @@ mod tests {
 
     impl SessionParser for EchoParser {
         type Message = (FlowSide, Vec<u8>);
-        fn feed_initiator(&mut self, b: &[u8]) -> Vec<(FlowSide, Vec<u8>)> {
+        fn feed_initiator(&mut self, b: &[u8], _ts: Timestamp) -> Vec<(FlowSide, Vec<u8>)> {
             vec![(FlowSide::Initiator, b.to_vec())]
         }
-        fn feed_responder(&mut self, b: &[u8]) -> Vec<(FlowSide, Vec<u8>)> {
+        fn feed_responder(&mut self, b: &[u8], _ts: Timestamp) -> Vec<(FlowSide, Vec<u8>)> {
             vec![(FlowSide::Responder, b.to_vec())]
         }
     }

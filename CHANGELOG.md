@@ -1,5 +1,113 @@
 # Changelog
 
+## 0.14.0 — flowscope 0.4 + per-parser `on_tick`
+
+Bumps the `flowscope` dep from 0.3 to 0.4 and surfaces the headline
+upstream addition — the periodic `on_tick` hook on `SessionParser`
+and `DatagramParser` — through netring's async stream surfaces.
+
+### Breaking — parser data methods take a `Timestamp`
+
+flowscope 0.4 added a `ts: Timestamp` argument to every parser
+data-feed method so stateful parsers can attach the observed
+packet time directly to their messages. The shipped signatures
+become:
+
+```diff
+ impl SessionParser for MyParser {
+-    fn feed_initiator(&mut self, bytes: &[u8]) -> Vec<Self::Message> { … }
+-    fn feed_responder(&mut self, bytes: &[u8]) -> Vec<Self::Message> { … }
++    fn feed_initiator(&mut self, bytes: &[u8], ts: Timestamp) -> Vec<Self::Message> { … }
++    fn feed_responder(&mut self, bytes: &[u8], ts: Timestamp) -> Vec<Self::Message> { … }
+ }
+
+ impl DatagramParser for MyParser {
+-    fn parse(&mut self, bytes: &[u8], side: FlowSide) -> Vec<Self::Message> { … }
++    fn parse(&mut self, bytes: &[u8], side: FlowSide, ts: Timestamp) -> Vec<Self::Message> { … }
+ }
+```
+
+netring's session/datagram streams pass through the timestamp of
+the carrying packet automatically; users who don't care about it
+can name the parameter `_ts`.
+
+### New — `on_tick` integration
+
+`SessionParser::on_tick` and `DatagramParser::on_tick` (new in
+flowscope 0.4; default no-op) are now driven by `SessionStream`
+and `DatagramStream` on every sweep tick. The fire order mirrors
+flowscope's own `FlowSessionDriver::sweep`:
+
+1. Collect the tracker's swept flow events (Closed etc.).
+2. For each still-live parser (including ones this sweep is
+   about to close), call `parser.on_tick(now)` and emit returned
+   messages as `SessionEvent::Application { side: Initiator, ts: now }`.
+3. Translate the swept flow events (now driving any final `fin_*`
+   per existing semantics).
+
+This unlocks time-driven L7 patterns through the netring async
+chain — DNS-style unanswered-request timeouts, periodic
+heartbeats from a stateful parser, anything that needs a sweep-
+cadence wakeup attributed to a specific flow. Parsers that
+don't override `on_tick` are unaffected.
+
+### Breaking — driver `S` type parameter removed (flowscope-side)
+
+`FlowDriver<E, F, S>` → `FlowDriver<E, F>`,
+`FlowSessionDriver<E, P, S>` → `FlowSessionDriver<E, P>`,
+`FlowDatagramDriver<E, P, S>` → `FlowDatagramDriver<E, P>`. The
+drivers always ran their tracker with `S = ()` anyway. netring
+re-exports these unchanged; users who name the types directly
+need to drop the trailing `, ()`.
+
+netring's own async streams (`FlowStream<S, E, U, R>`,
+`SessionStream`, `DatagramStream`) are unaffected; per-flow user
+state lives on `FlowTracker<E, U>` as before.
+
+### Other inherited upstream changes
+
+flowscope 0.4 also added:
+
+- `Timestamp::MAX` (`u32::MAX`s + 999 999 999 ns) for forced
+  end-of-input flushes.
+- `FlowTracker::track(impl Into<PacketView>)` accepts an
+  `&OwnedPacketView` directly (no `.as_view()`).
+- DNS-over-UDP API unified on `DnsUdpParser`; the old
+  `DnsUdpObserver` + `DnsHandler` trait are gone (consumer impact:
+  see flowscope's CHANGELOG migration block).
+- `FlowSessionDriver::new(extractor, parser)` /
+  `FlowDatagramDriver::new(extractor, parser)` take the parser by
+  value — bound relaxed from `Default + Clone` to `Clone`.
+- Driver `finish()` method = `sweep(Timestamp::MAX)`.
+
+These flow through netring transparently — no source change in
+netring; consumers calling flowscope APIs directly migrate per
+flowscope's CHANGELOG.
+
+### Migration
+
+For consumers who define their own `SessionParser` /
+`DatagramParser` types:
+
+1. Add `_ts: Timestamp` (or `ts` if you use it) to
+   `feed_initiator` / `feed_responder` / `parse`.
+2. Optionally override `on_tick(&mut self, now: Timestamp) -> Vec<Self::Message>`
+   to emit time-driven messages (default impl returns `Vec::new()`).
+3. Re-derive `Debug` on your `Message` type if it isn't already
+   (the 0.3 bound; carried forward).
+
+netring's session/datagram stream chains compose unchanged; no
+new builder calls required to opt in to `on_tick`.
+
+### Tests
+
+All existing test fixtures (`flow_stream_config`,
+`with_dedup_propagation`, `flowscope_03_passthrough`,
+`stream_observability`) updated to the new parser signatures.
+198 lib + 10 proptest + 37 doctest tests pass.
+
+---
+
 ## 0.13.1 — MSRV bump + clippy 1.95 cleanup
 
 Patch release. No API changes, no new features — strictly

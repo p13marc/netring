@@ -20,8 +20,35 @@ built on AF_PACKET with TPACKET_V3 (block-based mmap ring buffers) and AF_XDP.
 
 ## Implementation Status
 
-**Active.** netring 0.13.0 published; 0.13.1 prepared (this branch).
+**Active.** netring 0.13.1 published; 0.14.0 prepared (this branch).
 ~225 tests, ~37 examples, zero warnings.
+
+### Recent additions (0.14.0)
+
+flowscope 0.3 → 0.4 bump. Headline pickup: the new periodic
+`SessionParser::on_tick` / `DatagramParser::on_tick` hook is
+driven by `SessionStream` / `DatagramStream` on every sweep
+tick — time-driven L7 patterns (DNS unanswered-request
+timeouts, heartbeats, etc.) flow through netring's async chain
+with no extra builder calls.
+
+- **Breaking**: `feed_initiator` / `feed_responder` / `parse`
+  gain a `ts: Timestamp` arg. netring forwards the carrying
+  packet's timestamp automatically.
+- **Breaking**: flowscope's `FlowDriver<E, F, S>` /
+  `FlowSessionDriver<E, P, S>` / `FlowDatagramDriver<E, P, S>`
+  lose the `S` type parameter — transparent re-export through
+  netring; users naming the types directly drop the trailing
+  `, ()`.
+- Sweep order in `SessionStream` / `DatagramStream` now matches
+  flowscope's `FlowSessionDriver::sweep`: collect tracker
+  events, fire `on_tick` on every live parser (including ones
+  about to close), then translate flow events. Default `on_tick`
+  is a no-op so existing parsers are unaffected.
+- Other 0.4 additions (`Timestamp::MAX`, `track(impl Into<PacketView>)`,
+  `PcapFlowSource::sessions()` / `datagrams()`, driver `finish()`,
+  DNS-over-UDP unification on `DnsUdpParser`) flow through netring
+  transparently.
 
 ### Recent additions (0.13.1)
 
@@ -247,7 +274,7 @@ just ci-full         # setcap + full test suite
 For the next `cargo publish` of netring:
 
 1. Ensure `flowscope` is published to crates.io at the version netring
-   needs (currently `0.3`).
+   needs (currently `0.4`).
 2. Verify `netring/Cargo.toml`'s `flowscope` version dep matches
    (default features false; same feature selectors as today).
 3. Bump `netring/Cargo.toml` `version` if more changes have landed

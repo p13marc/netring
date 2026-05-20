@@ -21,7 +21,7 @@
 
 mod helpers;
 
-use flowscope::{DatagramParser, FlowSide, SessionParser, SessionParserFactory};
+use flowscope::{DatagramParser, FlowSide, SessionParser, SessionParserFactory, Timestamp};
 use netring::flow::extract::FiveTuple;
 use netring::{AsyncCapture, CaptureBuilder, Dedup};
 
@@ -30,17 +30,17 @@ struct StubParser;
 
 impl SessionParser for StubParser {
     type Message = ();
-    fn feed_initiator(&mut self, _: &[u8]) -> Vec<()> {
+    fn feed_initiator(&mut self, _: &[u8], _ts: Timestamp) -> Vec<()> {
         Vec::new()
     }
-    fn feed_responder(&mut self, _: &[u8]) -> Vec<()> {
+    fn feed_responder(&mut self, _: &[u8], _ts: Timestamp) -> Vec<()> {
         Vec::new()
     }
 }
 
 impl DatagramParser for StubParser {
     type Message = ();
-    fn parse(&mut self, _: &[u8], _: FlowSide) -> Vec<()> {
+    fn parse(&mut self, _: &[u8], _: FlowSide, _ts: Timestamp) -> Vec<()> {
         Vec::new()
     }
 }

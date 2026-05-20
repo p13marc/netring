@@ -48,16 +48,16 @@ fn capture_stats_on_fresh_flow_stream_is_zero() {
 
 #[test]
 fn capture_stats_survives_session_stream_conversion() {
-    use flowscope::{SessionParser, SessionParserFactory};
+    use flowscope::{SessionParser, SessionParserFactory, Timestamp};
 
     #[derive(Default, Clone)]
     struct StubParser;
     impl SessionParser for StubParser {
         type Message = ();
-        fn feed_initiator(&mut self, _: &[u8]) -> Vec<()> {
+        fn feed_initiator(&mut self, _: &[u8], _ts: Timestamp) -> Vec<()> {
             Vec::new()
         }
-        fn feed_responder(&mut self, _: &[u8]) -> Vec<()> {
+        fn feed_responder(&mut self, _: &[u8], _ts: Timestamp) -> Vec<()> {
             Vec::new()
         }
     }

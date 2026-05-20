@@ -10,12 +10,12 @@
 //! # use futures::StreamExt;
 //! # use netring::AsyncCapture;
 //! # use netring::flow::extract::FiveTuple;
-//! # use flowscope::{DatagramParser, FlowSide, SessionEvent};
+//! # use flowscope::{DatagramParser, FlowSide, SessionEvent, Timestamp};
 //! # #[derive(Default, Clone)]
 //! # struct MyParser;
 //! # impl DatagramParser for MyParser {
 //! #     type Message = ();
-//! #     fn parse(&mut self, _: &[u8], _: FlowSide) -> Vec<()> { Vec::new() }
+//! #     fn parse(&mut self, _: &[u8], _: FlowSide, _: Timestamp) -> Vec<()> { Vec::new() }
 //! # }
 //! # async fn ex() -> Result<(), Box<dyn std::error::Error>> {
 //! let cap = AsyncCapture::open("eth0")?;
@@ -226,7 +226,23 @@ where
                     current_timestamp(),
                     &mut this.monotonic_ts,
                 );
-                for ev in this.tracker.sweep(now) {
+                let sweep_events: Vec<_> = this.tracker.sweep(now).into_iter().collect();
+
+                // flowscope 0.4 `DatagramParser::on_tick`. Default
+                // impl is a no-op; DNS parsers (e.g.) emit
+                // `DnsMessage::Unanswered` events from this hook.
+                for (key, parser) in this.parsers.iter_mut() {
+                    for m in parser.on_tick(now) {
+                        this.pending.push_back(SessionEvent::Application {
+                            key: key.clone(),
+                            side: flowscope::FlowSide::Initiator,
+                            message: m,
+                            ts: now,
+                        });
+                    }
+                }
+
+                for ev in sweep_events {
                     convert_event(ev, &mut this.parsers, &mut this.pending);
                 }
                 if !this.pending.is_empty() {
@@ -293,7 +309,7 @@ where
                                 .parsers
                                 .entry(key.clone())
                                 .or_insert_with(|| this.factory.new_parser(key));
-                            let messages = parser.parse(payload, side);
+                            let messages = parser.parse(payload, side, view_ts);
                             for message in messages {
                                 this.pending.push_back(SessionEvent::Application {
                                     key: key.clone(),

@@ -26,7 +26,9 @@ mod helpers;
 
 use std::time::Duration;
 
-use flowscope::{DatagramParser, DatagramParserFactory, SessionParser, SessionParserFactory};
+use flowscope::{
+    DatagramParser, DatagramParserFactory, SessionParser, SessionParserFactory, Timestamp,
+};
 use netring::flow::extract::FiveTuple;
 use netring::{AsyncCapture, CaptureBuilder};
 
@@ -35,10 +37,10 @@ struct StubSessionParser;
 
 impl SessionParser for StubSessionParser {
     type Message = ();
-    fn feed_initiator(&mut self, _: &[u8]) -> Vec<()> {
+    fn feed_initiator(&mut self, _: &[u8], _ts: Timestamp) -> Vec<()> {
         Vec::new()
     }
-    fn feed_responder(&mut self, _: &[u8]) -> Vec<()> {
+    fn feed_responder(&mut self, _: &[u8], _ts: Timestamp) -> Vec<()> {
         Vec::new()
     }
 }
@@ -58,7 +60,7 @@ struct StubDatagramParser;
 
 impl DatagramParser for StubDatagramParser {
     type Message = ();
-    fn parse(&mut self, _: &[u8], _: flowscope::FlowSide) -> Vec<()> {
+    fn parse(&mut self, _: &[u8], _: flowscope::FlowSide, _ts: Timestamp) -> Vec<()> {
         Vec::new()
     }
 }

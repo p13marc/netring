@@ -11,7 +11,7 @@ mostly used as the underlying source for the async wrappers.
 
 ```toml
 [dependencies]
-netring = { version = "0.13", features = ["tokio"] }
+netring = { version = "0.14", features = ["tokio"] }
 ```
 
 ```rust,no_run
@@ -72,7 +72,7 @@ considerations.
 
 ```toml
 [dependencies]
-netring = { version = "0.13", features = ["tokio", "flow"] }
+netring = { version = "0.14", features = ["tokio", "flow"] }
 futures = "0.3"
 ```
 

@@ -209,6 +209,56 @@ for pkt in &rx {
 # Ok::<(), netring::Error>(())
 ```
 
+## Flow & session tracking (`flow` feature)
+
+Built on top of [`flowscope`](https://github.com/p13marc/flowscope).
+Each stream consumes an `AsyncCapture<S>` and emits typed events.
+
+| Stream | Item | Built via |
+|--------|------|-----------|
+| [`FlowStream<S, E, U, R>`](https://docs.rs/netring/latest/netring/struct.FlowStream.html) | `FlowEvent<K>` | `cap.flow_stream(extractor)` |
+| [`SessionStream<S, E, F>`](https://docs.rs/netring/latest/netring/struct.SessionStream.html) | `SessionEvent<K, M>` (TCP via reassembler) | `cap.flow_stream(ext).session_stream(parser)` |
+| [`DatagramStream<S, E, F>`](https://docs.rs/netring/latest/netring/struct.DatagramStream.html) | `SessionEvent<K, M>` (UDP, no reassembler) | `cap.flow_stream(ext).datagram_stream(parser)` |
+| [`FlowBroadcast<K>`](https://docs.rs/netring/latest/netring/struct.FlowBroadcast.html) | per-subscriber `FlowEvent<K>` | `flow_stream(...).broadcast(buffer)` |
+
+Each stream chain accepts the same builder knobs:
+
+- `.with_config(FlowTrackerConfig)` — idle timeouts, reassembler caps, overflow policy.
+- `.with_dedup(Dedup)` — loopback-aware content dedup before flow extraction.
+- `.with_idle_timeout_fn(F)` — per-key idle override (`Fn(&K, Option<L4Proto>) -> Option<Duration>`).
+- `.with_monotonic_timestamps(bool)` — clamp NIC timestamps to a running max.
+- `.with_pcap_tap(writer)` — record every packet to a `CaptureWriter` before flow tracking.
+- `.snapshot_flow_stats()` — borrow-iterator over live `(&K, &FlowStats)`.
+
+The [`StreamCapture`](https://docs.rs/netring/latest/netring/trait.StreamCapture.html)
+trait gives all four stream types `capture()`, `capture_stats()`, and
+`capture_cumulative_stats()` for out-of-band ring observability +
+plan-21 `stream.capture().set_filter(...)` BPF swap.
+
+Parsers (`SessionParser` / `DatagramParser`) get a periodic
+[`on_tick`](https://docs.rs/flowscope/latest/flowscope/trait.SessionParser.html#method.on_tick)
+hook called on every sweep — useful for unanswered-request timeouts,
+heartbeats, any time-driven L7 logic.
+
+### Multi-source (`flow` feature)
+
+`AsyncMultiCapture` fans in N AF_PACKET captures (multi-interface or
+per-CPU workers in a fanout group) and yields `TaggedEvent { source_idx, event }`.
+See [`docs/scaling.md`](../netring/docs/scaling.md) for the recipe +
+`FanoutMode` decision matrix.
+
+### Offline pcap (`pcap + flow` features)
+
+| Type | Item | Built via |
+|------|------|-----------|
+| [`AsyncPcapSource`](https://docs.rs/netring/latest/netring/struct.AsyncPcapSource.html) | `OwnedPacket` | `AsyncPcapSource::open(path).await?` |
+| [`PcapFlowStream<E>`](https://docs.rs/netring/latest/netring/struct.PcapFlowStream.html) | `FlowEvent<K>` | `source.flow_events(extractor)` |
+| [`PcapSessionStream<E, P>`](https://docs.rs/netring/latest/netring/struct.PcapSessionStream.html) | `SessionEvent<K, M>` | `source.sessions(ext, parser)` |
+| [`PcapDatagramStream<E, P>`](https://docs.rs/netring/latest/netring/struct.PcapDatagramStream.html) | `SessionEvent<K, M>` | `source.datagrams(ext, parser)` |
+
+Format (PCAP vs PCAPNG) is auto-detected at `open`. EOF flush via
+`Timestamp::MAX` so every still-open flow emits its terminal event.
+
 ## Configuration reference
 
 ### CaptureBuilder
@@ -232,7 +282,7 @@ for pkt in &rx {
 | `.poll_timeout(dur)` | 100ms | Iterator poll timeout |
 | `.fanout(mode, id)` | disabled | Join fanout group |
 | `.fanout_flags(flags)` | empty | Fanout options |
-| `.bpf_filter(insns)` | disabled | Classic BPF filter |
+| `.bpf_filter(filter)` | disabled | Classic BPF filter (`BpfFilter`, built via `BpfFilter::builder()…build()` or `BpfFilter::new(insns)?`) |
 
 ### InjectorBuilder
 
@@ -288,16 +338,15 @@ cap.attach_fanout_ebpf(prog.fd())?;  // if FanoutMode::Ebpf was selected
 cap.detach_filter()?;
 ```
 
-## Migrating from 0.3.x
+## Migration notes
 
-| 0.3.x | 0.4.x |
-|-------|-------|
-| `AfPacketRx` | `Capture` |
-| `AfPacketRxBuilder` | `CaptureBuilder` |
-| `AfPacketTx` | `Injector` |
-| `AfPacketTxBuilder` | `InjectorBuilder` |
-| `Capture::new(iface)` | `Capture::open(iface)` |
-| `XdpSocket::recv_batch()` | `XdpSocket::next_batch()` |
-| `cap.wait_readable() + cap.get_mut().next_batch()` | `let g = cap.readable().await?; g.next_batch()` |
+Per-release breaking changes and migration recipes live in
+[`CHANGELOG.md`](../CHANGELOG.md). The current canonical entries:
 
-The old type names ship as `#[deprecated]` aliases for one release.
+- **0.14.0** — flowscope 0.4: `SessionParser` / `DatagramParser`
+  data methods gain a `ts: Timestamp` parameter; driver `S` type
+  parameter removed.
+- **0.13.0** — `SessionEvent` adds `Anomaly` arm; `StreamCapture`
+  trait gives async streams uniform ring access.
+- **0.11.0** — `BpfFilter::new` becomes fallible; typed
+  `BpfFilter::builder()` available.

@@ -25,7 +25,7 @@ state, and the next call re-arms via the reactor.
 
 ```toml
 [dependencies]
-netring = { version = "0.6", features = ["tokio"] }
+netring = { version = "0.14", features = ["tokio"] }
 ```
 
 ```rust,no_run
@@ -222,7 +222,7 @@ combinators:
 
 ```toml
 [dependencies]
-netring = { version = "0.6", features = ["tokio"] }
+netring = { version = "0.14", features = ["tokio"] }
 futures = "0.3"
 ```
 

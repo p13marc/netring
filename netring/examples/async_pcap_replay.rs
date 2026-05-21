@@ -1,7 +1,10 @@
 //! Offline pcap replay through the same flow-tracking pipeline as a
 //! live capture.
 //!
-//! Demonstrates plan 23: `AsyncPcapSource` + `flow_events()`. Both
+//! Demonstrates `AsyncPcapSource::flow_events(extractor)`. For
+//! L7-aware offline pipelines (HTTP, TLS, DNS, custom session
+//! parsers) reach for `source.sessions(extractor, parser)` instead
+//! — see [`async_pcap_sessions`](./async_pcap_sessions.rs). Both
 //! legacy PCAP and PCAPNG are auto-detected at open.
 //!
 //! Usage:

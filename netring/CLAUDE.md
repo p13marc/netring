@@ -45,10 +45,25 @@ with no extra builder calls.
   events, fire `on_tick` on every live parser (including ones
   about to close), then translate flow events. Default `on_tick`
   is a no-op so existing parsers are unaffected.
-- Other 0.4 additions (`Timestamp::MAX`, `track(impl Into<PacketView>)`,
-  `PcapFlowSource::sessions()` / `datagrams()`, driver `finish()`,
-  DNS-over-UDP unification on `DnsUdpParser`) flow through netring
-  transparently.
+- **New** `PcapSessionStream<E, P>` and `PcapDatagramStream<E, P>`
+  — async session/datagram streams over offline pcap, wrapping
+  flowscope's `FlowSessionDriver` / `FlowDatagramDriver` (so
+  `on_tick` integration + EOF flush via `Timestamp::MAX` come
+  along for free).
+- **New** one-line offline pipeline constructors:
+  `AsyncPcapSource::sessions(extractor, parser)` and
+  `.datagrams(extractor, parser)`. Mirrors flowscope 0.4's
+  `PcapFlowSource::sessions()` / `datagrams()` for the async
+  side. `PcapFlowStream::session_stream(parser)` /
+  `.datagram_stream(parser)` for users who built a flow stream
+  first and want to layer L7 on top.
+- `PcapFlowStream`'s EOF flush now anchors at `Timestamp::MAX`
+  (matches flowscope's `finish()`); previously used wall-clock
+  `now()` which could under-sweep against pcaps with future
+  timestamps.
+- Other 0.4 additions (`track(impl Into<PacketView>)`,
+  driver `finish()`, DNS-over-UDP unification on `DnsUdpParser`)
+  flow through netring transparently.
 
 ### Recent additions (0.13.1)
 
@@ -233,8 +248,11 @@ just ci-full         # setcap + full test suite
 - `src/pcap_tap.rs` — `PcapTap` + `TapErrorPolicy` (plan 20; `pcap + tokio`)
 - `src/pcap_source.rs` — `AsyncPcapSource` + `AsyncPcapConfig` +
   `PcapFormat` (plan 23; `pcap + tokio`)
-- `src/pcap_flow.rs` — `PcapFlowStream` bridge to flowscope
-  (plan 23; `pcap + tokio + flow`)
+- `src/pcap_flow.rs` — `PcapFlowStream` bridge to flowscope's
+  `FlowTracker`, plus `PcapSessionStream` (over
+  `FlowSessionDriver`) and `PcapDatagramStream` (over
+  `FlowDatagramDriver`) for one-line offline L7 pipelines
+  (`pcap + tokio + flow`)
 - `docs/scaling.md` — fanout decision matrix + anti-patterns (plan 22)
 
 ## Architecture

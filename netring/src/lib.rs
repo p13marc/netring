@@ -103,10 +103,10 @@ pub mod flow {
     pub use flowscope::tracker::IdleTimeoutFn;
     #[cfg(feature = "flow")]
     pub use flowscope::{
-        AnomalyKind, BufferedReassembler, BufferedReassemblerFactory, EndReason, FlowDriver,
-        FlowEntry, FlowEvent, FlowEvents, FlowSessionDriver, FlowSide, FlowState, FlowStats,
-        FlowTracker, FlowTrackerConfig, FlowTrackerStats, HistoryString, OverflowPolicy,
-        Reassembler, ReassemblerFactory,
+        AnomalyKind, BufferedReassembler, BufferedReassemblerFactory, EndReason,
+        FlowDatagramDriver, FlowDriver, FlowEntry, FlowEvent, FlowEvents, FlowSessionDriver,
+        FlowSide, FlowState, FlowStats, FlowTracker, FlowTrackerConfig, FlowTrackerStats,
+        HistoryString, OverflowPolicy, Reassembler, ReassemblerFactory, SessionEvent,
     };
 
     /// Async reassembly types for tokio integration.
@@ -133,7 +133,7 @@ pub use async_adapters::multi_streams::{
 #[cfg(feature = "tokio")]
 pub use async_adapters::stream_capture::StreamCapture;
 #[cfg(all(feature = "pcap", feature = "tokio", feature = "flow"))]
-pub use pcap_flow::PcapFlowStream;
+pub use pcap_flow::{PcapDatagramStream, PcapFlowStream, PcapSessionStream};
 #[cfg(all(feature = "pcap", feature = "tokio"))]
 pub use pcap_source::{AsyncPcapConfig, AsyncPcapSource, PcapFormat};
 #[cfg(all(feature = "pcap", feature = "tokio"))]

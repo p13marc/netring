@@ -64,6 +64,31 @@ netring's own async streams (`FlowStream<S, E, U, R>`,
 `SessionStream`, `DatagramStream`) are unaffected; per-flow user
 state lives on `FlowTracker<E, U>` as before.
 
+### New — async one-line offline L7 pipelines
+
+`AsyncPcapSource::sessions(extractor, parser)` and `.datagrams(extractor, parser)`
+return new `PcapSessionStream<E, P>` / `PcapDatagramStream<E, P>`
+types that wrap flowscope's `FlowSessionDriver` /
+`FlowDatagramDriver` over the offline pcap reader. The
+end-of-input flush (a final sweep at `Timestamp::MAX` that
+closes every still-open flow) is folded in — no manual
+`finish()` needed. `on_tick` integration comes for free since
+flowscope's drivers drive it internally.
+
+For users who built a flow stream first,
+`PcapFlowStream::session_stream(parser)` /
+`.datagram_stream(parser)` layer L7 on top, carrying tracker
+config (idle timeouts, reassembler caps, overflow policy)
+through the conversion.
+
+```rust,ignore
+let mut sessions = AsyncPcapSource::open("trace.pcap").await?
+    .sessions(FiveTuple::bidirectional(), MyHttpParser::default());
+while let Some(evt) = sessions.next().await {
+    // SessionEvent::{Started, Application, Closed, Anomaly}
+}
+```
+
 ### Other inherited upstream changes
 
 flowscope 0.4 also added:
@@ -98,6 +123,16 @@ For consumers who define their own `SessionParser` /
 
 netring's session/datagram stream chains compose unchanged; no
 new builder calls required to opt in to `on_tick`.
+
+### New examples
+
+- `examples/async_pcap_sessions.rs` — demos
+  `AsyncPcapSource::sessions(...)` one-liner with a hand-rolled
+  byte-counting `SessionParser`.
+- `examples/async_on_tick.rs` — demos a custom
+  `DatagramParser::on_tick` impl that emits heartbeat messages
+  after a configurable idle window. Pairs with netring's
+  `flow_stream(...).datagram_stream(parser)` chain.
 
 ### Tests
 

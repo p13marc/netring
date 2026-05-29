@@ -22,9 +22,7 @@ use std::time::Duration;
 use futures::StreamExt;
 use netring::flow::extract::FiveTuple;
 use netring::pcap::CaptureWriter;
-use netring::{
-    AsyncCapture, BpfFilter, CaptureBuilder, Dedup, StreamSetFilter, TapErrorPolicy,
-};
+use netring::{AsyncCapture, BpfFilter, CaptureBuilder, Dedup, StreamSetFilter, TapErrorPolicy};
 
 fn build_async_capture() -> AsyncCapture<netring::Capture> {
     let rx = CaptureBuilder::default()
@@ -51,7 +49,9 @@ fn stream_set_filter_replaces_active_filter() {
             .dst_port(443)
             .build()
             .expect("build filter");
-        stream.set_filter(&f).expect("set_filter via StreamSetFilter");
+        stream
+            .set_filter(&f)
+            .expect("set_filter via StreamSetFilter");
     });
 }
 

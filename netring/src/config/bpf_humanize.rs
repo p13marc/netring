@@ -46,8 +46,8 @@ fn render_to_string(builder: &BpfFilterBuilder) -> String {
 fn render_branch(branch: &BpfFilterBuilder) -> String {
     let body = render_to_string(branch);
     if branch.negated {
-        let composite = branch.fragments.len() + branch.or_branches.len() > 1
-            || !branch.or_branches.is_empty();
+        let composite =
+            branch.fragments.len() + branch.or_branches.len() > 1 || !branch.or_branches.is_empty();
         if body.is_empty() {
             "not ()".to_string()
         } else if composite {

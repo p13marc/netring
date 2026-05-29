@@ -123,11 +123,10 @@ pub trait StreamCapture: Sealed {
 /// satisfies the bound. Use via:
 ///
 /// ```no_run
-/// # use netring::{AsyncCapture, BpfFilter, StreamSetFilter};
-/// # use netring::flow::extract::FiveTuple;
+/// # use netring::{AsyncCapture, BpfFilter, Dedup, StreamSetFilter};
 /// # async fn _ex() -> Result<(), netring::Error> {
 /// let cap = AsyncCapture::open("eth0")?;
-/// let stream = cap.flow_stream(FiveTuple::bidirectional());
+/// let stream = cap.dedup_stream(Dedup::loopback());
 ///
 /// let new_filter = BpfFilter::builder().tcp().dst_port(443).build()?;
 /// stream.set_filter(&new_filter)?;

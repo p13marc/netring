@@ -212,9 +212,7 @@ where
 
     /// Per-source tracker stats. One entry per source, in order;
     /// `None` for sources that have ended.
-    pub fn per_source_tracker_stats(
-        &self,
-    ) -> Vec<(String, Option<&flowscope::FlowTrackerStats>)> {
+    pub fn per_source_tracker_stats(&self) -> Vec<(String, Option<&flowscope::FlowTrackerStats>)> {
         self.select
             .streams
             .iter()
@@ -373,9 +371,7 @@ where
 
     /// Per-source tracker stats. See
     /// [`MultiFlowStream::per_source_tracker_stats`].
-    pub fn per_source_tracker_stats(
-        &self,
-    ) -> Vec<(String, Option<&flowscope::FlowTrackerStats>)> {
+    pub fn per_source_tracker_stats(&self) -> Vec<(String, Option<&flowscope::FlowTrackerStats>)> {
         self.select
             .streams
             .iter()
@@ -538,9 +534,7 @@ where
 
     /// Per-source tracker stats. See
     /// [`MultiFlowStream::per_source_tracker_stats`].
-    pub fn per_source_tracker_stats(
-        &self,
-    ) -> Vec<(String, Option<&flowscope::FlowTrackerStats>)> {
+    pub fn per_source_tracker_stats(&self) -> Vec<(String, Option<&flowscope::FlowTrackerStats>)> {
         self.select
             .streams
             .iter()

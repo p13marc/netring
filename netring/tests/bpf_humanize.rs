@@ -38,7 +38,11 @@ fn http_or_dns() {
 
 #[test]
 fn not_arp_renders_negation_inline() {
-    let f = BpfFilter::builder().eth_type(0x0806).negate().build().unwrap();
+    let f = BpfFilter::builder()
+        .eth_type(0x0806)
+        .negate()
+        .build()
+        .unwrap();
     assert_eq!(f.to_human(), "not arp");
 }
 

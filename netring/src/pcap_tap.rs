@@ -61,11 +61,8 @@ pub enum TapErrorPolicy {
 /// bytes (the pcap `caplen` field). `None` means record the full
 /// packet — matching pre-snaplen behaviour.
 pub(crate) trait TapWriter: Send {
-    fn write(
-        &mut self,
-        pkt: &Packet<'_>,
-        snaplen: Option<u32>,
-    ) -> Result<(), pcap_file::PcapError>;
+    fn write(&mut self, pkt: &Packet<'_>, snaplen: Option<u32>)
+    -> Result<(), pcap_file::PcapError>;
 }
 
 impl<W: std::io::Write + Send + 'static> TapWriter for CaptureWriter<W> {

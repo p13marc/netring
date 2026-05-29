@@ -127,6 +127,8 @@ pub use async_adapters::flow_stream::{AsyncReassemblerSlot, FlowStream, NoReasse
 #[cfg(all(feature = "tokio", feature = "flow"))]
 pub use async_adapters::multi_capture::AsyncMultiCapture;
 #[cfg(all(feature = "tokio", feature = "flow"))]
+pub use async_adapters::multi_config::MultiStreamConfig;
+#[cfg(all(feature = "tokio", feature = "flow"))]
 pub use async_adapters::multi_streams::{
     MultiDatagramStream, MultiFlowStream, MultiSessionStream, TaggedEvent,
 };

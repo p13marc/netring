@@ -24,6 +24,8 @@ pub mod flow_stream;
 #[cfg(all(feature = "tokio", feature = "flow"))]
 pub mod multi_capture;
 #[cfg(all(feature = "tokio", feature = "flow"))]
+pub mod multi_config;
+#[cfg(all(feature = "tokio", feature = "flow"))]
 pub mod multi_streams;
 #[cfg(all(feature = "tokio", feature = "flow"))]
 pub mod session_stream;

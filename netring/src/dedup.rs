@@ -55,6 +55,18 @@ pub struct Dedup {
     seen: u64,
 }
 
+impl Clone for Dedup {
+    /// Clone produces a **fresh** dedup with the same window /
+    /// ring size / direction-awareness, but **reset state**:
+    /// counters at zero and an empty ring. This matches the
+    /// per-source-template use case in plan 26 — each source needs
+    /// its own dedup state, not a snapshot of the source dedup's
+    /// running counters.
+    fn clone(&self) -> Self {
+        Self::new(self.window, self.ring.len(), self.direction_aware)
+    }
+}
+
 #[derive(Clone, Copy)]
 struct Entry {
     hash: u64,

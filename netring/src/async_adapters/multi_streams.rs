@@ -122,9 +122,38 @@ where
         labels: Vec<String>,
         extractor: E,
     ) -> Self {
+        Self::new_with_config(
+            captures,
+            labels,
+            extractor,
+            super::multi_config::MultiStreamConfig::default(),
+        )
+    }
+
+    pub(crate) fn new_with_config(
+        captures: Vec<crate::async_adapters::tokio_adapter::AsyncCapture<Capture>>,
+        labels: Vec<String>,
+        extractor: E,
+        config: super::multi_config::MultiStreamConfig<E::Key>,
+    ) -> Self {
         let streams = captures
             .into_iter()
-            .map(|cap| cap.flow_stream(extractor.clone()))
+            .map(|cap| {
+                let mut s = cap
+                    .flow_stream(extractor.clone())
+                    .with_config(config.tracker_config.clone());
+                if let Some(d) = &config.dedup {
+                    s = s.with_dedup(d.clone());
+                }
+                if let Some(f) = &config.idle_timeout_fn {
+                    let f = f.clone();
+                    s = s.with_idle_timeout_fn(move |k, l4| f(k, l4));
+                }
+                if config.monotonic_ts {
+                    s = s.with_monotonic_timestamps(true);
+                }
+                s
+            })
             .collect();
         Self {
             select: SelectState::new(streams),
@@ -257,10 +286,37 @@ where
         extractor: E,
         factory: F,
     ) -> Self {
+        Self::new_with_config(
+            captures,
+            labels,
+            extractor,
+            factory,
+            super::multi_config::MultiStreamConfig::default(),
+        )
+    }
+
+    pub(crate) fn new_with_config(
+        captures: Vec<crate::async_adapters::tokio_adapter::AsyncCapture<Capture>>,
+        labels: Vec<String>,
+        extractor: E,
+        factory: F,
+        config: super::multi_config::MultiStreamConfig<E::Key>,
+    ) -> Self {
         let streams = captures
             .into_iter()
             .map(|cap| {
-                cap.flow_stream(extractor.clone())
+                let mut s = cap.flow_stream(extractor.clone());
+                if let Some(d) = &config.dedup {
+                    s = s.with_dedup(d.clone());
+                }
+                if let Some(f) = &config.idle_timeout_fn {
+                    let f = f.clone();
+                    s = s.with_idle_timeout_fn(move |k, l4| f(k, l4));
+                }
+                if config.monotonic_ts {
+                    s = s.with_monotonic_timestamps(true);
+                }
+                s.with_config(config.tracker_config.clone())
                     .session_stream(factory.clone())
             })
             .collect();
@@ -395,10 +451,37 @@ where
         extractor: E,
         factory: F,
     ) -> Self {
+        Self::new_with_config(
+            captures,
+            labels,
+            extractor,
+            factory,
+            super::multi_config::MultiStreamConfig::default(),
+        )
+    }
+
+    pub(crate) fn new_with_config(
+        captures: Vec<crate::async_adapters::tokio_adapter::AsyncCapture<Capture>>,
+        labels: Vec<String>,
+        extractor: E,
+        factory: F,
+        config: super::multi_config::MultiStreamConfig<E::Key>,
+    ) -> Self {
         let streams = captures
             .into_iter()
             .map(|cap| {
-                cap.flow_stream(extractor.clone())
+                let mut s = cap.flow_stream(extractor.clone());
+                if let Some(d) = &config.dedup {
+                    s = s.with_dedup(d.clone());
+                }
+                if let Some(f) = &config.idle_timeout_fn {
+                    let f = f.clone();
+                    s = s.with_idle_timeout_fn(move |k, l4| f(k, l4));
+                }
+                if config.monotonic_ts {
+                    s = s.with_monotonic_timestamps(true);
+                }
+                s.with_config(config.tracker_config.clone())
                     .datagram_stream(factory.clone())
             })
             .collect();
@@ -545,5 +628,60 @@ impl super::multi_capture::AsyncMultiCapture {
     {
         let (captures, labels) = self.into_captures();
         MultiDatagramStream::new(captures, labels, extractor, factory)
+    }
+
+    /// Like [`flow_stream`](Self::flow_stream) but applies `config`
+    /// to every inner per-source stream (tracker config, optional
+    /// dedup template cloned per source, optional shared
+    /// idle-timeout predicate, optional monotonic-timestamp clamping).
+    pub fn flow_stream_with<E>(
+        self,
+        extractor: E,
+        config: super::multi_config::MultiStreamConfig<E::Key>,
+    ) -> MultiFlowStream<E>
+    where
+        E: FlowExtractor + Clone + Unpin + Send + 'static,
+        E::Key: Clone + Unpin + Send + 'static,
+    {
+        let (captures, labels) = self.into_captures();
+        MultiFlowStream::new_with_config(captures, labels, extractor, config)
+    }
+
+    /// Like [`session_stream`](Self::session_stream) with per-source
+    /// config applied at construction.
+    pub fn session_stream_with<E, F>(
+        self,
+        extractor: E,
+        factory: F,
+        config: super::multi_config::MultiStreamConfig<E::Key>,
+    ) -> MultiSessionStream<E, F>
+    where
+        E: FlowExtractor + Clone + Unpin + Send + 'static,
+        E::Key: Eq + std::hash::Hash + Clone + Unpin + Send + 'static,
+        F: SessionParserFactory<E::Key> + Clone + Unpin + Send + 'static,
+        F::Parser: Unpin + Send + 'static,
+        <F::Parser as SessionParser>::Message: Unpin + Send + 'static,
+    {
+        let (captures, labels) = self.into_captures();
+        MultiSessionStream::new_with_config(captures, labels, extractor, factory, config)
+    }
+
+    /// Like [`datagram_stream`](Self::datagram_stream) with per-source
+    /// config applied at construction.
+    pub fn datagram_stream_with<E, F>(
+        self,
+        extractor: E,
+        factory: F,
+        config: super::multi_config::MultiStreamConfig<E::Key>,
+    ) -> MultiDatagramStream<E, F>
+    where
+        E: FlowExtractor + Clone + Unpin + Send + 'static,
+        E::Key: Eq + std::hash::Hash + Clone + Unpin + Send + 'static,
+        F: DatagramParserFactory<E::Key> + Clone + Unpin + Send + 'static,
+        F::Parser: Unpin + Send + 'static,
+        <F::Parser as DatagramParser>::Message: Unpin + Send + 'static,
+    {
+        let (captures, labels) = self.into_captures();
+        MultiDatagramStream::new_with_config(captures, labels, extractor, factory, config)
     }
 }

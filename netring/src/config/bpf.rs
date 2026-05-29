@@ -65,6 +65,10 @@ impl From<libc::sock_filter> for BpfInsn {
 #[derive(Debug, Clone)]
 pub struct BpfFilter {
     instructions: Vec<BpfInsn>,
+    /// Symbolic source captured during typed-builder compilation,
+    /// powering [`to_human`](Self::to_human). `None` when the
+    /// filter was constructed from raw bytecode via [`new`](Self::new).
+    pub(crate) source: Option<super::bpf_builder::BpfFilterBuilder>,
 }
 
 impl BpfFilter {
@@ -90,7 +94,27 @@ impl BpfFilter {
                 count: instructions.len(),
             });
         }
-        Ok(Self { instructions })
+        Ok(Self {
+            instructions,
+            source: None,
+        })
+    }
+
+    /// Internal constructor used by the typed-builder compiler to
+    /// attach a symbolic source for [`to_human`](Self::to_human).
+    pub(crate) fn with_source(
+        instructions: Vec<BpfInsn>,
+        source: super::bpf_builder::BpfFilterBuilder,
+    ) -> Result<Self, BuildError> {
+        if instructions.len() > Self::MAX_INSNS {
+            return Err(BuildError::TooManyInstructions {
+                count: instructions.len(),
+            });
+        }
+        Ok(Self {
+            instructions,
+            source: Some(source),
+        })
     }
 
     /// Typed-builder entry point. See
@@ -117,6 +141,38 @@ impl BpfFilter {
     /// Whether the filter has no instructions.
     pub fn is_empty(&self) -> bool {
         self.instructions.is_empty()
+    }
+
+    /// Render the filter as a canonical
+    /// [`pcap-filter(7)`](https://www.tcpdump.org/manpages/pcap-filter.7.html)
+    /// expression (e.g. `"tcp and dst port 443"`).
+    ///
+    /// Returns the empty string for filters built from the empty
+    /// builder (matches every packet — pcap-filter syntax for
+    /// "match all"). For filters constructed via
+    /// [`new`](Self::new) with raw bytecode, returns
+    /// `"<raw bytecode, N instructions>"` since the symbolic IR
+    /// isn't available.
+    ///
+    /// Best-effort: the output is guaranteed to be syntactically
+    /// valid pcap-filter when constructed via the typed builder;
+    /// no claim of byte-identical match with libpcap's
+    /// `tcpdump -dd` bytecode output.
+    pub fn to_human(&self) -> String {
+        self.to_string()
+    }
+}
+
+impl std::fmt::Display for BpfFilter {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match &self.source {
+            Some(builder) => super::bpf_humanize::render(builder, f),
+            None => write!(
+                f,
+                "<raw bytecode, {} instructions>",
+                self.instructions.len()
+            ),
+        }
     }
 }
 

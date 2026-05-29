@@ -5,6 +5,7 @@ use crate::afpacket::ffi;
 pub mod bpf;
 pub mod bpf_builder;
 pub(crate) mod bpf_compile;
+pub(crate) mod bpf_humanize;
 pub mod bpf_interp;
 pub mod busy_poll;
 pub mod ipnet;

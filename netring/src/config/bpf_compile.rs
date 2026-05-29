@@ -116,6 +116,10 @@ struct CompileCtx {
 
 /// Compile a [`BpfFilterBuilder`] into a [`BpfFilter`].
 pub(crate) fn compile(builder: BpfFilterBuilder) -> Result<BpfFilter, BuildError> {
+    // Snapshot the symbolic source before consuming the builder,
+    // so `BpfFilter::to_human` can render it later.
+    let source = builder.clone();
+
     let BpfFilterBuilder {
         fragments,
         or_branches,
@@ -124,12 +128,15 @@ pub(crate) fn compile(builder: BpfFilterBuilder) -> Result<BpfFilter, BuildError
 
     // Special case: empty builder with no branches → accept-all.
     if fragments.is_empty() && or_branches.is_empty() {
-        return BpfFilter::new(vec![BpfInsn {
-            code: BPF_RET_K,
-            jt: 0,
-            jf: 0,
-            k: if negated { DROP_RETVAL } else { ACCEPT_RETVAL },
-        }]);
+        return BpfFilter::with_source(
+            vec![BpfInsn {
+                code: BPF_RET_K,
+                jt: 0,
+                jf: 0,
+                k: if negated { DROP_RETVAL } else { ACCEPT_RETVAL },
+            }],
+            source,
+        );
     }
 
     // Compile each block (top-level AND chain + each OR branch)
@@ -216,7 +223,7 @@ pub(crate) fn compile(builder: BpfFilterBuilder) -> Result<BpfFilter, BuildError
     ));
 
     let resolved = resolve(&sym, accept_pc, drop_pc, &branch_starts)?;
-    BpfFilter::new(resolved)
+    BpfFilter::with_source(resolved, source)
 }
 
 /// Compile a single block (an AND chain of fragments) into a

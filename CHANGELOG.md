@@ -1,5 +1,130 @@
 # Changelog
 
+## 0.15.0 — stream API completion (simple-nms wishlist round)
+
+Three consolidated plans (24-26) closing simple-nms's
+`10-upstream-wishlist-netring.md` items N1.1, N1.3-redirect, N1.4,
+N1.5, N1.6, N1.7, and N2.1. No breaking changes on existing
+surface; net new types and methods plus one `impl Clone for Dedup`.
+
+### New — `StreamSetFilter` sub-trait
+
+`stream.set_filter(&filter)` is now the canonical verb for atomic
+in-kernel BPF filter swap on a built stream. Auto-implemented for
+any [`StreamCapture`] whose source satisfies [`PacketSetFilter`]
+(AF_PACKET only — `AsyncCapture<XdpSocket>`-backed streams don't
+expose it). Replaces simple-nms's `flow_stream(...).with_bpf_filter(filter)`
+ask, which had ambiguous timing semantics (apply at open vs apply
+post-build).
+
+```rust,ignore
+use netring::{AsyncCapture, BpfFilter, StreamSetFilter};
+let cap = AsyncCapture::open("eth0")?;
+let stream = cap.flow_stream(FiveTuple::bidirectional());
+let new = BpfFilter::builder().tcp().dst_port(443).build()?;
+stream.set_filter(&new)?;
+```
+
+### New — `StreamCapture::dedup` / `dedup_mut` default methods
+
+Default to `None`; overridden on `FlowStream` / `SessionStream` /
+`DatagramStream` / `DedupStream` to return their dedup field. The
+existing inherent `dedup()` methods stay (back-compat). Generic
+code can now reach the dedup uniformly through the trait.
+
+### New — `tracker_stats()` + `active_flows()` accessors
+
+`FlowStream`, `SessionStream`, `DatagramStream`, `PcapFlowStream`,
+`PcapSessionStream`, `PcapDatagramStream` all gain:
+
+- `tracker_stats(&self) -> &flowscope::FlowTrackerStats` — one-call
+  access to `flows_created` / `flows_ended` / `flows_evicted` /
+  `packets_unmatched`.
+- `active_flows(&self) -> usize` — count of live LRU entries
+  (O(n)).
+
+The three Multi*Streams add the fan-in versions
+`per_source_tracker_stats()` and `total_active_flows()`, side-channeled
+the same way `per_source_capture_stats` already is.
+
+### New — pcap-tap snaplen
+
+`with_pcap_tap_snaplen(n)` on all four async stream types caps the
+recorded frame size to `n` bytes. PCAP record's `orig_len` keeps
+the full wire length while `caplen` is bounded — same semantic as
+`tcpdump -s <snaplen>`. `PcapTap` gains a `snaplen: Option<u32>`
+field; `CaptureWriter::write_packet_truncated(pkt, caplen)` is the
+new inherent helper.
+
+### New — `Capture::busy_poll_config` + tracing
+
+`BusyPollConfig { busy_poll_us, prefer_busy_poll, busy_poll_budget }`
+plus `Capture::busy_poll_config(&self) -> &BusyPollConfig` lets a
+built capture report which busy-poll knobs were applied at build
+time. Reachable from a stream via
+`stream.capture().get_ref().busy_poll_config()`. The builder also
+emits a `tracing::info!(target: "netring::capture::busy_poll", …)`
+when any knob is set, so operators can confirm engagement without
+inspecting the TOML.
+
+### New — `BpfFilter::to_human()` / `Display`
+
+`BpfFilter` now carries an optional `BpfFilterBuilder` source
+snapshot captured during `build()`. `to_human()` (and the new
+`Display` impl) render it as canonical
+[pcap-filter(7)](https://www.tcpdump.org/manpages/pcap-filter.7.html)
+syntax — e.g. `"tcp and dst port 443 and (udp and dst port 53)"`.
+Falls back to `"<raw bytecode, N instructions>"` for filters
+constructed via `BpfFilter::new(raw_insns)`. Best-effort; no claim
+of byte-identical match with libpcap's `tcpdump -dd` bytecode
+output.
+
+### New — `MultiStreamConfig` + `*_stream_with` constructors
+
+`AsyncMultiCapture` gains three constructors that apply per-source
+config at construction time:
+
+- `flow_stream_with(extractor, MultiStreamConfig)`
+- `session_stream_with(extractor, factory, MultiStreamConfig)`
+- `datagram_stream_with(extractor, factory, MultiStreamConfig)`
+
+`MultiStreamConfig<K>` is a builder over `tracker_config`,
+`dedup` (cloned per source — see below), `idle_timeout_fn`
+(Arc-shared), and `monotonic_ts`. Used because the existing
+`with_*` builder pattern can't reach the boxed per-source streams
+inside `SelectState` post-construction without leaking internal
+types.
+
+Existing `flow_stream` / `session_stream` / `datagram_stream`
+constructors are preserved as `MultiStreamConfig::default()`
+shortcuts — no BC break.
+
+### Internal — `impl Clone for Dedup`
+
+`Dedup` now implements `Clone` with **reset semantics**: clone
+produces a fresh dedup with the same window/ring/direction-awareness
+but zero counters and empty ring. Required by
+`MultiStreamConfig::with_dedup(template)` so each source has
+independent dedup state instead of contending on a shared one.
+Documented loudly — the use case wants reset semantics, not a
+counter snapshot.
+
+### Tests
+
+- 199 lib unit tests pass (+ 5 BusyPollConfig).
+- 17 corpus cases in `tests/bpf_humanize.rs` cover the IR-to-string
+  mapping (tcp/udp/icmp/ip/ip6/arp/vlan, src/dst host/net/port,
+  OR composition, negation, fallback bytecode, Display ≡ to_human).
+- New `tests/stream_api_completion.rs` covers set_filter via trait
+  verb, dedup default propagation, tracker_stats at open,
+  pcap_tap_snaplen chain, busy_poll_config round-trip.
+- New `tests/multi_stream_config.rs` covers MultiStreamConfig
+  propagation through all three `*_stream_with` constructors.
+
+Clippy clean with `-D warnings` across lib + tests.
+
+---
+
 ## 0.14.0 — flowscope 0.4 + per-parser `on_tick`
 
 Bumps the `flowscope` dep from 0.3 to 0.4 and surfaces the headline

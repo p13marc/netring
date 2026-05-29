@@ -44,18 +44,13 @@ shape of any pruned plan, run
 `git log --diff-filter=D --name-only -- plans/` or check the
 corresponding release commits.
 
-### netring 0.15.0 backlog (simple-nms 2026-08-XX wishlist + general API completion)
+### netring 0.15.0 (simple-nms 2026-08-XX wishlist + general API completion)
 
 | Plan | Goal | Status |
 |------|------|--------|
-| [`24-stream-api-completion.md`](./24-stream-api-completion.md) | Five small additions: `StreamSetFilter` sub-trait + `StreamCapture::dedup`/`dedup_mut` defaults + `tracker_stats`/`active_flows` accessors + pcap-tap `snaplen` knob + `Capture::busy_poll_config` accessor with `tracing::info` on apply. Closes simple-nms N1.1, N1.3-redirect, N1.4, N1.5, N1.7. | Planned — 0.15.0 |
-| [`25-bpf-filter-to-human.md`](./25-bpf-filter-to-human.md) | `impl Display for BpfFilter` + `to_human()` rendering canonical pcap-filter syntax. Powers `simple-nms diag filter`. Stores the `MatchFrag` IR alongside the compiled bytecode (regex-source-pattern style). Closes simple-nms N1.6. | Planned — 0.15.0 |
-
-### netring 0.16.0 backlog (larger ergonomics)
-
-| Plan | Goal | Status |
-|------|------|--------|
-| [`26-multi-stream-config.md`](./26-multi-stream-config.md) | `MultiStreamConfig<K>` builder + `flow_stream_with` / `session_stream_with` / `datagram_stream_with` constructors on `AsyncMultiCapture`. Applies tracker config + dedup + idle-timeout-fn + monotonic-ts uniformly to every per-source inner stream during construction (architectural fit, vs. post-hoc `with_*` chaining which collides with the boxed `SelectState` fan-in). Requires `impl Clone for Dedup`. Closes simple-nms N2.1. | Planned — 0.16.0 |
+| [`24-stream-api-completion.md`](./24-stream-api-completion.md) | Five small additions: `StreamSetFilter` sub-trait + `StreamCapture::dedup`/`dedup_mut` defaults + `tracker_stats`/`active_flows` accessors + pcap-tap `snaplen` knob + `Capture::busy_poll_config` accessor with `tracing::info` on apply. Closes simple-nms N1.1, N1.3-redirect, N1.4, N1.5, N1.7. | ✅ landed (0.15.0) |
+| [`25-bpf-filter-to-human.md`](./25-bpf-filter-to-human.md) | `impl Display for BpfFilter` + `to_human()` rendering canonical pcap-filter syntax. Powers `simple-nms diag filter`. Stores the `MatchFrag` IR alongside the compiled bytecode (regex-source-pattern style). Closes simple-nms N1.6. | ✅ landed (0.15.0) |
+| [`26-multi-stream-config.md`](./26-multi-stream-config.md) | `MultiStreamConfig<K>` builder + `flow_stream_with` / `session_stream_with` / `datagram_stream_with` constructors on `AsyncMultiCapture`. Applies tracker config + dedup + idle-timeout-fn + monotonic-ts uniformly to every per-source inner stream during construction. Requires `impl Clone for Dedup` (reset semantics on clone). Closes simple-nms N2.1. | ✅ landed (0.15.0; originally targeted 0.16.0, shipped a release early) |
 
 ### Cross-repo (flowscope)
 

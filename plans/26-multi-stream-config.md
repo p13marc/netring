@@ -22,7 +22,9 @@ Closes simple-nms wishlist item **N2.1**.
 
 ## Status
 
-Planned — targets 0.16.0 (after 0.15.0 ships plans 24 + 25).
+Done — landed in 0.15.0 (shipped a release early; the original
+0.16.0 target became 0.15.0 once 24 + 25 + 26 were all
+implemented in one sweep).
 
 ## Prerequisites
 

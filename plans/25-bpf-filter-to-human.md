@@ -17,7 +17,7 @@ too lossy to disassemble.
 
 ## Status
 
-Planned — targets 0.15.0 (rides with plan 24).
+Done — landed in 0.15.0 (rode with plan 24).
 
 ## Prerequisites
 

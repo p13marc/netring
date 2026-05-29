@@ -35,7 +35,7 @@ N1.7**. N1.6 (`BpfFilter::to_human()`) is its own plan (25). N2.1
 
 ## Status
 
-Planned — targets 0.15.0.
+Done — landed in 0.15.0.
 
 ## Prerequisites
 

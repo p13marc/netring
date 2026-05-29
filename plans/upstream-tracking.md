@@ -62,7 +62,10 @@ at each minor release and update the "Last checked" line.
   ergonomics. Most users pick one backend and stay there.
 - **Action**: revisit when there's user code that demands cross-backend
   generic handling.
-- **Last checked**: 2026-05-05.
+- **Known consumers waiting on this**: simple-nms (AF_PACKET in
+  v1/v2, AF_XDP in v3+); their ARP analyzer reads `vlan_tci` and
+  `direction`. See doc 10 §N2.3 in the simple-nms repo for context.
+- **Last checked**: 2026-08-XX (simple-nms feedback round).
 
 ## CI hardening (post-0.5)
 

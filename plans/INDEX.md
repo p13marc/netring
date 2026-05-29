@@ -44,10 +44,46 @@ shape of any pruned plan, run
 `git log --diff-filter=D --name-only -- plans/` or check the
 corresponding release commits.
 
-_No in-progress plans for the next release yet. The most recently
-shipped batch — plans 20–23 in netring 0.13.0 — was pruned after
-verification against acceptance criteria; see the 0.13.0 CHANGELOG
-section for the full record._
+### netring 0.15.0 backlog (simple-nms 2026-08-XX wishlist + general API completion)
+
+| Plan | Goal | Status |
+|------|------|--------|
+| [`24-stream-api-completion.md`](./24-stream-api-completion.md) | Five small additions: `StreamSetFilter` sub-trait + `StreamCapture::dedup`/`dedup_mut` defaults + `tracker_stats`/`active_flows` accessors + pcap-tap `snaplen` knob + `Capture::busy_poll_config` accessor with `tracing::info` on apply. Closes simple-nms N1.1, N1.3-redirect, N1.4, N1.5, N1.7. | Planned — 0.15.0 |
+| [`25-bpf-filter-to-human.md`](./25-bpf-filter-to-human.md) | `impl Display for BpfFilter` + `to_human()` rendering canonical pcap-filter syntax. Powers `simple-nms diag filter`. Stores the `MatchFrag` IR alongside the compiled bytecode (regex-source-pattern style). Closes simple-nms N1.6. | Planned — 0.15.0 |
+
+### netring 0.16.0 backlog (larger ergonomics)
+
+| Plan | Goal | Status |
+|------|------|--------|
+| [`26-multi-stream-config.md`](./26-multi-stream-config.md) | `MultiStreamConfig<K>` builder + `flow_stream_with` / `session_stream_with` / `datagram_stream_with` constructors on `AsyncMultiCapture`. Applies tracker config + dedup + idle-timeout-fn + monotonic-ts uniformly to every per-source inner stream during construction (architectural fit, vs. post-hoc `with_*` chaining which collides with the boxed `SelectState` fan-in). Requires `impl Clone for Dedup`. Closes simple-nms N2.1. | Planned — 0.16.0 |
+
+### Cross-repo (flowscope)
+
+- [`flowscope/plans/75-skip-endpoints-extractor.md`](https://github.com/p13marc/flowscope/blob/master/plans/75-skip-endpoints-extractor.md) — `extract::SkipEndpoints` + generic `extract::Filter` + `EndpointSet` trait. Closes simple-nms N1.2 (originally directed at netring; redirected because `FlowExtractor` combinators belong in flowscope alongside `StripVlan` / `InnerVxlan` / `FlowLabel`).
+
+### Deferred (recorded so a future ask doesn't get re-litigated)
+
+- **simple-nms N1.3 verbatim** (`flow_stream(...).with_bpf_filter(filter)`
+  chained builder) — declined in favor of the cleaner
+  `stream.set_filter(filter)` verb on `StreamSetFilter` (plan 24).
+  The chained `with_*` form has ambiguous timing semantics
+  (apply-at-open vs. apply-now); the explicit verb avoids the
+  reader-trap.
+- **simple-nms N2.2** (`with_extractor_replace` for hot-reload) —
+  deferred indefinitely. Atomic mid-packet extractor swap is hard
+  (consistency on the in-flight tracker state), and simple-nms has
+  a working `Arc<ArcSwap<...>>`-wrapped-extractor fallback. Revisit
+  only if a third consumer asks.
+- **simple-nms N2.3** (AF_XDP `Packet`-metadata parity with
+  `XdpPacket`) — already tracked in
+  [`upstream-tracking.md`](./upstream-tracking.md) §"Unified
+  `PacketBackend` trait" and §"XDP RX metadata extensions". Added
+  simple-nms as a known consumer waiting on the kernel-side story.
+- **simple-nms N3.1** (in-crate XDP-prefilter shape library) —
+  speculative; revisit when v3 demands materialise.
+- **simple-nms N3.2** (per-fanout-worker drops histogram) —
+  current `AsyncMultiCapture::per_source_capture_stats()` is the
+  raw shape; aggregation belongs in consumer-side dashboards.
 
 ---
 

@@ -56,13 +56,28 @@ pub enum TapErrorPolicy {
 /// so the four stream types can hold an `Option<PcapTap>` without
 /// proliferating generics. One virtual call per packet; overhead is
 /// dwarfed by syscall cost on the disk write.
+///
+/// The `snaplen` argument is the optional per-packet cap on recorded
+/// bytes (the pcap `caplen` field). `None` means record the full
+/// packet — matching pre-snaplen behaviour.
 pub(crate) trait TapWriter: Send {
-    fn write(&mut self, pkt: &Packet<'_>) -> Result<(), pcap_file::PcapError>;
+    fn write(
+        &mut self,
+        pkt: &Packet<'_>,
+        snaplen: Option<u32>,
+    ) -> Result<(), pcap_file::PcapError>;
 }
 
 impl<W: std::io::Write + Send + 'static> TapWriter for CaptureWriter<W> {
-    fn write(&mut self, pkt: &Packet<'_>) -> Result<(), pcap_file::PcapError> {
-        self.write_packet(pkt)
+    fn write(
+        &mut self,
+        pkt: &Packet<'_>,
+        snaplen: Option<u32>,
+    ) -> Result<(), pcap_file::PcapError> {
+        match snaplen {
+            Some(cap) => self.write_packet_truncated(pkt, cap as usize),
+            None => self.write_packet(pkt),
+        }
     }
 }
 
@@ -73,6 +88,9 @@ impl<W: std::io::Write + Send + 'static> TapWriter for CaptureWriter<W> {
 pub struct PcapTap {
     inner: Box<dyn TapWriter>,
     policy: TapErrorPolicy,
+    /// Optional per-packet cap on recorded bytes. `None` records
+    /// full packets. Set via `with_pcap_tap_snaplen`.
+    snaplen: Option<u32>,
     /// Set when the tap was dropped under [`TapErrorPolicy::DropTap`].
     dropped: bool,
 }
@@ -92,19 +110,28 @@ impl PcapTap {
         Self {
             inner: writer,
             policy,
+            snaplen: None,
             dropped: false,
         }
     }
 
-    /// Write `pkt`, honouring the policy. Returns `Some(Error)`
-    /// **only** when the policy is [`TapErrorPolicy::FailStream`]
-    /// and the write fails; in all other cases returns `None` and
-    /// silently records / logs / drops as configured.
+    /// Set the per-packet recording cap. `cap == 0` is allowed and
+    /// records zero-length pcap entries (pcap header + orig_len
+    /// metadata only).
+    pub(crate) fn set_snaplen(&mut self, cap: u32) {
+        self.snaplen = Some(cap);
+    }
+
+    /// Write `pkt`, honouring the policy and any configured snaplen.
+    /// Returns `Some(Error)` **only** when the policy is
+    /// [`TapErrorPolicy::FailStream`] and the write fails; in all
+    /// other cases returns `None` and silently records / logs /
+    /// drops as configured.
     pub(crate) fn write_or_handle(&mut self, pkt: &Packet<'_>) -> Option<Error> {
         if self.dropped {
             return None;
         }
-        let result = self.inner.write(pkt);
+        let result = self.inner.write(pkt, self.snaplen);
         self.handle_result(result)
     }
 
@@ -144,6 +171,12 @@ impl PcapTap {
     pub fn is_dropped(&self) -> bool {
         self.dropped
     }
+
+    /// Configured per-packet recording cap, or `None` for full
+    /// packets.
+    pub fn snaplen(&self) -> Option<u32> {
+        self.snaplen
+    }
 }
 
 #[cfg(test)]
@@ -155,7 +188,11 @@ mod tests {
     /// directly to avoid needing a real `Packet<'_>`.
     struct NoopWriter;
     impl TapWriter for NoopWriter {
-        fn write(&mut self, _pkt: &Packet<'_>) -> Result<(), pcap_file::PcapError> {
+        fn write(
+            &mut self,
+            _pkt: &Packet<'_>,
+            _snaplen: Option<u32>,
+        ) -> Result<(), pcap_file::PcapError> {
             Ok(())
         }
     }

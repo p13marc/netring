@@ -38,8 +38,8 @@ pub use bridge::{
     Bridge, BridgeAction, BridgeBuilder, BridgeDirection, BridgeHandles, BridgeStats,
 };
 pub use config::{
-    BpfFilter, BpfFilterBuilder, BpfInsn, BuildError, FanoutFlags, FanoutMode, IpNet,
-    ParseIpNetError, RingProfile, TimestampSource,
+    BpfFilter, BpfFilterBuilder, BpfInsn, BuildError, BusyPollConfig, FanoutFlags, FanoutMode,
+    IpNet, ParseIpNetError, RingProfile, TimestampSource,
 };
 pub use dedup::Dedup;
 pub use error::Error;
@@ -131,7 +131,7 @@ pub use async_adapters::multi_streams::{
     MultiDatagramStream, MultiFlowStream, MultiSessionStream, TaggedEvent,
 };
 #[cfg(feature = "tokio")]
-pub use async_adapters::stream_capture::StreamCapture;
+pub use async_adapters::stream_capture::{StreamCapture, StreamSetFilter};
 #[cfg(all(feature = "pcap", feature = "tokio", feature = "flow"))]
 pub use pcap_flow::{PcapDatagramStream, PcapFlowStream, PcapSessionStream};
 #[cfg(all(feature = "pcap", feature = "tokio"))]

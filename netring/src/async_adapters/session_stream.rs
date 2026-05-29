@@ -195,6 +195,18 @@ where
         self.tracker.all_flow_stats()
     }
 
+    /// Cumulative tracker counters: `flows_created`, `flows_ended`,
+    /// `flows_evicted`, `packets_unmatched`.
+    pub fn tracker_stats(&self) -> &flowscope::FlowTrackerStats {
+        self.tracker.stats()
+    }
+
+    /// Count of live flow entries. O(n) walk; call from a metrics
+    /// tick, not every poll.
+    pub fn active_flows(&self) -> usize {
+        self.tracker.flows().count()
+    }
+
     /// Plan 20: tap every captured packet into `writer` before
     /// reassembly + parsing. Default error policy:
     /// [`TapErrorPolicy::Continue`](crate::pcap_tap::TapErrorPolicy::Continue).
@@ -218,6 +230,16 @@ where
         W: std::io::Write + Send + 'static,
     {
         self.tap = Some(crate::pcap_tap::PcapTap::new(writer, policy));
+        self
+    }
+
+    /// Plan 24: cap the recorded frame size on the pcap tap. See
+    /// [`FlowStream::with_pcap_tap_snaplen`](super::flow_stream::FlowStream::with_pcap_tap_snaplen).
+    #[cfg(feature = "pcap")]
+    pub fn with_pcap_tap_snaplen(mut self, snaplen: u32) -> Self {
+        if let Some(tap) = self.tap.as_mut() {
+            tap.set_snaplen(snaplen);
+        }
         self
     }
 }
@@ -539,6 +561,14 @@ where
 
     fn capture(&self) -> &AsyncCapture<S> {
         &self.cap
+    }
+
+    fn dedup(&self) -> Option<&crate::dedup::Dedup> {
+        self.dedup.as_ref()
+    }
+
+    fn dedup_mut(&mut self) -> Option<&mut crate::dedup::Dedup> {
+        self.dedup.as_mut()
     }
 }
 

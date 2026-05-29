@@ -101,6 +101,16 @@ where
         self.tap = Some(crate::pcap_tap::PcapTap::new(writer, policy));
         self
     }
+
+    /// Plan 24: cap the recorded frame size on the pcap tap. See
+    /// [`FlowStream::with_pcap_tap_snaplen`](super::flow_stream::FlowStream::with_pcap_tap_snaplen).
+    #[cfg(feature = "pcap")]
+    pub fn with_pcap_tap_snaplen(mut self, snaplen: u32) -> Self {
+        if let Some(tap) = self.tap.as_mut() {
+            tap.set_snaplen(snaplen);
+        }
+        self
+    }
 }
 
 impl<S> Stream for DedupStream<S>
@@ -211,5 +221,13 @@ where
 
     fn capture(&self) -> &AsyncCapture<S> {
         &self.cap
+    }
+
+    fn dedup(&self) -> Option<&crate::dedup::Dedup> {
+        Some(&self.dedup)
+    }
+
+    fn dedup_mut(&mut self) -> Option<&mut crate::dedup::Dedup> {
+        Some(&mut self.dedup)
     }
 }

@@ -6,10 +6,12 @@ pub mod bpf;
 pub mod bpf_builder;
 pub(crate) mod bpf_compile;
 pub mod bpf_interp;
+pub mod busy_poll;
 pub mod ipnet;
 
 pub use bpf::{BpfFilter, BpfInsn, BuildError};
 pub use bpf_builder::BpfFilterBuilder;
+pub use busy_poll::BusyPollConfig;
 pub use ipnet::{IpNet, ParseIpNetError};
 
 /// Fanout distribution mode for multi-socket packet sharing.

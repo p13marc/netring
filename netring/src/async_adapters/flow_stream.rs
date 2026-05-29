@@ -352,6 +352,23 @@ where
         self.tracker.all_flow_stats()
     }
 
+    /// Cumulative tracker counters: `flows_created`, `flows_ended`,
+    /// `flows_evicted`, `packets_unmatched`. One-call accessor for
+    /// the inner [`flowscope::FlowTrackerStats`].
+    ///
+    /// Pair with [`active_flows`](Self::active_flows) for live count.
+    pub fn tracker_stats(&self) -> &flowscope::FlowTrackerStats {
+        self.tracker.stats()
+    }
+
+    /// Count of live flow entries (current LRU size).
+    ///
+    /// O(n) over the LRU; cheap (a few µs at 100k flows) but not
+    /// free — call from a periodic metrics tick, not from every poll.
+    pub fn active_flows(&self) -> usize {
+        self.tracker.flows().count()
+    }
+
     /// Plan 20: tap every captured packet into `writer` before
     /// passing it to the flow tracker. Default error policy:
     /// [`TapErrorPolicy::Continue`](crate::pcap_tap::TapErrorPolicy::Continue).
@@ -390,6 +407,20 @@ where
         W: std::io::Write + Send + 'static,
     {
         self.tap = Some(crate::pcap_tap::PcapTap::new(writer, policy));
+        self
+    }
+
+    /// Plan 24: cap the recorded frame size on the pcap tap, in
+    /// bytes. Same semantic as `tcpdump -s <snaplen>` — the pcap
+    /// record's `orig_len` keeps the full wire length while
+    /// `caplen` is bounded by `snaplen`.
+    ///
+    /// No-op if no tap is attached. Default unlimited.
+    #[cfg(feature = "pcap")]
+    pub fn with_pcap_tap_snaplen(mut self, snaplen: u32) -> Self {
+        if let Some(tap) = self.tap.as_mut() {
+            tap.set_snaplen(snaplen);
+        }
         self
     }
 }
@@ -699,6 +730,14 @@ where
 
     fn capture(&self) -> &AsyncCapture<S> {
         &self.cap
+    }
+
+    fn dedup(&self) -> Option<&Dedup> {
+        self.dedup.as_ref()
+    }
+
+    fn dedup_mut(&mut self) -> Option<&mut Dedup> {
+        self.dedup.as_mut()
     }
 }
 

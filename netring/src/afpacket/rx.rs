@@ -8,7 +8,9 @@ use std::time::{Duration, Instant};
 
 use crate::afpacket::ring::MmapRing;
 use crate::afpacket::{fanout, ffi, filter, ring, socket};
-use crate::config::{BpfFilter, BpfInsn, FanoutFlags, FanoutMode, RingProfile, TimestampSource};
+use crate::config::{
+    BpfFilter, BpfInsn, BusyPollConfig, FanoutFlags, FanoutMode, RingProfile, TimestampSource,
+};
 use crate::error::Error;
 use crate::packet::{BatchIter, Packet, PacketBatch};
 use crate::stats::CaptureStats;
@@ -55,6 +57,10 @@ pub struct Capture {
     /// Running totals across calls to [`cumulative_stats`](Self::cumulative_stats).
     /// `stats()` (the destructive variant) does not touch this.
     cumulative: Cell<CaptureStats>,
+    /// Busy-poll trio applied at build time. Inspected via
+    /// [`busy_poll_config`](Self::busy_poll_config). Empty (all
+    /// `None`) when no busy-poll knobs were set.
+    busy_poll: BusyPollConfig,
 }
 
 impl Capture {
@@ -206,6 +212,19 @@ impl Capture {
     /// then narrow.
     pub fn set_filter(&self, filter: &crate::config::BpfFilter) -> Result<(), Error> {
         filter::attach_bpf_filter(self.fd.as_fd(), filter)
+    }
+
+    // ── Busy-poll introspection ──────────────────────────────────────────
+
+    /// Borrow the busy-poll trio applied at build time.
+    ///
+    /// Empty (all fields `None`) when no busy-poll knob was set on
+    /// the builder. Use [`BusyPollConfig::is_active`] to check.
+    ///
+    /// Reachable from a built async stream via
+    /// `stream.capture().get_ref().busy_poll_config()`.
+    pub fn busy_poll_config(&self) -> &BusyPollConfig {
+        &self.busy_poll
     }
 
     // ── Advanced ─────────────────────────────────────────────────────────
@@ -811,6 +830,22 @@ fn build_inner(b: &CaptureBuilder, block_count: usize) -> Result<Capture, Error>
         filter::attach_bpf_filter(fd.as_fd(), &filt)?;
     }
 
+    let busy_poll = BusyPollConfig {
+        busy_poll_us: b.busy_poll_us,
+        prefer_busy_poll: b.prefer_busy_poll,
+        busy_poll_budget: b.busy_poll_budget,
+    };
+    if busy_poll.is_active() {
+        tracing::info!(
+            target: "netring::capture::busy_poll",
+            busy_poll_us = ?busy_poll.busy_poll_us,
+            prefer_busy_poll = ?busy_poll.prefer_busy_poll,
+            busy_poll_budget = ?busy_poll.busy_poll_budget,
+            interface = %interface,
+            "busy-poll trio applied",
+        );
+    }
+
     Ok(Capture {
         ring,
         fd,
@@ -818,6 +853,7 @@ fn build_inner(b: &CaptureBuilder, block_count: usize) -> Result<Capture, Error>
         expected_seq: 0,
         poll_timeout: b.poll_timeout,
         cumulative: Cell::new(CaptureStats::default()),
+        busy_poll,
     })
 }
 

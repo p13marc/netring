@@ -86,6 +86,33 @@ impl<W: Write> CaptureWriter<W> {
         self.inner.write_packet(&record).map(|_| ())
     }
 
+    /// Write a snaplen-truncated copy of one zero-copy packet.
+    ///
+    /// `caplen` bytes from the head of the packet are recorded; the
+    /// PCAP record's `orig_len` keeps the full wire length, matching
+    /// standard `tcpdump -s <snaplen>` semantics. If `caplen` is
+    /// greater than or equal to the packet length, this is equivalent
+    /// to [`write_packet`](Self::write_packet).
+    pub fn write_packet_truncated(
+        &mut self,
+        pkt: &Packet<'_>,
+        caplen: usize,
+    ) -> Result<(), pcap_file::PcapError> {
+        let ts = pkt.timestamp();
+        let data = pkt.data();
+        let truncated = if caplen < data.len() {
+            data[..caplen].to_vec()
+        } else {
+            data.to_vec()
+        };
+        let record = PcapPacket::new_owned(
+            Duration::new(ts.sec as u64, ts.nsec),
+            pkt.original_len() as u32,
+            truncated,
+        );
+        self.inner.write_packet(&record).map(|_| ())
+    }
+
     /// Write one owned packet.
     pub fn write_owned(&mut self, pkt: &OwnedPacket) -> Result<(), pcap_file::PcapError> {
         let record = PcapPacket::new(

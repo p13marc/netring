@@ -39,9 +39,11 @@
 use std::os::unix::io::AsRawFd;
 
 use crate::async_adapters::tokio_adapter::AsyncCapture;
+use crate::config::BpfFilter;
+use crate::dedup::Dedup;
 use crate::error::Error;
 use crate::stats::CaptureStats;
-use crate::traits::PacketSource;
+use crate::traits::{PacketSetFilter, PacketSource};
 
 /// Sealing module — keeps external crates from implementing
 /// [`StreamCapture`] on their own types.
@@ -93,4 +95,67 @@ pub trait StreamCapture: Sealed {
     fn capture_cumulative_stats(&self) -> Result<CaptureStats, Error> {
         self.capture().cumulative_stats()
     }
+
+    /// Borrow the embedded loopback dedup, if one was attached via
+    /// `with_dedup(...)`. Defaults to `None`; stream types that
+    /// carry a dedup field override this method.
+    ///
+    /// Useful for periodic reporting of `dedup.dropped()` /
+    /// `dedup.seen()` from a built stream without keeping a
+    /// separate handle.
+    fn dedup(&self) -> Option<&Dedup> {
+        None
+    }
+
+    /// Mutable counterpart of [`dedup`](Self::dedup) — for
+    /// inspecting counters (or calling [`Dedup::reset`]).
+    fn dedup_mut(&mut self) -> Option<&mut Dedup> {
+        None
+    }
+}
+
+/// Atomically replace the BPF filter on the underlying capture
+/// from a built stream. Sub-trait of [`StreamCapture`], gated on
+/// the source supporting [`PacketSetFilter`] (AF_PACKET only —
+/// `AsyncCapture<XdpSocket>`-backed streams don't expose it).
+///
+/// Auto-implemented for every [`StreamCapture`] whose source
+/// satisfies the bound. Use via:
+///
+/// ```no_run
+/// # use netring::{AsyncCapture, BpfFilter, StreamSetFilter};
+/// # use netring::flow::extract::FiveTuple;
+/// # async fn _ex() -> Result<(), netring::Error> {
+/// let cap = AsyncCapture::open("eth0")?;
+/// let stream = cap.flow_stream(FiveTuple::bidirectional());
+///
+/// let new_filter = BpfFilter::builder().tcp().dst_port(443).build()?;
+/// stream.set_filter(&new_filter)?;
+/// # Ok(()) }
+/// ```
+///
+/// **Caveat**: in-flight packets in the kernel ring at swap time
+/// were captured under the *old* filter. Drain a couple of polls
+/// if a clean cutover is needed.
+pub trait StreamSetFilter: StreamCapture
+where
+    Self::Source: PacketSetFilter,
+{
+    /// Replace the BPF filter on the underlying capture. Atomic at
+    /// the kernel level (`setsockopt(SO_ATTACH_FILTER)`).
+    ///
+    /// # Errors
+    ///
+    /// - [`crate::Error::Config`] if the filter is empty or oversized.
+    /// - [`crate::Error::SockOpt`] if the `setsockopt` call fails.
+    fn set_filter(&self, filter: &BpfFilter) -> Result<(), Error> {
+        self.capture().get_ref().set_filter(filter)
+    }
+}
+
+impl<T> StreamSetFilter for T
+where
+    T: StreamCapture,
+    T::Source: PacketSetFilter,
+{
 }

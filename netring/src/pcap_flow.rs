@@ -91,6 +91,19 @@ where
         &self.tracker
     }
 
+    /// Cumulative tracker counters: `flows_created`, `flows_ended`,
+    /// `flows_evicted`, `packets_unmatched`. One-call accessor for
+    /// the inner [`flowscope::FlowTrackerStats`].
+    pub fn tracker_stats(&self) -> &flowscope::FlowTrackerStats {
+        self.tracker.stats()
+    }
+
+    /// Count of live flow entries. O(n) walk; call from a metrics
+    /// tick, not every poll.
+    pub fn active_flows(&self) -> usize {
+        self.tracker.flows().count()
+    }
+
     /// Number of packets the upstream source has yielded so far.
     /// Analogue of `capture_stats().packets` for offline replay.
     pub fn packets_read(&self) -> u64 {
@@ -297,6 +310,16 @@ where
         &self.driver
     }
 
+    /// Cumulative tracker counters from the inner driver.
+    pub fn tracker_stats(&self) -> &flowscope::FlowTrackerStats {
+        self.driver.tracker().stats()
+    }
+
+    /// Count of live flow entries. O(n) walk.
+    pub fn active_flows(&self) -> usize {
+        self.driver.tracker().flows().count()
+    }
+
     /// Number of packets the upstream source has yielded so far.
     pub fn packets_read(&self) -> u64 {
         self.source.packets_yielded()
@@ -381,6 +404,16 @@ where
     /// Borrow the inner driver.
     pub fn driver(&self) -> &FlowDatagramDriver<E, P> {
         &self.driver
+    }
+
+    /// Cumulative tracker counters from the inner driver.
+    pub fn tracker_stats(&self) -> &flowscope::FlowTrackerStats {
+        self.driver.tracker().stats()
+    }
+
+    /// Count of live flow entries. O(n) walk.
+    pub fn active_flows(&self) -> usize {
+        self.driver.tracker().flows().count()
     }
 
     /// Number of packets the upstream source has yielded so far.

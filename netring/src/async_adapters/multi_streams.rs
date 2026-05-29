@@ -180,6 +180,33 @@ where
         }
         acc
     }
+
+    /// Per-source tracker stats. One entry per source, in order;
+    /// `None` for sources that have ended.
+    pub fn per_source_tracker_stats(
+        &self,
+    ) -> Vec<(String, Option<&flowscope::FlowTrackerStats>)> {
+        self.select
+            .streams
+            .iter()
+            .enumerate()
+            .map(|(i, slot)| {
+                let label = self.labels[i].clone();
+                let stats = slot.as_ref().map(|s| s.tracker_stats());
+                (label, stats)
+            })
+            .collect()
+    }
+
+    /// Sum of live flow counts across all sources. O(n × per-source LRU).
+    pub fn total_active_flows(&self) -> usize {
+        self.select
+            .streams
+            .iter()
+            .filter_map(|slot| slot.as_ref())
+            .map(|s| s.active_flows())
+            .sum()
+    }
 }
 
 impl<E> Stream for MultiFlowStream<E>
@@ -286,6 +313,33 @@ where
             }
         }
         acc
+    }
+
+    /// Per-source tracker stats. See
+    /// [`MultiFlowStream::per_source_tracker_stats`].
+    pub fn per_source_tracker_stats(
+        &self,
+    ) -> Vec<(String, Option<&flowscope::FlowTrackerStats>)> {
+        self.select
+            .streams
+            .iter()
+            .enumerate()
+            .map(|(i, slot)| {
+                let label = self.labels[i].clone();
+                let stats = slot.as_ref().map(|s| s.tracker_stats());
+                (label, stats)
+            })
+            .collect()
+    }
+
+    /// Sum of live flow counts across all sources.
+    pub fn total_active_flows(&self) -> usize {
+        self.select
+            .streams
+            .iter()
+            .filter_map(|slot| slot.as_ref())
+            .map(|s| s.active_flows())
+            .sum()
     }
 }
 
@@ -397,6 +451,33 @@ where
             }
         }
         acc
+    }
+
+    /// Per-source tracker stats. See
+    /// [`MultiFlowStream::per_source_tracker_stats`].
+    pub fn per_source_tracker_stats(
+        &self,
+    ) -> Vec<(String, Option<&flowscope::FlowTrackerStats>)> {
+        self.select
+            .streams
+            .iter()
+            .enumerate()
+            .map(|(i, slot)| {
+                let label = self.labels[i].clone();
+                let stats = slot.as_ref().map(|s| s.tracker_stats());
+                (label, stats)
+            })
+            .collect()
+    }
+
+    /// Sum of live flow counts across all sources.
+    pub fn total_active_flows(&self) -> usize {
+        self.select
+            .streams
+            .iter()
+            .filter_map(|slot| slot.as_ref())
+            .map(|s| s.active_flows())
+            .sum()
     }
 }
 

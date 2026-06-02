@@ -23,6 +23,8 @@ pub mod pcap_flow;
 pub mod pcap_source;
 #[cfg(all(feature = "pcap", feature = "tokio"))]
 pub mod pcap_tap;
+#[cfg(all(feature = "flow", feature = "tokio"))]
+pub mod protocol;
 pub mod stats;
 pub mod traits;
 
@@ -142,3 +144,5 @@ pub use pcap_flow::{PcapDatagramStream, PcapFlowStream, PcapSessionStream};
 pub use pcap_source::{AsyncPcapConfig, AsyncPcapSource, PcapFormat};
 #[cfg(all(feature = "pcap", feature = "tokio"))]
 pub use pcap_tap::{PcapTap, TapErrorPolicy};
+#[cfg(all(feature = "flow", feature = "tokio"))]
+pub use protocol::{ProtocolEvent, ProtocolMessage, ProtocolMonitor, ProtocolMonitorBuilder};

@@ -101,7 +101,7 @@ production-style "watch this interface for everything" recipe.
 | `multi_protocol_monitor` | One `flow_stream`, demux per-L4 (ICMP / TCP / UDP) | `tokio,flow,parse` |
 | `http_session` | TCP/80,8080 → `HttpParser` → request/response events | `tokio,http` |
 | `dns_lookups` | UDP/53 → `DnsUdpParser::with_correlation()` → query/response/RTT/unanswered | `tokio,dns` |
-| **`full_monitor`** | **Three concurrent streams via `tokio::select!`: flow + HTTP + DNS, each kernel-side BPF-filtered.** The "all at once" showcase. | `tokio,http,dns` |
+| **`full_monitor`** | **One `ProtocolMonitorBuilder` call drives flow + HTTP + DNS through a unified `ProtocolEvent` stream.** The "all at once" showcase. Replaces the previous hand-rolled `tokio::select!` boilerplate. | `tokio,http,dns` |
 
 ## pcap/ — offline replay
 

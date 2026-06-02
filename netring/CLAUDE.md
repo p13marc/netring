@@ -21,7 +21,32 @@ built on AF_PACKET with TPACKET_V3 (block-based mmap ring buffers) and AF_XDP.
 ## Implementation Status
 
 **Active.** netring 0.14.0 published; 0.15.0+ in progress (this branch).
-~245 tests, ~47 examples, zero warnings.
+~250 tests, ~47 examples, zero warnings.
+
+### Recent additions (netring 0.16 roadmap, Part I + Part II + III foundation)
+
+Part II — single-call multi-protocol monitor:
+
+- **N8 `ProtocolEvent<K>` + `ProtocolMessage`** in new
+  `netring::protocol` module. Sum-type over `FlowEvent` + L7
+  messages (Http/Dns/Tls). Each Message carries `parser_kind`
+  (from flowscope 0.5) for routing without downcasting.
+  Feature-gated variants — only present when the corresponding
+  parser feature is enabled.
+- **N7 `ProtocolMonitorBuilder` + `ProtocolMonitor<K>`** —
+  declarative entry. `.interface(name).flow().http().dns().build(extractor)`
+  internally opens N AsyncCaptures (one per protocol, each with
+  its kernel BPF filter narrowing to that protocol's ports),
+  boxes each as `Stream<Item = Result<ProtocolEvent<K>, Error>>`,
+  and round-robin polls them through a single unified stream.
+- `examples/l7/full_monitor.rs` rewritten on top of the new
+  builder — drops ~80 LoC of `tokio::select!` orchestration in
+  favour of one `.build()` call. Same kernel/runtime behaviour.
+
+Per-protocol arms only forward `SessionEvent::Application` events
+as `ProtocolEvent::Message`; the lifecycle (Started/Ended/etc.)
+is owned by the `.flow()` arm, avoiding duplicate Started events
+when both `.flow()` and e.g. `.http()` are enabled.
 
 ### Recent additions (netring 0.16 roadmap, Part I + foundation for III)
 

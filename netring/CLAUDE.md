@@ -20,8 +20,33 @@ built on AF_PACKET with TPACKET_V3 (block-based mmap ring buffers) and AF_XDP.
 
 ## Implementation Status
 
-**Active.** netring 0.13.1 published; 0.14.0 prepared (this branch).
-~225 tests, ~37 examples, zero warnings.
+**Active.** netring 0.14.0 published; 0.15.0+ in progress (this branch).
+~225 tests, ~45 examples, zero warnings.
+
+### Recent additions (0.15.0+ — example reorg + real-life L7)
+
+Major example overhaul:
+
+- **`examples/` reorganized into topic dirs** (`basic/`,
+  `async_basics/`, `filter/`, `scaling/`, `xdp/`, `flow/`, `l7/`,
+  `pcap/`). Example *names* (the `cargo run --example <name>`
+  argument) stay stable — only file paths moved. `Cargo.toml`
+  uses explicit `[[example]] name = ..., path = ...` entries.
+- **`examples/README.md`** — per-directory index with the right
+  `--features` flags.
+- **4 new L7 examples** under `examples/l7/`:
+  - `multi_protocol_monitor` — single `flow_stream`, demux per-L4
+    (ICMP / TCP / UDP) with port hints. ~150 LoC.
+  - `http_session` — TCP/80,8080 → `flowscope::http::HttpParser`
+    → request/response events. ~110 LoC.
+  - `dns_lookups` — UDP/53 → `flowscope::dns::DnsUdpParser::with_correlation()`
+    → query / response (with RTT) / unanswered. ~110 LoC.
+  - **`full_monitor`** — three concurrent streams via
+    `tokio::select!`: flow + HTTP + DNS, each on its own
+    BPF-filtered `AsyncCapture`. The "watch this interface for
+    everything" recipe. ~200 LoC.
+- **New `http` / `dns` / `tls` / `all-parsers` features** on
+  netring — pass-through to flowscope's per-protocol parsers.
 
 ### Recent additions (0.14.0)
 

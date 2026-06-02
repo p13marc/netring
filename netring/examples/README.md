@@ -1,0 +1,129 @@
+# netring examples
+
+All ~45 examples are organized by topic. Example *names* (what you
+pass to `cargo run --example <name>`) are stable across the
+reorganization — only the file paths inside this directory changed.
+
+Most examples need `CAP_NET_RAW` on the test binary. Use `just
+setcap` once to grant capabilities, then run examples as your
+normal user.
+
+---
+
+## basic/ — sync capture, TX, bridge
+
+The lowest-level synchronous API. Start here if you want to
+understand the building blocks before reaching for the async
+wrappers.
+
+| Example | What it shows |
+|---|---|
+| `capture` | Plain `Capture::open` → batch loop |
+| `inject` | Plain `Injector::open` → `send` |
+| `bridge` | Forward packets between two interfaces sync |
+| `batch_processing` | Walking a `PacketBatch` with sequence-gap detection |
+| `low_latency` | `LowLatency` ring profile + busy-poll |
+| `stats_monitor` | Live `Capture::stats()` polling loop |
+| `channel_consumer` | `ChannelCapture` (runtime-agnostic, no tokio) |
+| `pcap_write` | Sync capture → `CaptureWriter` pcap file |
+| `dpi` | Simple deep-packet-inspection demo |
+
+## async_basics/ — async wrappers, no flow features
+
+The async API surface. Use these as templates for the typical
+`AsyncCapture::open(iface)?` recipe.
+
+| Example | What it shows |
+|---|---|
+| `async_capture` | `AsyncCapture::readable().await` loop |
+| `async_inject` | `AsyncInjector::send().await` with backpressure |
+| `async_bridge` | Async bidirectional bridge |
+| `async_stream` | `into_stream()` + `futures::StreamExt` |
+| `async_streamext` | Stream combinator usage (`map`, `filter`, …) |
+| `async_pipeline` | tokio `mpsc` pipeline with worker pool |
+| `async_signal` | Ctrl-C graceful shutdown |
+| `async_lo_dedup` | `Dedup::loopback()` for `lo` capture |
+| `async_stats_monitor` | `StreamCapture::capture_stats()` (plan 20) |
+| `async_metrics` | `metrics` crate counters |
+
+## filter/ — BPF and eBPF filtering
+
+| Example | What it shows |
+|---|---|
+| `bpf_filter` | Typed `BpfFilter::builder()` end-to-end |
+| `ebpf_filter` | `aya`-loaded eBPF socket filter |
+| `async_filter` | `AsyncCapture::open_with_filter` + runtime swap |
+
+## scaling/ — fanout and multi-source
+
+| Example | What it shows |
+|---|---|
+| `fanout` | Sync `Capture` joining a `PACKET_FANOUT` group |
+| `async_fanout_workers` | `AsyncMultiCapture::open_workers` |
+| `async_multi_interface` | `AsyncMultiCapture::open(&["lo", "eth0"])` |
+
+See [`docs/scaling.md`](docs/scaling.md) for the fanout decision
+matrix and anti-patterns.
+
+## xdp/ — AF_XDP kernel bypass
+
+| Example | What it shows |
+|---|---|
+| `xdp_send` | TX-only AF_XDP via `XdpMode::Tx` |
+| `async_xdp` | Default `AsyncXdpSocket` recipe |
+| `async_xdp_busy_poll` | Busy-poll trio for latency |
+| `async_xdp_self_loaded` | `with_default_program()` — no external XDP loader |
+| `async_xdp_custom_program` | `with_program(prog)` for a caller-loaded XDP program |
+
+## flow/ — flow tracking (no L7 parsing)
+
+| Example | What it shows |
+|---|---|
+| `async_flow_keys` | Bare `FiveTuple` extraction |
+| `async_flow_summary` | Lifecycle events + summary stats |
+| `async_flow_history` | Zeek-style `HistoryString` per flow |
+| `async_flow_channel` | `cap.flow_stream` over an mpsc channel |
+| `async_flow_filter` | Combining `with_dedup` + `flow_stream` |
+| `async_flow_idle_per_key` | `with_idle_timeout_fn` for protocol-aware timeouts |
+| `async_flow_conversations` | `Conversation<K>` aggregate |
+| `async_flow_with_tap` | `with_pcap_tap` — record while you track |
+
+## l7/ — session + datagram parsing (HTTP, DNS, custom)
+
+The L7 surface. `multi_protocol_monitor` demuxes ICMP/TCP/UDP at
+the flow level; `http_session` and `dns_lookups` add real protocol
+parsing; `full_monitor` combines all three concurrently — the
+production-style "watch this interface for everything" recipe.
+
+| Example | What it shows | Features |
+|---|---|---|
+| `async_on_tick` | Custom `DatagramParser::on_tick` emitting heartbeats | `tokio,flow,parse` |
+| `multi_protocol_monitor` | One `flow_stream`, demux per-L4 (ICMP / TCP / UDP) | `tokio,flow,parse` |
+| `http_session` | TCP/80,8080 → `HttpParser` → request/response events | `tokio,http` |
+| `dns_lookups` | UDP/53 → `DnsUdpParser::with_correlation()` → query/response/RTT/unanswered | `tokio,dns` |
+| **`full_monitor`** | **Three concurrent streams via `tokio::select!`: flow + HTTP + DNS, each kernel-side BPF-filtered.** The "all at once" showcase. | `tokio,http,dns` |
+
+## pcap/ — offline replay
+
+| Example | What it shows |
+|---|---|
+| `async_pcap_replay` | `AsyncPcapSource::open(...).flow_events(ext)` for flow-level replay |
+| `async_pcap_sessions` | `AsyncPcapSource::open(...).sessions(ext, parser)` one-liner |
+
+---
+
+## Running
+
+```bash
+# Most examples take an `iface` arg, default `lo`:
+cargo run --example multi_protocol_monitor --features tokio,flow,parse -- lo 30
+
+# Full L4+L7 monitor:
+cargo run --example full_monitor --features tokio,http,dns -- eth0 60
+
+# Offline pcap replay (no privileges needed):
+cargo run --example async_pcap_sessions --features tokio,flow,parse,pcap -- trace.pcap
+```
+
+The `justfile` also has shortcut targets (`just async`, `just dpi`,
+`just bpf-filter`, etc.) — see `just --list`.

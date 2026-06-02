@@ -74,101 +74,244 @@ integration-tests = []
 # Flow & session tracking. `flow + tokio` enables `AsyncCapture::flow_stream`.
 # Pulls `bytes` since the async reassembler API uses it.
 flow = ["parse", "flowscope/tracker", "flowscope/reassembler", "flowscope/session", "dep:bytes", "dep:ahash"]
+# L7 parser pass-through features — pull flowscope's HTTP/DNS/TLS modules.
+# Used by `examples/l7/*` and any consumer that wants a ready-made parser.
+http = ["flow", "flowscope/http"]
+dns = ["flow", "flowscope/dns"]
+tls = ["flow", "flowscope/tls"]
+# Umbrella for everything flowscope-side.
+all-parsers = ["http", "dns", "tls"]
 
 [package.metadata.docs.rs]
 all-features = true
 rustdoc-args = ["--cfg", "docsrs"]
 
+# ── Examples ────────────────────────────────────────────────────────────────
+# Organized by topic under `examples/<category>/`. Example *names*
+# (the `cargo run --example <name>` argument) are kept stable across
+# the reorg; files moved to subdirectories carry explicit `path = ...`.
+
+# basic/ — plain sync capture / TX / bridge
 [[example]]
-name = "xdp_send"
-required-features = ["af-xdp"]
+name = "capture"
+path = "examples/basic/capture.rs"
+
+[[example]]
+name = "inject"
+path = "examples/basic/inject.rs"
+
+[[example]]
+name = "bridge"
+path = "examples/basic/bridge.rs"
+
+[[example]]
+name = "batch_processing"
+path = "examples/basic/batch_processing.rs"
+
+[[example]]
+name = "low_latency"
+path = "examples/basic/low_latency.rs"
+
+[[example]]
+name = "stats_monitor"
+path = "examples/basic/stats_monitor.rs"
+
+[[example]]
+name = "channel_consumer"
+path = "examples/basic/channel_consumer.rs"
+required-features = ["channel"]
 
 [[example]]
 name = "pcap_write"
+path = "examples/basic/pcap_write.rs"
 required-features = ["pcap"]
 
 [[example]]
-name = "async_xdp"
-required-features = ["tokio", "af-xdp"]
+name = "dpi"
+path = "examples/basic/dpi.rs"
 
+# async_basics/ — async wrappers, no flow features
 [[example]]
-name = "async_xdp_busy_poll"
-required-features = ["tokio", "af-xdp"]
-
-[[example]]
-name = "async_xdp_self_loaded"
-required-features = ["tokio", "af-xdp", "xdp-loader"]
-
-[[example]]
-name = "async_xdp_custom_program"
-required-features = ["tokio", "af-xdp", "xdp-loader"]
-
-[[example]]
-name = "async_metrics"
-required-features = ["tokio", "metrics"]
-
-[[example]]
-name = "async_flow_keys"
-required-features = ["tokio", "parse"]
-
-[[example]]
-name = "async_flow_summary"
-required-features = ["tokio", "flow"]
-
-[[example]]
-name = "async_flow_filter"
-required-features = ["tokio", "flow"]
-
-[[example]]
-name = "async_flow_history"
-required-features = ["tokio", "flow"]
-
-[[example]]
-name = "async_flow_channel"
-required-features = ["tokio", "flow"]
-
-[[example]]
-name = "async_lo_dedup"
+name = "async_capture"
+path = "examples/async_basics/capture.rs"
 required-features = ["tokio"]
 
 [[example]]
-name = "async_flow_conversations"
-required-features = ["tokio", "flow"]
+name = "async_inject"
+path = "examples/async_basics/inject.rs"
+required-features = ["tokio"]
 
 [[example]]
-name = "async_flow_idle_per_key"
-required-features = ["tokio", "flow"]
+name = "async_bridge"
+path = "examples/async_basics/bridge.rs"
+required-features = ["tokio"]
+
+[[example]]
+name = "async_stream"
+path = "examples/async_basics/stream.rs"
+required-features = ["tokio"]
+
+[[example]]
+name = "async_streamext"
+path = "examples/async_basics/streamext.rs"
+required-features = ["tokio"]
+
+[[example]]
+name = "async_pipeline"
+path = "examples/async_basics/pipeline.rs"
+required-features = ["tokio"]
+
+[[example]]
+name = "async_signal"
+path = "examples/async_basics/signal.rs"
+required-features = ["tokio"]
+
+[[example]]
+name = "async_lo_dedup"
+path = "examples/async_basics/lo_dedup.rs"
+required-features = ["tokio"]
 
 [[example]]
 name = "async_stats_monitor"
+path = "examples/async_basics/stats_monitor.rs"
 required-features = ["tokio", "flow"]
 
 [[example]]
-name = "async_pcap_sessions"
-required-features = ["tokio", "flow", "parse", "pcap"]
+name = "async_metrics"
+path = "examples/async_basics/metrics.rs"
+required-features = ["tokio", "metrics"]
+
+# filter/ — BPF / eBPF / live filter swap
+[[example]]
+name = "bpf_filter"
+path = "examples/filter/bpf_filter.rs"
 
 [[example]]
-name = "async_on_tick"
-required-features = ["tokio", "flow", "parse"]
-
-[[example]]
-name = "async_flow_with_tap"
-required-features = ["tokio", "flow", "parse", "pcap"]
+name = "ebpf_filter"
+path = "examples/filter/ebpf_filter.rs"
 
 [[example]]
 name = "async_filter"
+path = "examples/filter/async_filter.rs"
 required-features = ["tokio", "flow", "parse"]
+
+# scaling/ — fanout + multi-source
+[[example]]
+name = "fanout"
+path = "examples/scaling/fanout.rs"
 
 [[example]]
 name = "async_fanout_workers"
+path = "examples/scaling/async_fanout_workers.rs"
 required-features = ["tokio", "flow", "parse"]
 
 [[example]]
 name = "async_multi_interface"
+path = "examples/scaling/async_multi_interface.rs"
+required-features = ["tokio", "flow", "parse"]
+
+# xdp/ — AF_XDP
+[[example]]
+name = "xdp_send"
+path = "examples/xdp/xdp_send.rs"
+required-features = ["af-xdp"]
+
+[[example]]
+name = "async_xdp"
+path = "examples/xdp/async_xdp.rs"
+required-features = ["tokio", "af-xdp"]
+
+[[example]]
+name = "async_xdp_busy_poll"
+path = "examples/xdp/async_xdp_busy_poll.rs"
+required-features = ["tokio", "af-xdp"]
+
+[[example]]
+name = "async_xdp_self_loaded"
+path = "examples/xdp/async_xdp_self_loaded.rs"
+required-features = ["tokio", "af-xdp", "xdp-loader"]
+
+[[example]]
+name = "async_xdp_custom_program"
+path = "examples/xdp/async_xdp_custom_program.rs"
+required-features = ["tokio", "af-xdp", "xdp-loader"]
+
+# flow/ — flow tracking (no L7 parsers)
+[[example]]
+name = "async_flow_keys"
+path = "examples/flow/keys.rs"
+required-features = ["tokio", "parse"]
+
+[[example]]
+name = "async_flow_summary"
+path = "examples/flow/summary.rs"
+required-features = ["tokio", "flow"]
+
+[[example]]
+name = "async_flow_history"
+path = "examples/flow/history.rs"
+required-features = ["tokio", "flow"]
+
+[[example]]
+name = "async_flow_channel"
+path = "examples/flow/channel.rs"
+required-features = ["tokio", "flow"]
+
+[[example]]
+name = "async_flow_filter"
+path = "examples/flow/filter.rs"
+required-features = ["tokio", "flow"]
+
+[[example]]
+name = "async_flow_idle_per_key"
+path = "examples/flow/idle_per_key.rs"
+required-features = ["tokio", "flow"]
+
+[[example]]
+name = "async_flow_conversations"
+path = "examples/flow/conversations.rs"
+required-features = ["tokio", "flow"]
+
+[[example]]
+name = "async_flow_with_tap"
+path = "examples/flow/with_tap.rs"
+required-features = ["tokio", "flow", "parse", "pcap"]
+
+# l7/ — session/datagram parsers (HTTP, DNS, custom)
+[[example]]
+name = "async_on_tick"
+path = "examples/l7/on_tick.rs"
 required-features = ["tokio", "flow", "parse"]
 
 [[example]]
+name = "multi_protocol_monitor"
+path = "examples/l7/multi_protocol_monitor.rs"
+required-features = ["tokio", "flow", "parse"]
+
+[[example]]
+name = "http_session"
+path = "examples/l7/http_session.rs"
+required-features = ["tokio", "http"]
+
+[[example]]
+name = "dns_lookups"
+path = "examples/l7/dns_lookups.rs"
+required-features = ["tokio", "dns"]
+
+[[example]]
+name = "full_monitor"
+path = "examples/l7/full_monitor.rs"
+required-features = ["tokio", "http", "dns"]
+
+# pcap/ — offline pcap
+[[example]]
 name = "async_pcap_replay"
+path = "examples/pcap/replay.rs"
+required-features = ["tokio", "flow", "parse", "pcap"]
+
+[[example]]
+name = "async_pcap_sessions"
+path = "examples/pcap/sessions.rs"
 required-features = ["tokio", "flow", "parse", "pcap"]
 
 [[bench]]

@@ -439,7 +439,18 @@ cargo run --example async_stats_monitor   --features "tokio,flow,parse" -- eth0 
 # 0.14.0 — flowscope 0.4 ergonomics: one-step pcap-to-sessions + on_tick parsers:
 cargo run --example async_pcap_sessions   --features "tokio,flow,parse,pcap" -- trace.pcap
 cargo run --example async_on_tick         --features "tokio,flow,parse" -- lo 30
+# 0.15.0+ — real-life L7 monitors using flowscope's HTTP / DNS parsers:
+cargo run --example multi_protocol_monitor --features "tokio,flow,parse"  -- eth0 30
+cargo run --example http_session           --features "tokio,http"        -- eth0 60
+cargo run --example dns_lookups            --features "tokio,dns"         -- eth0 60
+cargo run --example full_monitor           --features "tokio,http,dns"    -- eth0 60
 ```
+
+Examples are organized by topic under
+[`examples/`](examples/README.md) — `basic/`, `async_basics/`,
+`filter/`, `scaling/`, `xdp/`, `flow/`, `l7/`, `pcap/`. See
+[`examples/README.md`](examples/README.md) for a per-category
+index with the right `--features` flags.
 
 ## Documentation
 

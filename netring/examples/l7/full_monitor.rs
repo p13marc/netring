@@ -68,24 +68,14 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let mut flow = cap_flow.flow_stream(FiveTuple::bidirectional());
 
     // ── HTTP stream — TCP/80 + TCP/8080 only ────────────────────
-    let http_filter = BpfFilter::builder()
-        .tcp()
-        .dst_port(80)
-        .or(|b| b.tcp().src_port(80))
-        .or(|b| b.tcp().dst_port(8080))
-        .or(|b| b.tcp().src_port(8080))
-        .build()?;
+    let http_filter = BpfFilter::builder().tcp().ports([80, 8080]).build()?;
     let cap_http = AsyncCapture::open_with_filter(&iface, http_filter)?;
     let mut http = cap_http
         .flow_stream(FiveTuple::bidirectional())
         .session_stream(HttpParser::default());
 
     // ── DNS stream — UDP/53 only ────────────────────────────────
-    let dns_filter = BpfFilter::builder()
-        .udp()
-        .dst_port(53)
-        .or(|b| b.udp().src_port(53))
-        .build()?;
+    let dns_filter = BpfFilter::builder().udp().port(53).build()?;
     let cap_dns = AsyncCapture::open_with_filter(&iface, dns_filter)?;
     let mut dns = cap_dns
         .flow_stream(FiveTuple::bidirectional())

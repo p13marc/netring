@@ -39,15 +39,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .and_then(|s| s.parse().ok())
         .unwrap_or(30);
 
-    // Kernel-side filter: only TCP traffic to/from common HTTP ports.
-    // The flow tracker never sees the rest of the wire — big CPU win.
-    let filter = BpfFilter::builder()
-        .tcp()
-        .dst_port(80)
-        .or(|b| b.tcp().src_port(80))
-        .or(|b| b.tcp().dst_port(8080))
-        .or(|b| b.tcp().src_port(8080))
-        .build()?;
+    // Kernel-side filter: only TCP traffic to/from common HTTP ports
+    // (src OR dst in the set). The flow tracker never sees the rest of
+    // the wire — big CPU win.
+    let filter = BpfFilter::builder().tcp().ports([80, 8080]).build()?;
 
     eprintln!(
         "[http] watching {iface} for {seconds}s (TCP/80, TCP/8080)\n\
@@ -96,8 +91,11 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             SessionEvent::Closed { key, reason, .. } => {
                 println!("- flow {a} <-> {b}  {reason:?}", a = key.a, b = key.b);
             }
-            SessionEvent::Anomaly { kind, .. } => {
-                eprintln!("! anomaly: {kind:?}");
+            SessionEvent::FlowAnomaly { kind, .. } => {
+                eprintln!("! flow anomaly: {kind:?}");
+            }
+            SessionEvent::TrackerAnomaly { kind, .. } => {
+                eprintln!("! tracker anomaly: {kind:?}");
             }
             _ => {}
         }

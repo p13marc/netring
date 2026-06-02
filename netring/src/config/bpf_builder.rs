@@ -187,6 +187,59 @@ impl BpfFilterBuilder {
         self
     }
 
+    /// Match source port in any of `ports`. Convenience for multi-port
+    /// monitors:
+    ///
+    /// ```
+    /// use netring::BpfFilter;
+    /// let f = BpfFilter::builder().tcp().src_ports([80, 8080, 8000]).build().unwrap();
+    /// # let _ = f;
+    /// ```
+    ///
+    /// Desugars to an OR-of-branches at build time — same bytecode
+    /// shape as a hand-rolled `.src_port(80).or(|b| b.src_port(8080))…`
+    /// chain.
+    ///
+    /// # Panics
+    ///
+    /// Panics if `ports` is empty. A filter that matches "any source
+    /// port" should omit the predicate entirely.
+    pub fn src_ports(self, ports: impl IntoIterator<Item = u16>) -> Self {
+        self.expand_ports(ports.into_iter().collect(), MatchFrag::SrcPort)
+    }
+
+    /// Match destination port in any of `ports`. See
+    /// [`Self::src_ports`].
+    pub fn dst_ports(self, ports: impl IntoIterator<Item = u16>) -> Self {
+        self.expand_ports(ports.into_iter().collect(), MatchFrag::DstPort)
+    }
+
+    /// Match either source or destination port in any of `ports`.
+    /// Mirrors [`Self::port`] for a set.
+    pub fn ports(self, ports: impl IntoIterator<Item = u16>) -> Self {
+        self.expand_ports(ports.into_iter().collect(), MatchFrag::AnyPort)
+    }
+
+    /// Desugar `kind_ports([p1, p2, p3])` to
+    /// `kind_port(p1).or(kind_port(p2)).or(kind_port(p3))`. Internal
+    /// helper for `src_ports` / `dst_ports` / `ports`.
+    fn expand_ports(mut self, ports: Vec<u16>, wrap: impl Fn(u16) -> MatchFrag) -> Self {
+        assert!(!ports.is_empty(), "ports() requires at least one port");
+        let mut iter = ports.into_iter();
+        let first = iter.next().unwrap();
+        // Main branch: existing fragments + first port.
+        let base_fragments = self.fragments.clone();
+        self.fragments.push(wrap(first));
+        // Additional branches: same base AND-chain, one per remaining port.
+        for p in iter {
+            let mut branch = BpfFilterBuilder::new();
+            branch.fragments = base_fragments.clone();
+            branch.fragments.push(wrap(p));
+            self.or_branches.push(branch);
+        }
+        self
+    }
+
     // ── Composition ─────────────────────────────────────────
 
     /// Negate the entire builder so far. Calling twice is a no-op.
@@ -238,6 +291,67 @@ mod tests {
         assert!(b.negated);
         let b = b.negate();
         assert!(!b.negated);
+    }
+
+    #[test]
+    fn ports_expands_to_or_branches() {
+        // `.tcp().ports([80, 8080])` should desugar to one branch with
+        // [IpProto(6), AnyPort(80)] and one OR-branch with [IpProto(6),
+        // AnyPort(8080)].
+        let b = BpfFilterBuilder::new().tcp().ports([80, 8080]);
+        assert_eq!(
+            b.fragments,
+            vec![MatchFrag::IpProto(6), MatchFrag::AnyPort(80)]
+        );
+        assert_eq!(b.or_branches.len(), 1);
+        assert_eq!(
+            b.or_branches[0].fragments,
+            vec![MatchFrag::IpProto(6), MatchFrag::AnyPort(8080)]
+        );
+    }
+
+    #[test]
+    fn src_ports_uses_src_port_fragment() {
+        let b = BpfFilterBuilder::new().tcp().src_ports([80, 443]);
+        assert_eq!(
+            b.fragments,
+            vec![MatchFrag::IpProto(6), MatchFrag::SrcPort(80)]
+        );
+        assert_eq!(
+            b.or_branches[0].fragments,
+            vec![MatchFrag::IpProto(6), MatchFrag::SrcPort(443)]
+        );
+    }
+
+    #[test]
+    fn dst_ports_uses_dst_port_fragment() {
+        let b = BpfFilterBuilder::new().udp().dst_ports([53, 5353]);
+        assert_eq!(
+            b.fragments,
+            vec![MatchFrag::IpProto(17), MatchFrag::DstPort(53)]
+        );
+        assert_eq!(
+            b.or_branches[0].fragments,
+            vec![MatchFrag::IpProto(17), MatchFrag::DstPort(5353)]
+        );
+    }
+
+    #[test]
+    fn ports_single_port_no_or_branch() {
+        // Edge case: ports([80]) should be equivalent to port(80) with
+        // no OR-branch.
+        let b = BpfFilterBuilder::new().tcp().ports([80]);
+        assert_eq!(
+            b.fragments,
+            vec![MatchFrag::IpProto(6), MatchFrag::AnyPort(80)]
+        );
+        assert!(b.or_branches.is_empty());
+    }
+
+    #[test]
+    #[should_panic(expected = "at least one port")]
+    fn ports_empty_panics() {
+        let _ = BpfFilterBuilder::new().tcp().ports([]);
     }
 
     #[test]

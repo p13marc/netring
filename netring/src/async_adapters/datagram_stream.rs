@@ -254,12 +254,14 @@ where
                 // impl is a no-op; DNS parsers (e.g.) emit
                 // `DnsMessage::Unanswered` events from this hook.
                 for (key, parser) in this.parsers.iter_mut() {
+                    let parser_kind = parser.parser_kind();
                     for m in parser.on_tick(now) {
                         this.pending.push_back(SessionEvent::Application {
                             key: key.clone(),
                             side: flowscope::FlowSide::Initiator,
                             message: m,
                             ts: now,
+                            parser_kind,
                         });
                     }
                 }
@@ -331,6 +333,7 @@ where
                                 .parsers
                                 .entry(key.clone())
                                 .or_insert_with(|| this.factory.new_parser(key));
+                            let parser_kind = parser.parser_kind();
                             let messages = parser.parse(payload, side, view_ts);
                             for message in messages {
                                 this.pending.push_back(SessionEvent::Application {
@@ -338,6 +341,7 @@ where
                                     side,
                                     message,
                                     ts: view_ts,
+                                    parser_kind,
                                 });
                             }
                         }
@@ -378,9 +382,13 @@ fn convert_event<K, P>(
             parsers.remove(&key);
             pending.push_back(SessionEvent::Closed { key, reason, stats });
         }
-        FlowEvent::Anomaly { key, kind, ts } => {
-            // Plan 19: forward as a typed `SessionEvent::Anomaly`.
-            pending.push_back(SessionEvent::Anomaly { key, kind, ts });
+        FlowEvent::FlowAnomaly { key, kind, ts } => {
+            // flowscope 0.6: per-flow anomaly.
+            pending.push_back(SessionEvent::FlowAnomaly { key, kind, ts });
+        }
+        FlowEvent::TrackerAnomaly { kind, ts } => {
+            // flowscope 0.6: tracker-global anomaly.
+            pending.push_back(SessionEvent::TrackerAnomaly { kind, ts });
         }
         _ => {}
     }

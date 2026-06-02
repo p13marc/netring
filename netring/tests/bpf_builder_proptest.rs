@@ -254,6 +254,33 @@ proptest! {
         let pkt = synth_eth_ipv4_tcp([1, 1, 1, 1], [2, 2, 2, 2], 9999, actual);
         prop_assert_eq!(f.matches(&pkt), target == actual);
     }
+
+    /// 11. `.ports([P1, P2, P3])` matches iff src or dst port is in the set.
+    #[test]
+    fn ports_set_matches_membership(
+        actual_src in arb_port(),
+        actual_dst in arb_port(),
+    ) {
+        // A fixed 3-port set, exercised against arbitrary src/dst ports.
+        let set = [80u16, 443u16, 8080u16];
+        let f = BpfFilter::builder().tcp().ports(set).build().unwrap();
+        let pkt = synth_eth_ipv4_tcp([1, 1, 1, 1], [2, 2, 2, 2], actual_src, actual_dst);
+        let expected = set.contains(&actual_src) || set.contains(&actual_dst);
+        prop_assert_eq!(f.matches(&pkt), expected);
+    }
+
+    /// 12. `.dst_ports([...])` matches dst-only.
+    #[test]
+    fn dst_ports_set_matches_dst_only(
+        actual_src in arb_port(),
+        actual_dst in arb_port(),
+    ) {
+        let set = [22u16, 23u16, 222u16];
+        let f = BpfFilter::builder().tcp().dst_ports(set).build().unwrap();
+        let pkt = synth_eth_ipv4_tcp([1, 1, 1, 1], [2, 2, 2, 2], actual_src, actual_dst);
+        // Src-only-in-set must NOT match.
+        prop_assert_eq!(f.matches(&pkt), set.contains(&actual_dst));
+    }
 }
 
 // Re-expose builder type so tests can name it.

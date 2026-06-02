@@ -39,12 +39,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .and_then(|s| s.parse().ok())
         .unwrap_or(30);
 
-    // Kernel-side filter: UDP/53 only.
-    let filter = BpfFilter::builder()
-        .udp()
-        .dst_port(53)
-        .or(|b| b.udp().src_port(53))
-        .build()?;
+    // Kernel-side filter: UDP/53 only (src OR dst).
+    let filter = BpfFilter::builder().udp().port(53).build()?;
 
     eprintln!(
         "[dns] watching {iface} for {seconds}s (UDP/53)\n\
@@ -98,8 +94,11 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 }
                 _ => {}
             },
-            SessionEvent::Anomaly { kind, .. } => {
-                eprintln!("! anomaly: {kind:?}");
+            SessionEvent::FlowAnomaly { kind, .. } => {
+                eprintln!("! flow anomaly: {kind:?}");
+            }
+            SessionEvent::TrackerAnomaly { kind, .. } => {
+                eprintln!("! tracker anomaly: {kind:?}");
             }
             _ => {}
         }

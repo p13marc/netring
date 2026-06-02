@@ -283,12 +283,14 @@ where
                 // that override it can emit timeout / unanswered-request
                 // messages attributed to the initiator side.
                 for (key, parser) in parsers.iter_mut() {
+                    let parser_kind = parser.parser_kind();
                     for m in parser.on_tick(now) {
                         pending.push_back(SessionEvent::Application {
                             key: key.clone(),
                             side: FlowSide::Initiator,
                             message: m,
                             ts: now,
+                            parser_kind,
                         });
                     }
                 }
@@ -339,6 +341,7 @@ where
                             pkt.view(),
                             &mut this.monotonic_ts,
                         );
+                        let view_ts = view.timestamp;
                         let parsers = &mut this.parsers;
                         let parser_factory = &mut this.parser_factory;
                         let reassemblers = &mut this.reassemblers;
@@ -346,6 +349,9 @@ where
                         let pending = &mut this.pending;
 
                         // Per-segment: route into the per-(flow, side) reassembler.
+                        // `segment` takes the carrying packet's timestamp
+                        // (flowscope 0.5+) so the reassembler can classify
+                        // retransmits with timing.
                         let evts =
                             this.tracker
                                 .track_with_payload(view, |key, side, seq, payload| {
@@ -357,7 +363,7 @@ where
                                         .or_insert_with(|| {
                                             reassembler_factory.new_reassembler(key, side)
                                         })
-                                        .segment(seq, payload);
+                                        .segment(seq, payload, view_ts);
                                 });
 
                         // Per-event: drain reassembler on Packet, drain+fin on Ended,
@@ -434,6 +440,7 @@ fn process_session_event<K, F>(
             let parser = parsers
                 .entry(key.clone())
                 .or_insert_with(|| parser_factory.new_parser(&key));
+            let parser_kind = parser.parser_kind();
             let messages = match side {
                 FlowSide::Initiator => parser.feed_initiator(&drained, ts),
                 FlowSide::Responder => parser.feed_responder(&drained, ts),
@@ -444,6 +451,7 @@ fn process_session_event<K, F>(
                     side,
                     message: m,
                     ts,
+                    parser_kind,
                 });
             }
         }
@@ -466,6 +474,7 @@ fn process_session_event<K, F>(
                         let parser = parsers
                             .entry(key.clone())
                             .or_insert_with(|| parser_factory.new_parser(&key));
+                        let parser_kind = parser.parser_kind();
                         let messages = match side {
                             FlowSide::Initiator => parser.feed_initiator(&drained, stats.last_seen),
                             FlowSide::Responder => parser.feed_responder(&drained, stats.last_seen),
@@ -476,6 +485,7 @@ fn process_session_event<K, F>(
                                 side,
                                 message: m,
                                 ts: stats.last_seen,
+                                parser_kind,
                             });
                         }
                     }
@@ -483,6 +493,7 @@ fn process_session_event<K, F>(
             }
 
             if let Some(mut parser) = parsers.remove(&key) {
+                let parser_kind = parser.parser_kind();
                 match reason {
                     EndReason::Fin | EndReason::IdleTimeout => {
                         for m in parser.fin_initiator() {
@@ -491,6 +502,7 @@ fn process_session_event<K, F>(
                                 side: FlowSide::Initiator,
                                 message: m,
                                 ts: stats.last_seen,
+                                parser_kind,
                             });
                         }
                         for m in parser.fin_responder() {
@@ -499,6 +511,7 @@ fn process_session_event<K, F>(
                                 side: FlowSide::Responder,
                                 message: m,
                                 ts: stats.last_seen,
+                                parser_kind,
                             });
                         }
                     }
@@ -517,16 +530,21 @@ fn process_session_event<K, F>(
             }
             pending.push_back(SessionEvent::Closed { key, reason, stats });
         }
-        FlowEvent::Anomaly { key, kind, ts } => {
-            // Plan 19: forward as a typed `SessionEvent::Anomaly`. The
-            // `Closed` event still carries `EndReason::BufferOverflow` /
-            // `ParseError` when applicable, but the live anomaly is now
-            // first-class on the typed surface.
-            pending.push_back(SessionEvent::Anomaly { key, kind, ts });
+        FlowEvent::FlowAnomaly { key, kind, ts } => {
+            // flowscope 0.6: per-flow anomaly. The `Closed` event still
+            // carries `EndReason::BufferOverflow` / `ParseError` when
+            // applicable, but the live anomaly is first-class on the
+            // typed surface.
+            pending.push_back(SessionEvent::FlowAnomaly { key, kind, ts });
         }
-        // Established / StateChange are not surfaced — SessionStream's
-        // contract is "messages and lifecycle endpoints".
-        FlowEvent::Established { .. } | FlowEvent::StateChange { .. } => {}
+        FlowEvent::TrackerAnomaly { kind, ts } => {
+            // flowscope 0.6: tracker-global anomaly (e.g. eviction
+            // pressure). Carries no flow key.
+            pending.push_back(SessionEvent::TrackerAnomaly { kind, ts });
+        }
+        // Established / StateChange / Tick are not surfaced —
+        // SessionStream's contract is "messages and lifecycle endpoints".
+        _ => {}
     }
 }
 
@@ -639,7 +657,7 @@ mod tests {
         let (mut parsers, mut factory, mut reassemblers, mut pending) = empty_state();
         // Pre-load the reassembler with bytes (simulating prior segment dispatch).
         let mut r = BufferedReassembler::new();
-        r.segment(0, b"hello");
+        r.segment(0, b"hello", ts());
         reassemblers.insert((7u32, FlowSide::Initiator), r);
 
         process_session_event::<u32, EchoParser>(
@@ -697,7 +715,7 @@ mod tests {
         let (mut parsers, mut factory, mut reassemblers, mut pending) = empty_state();
         // Residual bytes left in the initiator reassembler when FIN arrives.
         let mut r = BufferedReassembler::new();
-        r.segment(0, b"residual");
+        r.segment(0, b"residual", ts());
         reassemblers.insert((7u32, FlowSide::Initiator), r);
 
         process_session_event::<u32, EchoParser>(
@@ -735,7 +753,7 @@ mod tests {
     fn ended_buffer_overflow_drops_reassembler_without_drain() {
         let (mut parsers, mut factory, mut reassemblers, mut pending) = empty_state();
         let mut r = BufferedReassembler::new();
-        r.segment(0, b"suspect-data-from-poisoned-flow");
+        r.segment(0, b"suspect-data-from-poisoned-flow", ts());
         reassemblers.insert((7u32, FlowSide::Initiator), r);
 
         process_session_event::<u32, EchoParser>(
@@ -770,7 +788,7 @@ mod tests {
         parsers.insert(7u32, EchoParser);
 
         let mut r = BufferedReassembler::new();
-        r.segment(0, b"abc");
+        r.segment(0, b"abc", ts());
         reassemblers.insert((7u32, FlowSide::Responder), r);
 
         process_session_event::<u32, EchoParser>(
@@ -800,8 +818,8 @@ mod tests {
     fn anomaly_event_forwards_as_session_anomaly() {
         let (mut parsers, mut factory, mut reassemblers, mut pending) = empty_state();
         process_session_event::<u32, EchoParser>(
-            FlowEvent::Anomaly {
-                key: Some(42),
+            FlowEvent::FlowAnomaly {
+                key: 42,
                 kind: AnomalyKind::OutOfOrderSegment {
                     side: FlowSide::Initiator,
                     count: 3,
@@ -815,11 +833,11 @@ mod tests {
         );
         assert_eq!(pending.len(), 1);
         match pending.pop_front().unwrap() {
-            SessionEvent::Anomaly { key, kind, .. } => {
-                assert_eq!(key, Some(42));
+            SessionEvent::FlowAnomaly { key, kind, .. } => {
+                assert_eq!(key, 42);
                 assert!(matches!(kind, AnomalyKind::OutOfOrderSegment { .. }));
             }
-            other => panic!("expected Anomaly, got {other:?}"),
+            other => panic!("expected FlowAnomaly, got {other:?}"),
         }
     }
 
@@ -833,7 +851,7 @@ mod tests {
         // Push enough bytes to trigger the cap; with DropFlow, reassembler
         // poisons (this is the flowscope contract; we just check we get a
         // poisoned flag).
-        r.segment(0, &[0u8; 128]);
+        r.segment(0, &[0u8; 128], ts());
         assert!(r.is_poisoned());
     }
 
@@ -842,7 +860,7 @@ mod tests {
         let cfg = FlowTrackerConfig::default();
         let mut factory = build_reassembler_factory(&cfg);
         let mut r: BufferedReassembler = factory.new_reassembler(&7u32, FlowSide::Initiator);
-        r.segment(0, &vec![0u8; 4096]);
+        r.segment(0, &vec![0u8; 4096], ts());
         assert!(!r.is_poisoned());
         assert_eq!(r.buffered_len(), 4096);
     }

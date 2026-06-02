@@ -87,8 +87,11 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 closed += 1;
                 println!("- {a} <-> {b} ({reason:?})", a = key.a, b = key.b);
             }
-            SessionEvent::Anomaly { kind, .. } => {
-                eprintln!("! anomaly: {kind:?}");
+            SessionEvent::FlowAnomaly { kind, .. } => {
+                eprintln!("! flow anomaly: {kind:?}");
+            }
+            SessionEvent::TrackerAnomaly { kind, .. } => {
+                eprintln!("! tracker anomaly: {kind:?}");
             }
             _ => {}
         }

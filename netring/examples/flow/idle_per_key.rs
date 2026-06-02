@@ -71,8 +71,14 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                     stats.packets_responder,
                 );
             }
-            FlowEvent::Anomaly { key, kind, ts } => {
-                eprintln!("[{}.{:09}] ! anomaly {key:?} {kind:?}", ts.sec, ts.nsec);
+            FlowEvent::FlowAnomaly { key, kind, ts } => {
+                eprintln!(
+                    "[{}.{:09}] ! flow anomaly {key:?} {kind:?}",
+                    ts.sec, ts.nsec
+                );
+            }
+            FlowEvent::TrackerAnomaly { kind, ts } => {
+                eprintln!("[{}.{:09}] ! tracker anomaly {kind:?}", ts.sec, ts.nsec);
             }
             _ => {}
         }

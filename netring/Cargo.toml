@@ -314,6 +314,11 @@ name = "dns_resolved_no_connection"
 path = "examples/anomaly/dns_resolved_no_connection.rs"
 required-features = ["tokio", "dns"]
 
+[[example]]
+name = "anomaly_monitor_demo"
+path = "examples/anomaly/anomaly_monitor_demo.rs"
+required-features = ["tokio", "dns"]
+
 # pcap/ — offline pcap
 [[example]]
 name = "async_pcap_replay"

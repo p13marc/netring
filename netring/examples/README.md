@@ -119,8 +119,9 @@ Part III's `AnomalyMonitor` harness.
 
 | Example | What it shows | Features |
 |---|---|---|
-| `dns_query_burst` | Per-source-IP DNS rate anomaly via `TimeBucketedCounter` | `tokio,dns` |
-| `dns_resolved_no_connection` | Cross-protocol: DNS resolved but no TCP/UDP follows within timeout. Uses `KeyIndexed::drain_expired` to surface unfulfilled resolutions as anomalies. | `tokio,dns` |
+| `dns_query_burst` | Per-source-IP DNS rate anomaly via `TimeBucketedCounter`. Raw primitives, no harness. | `tokio,dns` |
+| `dns_resolved_no_connection` | Cross-protocol: DNS resolved but no TCP/UDP follows within timeout. Uses `KeyIndexed::drain_expired` to surface unfulfilled resolutions as anomalies. Raw primitives. | `tokio,dns` |
+| **`anomaly_monitor_demo`** | **Both detectors above in one event loop using `AnomalyMonitor` + `ProtocolMonitor`.** The "easy to write" recipe: each rule is a small `AnomalyRule<FiveTupleKey>` impl. Compose freely; one builder + one event loop drives the whole correlator. | `tokio,dns` |
 
 ---
 

@@ -23,7 +23,25 @@ built on AF_PACKET with TPACKET_V3 (block-based mmap ring buffers) and AF_XDP.
 **Active.** netring 0.14.0 published; 0.15.0+ in progress (this branch).
 ~250 tests, ~47 examples, zero warnings.
 
-### Recent additions (netring 0.16 roadmap, Part I + Part II + III foundation)
+### Recent additions (netring 0.16 roadmap, Part I + Part II + III)
+
+Part III — anomaly correlation harness:
+
+- **N9 `AnomalyMonitor<K>` + `AnomalyRule<K>`** in new
+  `netring::anomaly` module. A rule is `fn name() -> &'static
+  str`, `fn observe(&mut self, evt: &ProtocolEvent<K>, emit:
+  &mut Vec<Anomaly<K>>)`, optional `fn on_tick(now: Timestamp,
+  emit: ...)`. The monitor reuses one scratch `Vec` across
+  rules.
+- `Anomaly<K>` value type: `kind` slug, `severity`
+  (Info/Warning/Error/Critical), optional `key`, `ts`,
+  `AnomalyContext { observations: Vec<(&'static str, String)>,
+  metrics: Vec<(&'static str, f64)> }`. Builder-style
+  `with_key`/`with_observation`/`with_metric` setters.
+- `examples/anomaly/anomaly_monitor_demo.rs` — reference
+  composition: DnsBurstRule (rate, `TimeBucketedCounter`) +
+  DnsResolvedNoConnectionRule (cross-protocol, `KeyIndexed`)
+  in one event loop driven by `ProtocolMonitor` + `AnomalyMonitor`.
 
 Part II — single-call multi-protocol monitor:
 

@@ -4,6 +4,8 @@
 
 pub mod afpacket;
 pub mod afxdp;
+#[cfg(all(feature = "flow", feature = "tokio"))]
+pub mod anomaly;
 pub mod async_adapters;
 pub mod bridge;
 pub mod config;
@@ -146,3 +148,6 @@ pub use pcap_source::{AsyncPcapConfig, AsyncPcapSource, PcapFormat};
 pub use pcap_tap::{PcapTap, TapErrorPolicy};
 #[cfg(all(feature = "flow", feature = "tokio"))]
 pub use protocol::{ProtocolEvent, ProtocolMessage, ProtocolMonitor, ProtocolMonitorBuilder};
+
+#[cfg(all(feature = "flow", feature = "tokio"))]
+pub use anomaly::{Anomaly, AnomalyContext, AnomalyMonitor, AnomalyRule, Severity};

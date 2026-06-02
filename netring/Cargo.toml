@@ -319,6 +319,16 @@ name = "anomaly_monitor_demo"
 path = "examples/anomaly/anomaly_monitor_demo.rs"
 required-features = ["tokio", "dns"]
 
+[[example]]
+name = "slow_tls_handshake"
+path = "examples/anomaly/slow_tls_handshake.rs"
+required-features = ["tokio", "tls"]
+
+[[example]]
+name = "lateral_movement"
+path = "examples/anomaly/lateral_movement.rs"
+required-features = ["tokio", "flow", "parse"]
+
 # pcap/ — offline pcap
 [[example]]
 name = "async_pcap_replay"

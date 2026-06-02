@@ -110,6 +110,18 @@ production-style "watch this interface for everything" recipe.
 | `async_pcap_replay` | `AsyncPcapSource::open(...).flow_events(ext)` for flow-level replay |
 | `async_pcap_sessions` | `AsyncPcapSource::open(...).sessions(ext, parser)` one-liner |
 
+## anomaly/ — multi-protocol anomaly correlators
+
+Real-life detectors built on `netring::correlate`'s primitives
+(`TimeBucketedCounter`, `KeyIndexed`). The foundation for plan
+[`netring-0.16-roadmap-2026-05-29.md`](../../plans/netring-0.16-roadmap-2026-05-29.md)
+Part III's `AnomalyMonitor` harness.
+
+| Example | What it shows | Features |
+|---|---|---|
+| `dns_query_burst` | Per-source-IP DNS rate anomaly via `TimeBucketedCounter` | `tokio,dns` |
+| `dns_resolved_no_connection` | Cross-protocol: DNS resolved but no TCP/UDP follows within timeout. Uses `KeyIndexed::drain_expired` to surface unfulfilled resolutions as anomalies. | `tokio,dns` |
+
 ---
 
 ## Running

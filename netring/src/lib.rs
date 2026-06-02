@@ -7,6 +7,8 @@ pub mod afxdp;
 pub mod async_adapters;
 pub mod bridge;
 pub mod config;
+#[cfg(feature = "flow")]
+pub mod correlate;
 pub mod dedup;
 pub mod error;
 pub mod interface;

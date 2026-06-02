@@ -303,6 +303,17 @@ name = "full_monitor"
 path = "examples/l7/full_monitor.rs"
 required-features = ["tokio", "http", "dns"]
 
+# anomaly/ — multi-protocol correlators on top of `netring::correlate`
+[[example]]
+name = "dns_query_burst"
+path = "examples/anomaly/dns_query_burst.rs"
+required-features = ["tokio", "dns"]
+
+[[example]]
+name = "dns_resolved_no_connection"
+path = "examples/anomaly/dns_resolved_no_connection.rs"
+required-features = ["tokio", "dns"]
+
 # pcap/ — offline pcap
 [[example]]
 name = "async_pcap_replay"

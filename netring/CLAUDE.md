@@ -21,7 +21,41 @@ built on AF_PACKET with TPACKET_V3 (block-based mmap ring buffers) and AF_XDP.
 ## Implementation Status
 
 **Active.** netring 0.14.0 published; 0.15.0+ in progress (this branch).
-~225 tests, ~45 examples, zero warnings.
+~245 tests, ~47 examples, zero warnings.
+
+### Recent additions (netring 0.16 roadmap, Part I + foundation for III)
+
+Executing
+[`plans/netring-0.16-roadmap-2026-05-29.md`](../plans/netring-0.16-roadmap-2026-05-29.md).
+Items landed:
+
+- **N1** — `flowscope` bumped 0.4 → 0.6. Anomaly split
+  (`FlowAnomaly`/`TrackerAnomaly`), `SessionEvent::Application
+  .parser_kind` field plumbed, `Reassembler::segment(seq, payload,
+  ts)` migration. Catches up with everything that shipped in
+  flowscope 0.5/0.6.
+- **N11** — `BpfFilter::builder().ports([P...])` / `.src_ports`
+  / `.dst_ports` multi-port OR shortcut. Lets examples write
+  `.tcp().ports([80, 8080])` instead of nested `.or(|b| ...)`
+  chains.
+- **N2** — over-verbose BPF filters in `http_session` /
+  `dns_lookups` / `full_monitor` collapsed to use the shortcut.
+- **N9 foundation** — new `netring::correlate` module
+  (`#[cfg(feature = "flow")]`) with two anomaly-detection
+  primitives:
+  - `TimeBucketedCounter<K>` — sliding-window per-key rate counter
+    (DNS bursts, connection storms). 8 unit tests.
+  - `KeyIndexed<K, V>` — TTL'd kv-cache for cross-protocol
+    correlation (DNS resolutions, last-seen hostnames). 9 unit
+    tests including `drain_expired` for "expected B-after-A didn't
+    happen" detectors.
+- **`examples/anomaly/`** — first two reference detectors:
+  - `dns_query_burst` (tokio,dns): >50 DNS queries / 10s window
+    from one source IP. Uses `TimeBucketedCounter`. ~100 LoC.
+  - `dns_resolved_no_connection` (tokio,dns): DNS Response cached
+    by answer IP; absence of subsequent TCP/UDP to that IP within
+    5s emits anomaly. Uses BOTH primitives + two `AsyncCapture`s
+    joined via `tokio::select!`. ~150 LoC.
 
 ### Recent additions (0.15.0+ — example reorg + real-life L7)
 

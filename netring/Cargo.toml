@@ -341,6 +341,11 @@ path = "examples/anomaly/pcap_replay.rs"
 required-features = ["tokio", "flow", "parse", "pcap", "dns"]
 
 [[example]]
+name = "pcap_replay_multi"
+path = "examples/anomaly/pcap_replay_multi.rs"
+required-features = ["tokio", "flow", "parse", "pcap", "dns", "tls"]
+
+[[example]]
 name = "tls_to_unresolved_ip"
 path = "examples/anomaly/tls_to_unresolved_ip.rs"
 required-features = ["tokio", "dns", "tls"]

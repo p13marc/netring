@@ -4,13 +4,29 @@ use flowscope::Timestamp;
 
 use crate::protocol::ProtocolEvent;
 
+impl From<flowscope::event::Severity> for Severity {
+    fn from(s: flowscope::event::Severity) -> Self {
+        // 1:1 variant mapping; the enums were intentionally designed
+        // with the same shape + order so threshold filters port
+        // across the boundary unchanged.
+        match s {
+            flowscope::event::Severity::Info => Severity::Info,
+            flowscope::event::Severity::Warning => Severity::Warning,
+            flowscope::event::Severity::Error => Severity::Error,
+            flowscope::event::Severity::Critical => Severity::Critical,
+            _ => Severity::Warning,
+        }
+    }
+}
+
 /// Severity tier carried on every [`Anomaly`].
 ///
 /// Rule authors pick the tier; the [`AnomalyMonitor`](super::AnomalyMonitor)
 /// is policy-neutral about what to do with it (log, page, alert).
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Default)]
 pub enum Severity {
     /// Informational — pattern of interest, no immediate action.
+    #[default]
     Info,
     /// Worth surfacing in dashboards.
     Warning,

@@ -25,10 +25,10 @@ use futures_core::Stream;
 use tokio_stream::StreamExt;
 
 use super::event::ProtocolEvent;
-#[cfg(any(feature = "http", feature = "dns", feature = "tls"))]
+#[cfg(any(feature = "http", feature = "dns", feature = "tls", feature = "icmp"))]
 use super::event::ProtocolMessage;
 use crate::AsyncCapture;
-#[cfg(any(feature = "http", feature = "dns", feature = "tls"))]
+#[cfg(any(feature = "http", feature = "dns", feature = "tls", feature = "icmp"))]
 use crate::config::BpfFilter;
 use crate::error::Error;
 
@@ -140,7 +140,7 @@ impl<K: Send + Unpin + 'static> Stream for ProtocolMonitor<K> {
 /// Declare:
 /// - the interface to watch (one network device)
 /// - which protocols to track (`.flow()`, `.http()`, `.dns()`,
-///   `.tls()` — each is an additive opt-in)
+///   `.tls()`, `.icmp()` — each is an additive opt-in)
 ///
 /// Then call [`build`](Self::build) with the
 /// [`FlowExtractor`](flowscope::FlowExtractor) (typically
@@ -157,6 +157,17 @@ pub struct ProtocolMonitorBuilder {
     dns_tcp_ports: Option<Vec<u16>>,
     #[cfg(feature = "tls")]
     tls_ports: Option<Vec<u16>>,
+    #[cfg(feature = "icmp")]
+    enable_icmp: Option<IcmpScope>,
+}
+
+/// Which ICMP family the monitor's `.icmp()` arm parses.
+#[cfg(feature = "icmp")]
+#[derive(Debug, Clone, Copy)]
+enum IcmpScope {
+    Both,
+    V4,
+    V6,
 }
 
 impl ProtocolMonitorBuilder {
@@ -226,6 +237,32 @@ impl ProtocolMonitorBuilder {
         self
     }
 
+    /// Enable ICMP parsing (both ICMPv4 and ICMPv6). The arm
+    /// surfaces `ProtocolMessage::Icmp(IcmpMessage)` events,
+    /// including `inner: Option<IcmpInner>` on error variants
+    /// (`DestinationUnreachable`, `TimeExceeded`, …) — the
+    /// cross-protocol correlation primitive that ties an ICMP
+    /// error back to the originating TCP/UDP flow.
+    #[cfg(feature = "icmp")]
+    pub fn icmp(mut self) -> Self {
+        self.enable_icmp = Some(IcmpScope::Both);
+        self
+    }
+
+    /// Enable ICMPv4-only parsing.
+    #[cfg(feature = "icmp")]
+    pub fn icmp_v4_only(mut self) -> Self {
+        self.enable_icmp = Some(IcmpScope::V4);
+        self
+    }
+
+    /// Enable ICMPv6-only parsing.
+    #[cfg(feature = "icmp")]
+    pub fn icmp_v6_only(mut self) -> Self {
+        self.enable_icmp = Some(IcmpScope::V6);
+        self
+    }
+
     /// Build the monitor.
     ///
     /// # Errors
@@ -264,6 +301,11 @@ impl ProtocolMonitorBuilder {
         #[cfg(feature = "tls")]
         if let Some(ports) = self.tls_ports.as_deref() {
             streams.push(build_tls_stream(&iface, extractor.clone(), ports)?);
+        }
+
+        #[cfg(feature = "icmp")]
+        if let Some(scope) = self.enable_icmp {
+            streams.push(build_icmp_stream(&iface, extractor.clone(), scope)?);
         }
 
         if streams.is_empty() {
@@ -376,6 +418,32 @@ where
     Ok(Box::pin(stream))
 }
 
+#[cfg(feature = "icmp")]
+fn build_icmp_stream<E>(
+    iface: &str,
+    ext: E,
+    scope: IcmpScope,
+) -> Result<BoxedEventStream<E::Key>, Error>
+where
+    E: FlowExtractor + Unpin + Send + 'static,
+    E::Key: Eq + std::hash::Hash + Clone + Send + Sync + Unpin + 'static,
+{
+    use flowscope::icmp::IcmpParser;
+
+    let filter = bpf_icmp(scope)?;
+    let cap = AsyncCapture::open_with_filter(iface, filter)?;
+    let parser = match scope {
+        IcmpScope::Both => IcmpParser::new(),
+        IcmpScope::V4 => IcmpParser::new().v4_only(),
+        IcmpScope::V6 => IcmpParser::new().v6_only(),
+    };
+    let stream = cap
+        .flow_stream(ext)
+        .datagram_stream(parser)
+        .filter_map(application_only_icmp);
+    Ok(Box::pin(stream))
+}
+
 // ── Filter helpers — keep only Application events, drop lifecycle. ──
 
 #[cfg(feature = "http")]
@@ -420,6 +488,30 @@ fn application_only_dns<K>(
             side,
             kind: parser_kind,
             message: ProtocolMessage::Dns(message),
+            ts,
+        })),
+        Ok(_) => None,
+    }
+}
+
+#[cfg(feature = "icmp")]
+fn application_only_icmp<K>(
+    r: Result<flowscope::SessionEvent<K, flowscope::icmp::IcmpMessage>, Error>,
+) -> Option<Result<ProtocolEvent<K>, Error>> {
+    use flowscope::SessionEvent;
+    match r {
+        Err(e) => Some(Err(e)),
+        Ok(SessionEvent::Application {
+            key,
+            side,
+            message,
+            ts,
+            parser_kind,
+        }) => Some(Ok(ProtocolEvent::Message {
+            key,
+            side,
+            kind: parser_kind,
+            message: ProtocolMessage::Icmp(message),
             ts,
         })),
         Ok(_) => None,
@@ -474,6 +566,18 @@ fn bpf_udp_ports(ports: &[u16]) -> Result<BpfFilter, Error> {
         .ports(ports.iter().copied())
         .build()
         .map_err(Error::from)
+}
+
+#[cfg(feature = "icmp")]
+fn bpf_icmp(scope: IcmpScope) -> Result<BpfFilter, Error> {
+    // ICMPv4 is IP proto 1; ICMPv6 is IPv6 Next Header 58.
+    let b = BpfFilter::builder();
+    let b = match scope {
+        IcmpScope::V4 => b.icmp(),
+        IcmpScope::V6 => b.ipv6().ip_proto(58),
+        IcmpScope::Both => b.icmp().or(|b| b.ipv6().ip_proto(58)),
+    };
+    b.build().map_err(Error::from)
 }
 
 #[cfg(test)]

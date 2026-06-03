@@ -150,4 +150,6 @@ pub use pcap_tap::{PcapTap, TapErrorPolicy};
 pub use protocol::{ProtocolEvent, ProtocolMessage, ProtocolMonitor, ProtocolMonitorBuilder};
 
 #[cfg(all(feature = "flow", feature = "tokio"))]
-pub use anomaly::{Anomaly, AnomalyContext, AnomalyMonitor, AnomalyRule, Severity};
+pub use anomaly::{
+    Anomaly, AnomalyContext, AnomalyMonitor, AnomalyRule, FlowAnomalyRule, Severity,
+};

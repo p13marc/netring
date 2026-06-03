@@ -83,8 +83,8 @@ fn flow_event_key<K>(e: &FlowEvent<K>) -> Option<&K> {
 }
 
 /// A parsed L7 message. Variants are feature-gated by the
-/// corresponding parser feature (`http` / `dns` / `tls`); enabling
-/// `all-parsers` enables all three.
+/// corresponding parser feature (`http` / `dns` / `tls` / `icmp`);
+/// enabling `all-parsers` enables all four.
 #[derive(Debug, Clone)]
 #[non_exhaustive]
 pub enum ProtocolMessage {
@@ -103,6 +103,14 @@ pub enum ProtocolMessage {
     /// Alert).
     #[cfg(feature = "tls")]
     Tls(flowscope::tls::TlsMessage),
+
+    /// ICMPv4 / ICMPv6 message. Error variants
+    /// (`DestinationUnreachable` / `TimeExceeded` / …) carry
+    /// `inner: Option<IcmpInner>` — the cross-protocol correlation
+    /// primitive that ties the ICMP error back to the originating
+    /// TCP/UDP flow.
+    #[cfg(feature = "icmp")]
+    Icmp(flowscope::icmp::IcmpMessage),
 }
 
 #[cfg(test)]

@@ -335,6 +335,12 @@ name = "icmp_explained_drop"
 path = "examples/anomaly/icmp_explained_drop.rs"
 required-features = ["tokio", "icmp"]
 
+# util/ — helper companions for the demos
+[[example]]
+name = "synthetic_traffic"
+path = "examples/util/synthetic_traffic.rs"
+required-features = ["tokio"]
+
 # pcap/ — offline pcap
 [[example]]
 name = "async_pcap_replay"

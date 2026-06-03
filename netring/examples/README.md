@@ -126,20 +126,43 @@ Part III's `AnomalyMonitor` harness.
 | `lateral_movement` | `LateralMovementRule` — one internal IP contacts > N distinct internal peers in window. Per-source `KeyIndexed<IpAddr, ()>` fan-out tracking; persistent state across flows. | `tokio,flow,parse` |
 | **`icmp_explained_drop`** | **`IcmpExplainedDropRule` — cross-protocol correlation using `IcmpInner` (flowscope 0.7).** Classifies aborted flows into "explained" (matching ICMP Destination Unreachable / Time Exceeded arrived first; Severity::Info) vs "unexplained" (no matching ICMP; Severity::Warning). Catches firewall silent-drop / peer-RST patterns. | `tokio,icmp` |
 
+## util/ — demo helpers
+
+| Example | What it shows | Features |
+|---|---|---|
+| **`synthetic_traffic`** | **Companion traffic generator** — fires DNS queries / TCP SYN→RST flows / HTTP-shaped requests / per-source fan-out on `lo` so the L7 and anomaly examples are self-demoable. Userspace sockets only; **no `CAP_NET_RAW` / root required**. Run in one terminal, run the example you want to demo in another. | `tokio` |
+
 ---
 
 ## Running
+
+The L7 + anomaly examples need real traffic to fire. The
+`synthetic_traffic` helper provides enough on `lo` to demo most of
+them without root:
+
+```bash
+# Terminal A — generator:
+just synthetic-traffic 30
+
+# Terminal B — pick a detector:
+just example dns_query_burst tokio,dns -- lo 30 50
+just example lateral_movement tokio,flow,parse -- lo 30 10 60
+just example full_monitor tokio,http,dns -- lo 30
+```
+
+Other run patterns:
 
 ```bash
 # Most examples take an `iface` arg, default `lo`:
 cargo run --example multi_protocol_monitor --features tokio,flow,parse -- lo 30
 
-# Full L4+L7 monitor:
+# Full L4+L7 monitor on a real interface:
 cargo run --example full_monitor --features tokio,http,dns -- eth0 60
 
 # Offline pcap replay (no privileges needed):
 cargo run --example async_pcap_sessions --features tokio,flow,parse,pcap -- trace.pcap
 ```
 
+```bash
 The `justfile` also has shortcut targets (`just async`, `just dpi`,
 `just bpf-filter`, etc.) — see `just --list`.

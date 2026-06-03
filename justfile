@@ -127,6 +127,11 @@ flow-channel *args:  cargo run -p netring --example async_flow_channel --feature
 # Loopback dedup demo (no privileges-by-default; needs setcap for live capture)
 lo-dedup *args:      cargo run -p netring --example async_lo_dedup --features tokio -- {{args}}
 
+# Synthetic traffic generator — pair with the L7 / anomaly demos.
+# Userspace sockets only; no CAP_NET_RAW. Run in one terminal,
+# run the consumer example in another.
+synthetic-traffic *args:  cargo run -p netring --example synthetic_traffic --features tokio -- {{args}}
+
 # ── Lint & Format ───────────────────────────────────────────────────────────
 
 # Run clippy on the workspace with all features

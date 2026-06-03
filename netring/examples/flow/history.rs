@@ -30,6 +30,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             reason,
             stats,
             history,
+            ..
         } = evt?
         {
             let dur = stats

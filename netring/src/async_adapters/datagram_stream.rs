@@ -376,11 +376,20 @@ fn convert_event<K, P>(
             pending.push_back(SessionEvent::Started { key, ts });
         }
         FlowEvent::Ended {
-            key, reason, stats, ..
+            key,
+            reason,
+            stats,
+            l4,
+            ..
         } => {
             // Datagram parsers have no fin/rst; just drop.
             parsers.remove(&key);
-            pending.push_back(SessionEvent::Closed { key, reason, stats });
+            pending.push_back(SessionEvent::Closed {
+                key,
+                reason,
+                stats,
+                l4,
+            });
         }
         FlowEvent::FlowAnomaly { key, kind, ts } => {
             // flowscope 0.6: per-flow anomaly.

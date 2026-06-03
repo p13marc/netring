@@ -40,15 +40,14 @@
 #[cfg(all(feature = "tokio", feature = "http", feature = "dns"))]
 #[tokio::main(flavor = "current_thread")]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
-    use std::collections::HashMap;
     use std::time::{Duration, Instant};
 
     use flowscope::dns::DnsMessage;
     use flowscope::http::HttpMessage;
     use futures::StreamExt;
     use netring::ProtocolMonitorBuilder;
-    use netring::flow::extract::{FiveTuple, FiveTupleKey};
-    use netring::flow::{EndReason, FlowEvent, L4Proto};
+    use netring::flow::extract::FiveTuple;
+    use netring::flow::{EndReason, FlowEvent};
     use netring::protocol::{ProtocolEvent, ProtocolMessage};
 
     let iface = std::env::args().nth(1).unwrap_or_else(|| "lo".into());
@@ -73,9 +72,6 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     eprintln!("[full-monitor] {} sources active\n", monitor.source_count());
 
-    // FlowEvent::Ended doesn't carry l4; remember it from Started.
-    let mut l4_by_key: HashMap<FiveTupleKey, L4Proto> = HashMap::new();
-
     let deadline = Instant::now() + Duration::from_secs(seconds);
     let mut totals = Totals::default();
 
@@ -84,9 +80,6 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     {
         match evt? {
             ProtocolEvent::Flow(FlowEvent::Started { key, l4, .. }) => {
-                if let Some(p) = l4 {
-                    l4_by_key.insert(key, p);
-                }
                 println!(
                     "[FLOW] + {tag:<5} {a} <-> {b}",
                     tag = l4_tag(l4),
@@ -96,9 +89,12 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 totals.flow_started += 1;
             }
             ProtocolEvent::Flow(FlowEvent::Ended {
-                key, reason, stats, ..
+                key,
+                reason,
+                stats,
+                l4,
+                ..
             }) => {
-                let l4 = l4_by_key.remove(&key);
                 println!(
                     "[FLOW] - {tag:<5} {a} <-> {b}  {reason:?} pkts={p}",
                     tag = l4_tag(l4),

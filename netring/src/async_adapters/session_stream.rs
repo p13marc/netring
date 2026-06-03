@@ -456,7 +456,11 @@ fn process_session_event<K, F>(
             }
         }
         FlowEvent::Ended {
-            key, reason, stats, ..
+            key,
+            reason,
+            stats,
+            l4,
+            ..
         } => {
             // For graceful close paths, drain any residual bytes
             // before calling fin_*. For abort paths, drop the
@@ -528,7 +532,12 @@ fn process_session_event<K, F>(
                     }
                 }
             }
-            pending.push_back(SessionEvent::Closed { key, reason, stats });
+            pending.push_back(SessionEvent::Closed {
+                key,
+                reason,
+                stats,
+                l4,
+            });
         }
         FlowEvent::FlowAnomaly { key, kind, ts } => {
             // flowscope 0.6: per-flow anomaly. The `Closed` event still
@@ -724,6 +733,7 @@ mod tests {
                 reason: EndReason::Fin,
                 stats: FlowStats::default(),
                 history: HistoryString::default(),
+                l4: None,
             },
             &mut parsers,
             &mut factory,
@@ -762,6 +772,7 @@ mod tests {
                 reason: EndReason::BufferOverflow,
                 stats: FlowStats::default(),
                 history: HistoryString::default(),
+                l4: None,
             },
             &mut parsers,
             &mut factory,
@@ -797,6 +808,7 @@ mod tests {
                 reason: EndReason::Rst,
                 stats: FlowStats::default(),
                 history: HistoryString::default(),
+                l4: None,
             },
             &mut parsers,
             &mut factory,

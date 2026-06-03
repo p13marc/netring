@@ -34,6 +34,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 reason,
                 stats,
                 history,
+                ..
             } => {
                 let pkts = stats.packets_initiator + stats.packets_responder;
                 let bytes = stats.bytes_initiator + stats.bytes_responder;

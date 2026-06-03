@@ -133,6 +133,7 @@ mod tests {
             reason: flowscope::EndReason::Fin,
             stats,
             history: flowscope::HistoryString::default(),
+            l4: None,
         });
         assert_eq!(evt.timestamp(), Timestamp::new(150, 0));
         assert_eq!(evt.key(), Some(&7));

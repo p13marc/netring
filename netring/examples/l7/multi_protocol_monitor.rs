@@ -27,9 +27,8 @@
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
     use futures::StreamExt;
     use netring::AsyncCapture;
-    use netring::flow::extract::{FiveTuple, FiveTupleKey};
-    use netring::flow::{EndReason, FlowEvent, L4Proto};
-    use std::collections::HashMap;
+    use netring::flow::extract::FiveTuple;
+    use netring::flow::{EndReason, FlowEvent};
     use std::time::{Duration, Instant};
 
     let iface = std::env::args().nth(1).unwrap_or_else(|| "lo".into());
@@ -48,11 +47,6 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let mut stats_tcp: (u64, u64) = (0, 0);
     let mut stats_udp: (u64, u64) = (0, 0);
 
-    // `FlowEvent::Ended` doesn't carry `l4`, so remember it from
-    // `Started`. A small HashMap suffices for the overview-cadence
-    // workload; production code would use the snapshot accessor.
-    let mut l4_by_key: HashMap<FiveTupleKey, L4Proto> = HashMap::new();
-
     while Instant::now() < deadline
         && let Some(evt) = stream.next().await
     {
@@ -60,15 +54,15 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             FlowEvent::Started { key, l4, .. } => {
                 let (tag, port_hint) = describe(&key, l4);
                 println!("[{tag:<5}] + {a} <-> {b}{port_hint}", a = key.a, b = key.b);
-                if let Some(p) = l4 {
-                    l4_by_key.insert(key, p);
-                }
                 bump_started(l4, &mut stats_icmp, &mut stats_tcp, &mut stats_udp);
             }
             FlowEvent::Ended {
-                key, reason, stats, ..
+                key,
+                reason,
+                stats,
+                l4,
+                ..
             } => {
-                let l4 = l4_by_key.remove(&key);
                 let (tag, _) = describe(&key, l4);
                 println!(
                     "[{tag:<5}] - {a} <-> {b}  {reason:?} pkts={p}",

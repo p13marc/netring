@@ -462,6 +462,35 @@ netring detector → stdout (JSON) → Vector → Loki + Prometheus + alertmanag
 - `kind` field drives label cardinality in Prometheus — keep
   it stable across detector versions.
 
+### Tracing integration
+
+If your service already uses [`tracing`](https://docs.rs/tracing/),
+`Anomaly::emit_tracing()` routes anomalies through the standard
+subscriber instead of stdout:
+
+```rust
+for a in rules.observe(&evt)? {
+    a.emit_tracing();
+}
+```
+
+| `Severity` | tracing `Level` | Extra field |
+|---|---|---|
+| `Info` | `INFO` | — |
+| `Warning` | `WARN` | — |
+| `Error` | `ERROR` | — |
+| `Critical` | `ERROR` | `critical = true` |
+
+Target: `"netring.anomaly"` — filter independently of the rest of
+your logs (`RUST_LOG=netring.anomaly=warn`).
+
+Fields on every event: `kind`, `severity`, `ts_secs`, `ts_nanos`,
+`key` (Debug-formatted), plus `payload` carrying the full JSON
+line (same shape as `to_json_line()`). Subscribers that want the
+dynamic observations / metrics parse the `payload`; subscribers
+that just want kind + severity routing read the fixed fields
+directly.
+
 ### Backpressure
 
 `AnomalyMonitor::observe` returns a `Vec<Anomaly<K>>` per call

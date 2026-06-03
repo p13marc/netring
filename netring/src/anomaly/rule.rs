@@ -205,6 +205,98 @@ impl<K: std::fmt::Debug> Anomaly<K> {
     }
 }
 
+impl<K: std::fmt::Debug> Anomaly<K> {
+    /// Emit this anomaly through the [`tracing`] crate at the
+    /// level matching its [`Severity`].
+    ///
+    /// | `Severity` | tracing `Level` |
+    /// |---|---|
+    /// | `Info` | `INFO` |
+    /// | `Warning` | `WARN` |
+    /// | `Error` | `ERROR` |
+    /// | `Critical` | `ERROR` (with a `critical = true` field) |
+    ///
+    /// Tracing's structured-field model is compile-time — we
+    /// can't enumerate the dynamic `observations` / `metrics`
+    /// vectors as individual fields. Instead the full structured
+    /// payload is attached as a `payload` field carrying the
+    /// JSON line (same shape as [`Self::to_json_line`]).
+    /// Subscribers that want the typed fields (`severity`,
+    /// `kind`, `ts_secs`, `ts_nanos`, optional `key`) can read
+    /// them directly off the event; subscribers that want the
+    /// full payload parse the `payload` field.
+    ///
+    /// Target: `"netring.anomaly"` — set
+    /// `RUST_LOG=netring.anomaly=info` (or filter via
+    /// `EnvFilter`) to route detector events independently of
+    /// the rest of netring's logs.
+    ///
+    /// # Example
+    ///
+    /// ```no_run
+    /// # use flowscope::Timestamp;
+    /// # use netring::anomaly::{Anomaly, Severity};
+    /// let a: Anomaly<u32> = Anomaly::new("DnsBurst", Severity::Warning, Timestamp::new(0, 0));
+    /// a.emit_tracing();
+    /// ```
+    pub fn emit_tracing(&self) {
+        let payload = self.to_json_line();
+        let key_dbg = self.key.as_ref().map(|k| format!("{k:?}"));
+        let key_str: &str = key_dbg.as_deref().unwrap_or("");
+
+        // tracing's structured fields must be compile-time
+        // literal idents; we can't iterate the per-anomaly
+        // observations/metrics here. Pin the fixed fields +
+        // ship the full structure on `payload`. Subscribers
+        // that want per-field structure should split on
+        // payload + use serde_json (or any JSON parser) to
+        // unpack.
+        match self.severity {
+            Severity::Info => tracing::event!(
+                target: "netring.anomaly",
+                tracing::Level::INFO,
+                kind = self.kind,
+                severity = "info",
+                ts_secs = self.ts.sec,
+                ts_nanos = self.ts.nsec,
+                key = key_str,
+                payload = %payload,
+            ),
+            Severity::Warning => tracing::event!(
+                target: "netring.anomaly",
+                tracing::Level::WARN,
+                kind = self.kind,
+                severity = "warning",
+                ts_secs = self.ts.sec,
+                ts_nanos = self.ts.nsec,
+                key = key_str,
+                payload = %payload,
+            ),
+            Severity::Error => tracing::event!(
+                target: "netring.anomaly",
+                tracing::Level::ERROR,
+                kind = self.kind,
+                severity = "error",
+                ts_secs = self.ts.sec,
+                ts_nanos = self.ts.nsec,
+                key = key_str,
+                payload = %payload,
+            ),
+            Severity::Critical => tracing::event!(
+                target: "netring.anomaly",
+                tracing::Level::ERROR,
+                critical = true,
+                kind = self.kind,
+                severity = "critical",
+                ts_secs = self.ts.sec,
+                ts_nanos = self.ts.nsec,
+                key = key_str,
+                payload = %payload,
+            ),
+        }
+    }
+}
+
 /// Escape `value` per RFC 8259 §7 and append it to `out` wrapped in
 /// double quotes. Only handles the control set + `\` + `"`; the rest
 /// passes through as UTF-8.

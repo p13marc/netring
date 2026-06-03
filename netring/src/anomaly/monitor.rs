@@ -285,6 +285,27 @@ mod tests {
     }
 
     #[test]
+    fn anomaly_emit_tracing_does_not_panic() {
+        // Verifies the macro expansion + the per-severity match arms
+        // are all wired correctly. Without an installed subscriber
+        // the events are dropped, but the call site still must not
+        // panic. Each severity goes through its own match arm.
+        let make = |sev| {
+            Anomaly::<Key>::new("X", sev, Timestamp::new(0, 0))
+                .with_key(1)
+                .with_observation("o", "v")
+                .with_metric("m", 1.5)
+        };
+        make(Severity::Info).emit_tracing();
+        make(Severity::Warning).emit_tracing();
+        make(Severity::Error).emit_tracing();
+        make(Severity::Critical).emit_tracing();
+        // No-key path:
+        let nokey: Anomaly<Key> = Anomaly::new("Y", Severity::Warning, Timestamp::new(0, 0));
+        nokey.emit_tracing();
+    }
+
+    #[test]
     fn anomaly_to_json_line_nan_metric_becomes_null() {
         let a: Anomaly<Key> = Anomaly::new("X", Severity::Info, Timestamp::new(0, 0))
             .with_metric("nan", f64::NAN)

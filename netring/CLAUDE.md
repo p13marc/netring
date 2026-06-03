@@ -20,10 +20,37 @@ built on AF_PACKET with TPACKET_V3 (block-based mmap ring buffers) and AF_XDP.
 
 ## Implementation Status
 
-**Active.** netring 0.14.0 published; 0.15.0+ in progress (this branch).
-~250 tests, ~47 examples, zero warnings.
+**Active.** netring 0.16.0 prepared (this branch); 0.15.0 published.
+~318 tests, ~53 examples, zero warnings.
 
-### Recent additions (netring 0.16 roadmap, Part I + Part II + III)
+### Recent additions (netring 0.17 — flowscope 0.7 bump)
+
+Driven by
+[`plans/netring-0.17-flowscope-0.7-bump-2026-06-03.md`](../plans/netring-0.17-flowscope-0.7-bump-2026-06-03.md).
+
+- **flowscope 0.6 → 0.7.** `FlowEvent::Ended` and
+  `SessionEvent::Closed` gain `l4: Option<L4Proto>`; the
+  `HashMap<FiveTupleKey, L4Proto>` workaround in
+  `full_monitor.rs` / `multi_protocol_monitor.rs` is gone.
+- **New `icmp` Cargo feature** + `ProtocolMessage::Icmp` +
+  `ProtocolMonitorBuilder::icmp()` (with `.icmp_v4_only()` /
+  `.icmp_v6_only()` variants). Combined v4 + v6 BPF
+  (`ip proto 1 or ip6 ip_proto 58`).
+- **`From<flowscope::event::Severity> for netring::Severity`** —
+  1:1 variant map. `Severity` gains `Default = Info`.
+- **`FlowAnomalyRule`** built-in `AnomalyRule` — lifts every
+  `FlowEvent::FlowAnomaly` / `TrackerAnomaly` into the same
+  `Vec<Anomaly<K>>` pipeline as user-defined rules. Tier comes
+  from `AnomalyKind::severity()`; the kind name lands in
+  `context.observations["kind"]`. Optional `min_severity` floor.
+- **`examples/anomaly/icmp_explained_drop.rs`** — the third
+  N10 reference detector. Uses `IcmpInner` to correlate ICMP
+  errors (Destination Unreachable / Time Exceeded / Redirect /
+  PacketTooBig / ParameterProblem) back to the originating
+  TCP/UDP flow via `KeyIndexed`. Classifies aborted flows into
+  Info/explained vs Warning/unexplained.
+
+### Earlier — netring 0.16 roadmap, Part I + Part II + III
 
 Part III — anomaly correlation harness:
 

@@ -124,6 +124,7 @@ Part III's `AnomalyMonitor` harness.
 | **`anomaly_monitor_demo`** | **Both detectors above in one event loop using `AnomalyMonitor` + `ProtocolMonitor`.** The "easy to write" recipe: each rule is a small `AnomalyRule<FiveTupleKey>` impl. Compose freely; one builder + one event loop drives the whole correlator. | `tokio,dns` |
 | `slow_tls_handshake` | `SlowTlsHandshakeRule` — `ClientHello` not followed by `ServerHello` within threshold. Uses `KeyIndexed::drain_expired` on sweep tick. | `tokio,tls` |
 | `lateral_movement` | `LateralMovementRule` — one internal IP contacts > N distinct internal peers in window. Per-source `KeyIndexed<IpAddr, ()>` fan-out tracking; persistent state across flows. | `tokio,flow,parse` |
+| **`icmp_explained_drop`** | **`IcmpExplainedDropRule` — cross-protocol correlation using `IcmpInner` (flowscope 0.7).** Classifies aborted flows into "explained" (matching ICMP Destination Unreachable / Time Exceeded arrived first; Severity::Info) vs "unexplained" (no matching ICMP; Severity::Warning). Catches firewall silent-drop / peer-RST patterns. | `tokio,icmp` |
 
 ---
 

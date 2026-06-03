@@ -82,7 +82,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             ProtocolEvent::Flow(FlowEvent::Started { key, l4, .. }) => {
                 println!(
                     "[FLOW] + {tag:<5} {a} <-> {b}",
-                    tag = l4_tag(l4),
+                    tag = l4_label(l4),
                     a = key.a,
                     b = key.b
                 );
@@ -97,7 +97,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             }) => {
                 println!(
                     "[FLOW] - {tag:<5} {a} <-> {b}  {reason:?} pkts={p}",
-                    tag = l4_tag(l4),
+                    tag = l4_label(l4),
                     a = key.a,
                     b = key.b,
                     p = stats.packets_initiator + stats.packets_responder,
@@ -200,17 +200,10 @@ struct Totals {
 }
 
 #[cfg(all(feature = "tokio", feature = "http", feature = "dns"))]
-fn l4_tag(l4: Option<netring::flow::L4Proto>) -> &'static str {
-    use netring::flow::L4Proto;
-    match l4 {
-        Some(L4Proto::Tcp) => "TCP",
-        Some(L4Proto::Udp) => "UDP",
-        Some(L4Proto::Icmp) => "ICMP",
-        Some(L4Proto::IcmpV6) => "ICMP6",
-        Some(L4Proto::Sctp) => "SCTP",
-        Some(L4Proto::Other(_)) => "L4?",
-        None => "?",
-    }
+fn l4_label(l4: Option<netring::flow::L4Proto>) -> String {
+    // `L4Proto: Display` since flowscope 0.7 (plan 77). Renders the
+    // metric-vocabulary token directly — `"tcp"`, `"udp"`, …
+    l4.map(|p| p.to_string()).unwrap_or_else(|| "?".into())
 }
 
 #[cfg(not(all(feature = "tokio", feature = "http", feature = "dns")))]

@@ -1,5 +1,97 @@
 # Changelog
 
+## 0.16.0 — flowscope 0.7 bump, ICMP correlation, anomaly harness
+
+Lockstep update to flowscope 0.7.0 plus the 0.16 anomaly-correlation
+roadmap. Pre-1.0 breaking changes on flow-event destructuring; full
+plan in
+[`plans/netring-0.17-flowscope-0.7-bump-2026-06-03.md`](plans/netring-0.17-flowscope-0.7-bump-2026-06-03.md)
+and prior
+[`plans/netring-0.16-roadmap-2026-05-29.md`](plans/netring-0.16-roadmap-2026-05-29.md).
+
+### Breaking
+
+- **flowscope 0.7** — `FlowEvent::Ended` and `SessionEvent::Closed`
+  gain `l4: Option<L4Proto>`. All destructure sites must bind or
+  `..` the new field. Migration sites in netring's own tree are
+  done; downstream consumers must mirror.
+- **`netring::Severity` gains `Default = Info`** (additive default
+  for `FlowAnomalyRule`'s `min_severity` field).
+
+### New — `netring::protocol` unified L7 stream
+
+- **`ProtocolEvent<K>` + `ProtocolMessage`** — sum-type over flow
+  lifecycle + L7 messages (HTTP / DNS / TLS / ICMP). Each Message
+  carries `parser_kind` for routing without downcasting.
+  `#[non_exhaustive]`.
+- **`ProtocolMonitorBuilder` + `ProtocolMonitor<K>`** — declarative
+  entry: `.interface(name).flow().http().dns().tls().icmp().build(extractor)`
+  opens one filtered `AsyncCapture` per enabled protocol and yields
+  a unified async `Stream<Item = Result<ProtocolEvent<K>, Error>>`.
+  Round-robin polls inner streams; one chatty protocol can't starve
+  the others.
+- `examples/l7/full_monitor.rs` rewritten on top of the builder —
+  drops the hand-rolled `tokio::select!` orchestration.
+
+### New — `netring::anomaly` correlation harness
+
+- **`AnomalyMonitor<K>` + `AnomalyRule<K>` trait** — compose
+  detectors as small typed rules over `ProtocolEvent<K>`. Each rule
+  implements `name()` + `observe()` + optional `on_tick()` and
+  pushes `Anomaly<K>` records into a shared scratch buffer.
+- **`Anomaly<K>`** carries `kind` slug, `Severity` tier
+  (`Info`/`Warning`/`Error`/`Critical`), optional key, timestamp,
+  `AnomalyContext { observations, metrics }`.
+- **`FlowAnomalyRule`** built-in — lifts every
+  `FlowEvent::FlowAnomaly` / `TrackerAnomaly` into the same
+  `Vec<Anomaly<K>>` pipeline. Severity tier comes from
+  `AnomalyKind::severity()` via `From<flowscope::event::Severity>`.
+
+### New — `netring::correlate` primitives
+
+- **`TimeBucketedCounter<K>`** — per-key sliding-window rate
+  counter for "this host issued >N events in the last T seconds"
+  detectors.
+- **`KeyIndexed<K, V>`** — TTL'd kv-cache with `drain_expired` for
+  cross-protocol correlation ("the DNS response 200ms ago resolved
+  to that IP — is the TCP flow going to the same IP?").
+
+### New — `icmp` feature + `flowscope::icmp` re-exports
+
+- New `icmp` Cargo feature → `flowscope/icmp`. `all-parsers`
+  umbrella includes it.
+- `ProtocolMessage::Icmp(IcmpMessage)` variant.
+- `ProtocolMonitorBuilder::icmp()` / `.icmp_v4_only()` /
+  `.icmp_v6_only()`. Combined v4 + v6 BPF filter
+  (`ip proto 1 or ip6 ip_proto 58`).
+
+### New — reference anomaly detectors (`examples/anomaly/`)
+
+| Example | Demonstrates |
+|---|---|
+| `dns_query_burst` | `TimeBucketedCounter` — per-source-IP DNS rate |
+| `dns_resolved_no_connection` | `KeyIndexed::drain_expired` cross-protocol |
+| `anomaly_monitor_demo` | Two detectors composed on `AnomalyMonitor` |
+| `slow_tls_handshake` | `ClientHello → ServerHello` timing via `KeyIndexed` |
+| `lateral_movement` | Per-source host-pair fan-out via `KeyIndexed<IpAddr, ()>` |
+| `icmp_explained_drop` | `IcmpInner` correlation — explained vs unexplained RSTs |
+
+### Cleanup
+
+- Examples reorganized into `examples/{basic,async_basics,filter,scaling,xdp,flow,l7,pcap,anomaly}/`
+  subdirectories (example *names* unchanged).
+- `full_monitor.rs` + `multi_protocol_monitor.rs` no longer carry
+  the `HashMap<FiveTupleKey, L4Proto>` workaround — `l4` reads
+  directly off `FlowEvent::Ended` (N4 from the 0.16 roadmap).
+- `BpfFilter::builder().ports([...])` multi-port OR shortcut (N11).
+- `full_monitor.rs` `l4_tag` helper now uses `L4Proto::Display`
+  (flowscope 0.7 plan 77).
+
+### Tests
+
+318 tests across the workspace; 53 examples build; clippy
+all-targets-all-features clean; doc warning-free.
+
 ## 0.15.0 — stream API completion (simple-nms wishlist round)
 
 Three consolidated plans (24-26) closing simple-nms's

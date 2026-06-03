@@ -365,3 +365,8 @@ required-features = ["tokio", "flow", "parse", "pcap"]
 [[bench]]
 name = "throughput"
 harness = false
+
+[[bench]]
+name = "anomaly"
+harness = false
+required-features = ["tokio", "flow", "parse", "dns", "tls"]

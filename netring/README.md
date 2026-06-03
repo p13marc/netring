@@ -11,7 +11,7 @@ mostly used as the underlying source for the async wrappers.
 
 ```toml
 [dependencies]
-netring = { version = "0.14", features = ["tokio"] }
+netring = { version = "0.16", features = ["tokio"] }
 ```
 
 ```rust,no_run
@@ -72,7 +72,7 @@ considerations.
 
 ```toml
 [dependencies]
-netring = { version = "0.14", features = ["tokio", "flow"] }
+netring = { version = "0.16", features = ["tokio", "flow"] }
 futures = "0.3"
 ```
 
@@ -107,7 +107,89 @@ works on any source of `&[u8]` frames.
 
 `flowscope` also ships feature-gated L7 modules: `http` (HTTP/1.x),
 `tls` (TLS handshake observation, optional JA3), `dns` (DNS-over-UDP
-parser + correlator), and `pcap` (offline replay).
+parser + correlator), `icmp` (ICMPv4 + ICMPv6 with `IcmpInner`
+cross-protocol correlation), and `pcap` (offline replay).
+
+## Multi-protocol monitor + anomaly correlation
+
+For the common case of watching one interface for several
+protocols simultaneously, `ProtocolMonitorBuilder` collapses the
+hand-rolled `tokio::select!` choreography to a single declarative
+call:
+
+```rust,ignore
+use futures::StreamExt;
+use netring::flow::extract::FiveTuple;
+use netring::protocol::{ProtocolEvent, ProtocolMessage, ProtocolMonitorBuilder};
+
+let mut monitor = ProtocolMonitorBuilder::new()
+    .interface("eth0")
+    .flow()        // ICMP/TCP/UDP lifecycle
+    .http()        // TCP/80,8080 → HttpParser
+    .dns()         // UDP/53 → DnsUdpParser::with_correlation()
+    .tls()         // TCP/443,8443 → TlsParser
+    .icmp()        // ICMPv4 + ICMPv6 → IcmpParser
+    .build(FiveTuple::bidirectional())?;
+
+while let Some(evt) = monitor.next().await {
+    match evt? {
+        ProtocolEvent::Flow(_) => {}
+        ProtocolEvent::Message { message: ProtocolMessage::Http(_), .. } => {}
+        ProtocolEvent::Message { message: ProtocolMessage::Dns(_), .. } => {}
+        _ => {}
+    }
+}
+```
+
+The monitor opens one filtered `AsyncCapture` per enabled
+protocol (each with a narrow kernel-side BPF filter) and
+round-robin polls them into a unified `Stream<Item =
+Result<ProtocolEvent<K>, Error>>` — one chatty protocol won't
+starve the others.
+
+**Anomaly correlation** sits on top of `ProtocolEvent` as a
+small typed-rule harness. Each detector is an `impl AnomalyRule<K>`
+of ~30 LoC; `AnomalyMonitor` fans every event through every rule:
+
+```rust,ignore
+use netring::anomaly::{Anomaly, AnomalyMonitor, AnomalyRule, FlowAnomalyRule, Severity};
+use netring::correlate::TimeBucketedCounter;
+use netring::flow::extract::FiveTupleKey;
+use netring::protocol::{ProtocolEvent, ProtocolMessage};
+use flowscope::dns::DnsMessage;
+use std::net::IpAddr;
+use std::time::Duration;
+
+struct DnsBurstRule {
+    counts: TimeBucketedCounter<IpAddr>,
+    threshold: u64,
+}
+impl AnomalyRule<FiveTupleKey> for DnsBurstRule {
+    fn name(&self) -> &'static str { "DnsBurst" }
+    fn observe(&mut self, evt: &ProtocolEvent<FiveTupleKey>, emit: &mut Vec<Anomaly<FiveTupleKey>>) {
+        let ProtocolEvent::Message { message: ProtocolMessage::Dns(DnsMessage::Query(_)), key, ts, .. } = evt
+        else { return };
+        self.counts.bump(key.a.ip(), *ts);
+        if self.counts.count(&key.a.ip(), *ts) > self.threshold {
+            emit.push(Anomaly::new(self.name(), Severity::Warning, *ts).with_key(*key));
+        }
+    }
+}
+
+let mut rules = AnomalyMonitor::<FiveTupleKey>::new()
+    .with_rule(DnsBurstRule { counts: TimeBucketedCounter::new(Duration::from_secs(10), Duration::from_secs(1)), threshold: 50 })
+    .with_rule(FlowAnomalyRule::default());  // lifts flowscope's own anomalies in too
+// monitor.next().await → rules.observe(&evt) → Vec<Anomaly<FiveTupleKey>>
+```
+
+`Anomaly<K>` impls `Display` for one-line greppable output;
+severity tiers (`Info/Warning/Error/Critical`) port directly to
+flowscope's `AnomalyKind::severity()` via a `From` impl. Six
+reference detectors live under `examples/anomaly/`:
+`dns_query_burst`, `dns_resolved_no_connection`,
+`anomaly_monitor_demo`, `slow_tls_handshake`, `lateral_movement`,
+`icmp_explained_drop`. Pair with `cargo run --example
+synthetic_traffic` to demo them on `lo` without `CAP_NET_RAW`.
 
 ## Stream observability
 

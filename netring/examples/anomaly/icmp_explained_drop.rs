@@ -258,7 +258,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 let evt = evt?;
                 last_seen = evt.timestamp();
                 for a in rules.observe(&evt) {
-                    print_anomaly(&a);
+                    println!("{a}");
                     match a.severity {
                         Severity::Info => n_explained += 1,
                         Severity::Warning => n_unexplained += 1,
@@ -275,32 +275,6 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     eprintln!("[done] {n_explained} explained drops, {n_unexplained} unexplained drops");
     Ok(())
-}
-
-#[cfg(all(feature = "tokio", feature = "icmp"))]
-fn print_anomaly(a: &Anomaly<FiveTupleKey>) {
-    let parts: Vec<String> = a
-        .context
-        .observations
-        .iter()
-        .map(|(k, v)| format!("{k}={v}"))
-        .chain(a.context.metrics.iter().map(|(k, v)| format!("{k}={v:.1}")))
-        .collect();
-    let tag = match a.severity {
-        Severity::Info => "OK ",
-        Severity::Warning => "WARN",
-        Severity::Error => "ERR ",
-        Severity::Critical => "CRIT",
-    };
-    println!(
-        "[{tag}] {} ts={} key={} {}",
-        a.kind,
-        a.ts,
-        a.key
-            .map(|k| format!("{}<>{}", k.a, k.b))
-            .unwrap_or_default(),
-        parts.join(" ")
-    );
 }
 
 #[cfg(all(feature = "tokio", feature = "icmp"))]

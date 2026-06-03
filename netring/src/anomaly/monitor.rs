@@ -210,4 +210,29 @@ mod tests {
         );
         assert_eq!(a.context.metrics, vec![("rtt_ms", 12.5)]);
     }
+
+    #[test]
+    fn anomaly_display_renders_one_line() {
+        let a: Anomaly<Key> = Anomaly::new("DnsBurst", Severity::Warning, Timestamp::new(5, 0))
+            .with_key(7)
+            .with_observation("src_ip", "10.0.0.1")
+            .with_metric("count", 123.4);
+        let rendered = format!("{a}");
+        assert!(rendered.contains("[warning]"));
+        assert!(rendered.contains("DnsBurst"));
+        assert!(rendered.contains("ts="));
+        assert!(rendered.contains("key=7"));
+        assert!(rendered.contains("src_ip=10.0.0.1"));
+        assert!(rendered.contains("count=123.40"));
+        assert!(!rendered.contains('\n'));
+    }
+
+    #[test]
+    fn anomaly_display_no_key_no_context_minimal() {
+        let a: Anomaly<Key> = Anomaly::new("Tracker", Severity::Info, Timestamp::new(1, 0));
+        let rendered = format!("{a}");
+        assert!(rendered.contains("[info]"));
+        assert!(rendered.contains("Tracker"));
+        assert!(!rendered.contains("key="));
+    }
 }

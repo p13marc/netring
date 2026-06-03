@@ -182,24 +182,6 @@ impl AnomalyRule<FiveTupleKey> for DnsNoConnectionRule {
 }
 
 #[cfg(all(feature = "tokio", feature = "dns"))]
-fn print_anomaly<K: std::fmt::Debug>(a: &Anomaly<K>) {
-    let sev = match a.severity {
-        Severity::Info => "INFO",
-        Severity::Warning => "WARN",
-        Severity::Error => "ERR ",
-        Severity::Critical => "CRIT",
-    };
-    let extras: Vec<_> = a
-        .context
-        .observations
-        .iter()
-        .map(|(k, v)| format!("{k}={v}"))
-        .chain(a.context.metrics.iter().map(|(k, v)| format!("{k}={v:.2}")))
-        .collect();
-    println!("[{sev}] {} ts={} {}", a.kind, a.ts, extras.join(" "));
-}
-
-#[cfg(all(feature = "tokio", feature = "dns"))]
 fn wall_clock_ts() -> Timestamp {
     let now = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
@@ -253,7 +235,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 let evt = evt?;
                 last_seen_ts = evt.timestamp();
                 for a in rules.observe(&evt) {
-                    print_anomaly(&a);
+                    println!("{a}");
                     total += 1;
                 }
             }
@@ -261,7 +243,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 let now = wall_clock_ts();
                 let now = if last_seen_ts > now { last_seen_ts } else { now };
                 for a in rules.on_tick(now) {
-                    print_anomaly(&a);
+                    println!("{a}");
                     total += 1;
                 }
             }

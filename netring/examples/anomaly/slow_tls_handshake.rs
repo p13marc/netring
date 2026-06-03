@@ -164,14 +164,14 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 let evt = evt?;
                 last_seen = evt.timestamp();
                 for a in rules.observe(&evt) {
-                    print_anomaly(&a);
+                    println!("{a}");
                     alerts += 1;
                 }
             }
             _ = sweep.tick() => {
                 let now = wall_clock_ts().max(last_seen);
                 for a in rules.on_tick(now) {
-                    print_anomaly(&a);
+                    println!("{a}");
                     alerts += 1;
                 }
             }
@@ -180,18 +180,6 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     eprintln!("[done] {alerts} slow TLS handshakes raised");
     Ok(())
-}
-
-#[cfg(all(feature = "tokio", feature = "tls"))]
-fn print_anomaly(a: &Anomaly<FiveTupleKey>) {
-    let mut parts: Vec<String> = a
-        .context
-        .observations
-        .iter()
-        .map(|(k, v)| format!("{k}={v}"))
-        .collect();
-    parts.extend(a.context.metrics.iter().map(|(k, v)| format!("{k}={v:.1}")));
-    println!("! ANOMALY {} ts={} {}", a.kind, a.ts, parts.join(" "));
 }
 
 #[cfg(all(feature = "tokio", feature = "tls"))]

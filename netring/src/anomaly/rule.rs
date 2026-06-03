@@ -58,6 +58,45 @@ pub struct Anomaly<K> {
     pub context: AnomalyContext,
 }
 
+impl std::fmt::Display for Severity {
+    /// Lowercase short label (`info` / `warning` / `error` /
+    /// `critical`) matching flowscope's metric-vocabulary
+    /// convention.
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(match self {
+            Severity::Info => "info",
+            Severity::Warning => "warning",
+            Severity::Error => "error",
+            Severity::Critical => "critical",
+        })
+    }
+}
+
+impl<K: std::fmt::Debug> std::fmt::Display for Anomaly<K> {
+    /// One-line greppable rendering. Saves callers from writing
+    /// their own `print_anomaly` helper. Format:
+    ///
+    /// ```text
+    /// [<severity>] <kind> ts=<ts> [key=<Debug-K>] [obs1=v1 ...] [metric1=v1 ...]
+    /// ```
+    ///
+    /// `K` only needs `Debug`; severity is rendered via its own
+    /// `Display`. Metrics are formatted with 2 decimal places.
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "[{}] {} ts={}", self.severity, self.kind, self.ts)?;
+        if let Some(k) = &self.key {
+            write!(f, " key={k:?}")?;
+        }
+        for (label, value) in &self.context.observations {
+            write!(f, " {label}={value}")?;
+        }
+        for (label, value) in &self.context.metrics {
+            write!(f, " {label}={value:.2}")?;
+        }
+        Ok(())
+    }
+}
+
 impl<K> Anomaly<K> {
     /// Construct a bare anomaly. Use `with_*` chainable setters to
     /// fill in key + context.

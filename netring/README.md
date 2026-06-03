@@ -186,13 +186,19 @@ let mut rules = AnomalyMonitor::<FiveTupleKey>::new()
 `to_json_line()` for production-pipeline JSON (no `serde` dep —
 escaping is hand-rolled to RFC 8259 §7). Severity tiers
 (`Info/Warning/Error/Critical`) port directly to flowscope's
-`AnomalyKind::severity()` via a `From` impl. Six reference
+`AnomalyKind::severity()` via a `From` impl. Eight reference
 detectors live under `examples/anomaly/`: `dns_query_burst`,
 `dns_resolved_no_connection`, `anomaly_monitor_demo`,
-`slow_tls_handshake`, `lateral_movement`, `icmp_explained_drop`.
-Set `NETRING_JSON=1` to switch the showcase to JSON output. Pair
+`slow_tls_handshake`, `lateral_movement`, `icmp_explained_drop`,
+`pcap_replay_anomaly`, `tls_to_unresolved_ip` (3-protocol). Set
+`NETRING_JSON=1` to switch the showcase to JSON output. Pair
 with `cargo run --example synthetic_traffic` to demo on `lo`
 without `CAP_NET_RAW`.
+
+See [docs/WRITING_DETECTORS.md](docs/WRITING_DETECTORS.md) for
+the full tutorial — anatomy of an `AnomalyRule`, state-primitive
+decision table, `observe` vs `on_tick`, cross-protocol patterns,
+testing, production deployment, and MITRE ATT&CK mapping.
 
 ## Stream observability
 

@@ -117,6 +117,12 @@ Real-life detectors built on `netring::correlate`'s primitives
 [`netring-0.16-roadmap-2026-05-29.md`](../../plans/netring-0.16-roadmap-2026-05-29.md)
 Part III's `AnomalyMonitor` harness.
 
+**See [`docs/WRITING_DETECTORS.md`](../docs/WRITING_DETECTORS.md)
+for the full tutorial** — anatomy of a rule, state primitives
+(when to use which), `observe` vs `on_tick`, cross-protocol
+correlator pattern, testing recipes, production deployment, false
+positives, MITRE mapping.
+
 | Example | What it shows | Features |
 |---|---|---|
 | `dns_query_burst` | Per-source-IP DNS rate anomaly via `TimeBucketedCounter`. Raw primitives, no harness. | `tokio,dns` |

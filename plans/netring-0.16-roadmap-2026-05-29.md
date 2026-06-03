@@ -2,6 +2,9 @@
 
 **Date:** 2026-05-29
 **Author:** netring maintainer (self-retrospective)
+**Status:** 🟢 **9 of 14 items shipped as of 2026-06-03.** N5/N6/N12
+carried to [`netring-0.18-roadmap-2026-06-03.md`](./netring-0.18-roadmap-2026-06-03.md).
+
 **Context:** roadmap document distilled from
 1. concrete friction writing the four real-life L7 examples
    committed in `9777eb7`
@@ -13,6 +16,59 @@
 
 **Scope rule:** backward-incompatible breaks are explicitly
 allowed; pre-1.0; releases ship in lockstep with flowscope.
+
+---
+
+## Status — what shipped vs what carried
+
+Run a `git log --oneline 22f61af..master -- netring/` to see the
+~15 commits that landed this roadmap.
+
+| Item | Status | Shipped in |
+|---|---|---|
+| **N1** Bump flowscope 0.4 → 0.6 | ✅ done | netring 0.16 (commit `6014e0f`) |
+| **N2** Fix over-verbose BPF in L7 examples | ✅ done | `6014e0f` |
+| **N3** CI smoke tests for examples | 🟡 partial | smoke-tested via `tests/anomaly_monitor_smoke.rs` + `tests/anomaly_pcap_replay.rs` (5 + 2 tests). Full example smoke-via-pcap still pending. |
+| **N4** Drop `HashMap<K, L4Proto>` workaround | ✅ done | netring 0.17 (commit `502a484`, unblocked by flowscope 0.7) |
+| **N5** Collapse onto flowscope drivers | ❌ deferred | Carried to 0.18 — multi-day internal refactor |
+| **N6** `AsyncCapture::broadcast(n)` | ❌ deferred | Carried to 0.18 — design-heavy |
+| **N7** `ProtocolMonitor` + builder | ✅ done | netring 0.16 (commit `7b53291`) |
+| **N8** `ProtocolEvent<K>` + `ProtocolMessage` | ✅ done | `7b53291` |
+| **N9** `AnomalyMonitor<K>` + `AnomalyRule` trait | ✅ done | netring 0.16 (commit `f114b2a`) |
+| **N10** 5 reference detectors | ✅ done | All 5 + 2 bonus shipped. See "deliverables" below. |
+| **N11** `BpfFilter::builder().ports([...])` | ✅ done | `6014e0f` |
+| **N12** `with_message_tap` for L7 streams | ❌ deferred | Carried to 0.18 — blocked on flowscope `serde` feature (G5 in `flowscope-0.8-feedback`) |
+| **N13** Synthetic traffic companion | ✅ done | netring 0.17 (commit `bead0e9`) |
+| **N14** `--json` output flag | ✅ done | `to_json_line()` on `Anomaly<K>` + `NETRING_JSON=1` env-var toggle (commit `d2e5adf`) |
+
+### N10 reference-detector deliverables
+
+The plan called for 5 detectors; 8 shipped:
+
+| Example | Demonstrates |
+|---|---|
+| `dns_query_burst.rs` | `TimeBucketedCounter` per-source rate |
+| `dns_resolved_no_connection.rs` | `KeyIndexed::drain_expired` cross-protocol |
+| `anomaly_monitor_demo.rs` | Two rules composed on `AnomalyMonitor` |
+| `slow_tls_handshake.rs` | TLS ClientHello → ServerHello timing |
+| `lateral_movement.rs` | Per-source host-pair fan-out |
+| `icmp_explained_drop.rs` | `IcmpInner` cross-protocol (flowscope 0.7) |
+| `pcap_replay_anomaly.rs` *(bonus)* | Drive `AnomalyMonitor` from a pcap file |
+| `tls_to_unresolved_ip.rs` *(bonus)* | **Three-protocol correlator** — Flow + DNS + TLS |
+
+### Bonus items shipped, not on the original plan
+
+- `impl Display for Anomaly<K>` + `impl Display for Severity` —
+  drops the per-example `print_anomaly` helpers.
+- `From<flowscope::event::Severity> for netring::Severity` +
+  `FlowAnomalyRule` — lifts flow-tracker anomalies through the
+  same `Vec<Anomaly<K>>` pipeline as user-defined rules.
+- `Anomaly::to_json_line()` — hand-rolled RFC 8259 JSON (no
+  serde dep). 4 escape-edge-case tests.
+- README "Multi-protocol monitor + anomaly correlation" section
+  with the full builder + custom-rule recipe.
+
+---
 
 > Companion to
 > [`flowscope-0.7-feedback-2026-05-29.md`](./flowscope-0.7-feedback-2026-05-29.md).

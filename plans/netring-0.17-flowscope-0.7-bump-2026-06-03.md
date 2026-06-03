@@ -2,6 +2,11 @@
 
 **Date:** 2026-06-03
 **Author:** netring maintainer
+**Status:** ✅ **Shipped 2026-06-03** in 3 ship-commits:
+- A — dep bump + Ended/Closed migration + N4 cleanup (`502a484`)
+- B — ICMP wiring + `icmp_explained_drop` + Severity bridge (`8bf53c0`)
+- C — cosmetic + docs + version bump 0.15.0 → 0.16.0 (`e044dd8`)
+
 **Predecessor:** [`netring-0.16-roadmap-2026-05-29.md`](./netring-0.16-roadmap-2026-05-29.md)
 **Driven by:** flowscope 0.7.0 (2026-05-23) — direct response to
 [`plans/flowscope-0.7-feedback-2026-05-29.md`](./flowscope-0.7-feedback-2026-05-29.md).

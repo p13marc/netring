@@ -11,7 +11,7 @@ at each minor release and update the "Last checked" line.
 - **Tracking issue**: rust-lang/rust #117078
 - **Action when stable**: implement `Capture::packets_gen` per SPEC §6.3.
 - **Cargo.toml** reserves the `nightly` feature for this.
-- **Last checked**: 2026-05-05 — still nightly only.
+- **Last checked**: 2026-06-03 — still nightly only.
 
 ## `LendingIterator` / GAT iteration in `Iterator`
 
@@ -20,7 +20,7 @@ at each minor release and update the "Last checked" line.
   the `'static`-erasure trick in `Packets` (`src/afpacket/rx.rs`) and
   `AsyncCapture::try_recv_batch` (`src/async_adapters/tokio_adapter.rs`).
   When Polonius lands these workarounds simplify; until then they stay.
-- **Last checked**: 2026-05-05.
+- **Last checked**: 2026-06-03.
 
 ## Polonius (NLL successor)
 
@@ -29,7 +29,7 @@ at each minor release and update the "Last checked" line.
   use a raw-pointer split because stable's NLL can't see that the Some-arm
   borrow doesn't outlive the None-arm `clear_ready`. Polonius would handle
   the split natively; remove the unsafe blocks once it's stable on the MSRV.
-- **Last checked**: 2026-05-05 — `-Znext-solver` previews but no
+- **Last checked**: 2026-06-03 — `-Znext-solver` previews but no
   stabilization ETA.
 
 ## XDP RX metadata extensions
@@ -40,7 +40,7 @@ at each minor release and update the "Last checked" line.
   Both are documented as "not yet wired" and are forward-compatible.
 - **Tracking**: kernel commit set around v6.0; userland integration still
   evolving (libxdp/aya have partial support).
-- **Last checked**: 2026-05-05.
+- **Last checked**: 2026-06-03.
 
 ## High-level `SharedUmem` helper
 
@@ -52,7 +52,7 @@ at each minor release and update the "Last checked" line.
   partitioning across primary + N secondaries, optionally with a shared
   allocator (Mutex-protected or partition-based). Wait for actual user
   code that demands it before settling the threading-model trade-offs.
-- **Last checked**: 2026-05-05.
+- **Last checked**: 2026-06-03.
 
 ## Unified `PacketBackend` trait
 
@@ -65,7 +65,28 @@ at each minor release and update the "Last checked" line.
 - **Known consumers waiting on this**: simple-nms (AF_PACKET in
   v1/v2, AF_XDP in v3+); their ARP analyzer reads `vlan_tci` and
   `direction`. See doc 10 §N2.3 in the simple-nms repo for context.
-- **Last checked**: 2026-08-XX (simple-nms feedback round).
+- **Last checked**: 2026-06-03.
+
+## flowscope `serde` feature (G5)
+
+- **Status**: queued in
+  [`flowscope-0.8-feedback-2026-06-03.md`](./flowscope-0.8-feedback-2026-06-03.md)
+  G5; not yet shipped.
+- **Action when shipped**: netring picks up the bump as part of the
+  next flowscope-lockstep release (see
+  [`netring-0.18-roadmap-2026-06-03.md`](./netring-0.18-roadmap-2026-06-03.md)
+  O3 + O4). Unblocks `with_message_tap` (O3) and serde-derive on
+  `Anomaly<K>` / `AnomalyContext` / `Severity` (O4).
+- **Last checked**: 2026-06-03 — flowscope 0.8 not released.
+
+## flowscope correlate primitives (F6 / G8)
+
+- **Status**: netring shipped its own `netring::correlate` module with
+  `KeyIndexed` and `TimeBucketedCounter`. flowscope side still open; if /
+  when flowscope ships an equivalent, netring re-exports.
+- **Action when shipped**: tag the netring types with a deprecation note
+  pointing at `flowscope::correlate::*`; remove on a major.
+- **Last checked**: 2026-06-03 — netring keeps its own copy for now.
 
 ## CI hardening (post-0.5)
 
@@ -74,7 +95,16 @@ at each minor release and update the "Last checked" line.
   `afxdp::ring`, `async_adapters::tokio_adapter`).
 - **cargo-public-api** — pin the public API once 0.5 is stable, surface
   diffs on PRs.
-- **Last checked**: 2026-05-05 — neither blocking, both nice-to-have.
+- **Last checked**: 2026-06-03 — neither blocking, both nice-to-have.
+
+## Anomaly path benchmarks (post-0.16)
+
+- **Status**: untracked. The `ProtocolMonitor` + `AnomalyMonitor` path
+  shipped without perf characterization. Open questions: per-event cost,
+  rule-count scaling, sweep tick cost, `Vec::take` realloc impact.
+- **Action**: tracked as O6 in
+  [`netring-0.18-roadmap-2026-06-03.md`](./netring-0.18-roadmap-2026-06-03.md).
+- **Last checked**: 2026-06-03 — not yet measured.
 
 ## Review cadence
 

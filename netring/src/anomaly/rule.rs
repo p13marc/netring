@@ -138,6 +138,96 @@ impl<K> Anomaly<K> {
     }
 }
 
+impl<K: std::fmt::Debug> Anomaly<K> {
+    /// Render as a single line of JSON — ready to pipe into
+    /// Vector / Fluentd / Loki / any line-oriented sink.
+    ///
+    /// Field shape:
+    ///
+    /// ```json
+    /// {"severity":"warning","kind":"DnsBurst","ts_secs":42,"ts_nanos":0,
+    ///  "key":"FiveTupleKey { ... }","observations":{"src_ip":"10.0.0.1"},
+    ///  "metrics":{"count":42.0}}
+    /// ```
+    ///
+    /// `key` is rendered via `Debug` and JSON-escaped. Omitted when
+    /// the anomaly has no key. `observations` and `metrics` are
+    /// always present (possibly empty objects). The output is
+    /// **one line, terminated with no newline** — caller decides.
+    ///
+    /// Zero external deps; no `serde`. Escaping covers `\`, `"`,
+    /// and the C0 control set (RFC 8259 §7). NaN / ±Inf metrics
+    /// are mapped to `null`.
+    pub fn to_json_line(&self) -> String {
+        let mut s = String::with_capacity(96);
+        s.push('{');
+        s.push_str("\"severity\":");
+        // `Display for Severity` returns the metric-vocabulary
+        // token already. Re-use it instead of duplicating the map.
+        json_string(&mut s, &self.severity.to_string());
+        s.push_str(",\"kind\":");
+        json_string(&mut s, self.kind);
+        s.push_str(",\"ts_secs\":");
+        s.push_str(&self.ts.sec.to_string());
+        s.push_str(",\"ts_nanos\":");
+        s.push_str(&self.ts.nsec.to_string());
+        if let Some(k) = &self.key {
+            s.push_str(",\"key\":");
+            let dbg = format!("{k:?}");
+            json_string(&mut s, &dbg);
+        }
+        s.push_str(",\"observations\":{");
+        for (i, (label, value)) in self.context.observations.iter().enumerate() {
+            if i > 0 {
+                s.push(',');
+            }
+            json_string(&mut s, label);
+            s.push(':');
+            json_string(&mut s, value);
+        }
+        s.push('}');
+        s.push_str(",\"metrics\":{");
+        for (i, (label, value)) in self.context.metrics.iter().enumerate() {
+            if i > 0 {
+                s.push(',');
+            }
+            json_string(&mut s, label);
+            s.push(':');
+            if value.is_finite() {
+                s.push_str(&format!("{value}"));
+            } else {
+                s.push_str("null");
+            }
+        }
+        s.push('}');
+        s.push('}');
+        s
+    }
+}
+
+/// Escape `value` per RFC 8259 §7 and append it to `out` wrapped in
+/// double quotes. Only handles the control set + `\` + `"`; the rest
+/// passes through as UTF-8.
+fn json_string(out: &mut String, value: &str) {
+    out.push('"');
+    for c in value.chars() {
+        match c {
+            '"' => out.push_str("\\\""),
+            '\\' => out.push_str("\\\\"),
+            '\n' => out.push_str("\\n"),
+            '\r' => out.push_str("\\r"),
+            '\t' => out.push_str("\\t"),
+            '\x08' => out.push_str("\\b"),
+            '\x0c' => out.push_str("\\f"),
+            c if (c as u32) < 0x20 => {
+                out.push_str(&format!("\\u{:04x}", c as u32));
+            }
+            c => out.push(c),
+        }
+    }
+    out.push('"');
+}
+
 /// Per-anomaly context: free-form observations + numeric metrics.
 ///
 /// Detectors should put rich human-readable details in

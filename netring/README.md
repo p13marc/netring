@@ -182,14 +182,17 @@ let mut rules = AnomalyMonitor::<FiveTupleKey>::new()
 // monitor.next().await → rules.observe(&evt) → Vec<Anomaly<FiveTupleKey>>
 ```
 
-`Anomaly<K>` impls `Display` for one-line greppable output;
-severity tiers (`Info/Warning/Error/Critical`) port directly to
-flowscope's `AnomalyKind::severity()` via a `From` impl. Six
-reference detectors live under `examples/anomaly/`:
-`dns_query_burst`, `dns_resolved_no_connection`,
-`anomaly_monitor_demo`, `slow_tls_handshake`, `lateral_movement`,
-`icmp_explained_drop`. Pair with `cargo run --example
-synthetic_traffic` to demo them on `lo` without `CAP_NET_RAW`.
+`Anomaly<K>` impls `Display` for one-line greppable output and
+`to_json_line()` for production-pipeline JSON (no `serde` dep —
+escaping is hand-rolled to RFC 8259 §7). Severity tiers
+(`Info/Warning/Error/Critical`) port directly to flowscope's
+`AnomalyKind::severity()` via a `From` impl. Six reference
+detectors live under `examples/anomaly/`: `dns_query_burst`,
+`dns_resolved_no_connection`, `anomaly_monitor_demo`,
+`slow_tls_handshake`, `lateral_movement`, `icmp_explained_drop`.
+Set `NETRING_JSON=1` to switch the showcase to JSON output. Pair
+with `cargo run --example synthetic_traffic` to demo on `lo`
+without `CAP_NET_RAW`.
 
 ## Stream observability
 

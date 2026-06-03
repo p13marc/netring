@@ -235,4 +235,62 @@ mod tests {
         assert!(rendered.contains("Tracker"));
         assert!(!rendered.contains("key="));
     }
+
+    #[test]
+    fn anomaly_to_json_line_shape() {
+        let a: Anomaly<Key> = Anomaly::new("DnsBurst", Severity::Warning, Timestamp::new(42, 7))
+            .with_key(99)
+            .with_observation("src_ip", "10.0.0.1")
+            .with_metric("count", 123.0)
+            .with_metric("rate", 4.5);
+        let json = a.to_json_line();
+        // Single line — no embedded newline.
+        assert!(!json.contains('\n'));
+        // Starts and ends with braces.
+        assert!(json.starts_with('{'));
+        assert!(json.ends_with('}'));
+        // Field names are quoted; the value-side is whatever they should be.
+        assert!(json.contains("\"severity\":\"warning\""));
+        assert!(json.contains("\"kind\":\"DnsBurst\""));
+        assert!(json.contains("\"ts_secs\":42"));
+        assert!(json.contains("\"ts_nanos\":7"));
+        assert!(json.contains("\"key\":\"99\""));
+        assert!(json.contains("\"observations\":{\"src_ip\":\"10.0.0.1\"}"));
+        assert!(json.contains("\"metrics\":{\"count\":123"));
+        assert!(json.contains("\"rate\":4.5"));
+    }
+
+    #[test]
+    fn anomaly_to_json_line_omits_key_when_absent() {
+        let a: Anomaly<Key> = Anomaly::new("Tracker", Severity::Info, Timestamp::new(1, 0));
+        let json = a.to_json_line();
+        assert!(!json.contains("\"key\":"));
+        // Observations + metrics still present as empty objects.
+        assert!(json.contains("\"observations\":{}"));
+        assert!(json.contains("\"metrics\":{}"));
+    }
+
+    #[test]
+    fn anomaly_to_json_line_escapes_strings() {
+        let a: Anomaly<Key> = Anomaly::new("X", Severity::Error, Timestamp::new(0, 0))
+            .with_observation("path", "/api/v1\n\"weird\\path\"")
+            .with_observation("tab", "a\tb");
+        let json = a.to_json_line();
+        // No raw newline or unescaped quote inside the value.
+        assert!(!json.contains("\n\""));
+        assert!(json.contains("\\n"));
+        assert!(json.contains("\\\""));
+        assert!(json.contains("\\\\"));
+        assert!(json.contains("\\t"));
+    }
+
+    #[test]
+    fn anomaly_to_json_line_nan_metric_becomes_null() {
+        let a: Anomaly<Key> = Anomaly::new("X", Severity::Info, Timestamp::new(0, 0))
+            .with_metric("nan", f64::NAN)
+            .with_metric("inf", f64::INFINITY);
+        let json = a.to_json_line();
+        assert!(json.contains("\"nan\":null"));
+        assert!(json.contains("\"inf\":null"));
+    }
 }

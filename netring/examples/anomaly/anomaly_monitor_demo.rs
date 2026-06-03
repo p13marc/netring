@@ -33,6 +33,12 @@
 //!
 //! Defaults: lo, 60s.
 //!
+//! Output format: human-readable by default. Set `NETRING_JSON=1`
+//! for one-line-JSON output (pipe into Vector / Fluentd / jq):
+//!
+//!     NETRING_JSON=1 cargo run --example anomaly_monitor_demo \
+//!         --features tokio,dns -- lo 30 | jq .
+//!
 //! Requires `CAP_NET_RAW`. Use `just setcap`.
 
 #[cfg(all(feature = "tokio", feature = "dns"))]
@@ -205,7 +211,24 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .and_then(|s| s.parse().ok())
         .unwrap_or(60);
 
-    eprintln!("[anomaly] watching {iface} for {seconds}s; rules: DnsBurst + DnsNoConnection");
+    // `NETRING_JSON=1` toggles structured one-line JSON output —
+    // pipe straight into Vector / Fluentd / Loki / jq. Default is
+    // the human-readable `Display` rendering on `Anomaly<K>`.
+    let json_output = std::env::var_os("NETRING_JSON").is_some();
+    let format: fn(&Anomaly<FiveTupleKey>) -> String = if json_output {
+        |a| a.to_json_line()
+    } else {
+        |a| format!("{a}")
+    };
+
+    eprintln!(
+        "[anomaly] watching {iface} for {seconds}s; rules: DnsBurst + DnsNoConnection ({})",
+        if json_output {
+            "JSON output"
+        } else {
+            "text output"
+        }
+    );
 
     let mut monitor = ProtocolMonitorBuilder::new()
         .interface(&iface)
@@ -235,7 +258,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 let evt = evt?;
                 last_seen_ts = evt.timestamp();
                 for a in rules.observe(&evt) {
-                    println!("{a}");
+                    println!("{}", format(&a));
                     total += 1;
                 }
             }
@@ -243,7 +266,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 let now = wall_clock_ts();
                 let now = if last_seen_ts > now { last_seen_ts } else { now };
                 for a in rules.on_tick(now) {
-                    println!("{a}");
+                    println!("{}", format(&a));
                     total += 1;
                 }
             }

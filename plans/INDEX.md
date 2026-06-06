@@ -42,6 +42,7 @@ the next.
 | [`flowscope-0.5-feedback-2026-05-22.md`](./flowscope-0.5-feedback-2026-05-22.md) | ✅ landed — drove flowscope 0.5 + 0.6 (11 of 12 items shipped) |
 | [`flowscope-0.7-feedback-2026-05-29.md`](./flowscope-0.7-feedback-2026-05-29.md) | ✅ landed — drove flowscope 0.7 (8 of 9 items shipped) |
 | [`flowscope-0.8-feedback-2026-06-03.md`](./flowscope-0.8-feedback-2026-06-03.md) | 📤 queued — flagged G1/G3/G5 as top-3 asks for flowscope 0.8 |
+| [`flowscope-wishlist-2026-06-06.md`](./flowscope-wishlist-2026-06-06.md) | 📤 **consolidated wishlist** — supersedes the dated feedback rounds. ~20 items with effort/impact matrix + phasing recommendation + per-item netring integration plan. Top 3: serde feature + IcmpType helpers + DnsResolutionCache primitive. |
 
 ## Numbering scheme
 

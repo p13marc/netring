@@ -3,8 +3,9 @@
 use super::rule::{Anomaly, AnomalyRule, Severity};
 use crate::protocol::ProtocolEvent;
 
-/// Lifts every [`FlowEvent::FlowAnomaly`] / [`FlowEvent::TrackerAnomaly`]
-/// from the underlying flow tracker into the
+/// Lifts every [`ProtocolEvent::FlowAnomaly`] /
+/// [`ProtocolEvent::TrackerAnomaly`] from the underlying flow
+/// tracker into the
 /// [`AnomalyMonitor`](super::AnomalyMonitor) pipeline as an
 /// [`Anomaly`](super::Anomaly) with
 /// the tier coming from

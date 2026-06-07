@@ -363,6 +363,21 @@ name = "tls_to_unresolved_ip"
 path = "examples/anomaly/tls_to_unresolved_ip.rs"
 required-features = ["tokio", "dns", "tls"]
 
+[[example]]
+name = "dns_tunnel_detect"
+path = "examples/anomaly/dns_tunnel_detect.rs"
+required-features = ["tokio", "dns"]
+
+[[example]]
+name = "port_scan"
+path = "examples/anomaly/port_scan.rs"
+required-features = ["tokio", "flow", "parse"]
+
+[[example]]
+name = "syn_flood_burst"
+path = "examples/anomaly/syn_flood_burst.rs"
+required-features = ["tokio", "flow", "parse"]
+
 # util/ — helper companions for the demos
 [[example]]
 name = "synthetic_traffic"

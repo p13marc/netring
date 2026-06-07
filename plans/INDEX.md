@@ -40,7 +40,7 @@ mistakes; three sequential netring releases instead.
 
 | Crate | Plan | Scope | Days |
 |---|---|---|---|
-| netring **0.17** | [`netring-0.17-flowscope-0.10-bump-2026-06-07.md`](./netring-0.17-flowscope-0.10-bump-2026-06-07.md) | Lockstep dep bump 0.7 → 0.10 + mechanical wishlist absorption (PARSER_KIND constants, IcmpType helpers, DnsResolutionCache, AnomalyKind::short_kind, TlsHandshakeParser, serde feature). 15 items; no architecture change. | ~2 |
+| netring **0.17** | ✅ **shipped** (`151901e`/`96f8d78`/`c1ec36b`) | Lockstep dep bump 0.7 → 0.10 + mechanical wishlist absorption (PARSER_KIND constants, IcmpType helpers, DnsResolutionCache, AnomalyKind::short_kind, TlsHandshakeParser, serde feature). See CHANGELOG.md and `git log`. | done |
 | netring **0.18** | [`netring-0.18-unified-driver-refactor-2026-06-07.md`](./netring-0.18-unified-driver-refactor-2026-06-07.md) | Collapse `ProtocolMonitor` onto `flowscope::driver_unified::Driver<E, M>` + `Event<K, M>`. Closes the long-deferred N5 + N6 + O1 + O2 in one strike. ~1300 LoC deleted from netring. Heuristic-routing slots via `flowscope::detect::signatures`. | ~4 |
 | netring **0.19** | [`netring-0.19-new-detectors-2026-06-07.md`](./netring-0.19-new-detectors-2026-06-07.md) | 9 new example detectors using new flowscope tooling (`shannon_entropy`, `TimeBucketedSet`, `BurstDetector`, `TopK`, `Ewma`, `iter_active`, `ZeekConnLogWriter`, `HttpExchangeParser`, `DnsExchangeParser`). Helper sweep adoption. WRITING_DETECTORS doc expansion. | ~3.5 |
 

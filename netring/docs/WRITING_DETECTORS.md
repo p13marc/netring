@@ -14,6 +14,21 @@ Companion to:
   [`plans/netring-0.16-roadmap-2026-05-29.md`](../../plans/netring-0.16-roadmap-2026-05-29.md)
   for the architecture rationale.
 
+## Migration notes (netring 0.18)
+
+The 0.18 release flattened the `ProtocolEvent` variant layout:
+
+| Old (≤0.17)                                      | New (0.18+)                          |
+| ------------------------------------------------ | ------------------------------------ |
+| `ProtocolEvent::Flow(FlowEvent::Started { … })`  | `ProtocolEvent::FlowStarted { … }`   |
+| `ProtocolEvent::Flow(FlowEvent::Ended { … })`    | `ProtocolEvent::FlowEnded { … }`     |
+| `ProtocolEvent::Flow(FlowEvent::FlowAnomaly { … })` | `ProtocolEvent::FlowAnomaly { … }` |
+| `ProtocolEvent::Message { kind: "dns-udp", … }`  | `ProtocolEvent::Message { parser_kind: "dns-udp", … }` |
+
+`ProtocolEvent<K>` is now a type alias for flowscope's
+`Event<K, ProtocolMessage>`; you can pattern-match on either
+qualifier.
+
 ---
 
 ## 1. The anatomy of an `AnomalyRule`
@@ -240,7 +255,7 @@ in a single rule via state shared between observe arms.
 fn observe(&mut self, evt, _emit) {
     match evt {
         // DNS Response: cache the resolution
-        ProtocolEvent::Message { kind: "dns-udp",
+        ProtocolEvent::Message { parser_kind: "dns-udp",
             message: ProtocolMessage::Dns(DnsMessage::Response(r)), ts, .. } => {
             for ans in &r.answers {
                 if let DnsRdata::A(v4) = &ans.data {
@@ -249,7 +264,7 @@ fn observe(&mut self, evt, _emit) {
             }
         }
         // Any flow Started: check if dst was just resolved
-        ProtocolEvent::Flow(FlowEvent::Started { key, .. }) => {
+        ProtocolEvent::FlowStarted { key, .. } => {
             self.pending.remove(&key.b.ip());  // resolved + connected: OK
         }
         _ => {}
@@ -273,7 +288,7 @@ protocols to catch hardcoded-IP TLS (MITRE T1571 / T1090):
 fn observe(&mut self, evt, emit) {
     match evt {
         // DNS Response → per-host resolution cache
-        ProtocolEvent::Message { kind: "dns-udp",
+        ProtocolEvent::Message { parser_kind: "dns-udp",
             message: ProtocolMessage::Dns(DnsMessage::Response(r)), key, ts, .. } => {
             let host = key.b.ip();
             let cache = self.resolved_by_host.entry(host)
@@ -285,7 +300,7 @@ fn observe(&mut self, evt, emit) {
             }
         }
         // TLS ClientHello → look up dst in source's cache
-        ProtocolEvent::Message { kind: "tls",
+        ProtocolEvent::Message { parser_kind: "tls",
             message: ProtocolMessage::Tls(TlsMessage::ClientHello(ch)), key, ts, .. } => {
             let resolved = self.resolved_by_host.get(&key.a.ip())
                 .map(|c| c.contains_fresh(&key.b.ip(), *ts))
@@ -315,6 +330,36 @@ let mut monitor = ProtocolMonitorBuilder::new()
     .tls()       // for the trigger
     .build(FiveTuple::bidirectional())?;
 ```
+
+### Port-agnostic routing (heuristic dispatch)
+
+Port-based slot registration (`.http()`, `.dns()`, `.tls()`)
+covers the common case. For traffic that hides on
+non-standard ports — proxies, debug endpoints, C2 channels,
+random-port HTTP — netring 0.18 exposes flowscope's heuristic
+routing via two builder shortcuts:
+
+```rust
+let mut monitor = ProtocolMonitorBuilder::new()
+    .interface("eth0")
+    .flow()
+    .http_on_ports([80, 8080])     // fast path
+    .http_heuristic()              // catches HTTP on any other port
+    .tls_handshake_on_ports([443, 8443])
+    .tls_handshake_heuristic()     // catches TLS ClientHello on any other port
+    .build(FiveTuple::bidirectional())?;
+```
+
+Heuristic slots inspect the first few payload bytes of each
+session (default budget: 4 packets) via a curated signature
+function. After a match, the flow is **pinned** to that parser
+and every subsequent packet dispatches in O(1) just like a
+port-routed slot. Flows that don't match within the probe
+budget are marked `GaveUp` and skipped.
+
+Trade-off: the signature evaluator costs a few cycles per
+new flow. Negligible in absolute terms but worth knowing when
+you stack many heuristic slots on a high-PPS link.
 
 ---
 
@@ -396,7 +441,7 @@ fn my_rule_fires_on_realistic_dns_burst() {
     while let Some(evt) = stream.next().await {
         if let SessionEvent::Application { key, side, message, ts, parser_kind } = evt.unwrap() {
             let pe = ProtocolEvent::Message {
-                key, side, kind: parser_kind,
+                key, side, parser_kind,
                 message: ProtocolMessage::Dns(message), ts
             };
             alerts += rules.observe(&pe).len();
@@ -412,7 +457,7 @@ See `tests/anomaly_pcap_replay.rs` for the working pair.
 
 Three usual suspects:
 
-1. **`kind` mismatch.** Your `let ProtocolEvent::Message { kind: "dns-udp", … }` only matches events with that exact kind. Run with extra logging: `eprintln!("kind={kind}")` inside `observe` to see what's actually flowing.
+1. **`kind` mismatch.** Your `let ProtocolEvent::Message { parser_kind: "dns-udp", … }` only matches events with that exact kind. Run with extra logging: `eprintln!("kind={kind}")` inside `observe` to see what's actually flowing.
 2. **Timestamp clock skew.** `TimeBucketedCounter::count(&k, now)` checks "now vs bucket start." If `now` is earlier than the event timestamps, you're querying a future bucket. Use `evt.timestamp()` consistently.
 3. **`alerted` set sticking.** Many examples use a `HashSet` to alert-once-per-source. Forgetting to re-arm (`alerted.remove(&src)`) means the rule fires once and never again — easy to mis-attribute as "rule broken."
 

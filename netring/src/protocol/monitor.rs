@@ -133,6 +133,13 @@ pub struct ProtocolMonitorBuilder {
     tls_handshake_ports: Option<Vec<u16>>,
     #[cfg(feature = "icmp")]
     enable_icmp: Option<IcmpScope>,
+    /// Heuristic-routing slots: parser selection is driven by a
+    /// signature function over the first N packets per side, not by
+    /// the L4 port number. Useful for C2 / port-randomized traffic.
+    #[cfg(feature = "http")]
+    http_heuristic: bool,
+    #[cfg(feature = "tls")]
+    tls_handshake_heuristic: bool,
 }
 
 /// Which ICMP family the monitor's `.icmp()` arm parses.
@@ -239,6 +246,35 @@ impl ProtocolMonitorBuilder {
         self
     }
 
+    /// Enable port-agnostic HTTP/1.x parsing via the
+    /// [`flowscope::detect::signatures::http_request`] signature.
+    /// Routes any TCP flow whose first packet looks like
+    /// `METHOD SP path SP HTTP/1.x` to the HTTP parser.
+    ///
+    /// Use when you suspect HTTP on non-standard ports (proxies,
+    /// debug endpoints, C2 over arbitrary ports). Combines with
+    /// `.http_on_ports()` — the heuristic slot fires only for
+    /// flows that *aren't* already pinned to the port-based slot.
+    #[cfg(feature = "http")]
+    pub fn http_heuristic(mut self) -> Self {
+        self.http_heuristic = true;
+        self
+    }
+
+    /// Enable port-agnostic TLS handshake aggregation via the
+    /// [`flowscope::detect::signatures::tls_client_hello`] signature.
+    /// Routes any TCP flow whose first packet starts with a TLS
+    /// ClientHello record to the
+    /// [`flowscope::tls::TlsHandshakeParser`].
+    ///
+    /// Pair with `.tls_handshake_on_ports()` for the standard
+    /// 443/8443 case + this heuristic for anything else.
+    #[cfg(feature = "tls")]
+    pub fn tls_handshake_heuristic(mut self) -> Self {
+        self.tls_handshake_heuristic = true;
+        self
+    }
+
     /// Enable ICMP parsing (both ICMPv4 and ICMPv6). Surfaces
     /// `ProtocolMessage::Icmp(IcmpMessage)` events, including
     /// `inner: Option<IcmpInner>` on error variants — the
@@ -342,6 +378,26 @@ impl ProtocolMonitorBuilder {
                 IcmpScope::V6 => flowscope::icmp::IcmpParser::new().v6_only(),
             };
             builder = builder.datagram_broadcast(parser, ProtocolMessage::Icmp);
+            slots += 1;
+        }
+
+        #[cfg(feature = "http")]
+        if self.http_heuristic {
+            builder = builder.session_heuristic(
+                flowscope::http::HttpParser::default(),
+                flowscope::detect::signatures::http_request,
+                ProtocolMessage::Http,
+            );
+            slots += 1;
+        }
+
+        #[cfg(feature = "tls")]
+        if self.tls_handshake_heuristic {
+            builder = builder.session_heuristic(
+                flowscope::tls::TlsHandshakeParser::default(),
+                flowscope::detect::signatures::tls_client_hello,
+                ProtocolMessage::TlsHandshake,
+            );
             slots += 1;
         }
 

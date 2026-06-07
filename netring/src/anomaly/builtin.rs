@@ -1,7 +1,5 @@
 //! Built-in [`AnomalyRule`] implementations shipped with netring.
 
-use flowscope::FlowEvent;
-
 use super::rule::{Anomaly, AnomalyRule, Severity};
 use crate::protocol::ProtocolEvent;
 
@@ -57,7 +55,7 @@ impl<K: Clone> AnomalyRule<K> for FlowAnomalyRule {
     fn observe(&mut self, evt: &ProtocolEvent<K>, emit: &mut Vec<Anomaly<K>>) {
         const KIND: &str = "FlowAnomaly";
         match evt {
-            ProtocolEvent::Flow(FlowEvent::FlowAnomaly { key, kind, ts }) => {
+            ProtocolEvent::FlowAnomaly { key, kind, ts } => {
                 let sev = Severity::from(kind.severity());
                 if sev < self.min_severity {
                     return;
@@ -68,7 +66,7 @@ impl<K: Clone> AnomalyRule<K> for FlowAnomalyRule {
                         .with_observation("kind", kind.short_kind()),
                 );
             }
-            ProtocolEvent::Flow(FlowEvent::TrackerAnomaly { kind, ts }) => {
+            ProtocolEvent::TrackerAnomaly { kind, ts } => {
                 let sev = Severity::from(kind.severity());
                 if sev < self.min_severity {
                     return;
@@ -91,27 +89,26 @@ mod tests {
     type Key = u32;
 
     fn flow_anomaly(k: Key, kind: AnomalyKind, ts: u32) -> ProtocolEvent<Key> {
-        ProtocolEvent::Flow(FlowEvent::FlowAnomaly {
+        ProtocolEvent::FlowAnomaly {
             key: k,
             kind,
             ts: Timestamp::new(ts, 0),
-        })
+        }
     }
 
     fn tracker_anomaly(kind: AnomalyKind, ts: u32) -> ProtocolEvent<Key> {
-        ProtocolEvent::Flow(FlowEvent::TrackerAnomaly {
+        ProtocolEvent::TrackerAnomaly {
             kind,
             ts: Timestamp::new(ts, 0),
-        })
+        }
     }
 
     fn unrelated_flow(k: Key, ts: u32) -> ProtocolEvent<Key> {
-        ProtocolEvent::Flow(FlowEvent::Started {
+        ProtocolEvent::FlowStarted {
             key: k,
-            side: FlowSide::Initiator,
             l4: None,
             ts: Timestamp::new(ts, 0),
-        })
+        }
     }
 
     #[test]

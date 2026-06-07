@@ -57,8 +57,6 @@ use netring::anomaly::{Anomaly, AnomalyRule, Severity};
 #[cfg(all(feature = "tokio", feature = "dns"))]
 use netring::correlate::{KeyIndexed, TimeBucketedCounter};
 #[cfg(all(feature = "tokio", feature = "dns"))]
-use netring::flow::FlowEvent;
-#[cfg(all(feature = "tokio", feature = "dns"))]
 use netring::flow::extract::FiveTupleKey;
 #[cfg(all(feature = "tokio", feature = "dns"))]
 use netring::protocol::{ProtocolEvent, ProtocolMessage};
@@ -95,7 +93,7 @@ impl AnomalyRule<FiveTupleKey> for DnsBurstRule {
         emit: &mut Vec<Anomaly<FiveTupleKey>>,
     ) {
         let ProtocolEvent::Message {
-            kind: flowscope::parser_kinds::DNS_UDP,
+            parser_kind: flowscope::parser_kinds::DNS_UDP,
             message: ProtocolMessage::Dns(DnsMessage::Query(_)),
             key,
             ts,
@@ -149,7 +147,7 @@ impl AnomalyRule<FiveTupleKey> for DnsNoConnectionRule {
     fn observe(&mut self, evt: &ProtocolEvent<FiveTupleKey>, _: &mut Vec<Anomaly<FiveTupleKey>>) {
         match evt {
             ProtocolEvent::Message {
-                kind: flowscope::parser_kinds::DNS_UDP,
+                parser_kind: flowscope::parser_kinds::DNS_UDP,
                 message: ProtocolMessage::Dns(DnsMessage::Response(r)),
                 ts,
                 ..
@@ -168,7 +166,7 @@ impl AnomalyRule<FiveTupleKey> for DnsNoConnectionRule {
                     self.pending.insert(ip, (qname.clone(), *ts), *ts);
                 }
             }
-            ProtocolEvent::Flow(FlowEvent::Started { key, .. }) => {
+            ProtocolEvent::FlowStarted { key, .. } => {
                 self.pending.remove(&key.b.ip());
             }
             _ => {}

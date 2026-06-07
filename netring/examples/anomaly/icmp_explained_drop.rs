@@ -51,8 +51,6 @@ use netring::anomaly::{Anomaly, AnomalyRule, Severity};
 #[cfg(all(feature = "tokio", feature = "icmp"))]
 use netring::correlate::KeyIndexed;
 #[cfg(all(feature = "tokio", feature = "icmp"))]
-use netring::flow::FlowEvent;
-#[cfg(all(feature = "tokio", feature = "icmp"))]
 use netring::flow::extract::FiveTupleKey;
 #[cfg(all(feature = "tokio", feature = "icmp"))]
 use netring::protocol::{ProtocolEvent, ProtocolMessage};
@@ -121,7 +119,7 @@ impl AnomalyRule<FiveTupleKey> for IcmpExplainedDropRule {
     ) {
         match evt {
             ProtocolEvent::Message {
-                kind: flowscope::parser_kinds::ICMP,
+                parser_kind: flowscope::parser_kinds::ICMP,
                 message: ProtocolMessage::Icmp(msg),
                 ts,
                 ..
@@ -134,13 +132,13 @@ impl AnomalyRule<FiveTupleKey> for IcmpExplainedDropRule {
                     );
                 }
             }
-            ProtocolEvent::Flow(FlowEvent::Ended {
+            ProtocolEvent::FlowEnded {
                 key,
                 reason,
                 stats,
                 l4,
                 ..
-            }) => {
+            } => {
                 use flowscope::EndReason;
                 // Only correlate aborted / mysterious tear-downs.
                 if !matches!(reason, EndReason::Rst | EndReason::IdleTimeout) {

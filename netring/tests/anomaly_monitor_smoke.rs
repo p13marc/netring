@@ -21,7 +21,7 @@ use std::time::Duration;
 
 use flowscope::dns::{DnsFlags, DnsMessage, DnsQuery, DnsQuestion};
 use flowscope::tls::{TlsClientHello, TlsMessage, TlsVersion};
-use flowscope::{FlowEvent, FlowSide, L4Proto, Timestamp};
+use flowscope::{FlowSide, L4Proto, Timestamp};
 use netring::anomaly::{Anomaly, AnomalyMonitor, AnomalyRule, Severity};
 use netring::correlate::{KeyIndexed, TimeBucketedCounter};
 use netring::flow::extract::FiveTupleKey;
@@ -40,12 +40,11 @@ fn key(a: SocketAddr, b: SocketAddr) -> FiveTupleKey {
 }
 
 fn fake_flow_started(k: FiveTupleKey, ts_s: u32) -> ProtocolEvent<FiveTupleKey> {
-    ProtocolEvent::Flow(FlowEvent::Started {
+    ProtocolEvent::FlowStarted {
         key: k,
-        side: FlowSide::Initiator,
         l4: Some(L4Proto::Udp),
         ts: Timestamp::new(ts_s, 0),
-    })
+    }
 }
 
 fn fake_dns_query(k: FiveTupleKey, ts_s: u32, qname: &str) -> ProtocolEvent<FiveTupleKey> {
@@ -62,7 +61,7 @@ fn fake_dns_query(k: FiveTupleKey, ts_s: u32, qname: &str) -> ProtocolEvent<Five
     ProtocolEvent::Message {
         key: k,
         side: FlowSide::Initiator,
-        kind: flowscope::parser_kinds::DNS_UDP,
+        parser_kind: flowscope::parser_kinds::DNS_UDP,
         message: ProtocolMessage::Dns(DnsMessage::Query(q)),
         ts: Timestamp::new(ts_s, 0),
     }
@@ -85,7 +84,7 @@ fn fake_tls_client_hello(k: FiveTupleKey, ts_s: u32) -> ProtocolEvent<FiveTupleK
     ProtocolEvent::Message {
         key: k,
         side: FlowSide::Initiator,
-        kind: flowscope::parser_kinds::TLS,
+        parser_kind: flowscope::parser_kinds::TLS,
         message: ProtocolMessage::Tls(TlsMessage::ClientHello(Box::new(ch))),
         ts: Timestamp::new(ts_s, 0),
     }
@@ -117,7 +116,7 @@ impl AnomalyRule<FiveTupleKey> for DnsBurstRule {
         emit: &mut Vec<Anomaly<FiveTupleKey>>,
     ) {
         let ProtocolEvent::Message {
-            kind: flowscope::parser_kinds::DNS_UDP,
+            parser_kind: flowscope::parser_kinds::DNS_UDP,
             message: ProtocolMessage::Dns(DnsMessage::Query(_)),
             key,
             ts,
@@ -187,7 +186,7 @@ impl AnomalyRule<FiveTupleKey> for SlowTlsHandshakeRule {
     }
     fn observe(&mut self, evt: &ProtocolEvent<FiveTupleKey>, _: &mut Vec<Anomaly<FiveTupleKey>>) {
         let ProtocolEvent::Message {
-            kind: flowscope::parser_kinds::TLS,
+            parser_kind: flowscope::parser_kinds::TLS,
             message: ProtocolMessage::Tls(TlsMessage::ClientHello(_)),
             key,
             ts,

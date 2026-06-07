@@ -124,7 +124,7 @@ impl AnomalyRule<FiveTupleKey> for DnsBurstRule {
         emit: &mut Vec<Anomaly<FiveTupleKey>>,
     ) {
         let ProtocolEvent::Message {
-            kind: flowscope::parser_kinds::DNS_UDP,
+            parser_kind: flowscope::parser_kinds::DNS_UDP,
             message: ProtocolMessage::Dns(DnsMessage::Query(_)),
             key,
             ts,
@@ -183,7 +183,7 @@ async fn pcap_replay_fires_dns_burst() {
             let pe = ProtocolEvent::Message {
                 key,
                 side,
-                kind: parser_kind,
+                parser_kind,
                 message: ProtocolMessage::Dns(message),
                 ts,
             };
@@ -234,7 +234,7 @@ async fn pcap_replay_quiet_traffic_no_alerts() {
             let pe = ProtocolEvent::Message {
                 key,
                 side,
-                kind: parser_kind,
+                parser_kind,
                 message: ProtocolMessage::Dns(message),
                 ts,
             };

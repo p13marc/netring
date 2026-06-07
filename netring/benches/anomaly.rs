@@ -41,7 +41,7 @@ use std::time::Duration;
 
 use criterion::{BenchmarkId, Criterion, Throughput, criterion_group, criterion_main};
 use flowscope::dns::{DnsFlags, DnsMessage, DnsQuery, DnsQuestion};
-use flowscope::{FlowEvent, FlowSide, L4Proto, Timestamp};
+use flowscope::{FlowSide, L4Proto, Timestamp};
 use netring::anomaly::{Anomaly, AnomalyMonitor, AnomalyRule, Severity};
 use netring::correlate::{KeyIndexed, TimeBucketedCounter};
 use netring::flow::extract::FiveTupleKey;
@@ -75,19 +75,18 @@ fn dns_query_event(o4: u8, ts: u32) -> ProtocolEvent<FiveTupleKey> {
     ProtocolEvent::Message {
         key: make_key(o4),
         side: FlowSide::Initiator,
-        kind: flowscope::parser_kinds::DNS_UDP,
+        parser_kind: flowscope::parser_kinds::DNS_UDP,
         message: ProtocolMessage::Dns(DnsMessage::Query(q)),
         ts: Timestamp::new(ts, 0),
     }
 }
 
 fn flow_started_event(o4: u8, ts: u32) -> ProtocolEvent<FiveTupleKey> {
-    ProtocolEvent::Flow(FlowEvent::Started {
+    ProtocolEvent::FlowStarted {
         key: make_key(o4),
-        side: FlowSide::Initiator,
         l4: Some(L4Proto::Udp),
         ts: Timestamp::new(ts, 0),
-    })
+    }
 }
 
 // ── Rules used across benches ────────────────────────────────────
@@ -146,7 +145,7 @@ impl AnomalyRule<FiveTupleKey> for DnsBurstRule {
         emit: &mut Vec<Anomaly<FiveTupleKey>>,
     ) {
         let ProtocolEvent::Message {
-            kind: flowscope::parser_kinds::DNS_UDP,
+            parser_kind: flowscope::parser_kinds::DNS_UDP,
             message: ProtocolMessage::Dns(DnsMessage::Query(_)),
             key,
             ts,

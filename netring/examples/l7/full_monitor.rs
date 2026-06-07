@@ -46,8 +46,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     use flowscope::http::HttpMessage;
     use futures::StreamExt;
     use netring::ProtocolMonitorBuilder;
+    use netring::flow::EndReason;
     use netring::flow::extract::FiveTuple;
-    use netring::flow::{EndReason, FlowEvent};
     use netring::protocol::{ProtocolEvent, ProtocolMessage};
 
     let iface = std::env::args().nth(1).unwrap_or_else(|| "lo".into());
@@ -79,7 +79,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         && let Some(evt) = monitor.next().await
     {
         match evt? {
-            ProtocolEvent::Flow(FlowEvent::Started { key, l4, .. }) => {
+            ProtocolEvent::FlowStarted { key, l4, .. } => {
                 println!(
                     "[FLOW] + {tag:<5} {a} <-> {b}",
                     tag = l4_label(l4),
@@ -88,13 +88,13 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 );
                 totals.flow_started += 1;
             }
-            ProtocolEvent::Flow(FlowEvent::Ended {
+            ProtocolEvent::FlowEnded {
                 key,
                 reason,
                 stats,
                 l4,
                 ..
-            }) => {
+            } => {
                 println!(
                     "[FLOW] - {tag:<5} {a} <-> {b}  {reason:?} pkts={p}",
                     tag = l4_label(l4),
@@ -107,7 +107,12 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                     totals.flow_rst += 1;
                 }
             }
-            ProtocolEvent::Flow(_) => {} // Established / StateChange / Tick / *Anomaly: skip
+            ProtocolEvent::FlowEstablished { .. }
+            | ProtocolEvent::FlowPacket { .. }
+            | ProtocolEvent::FlowTick { .. }
+            | ProtocolEvent::FlowAnomaly { .. }
+            | ProtocolEvent::TrackerAnomaly { .. }
+            | ProtocolEvent::ParserClosed { .. } => {} // skipped
             ProtocolEvent::Message {
                 message: ProtocolMessage::Http(http),
                 ..

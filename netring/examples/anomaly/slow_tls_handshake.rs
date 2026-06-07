@@ -68,7 +68,7 @@ impl AnomalyRule<FiveTupleKey> for SlowTlsHandshakeRule {
         emit: &mut Vec<Anomaly<FiveTupleKey>>,
     ) {
         let ProtocolEvent::Message {
-            kind: "tls-handshake",
+            parser_kind: "tls-handshake",
             key,
             message: ProtocolMessage::TlsHandshake(hs),
             ts,

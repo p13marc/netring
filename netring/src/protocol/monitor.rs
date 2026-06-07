@@ -1,137 +1,105 @@
-//! [`ProtocolMonitor`] — async stream that orchestrates one
-//! filtered `AsyncCapture` per enabled L7 protocol and yields a
-//! unified [`super::ProtocolEvent`].
+//! [`ProtocolMonitor`] — async stream over a single capture +
+//! one flowscope-side [`Driver<E, ProtocolMessage>`] that fans
+//! packets to every registered parser internally.
 //!
-//! Implementation note: the monitor owns N inner streams (one per
-//! enabled protocol). Without
-//! [`AsyncCapture::broadcast`](crate::AsyncCapture) (roadmap item N6),
-//! each protocol gets its own kernel ring + BPF filter. That's
-//! ~N × memory cost but only the packets each parser actually
-//! cares about cross the kernel→user boundary. For higher-
-//! throughput workloads, replace the multi-capture orchestration
-//! with a single broadcast-fanned capture once N6 ships.
+//! ## What changed in 0.18
 //!
-//! Per-protocol arms only forward `SessionEvent::Application`
-//! events as [`ProtocolEvent::Message`]; the canonical lifecycle
-//! (Started, Established, Ended, FlowAnomaly, TrackerAnomaly, Tick)
-//! is owned by the `.flow()` arm, avoiding duplicate Started/Closed
-//! events when both `.flow()` and e.g. `.http()` are enabled.
+//! Pre-0.18 [`ProtocolMonitor`] opened **N** `AsyncCapture`s — one
+//! per enabled protocol — each with a per-protocol kernel BPF
+//! filter. As of netring 0.18 the monitor opens **1** capture (no
+//! kernel filter) and dispatches user-side through flowscope's
+//! unified [`Driver<E, M>`]. The trade-off:
+//!
+//! - **Memory.** 5-protocol monitor goes from 5 × `tpacket_v3`
+//!   ring (typically 80–160 MiB total) to 1 × ring (16–32 MiB).
+//! - **CPU.** Slightly more user-side dispatch (one match per
+//!   packet to route to the right parser slot) in exchange for
+//!   one fewer kernel BPF eval per packet. Net wash on typical
+//!   workloads.
+//! - **Filter expressiveness.** Per-protocol BPF narrowing is no
+//!   longer used; parser slots route by L4 + port set
+//!   user-side. Users who want a kernel-side coarse filter (e.g.
+//!   "only watch a single subnet") can still pre-apply one
+//!   externally and feed the source through a pcap or alternative
+//!   `AsyncPacketSource`.
+//!
+//! ## API
+//!
+//! The user-facing surface
+//! ([`ProtocolMonitorBuilder`] + the per-protocol method
+//! shortcuts) is unchanged from 0.17. Event variant shapes
+//! shifted to match flowscope — see the [`super::event`] module
+//! docs for the migration table.
 
+use std::collections::VecDeque;
 use std::pin::Pin;
 use std::task::{Context, Poll};
 
 use flowscope::FlowExtractor;
+use flowscope::driver_unified::{Driver, DriverBuilder};
 use futures_core::Stream;
-use tokio_stream::StreamExt;
 
-use super::event::ProtocolEvent;
-#[cfg(any(feature = "http", feature = "dns", feature = "tls", feature = "icmp"))]
-use super::event::ProtocolMessage;
-use crate::AsyncCapture;
-#[cfg(any(feature = "http", feature = "dns", feature = "tls", feature = "icmp"))]
-use crate::config::BpfFilter;
+use super::event::{ProtocolEvent, ProtocolMessage};
+use crate::async_adapters::tokio_adapter::PacketStream;
 use crate::error::Error;
+use crate::traits::PacketSource;
+use crate::{AsyncCapture, Capture};
 
-/// An always-ready-None stream. Used to replace an exhausted slot
-/// in `ProtocolMonitor::streams` so subsequent polls fall through
-/// fast.
-struct FusedEmpty<T>(std::marker::PhantomData<T>);
-impl<T> Stream for FusedEmpty<T> {
-    type Item = T;
-    fn poll_next(self: Pin<&mut Self>, _: &mut Context<'_>) -> Poll<Option<T>> {
-        Poll::Ready(None)
-    }
-}
+type BoxedEventStream<K> = Pin<Box<dyn Stream<Item = Result<ProtocolEvent<K>, Error>> + Send>>;
 
-/// A unified async stream of [`ProtocolEvent`]s from one or more
-/// per-protocol child streams.
+/// A unified async stream of [`ProtocolEvent`]s from a single
+/// underlying capture.
 ///
-/// Produced by [`ProtocolMonitorBuilder::build`]. Owns N
-/// [`AsyncCapture`]s internally; see the module docs for the
-/// memory trade-off vs the roadmap-N6 broadcast variant.
+/// Produced by [`ProtocolMonitorBuilder::build`]. Owns one
+/// [`AsyncCapture`] internally + a flowscope-side
+/// `Driver` with one slot per enabled protocol.
 pub struct ProtocolMonitor<K> {
-    /// Boxed per-protocol child streams. Each yields
-    /// `Result<ProtocolEvent<K>, Error>`. Polled in round-robin
-    /// order to keep one chatty protocol from starving the others.
-    streams: Vec<BoxedEventStream<K>>,
-    /// Round-robin cursor for `poll_next`.
-    cursor: usize,
-    /// Number of streams that have hit `Poll::Ready(None)` and
-    /// won't be polled again.
-    exhausted: usize,
+    inner: BoxedEventStream<K>,
+    /// Number of registered parser slots inside the unified driver.
+    /// Always at least 1 (the central flow tracker always emits
+    /// lifecycle events).
+    slots: usize,
 }
 
 impl<K> std::fmt::Debug for ProtocolMonitor<K> {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("ProtocolMonitor")
-            .field("sources", &self.streams.len())
-            .field("alive", &(self.streams.len() - self.exhausted))
+            .field("source_count", &1usize)
+            .field("slots", &self.slots)
             .finish()
     }
 }
 
-type BoxedEventStream<K> =
-    Pin<Box<dyn Stream<Item = Result<ProtocolEvent<K>, Error>> + Send + 'static>>;
-
 impl<K> ProtocolMonitor<K> {
     /// Number of underlying captures driving this monitor.
+    /// **Always 1** as of netring 0.18.
     pub fn source_count(&self) -> usize {
-        self.streams.len()
+        1
     }
 
-    /// Number of sources still producing events (i.e. not yet at
-    /// `Poll::Ready(None)`).
+    /// Number of sources still producing events. **Always 1**
+    /// for live captures (a pcap-backed monitor returns 0 after
+    /// EOF; the unified-driver flow doesn't expose that today).
     pub fn alive_sources(&self) -> usize {
-        self.streams.len().saturating_sub(self.exhausted)
+        1
+    }
+
+    /// Number of parser slots registered on the underlying driver.
+    /// Excludes the always-on central flow tracker. `0` means
+    /// only lifecycle events are produced (no L7 messages).
+    pub fn slot_count(&self) -> usize {
+        self.slots
     }
 }
 
-impl ProtocolMonitorBuilder {
-    /// Entry point — mirrors `Capture::builder()` and other
-    /// builder constructors in netring.
-    pub fn new() -> Self {
-        Self::default()
-    }
-}
-
-impl<K: Send + Unpin + 'static> Stream for ProtocolMonitor<K> {
+impl<K> Stream for ProtocolMonitor<K>
+where
+    K: Send + Unpin + 'static,
+{
     type Item = Result<ProtocolEvent<K>, Error>;
 
     fn poll_next(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
-        if self.streams.is_empty() {
-            return Poll::Ready(None);
-        }
-
-        let len = self.streams.len();
-        let mut polled = 0;
-        // Round-robin so one chatty stream doesn't starve others.
-        while polled < len {
-            let idx = (self.cursor + polled) % len;
-            polled += 1;
-            let s = &mut self.streams[idx];
-            match s.as_mut().poll_next(cx) {
-                Poll::Ready(Some(item)) => {
-                    self.cursor = (idx + 1) % len;
-                    return Poll::Ready(Some(item));
-                }
-                Poll::Ready(None) => {
-                    self.exhausted += 1;
-                    // Replace with a fused-empty stream so future
-                    // polls fall through fast.
-                    let dummy: BoxedEventStream<K> = Box::pin(FusedEmpty(std::marker::PhantomData));
-                    self.streams[idx] = dummy;
-                }
-                Poll::Pending => {
-                    // Try the next stream.
-                }
-            }
-        }
-
-        if self.exhausted >= self.streams.len() {
-            Poll::Ready(None)
-        } else {
-            Poll::Pending
-        }
+        self.inner.as_mut().poll_next(cx)
     }
 }
 
@@ -140,7 +108,8 @@ impl<K: Send + Unpin + 'static> Stream for ProtocolMonitor<K> {
 /// Declare:
 /// - the interface to watch (one network device)
 /// - which protocols to track (`.flow()`, `.http()`, `.dns()`,
-///   `.tls()`, `.icmp()` — each is an additive opt-in)
+///   `.tls()`, `.tls_handshake()`, `.icmp()` — each is an
+///   additive opt-in)
 ///
 /// Then call [`build`](Self::build) with the
 /// [`FlowExtractor`](flowscope::FlowExtractor) (typically
@@ -148,6 +117,9 @@ impl<K: Send + Unpin + 'static> Stream for ProtocolMonitor<K> {
 #[derive(Debug, Default)]
 pub struct ProtocolMonitorBuilder {
     interface: Option<String>,
+    /// Retained for API compat — the central tracker always emits
+    /// lifecycle events on the unified driver, so this flag is now
+    /// informational only.
     enable_flow: bool,
     #[cfg(feature = "http")]
     http_ports: Option<Vec<u16>>,
@@ -173,16 +145,22 @@ enum IcmpScope {
 }
 
 impl ProtocolMonitorBuilder {
+    /// Entry point — mirrors `Capture::builder()` and other
+    /// builder constructors in netring.
+    pub fn new() -> Self {
+        Self::default()
+    }
+
     /// Set the network interface to watch.
     pub fn interface(mut self, name: impl Into<String>) -> Self {
         self.interface = Some(name.into());
         self
     }
 
-    /// Enable plain flow-lifecycle tracking (Started, Established,
-    /// StateChange, Ended, Tick, FlowAnomaly, TrackerAnomaly) for
-    /// every ICMP/TCP/UDP flow on the interface. No BPF filter —
-    /// the flow tracker sees everything.
+    /// Enable plain flow-lifecycle tracking. As of 0.18 the central
+    /// flow tracker is always on inside the unified driver; this
+    /// method is retained for backwards compatibility and as an
+    /// explicit marker of intent.
     pub fn flow(mut self) -> Self {
         self.enable_flow = true;
         self
@@ -239,15 +217,16 @@ impl ProtocolMonitorBuilder {
         self
     }
 
-    /// Enable the TLS handshake **aggregator** parser (flowscope's
-    /// [`TlsHandshakeParser`](flowscope::tls::TlsHandshakeParser),
-    /// new in 0.9) on the default port set (443, 8443). Emits one
+    /// Enable the TLS handshake **aggregator** parser
+    /// ([`flowscope::tls::TlsHandshakeParser`], new in flowscope 0.9)
+    /// on the default port set (443, 8443). Emits one
     /// `ProtocolMessage::TlsHandshake` per observed handshake
-    /// instead of the message-granularity events `.tls()` produces.
+    /// instead of the message-granularity events `.tls()`
+    /// produces.
     ///
     /// You can enable both `.tls()` and `.tls_handshake()` — they
-    /// run independent parsers. Most consumers want one or the
-    /// other.
+    /// run independent parser slots. Most consumers want one or
+    /// the other.
     #[cfg(feature = "tls")]
     pub fn tls_handshake(self) -> Self {
         self.tls_handshake_on_ports([443, 8443])
@@ -260,10 +239,9 @@ impl ProtocolMonitorBuilder {
         self
     }
 
-    /// Enable ICMP parsing (both ICMPv4 and ICMPv6). The arm
-    /// surfaces `ProtocolMessage::Icmp(IcmpMessage)` events,
-    /// including `inner: Option<IcmpInner>` on error variants
-    /// (`DestinationUnreachable`, `TimeExceeded`, …) — the
+    /// Enable ICMP parsing (both ICMPv4 and ICMPv6). Surfaces
+    /// `ProtocolMessage::Icmp(IcmpMessage)` events, including
+    /// `inner: Option<IcmpInner>` on error variants — the
     /// cross-protocol correlation primitive that ties an ICMP
     /// error back to the originating TCP/UDP flow.
     #[cfg(feature = "icmp")]
@@ -289,8 +267,8 @@ impl ProtocolMonitorBuilder {
     /// Build the monitor.
     ///
     /// # Errors
-    /// - `Error::Config` if no interface was set, or no protocols
-    ///   were enabled, or building any of the captures fails.
+    /// - `Error::Config` if no interface was set, or if opening the
+    ///   underlying capture fails.
     pub fn build<E>(self, extractor: E) -> Result<ProtocolMonitor<E::Key>, Error>
     where
         E: FlowExtractor + Unpin + Clone + Send + 'static,
@@ -300,362 +278,143 @@ impl ProtocolMonitorBuilder {
             Error::Config("ProtocolMonitorBuilder: .interface(...) is required".into())
         })?;
 
-        let mut streams: Vec<BoxedEventStream<E::Key>> = Vec::new();
-
-        if self.enable_flow {
-            streams.push(build_flow_stream(&iface, extractor.clone())?);
-        }
+        // Build the unified Driver with one slot per enabled
+        // protocol. The central flow tracker always runs and
+        // emits lifecycle events regardless of slots.
+        let mut builder: DriverBuilder<E, ProtocolMessage> = Driver::builder(extractor);
+        let mut slots: usize = 0;
 
         #[cfg(feature = "http")]
-        if let Some(ports) = self.http_ports.as_deref() {
-            streams.push(build_http_stream(&iface, extractor.clone(), ports)?);
-        }
-
-        #[cfg(feature = "dns")]
-        if let Some(ports) = self.dns_udp_ports.as_deref() {
-            streams.push(build_dns_udp_stream(&iface, extractor.clone(), ports)?);
-        }
-
-        #[cfg(feature = "dns")]
-        if let Some(ports) = self.dns_tcp_ports.as_deref() {
-            streams.push(build_dns_tcp_stream(&iface, extractor.clone(), ports)?);
-        }
-
-        #[cfg(feature = "tls")]
-        if let Some(ports) = self.tls_ports.as_deref() {
-            streams.push(build_tls_stream(&iface, extractor.clone(), ports)?);
-        }
-
-        #[cfg(feature = "tls")]
-        if let Some(ports) = self.tls_handshake_ports.as_deref() {
-            streams.push(build_tls_handshake_stream(
-                &iface,
-                extractor.clone(),
+        if let Some(ports) = self.http_ports {
+            builder = builder.session_on_ports(
+                flowscope::http::HttpParser::default(),
                 ports,
-            )?);
+                ProtocolMessage::Http,
+            );
+            slots += 1;
+        }
+
+        #[cfg(feature = "dns")]
+        if let Some(ports) = self.dns_udp_ports {
+            builder = builder.datagram_on_ports(
+                flowscope::dns::DnsUdpParser::with_correlation(),
+                ports,
+                ProtocolMessage::Dns,
+            );
+            slots += 1;
+        }
+
+        #[cfg(feature = "dns")]
+        if let Some(ports) = self.dns_tcp_ports {
+            builder = builder.session_on_ports(
+                flowscope::dns::DnsTcpParser::default(),
+                ports,
+                ProtocolMessage::Dns,
+            );
+            slots += 1;
+        }
+
+        #[cfg(feature = "tls")]
+        if let Some(ports) = self.tls_ports {
+            builder = builder.session_on_ports(
+                flowscope::tls::TlsParser::default(),
+                ports,
+                ProtocolMessage::Tls,
+            );
+            slots += 1;
+        }
+
+        #[cfg(feature = "tls")]
+        if let Some(ports) = self.tls_handshake_ports {
+            builder = builder.session_on_ports(
+                flowscope::tls::TlsHandshakeParser::default(),
+                ports,
+                ProtocolMessage::TlsHandshake,
+            );
+            slots += 1;
         }
 
         #[cfg(feature = "icmp")]
         if let Some(scope) = self.enable_icmp {
-            streams.push(build_icmp_stream(&iface, extractor.clone(), scope)?);
+            let parser = match scope {
+                IcmpScope::Both => flowscope::icmp::IcmpParser::new(),
+                IcmpScope::V4 => flowscope::icmp::IcmpParser::new().v4_only(),
+                IcmpScope::V6 => flowscope::icmp::IcmpParser::new().v6_only(),
+            };
+            builder = builder.datagram_broadcast(parser, ProtocolMessage::Icmp);
+            slots += 1;
         }
 
-        if streams.is_empty() {
-            return Err(Error::Config(
-                "ProtocolMonitorBuilder: at least one protocol must be enabled".into(),
-            ));
+        let driver = builder.build();
+
+        // One capture — no kernel filter.
+        let cap = AsyncCapture::open(&iface)?;
+        let packet_stream = cap.into_stream();
+
+        let inner: BoxedEventStream<E::Key> = Box::pin(DriverDrivenStream {
+            packet_stream,
+            driver,
+            pending: VecDeque::new(),
+        });
+
+        Ok(ProtocolMonitor { inner, slots })
+    }
+}
+
+/// Inner stream: pulls owned-packet batches from the underlying
+/// `AsyncCapture` and feeds them through the unified driver,
+/// buffering the resulting events.
+struct DriverDrivenStream<S, E>
+where
+    S: PacketSource + std::os::fd::AsRawFd,
+    E: FlowExtractor,
+{
+    packet_stream: PacketStream<S>,
+    driver: Driver<E, ProtocolMessage>,
+    pending: VecDeque<ProtocolEvent<E::Key>>,
+}
+
+// All fields are owned values without self-references; the struct
+// is Unpin whenever its field types are. Since flowscope's Driver
+// and the netring PacketStream are both Unpin given Unpin sources,
+// we don't need a manual impl.
+
+impl<S, E> Stream for DriverDrivenStream<S, E>
+where
+    S: PacketSource + std::os::fd::AsRawFd + Unpin + Send + 'static,
+    E: FlowExtractor + Clone + Unpin + Send + 'static,
+    E::Key: Eq + std::hash::Hash + Clone + Send + Sync + Unpin + 'static,
+{
+    type Item = Result<ProtocolEvent<E::Key>, Error>;
+
+    fn poll_next(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
+        loop {
+            // Drain pending first — driver.track() may have queued
+            // many events from a single batch.
+            if let Some(ev) = self.pending.pop_front() {
+                return Poll::Ready(Some(Ok(ev)));
+            }
+
+            let this = self.as_mut().get_mut();
+            match Pin::new(&mut this.packet_stream).poll_next(cx) {
+                Poll::Ready(Some(Ok(batch))) => {
+                    for owned in batch {
+                        let view = flowscope::PacketView::new(&owned.data, owned.timestamp);
+                        this.pending.extend(this.driver.track(view));
+                    }
+                    // Loop back and drain pending.
+                }
+                Poll::Ready(Some(Err(e))) => return Poll::Ready(Some(Err(e))),
+                Poll::Ready(None) => return Poll::Ready(None),
+                Poll::Pending => return Poll::Pending,
+            }
         }
-
-        Ok(ProtocolMonitor {
-            streams,
-            cursor: 0,
-            exhausted: 0,
-        })
     }
 }
 
-// ── Per-protocol stream constructors ─────────────────────────────
-
-fn build_flow_stream<E>(iface: &str, ext: E) -> Result<BoxedEventStream<E::Key>, Error>
-where
-    E: FlowExtractor + Unpin + Send + 'static,
-    E::Key: Eq + std::hash::Hash + Clone + Send + Sync + Unpin + 'static,
-{
-    let cap = AsyncCapture::open(iface)?;
-    let stream = cap.flow_stream(ext).map(|r| r.map(ProtocolEvent::Flow));
-    Ok(Box::pin(stream))
-}
-
-#[cfg(feature = "http")]
-fn build_http_stream<E>(
-    iface: &str,
-    ext: E,
-    ports: &[u16],
-) -> Result<BoxedEventStream<E::Key>, Error>
-where
-    E: FlowExtractor + Unpin + Send + 'static,
-    E::Key: Eq + std::hash::Hash + Clone + Send + Sync + Unpin + 'static,
-{
-    use flowscope::http::HttpParser;
-
-    let filter = bpf_tcp_ports(ports)?;
-    let cap = AsyncCapture::open_with_filter(iface, filter)?;
-    let stream = cap
-        .flow_stream(ext)
-        .session_stream(HttpParser::default())
-        .filter_map(application_only_http);
-    Ok(Box::pin(stream))
-}
-
-#[cfg(feature = "dns")]
-fn build_dns_udp_stream<E>(
-    iface: &str,
-    ext: E,
-    ports: &[u16],
-) -> Result<BoxedEventStream<E::Key>, Error>
-where
-    E: FlowExtractor + Unpin + Send + 'static,
-    E::Key: Eq + std::hash::Hash + Clone + Send + Sync + Unpin + 'static,
-{
-    use flowscope::dns::DnsUdpParser;
-
-    let filter = bpf_udp_ports(ports)?;
-    let cap = AsyncCapture::open_with_filter(iface, filter)?;
-    let stream = cap
-        .flow_stream(ext)
-        .datagram_stream(DnsUdpParser::with_correlation())
-        .filter_map(application_only_dns);
-    Ok(Box::pin(stream))
-}
-
-#[cfg(feature = "dns")]
-fn build_dns_tcp_stream<E>(
-    iface: &str,
-    ext: E,
-    ports: &[u16],
-) -> Result<BoxedEventStream<E::Key>, Error>
-where
-    E: FlowExtractor + Unpin + Send + 'static,
-    E::Key: Eq + std::hash::Hash + Clone + Send + Sync + Unpin + 'static,
-{
-    use flowscope::dns::DnsTcpParser;
-
-    let filter = bpf_tcp_ports(ports)?;
-    let cap = AsyncCapture::open_with_filter(iface, filter)?;
-    let stream = cap
-        .flow_stream(ext)
-        .session_stream(DnsTcpParser::default())
-        .filter_map(application_only_dns);
-    Ok(Box::pin(stream))
-}
-
-#[cfg(feature = "tls")]
-fn build_tls_stream<E>(
-    iface: &str,
-    ext: E,
-    ports: &[u16],
-) -> Result<BoxedEventStream<E::Key>, Error>
-where
-    E: FlowExtractor + Unpin + Send + 'static,
-    E::Key: Eq + std::hash::Hash + Clone + Send + Sync + Unpin + 'static,
-{
-    use flowscope::tls::TlsParser;
-
-    let filter = bpf_tcp_ports(ports)?;
-    let cap = AsyncCapture::open_with_filter(iface, filter)?;
-    let stream = cap
-        .flow_stream(ext)
-        .session_stream(TlsParser::default())
-        .filter_map(application_only_tls);
-    Ok(Box::pin(stream))
-}
-
-#[cfg(feature = "tls")]
-fn build_tls_handshake_stream<E>(
-    iface: &str,
-    ext: E,
-    ports: &[u16],
-) -> Result<BoxedEventStream<E::Key>, Error>
-where
-    E: FlowExtractor + Unpin + Send + 'static,
-    E::Key: Eq + std::hash::Hash + Clone + Send + Sync + Unpin + 'static,
-{
-    use flowscope::tls::TlsHandshakeParser;
-
-    let filter = bpf_tcp_ports(ports)?;
-    let cap = AsyncCapture::open_with_filter(iface, filter)?;
-    let stream = cap
-        .flow_stream(ext)
-        .session_stream(TlsHandshakeParser::default())
-        .filter_map(application_only_tls_handshake);
-    Ok(Box::pin(stream))
-}
-
-#[cfg(feature = "icmp")]
-fn build_icmp_stream<E>(
-    iface: &str,
-    ext: E,
-    scope: IcmpScope,
-) -> Result<BoxedEventStream<E::Key>, Error>
-where
-    E: FlowExtractor + Unpin + Send + 'static,
-    E::Key: Eq + std::hash::Hash + Clone + Send + Sync + Unpin + 'static,
-{
-    use flowscope::icmp::IcmpParser;
-
-    let filter = bpf_icmp(scope)?;
-    let cap = AsyncCapture::open_with_filter(iface, filter)?;
-    let parser = match scope {
-        IcmpScope::Both => IcmpParser::new(),
-        IcmpScope::V4 => IcmpParser::new().v4_only(),
-        IcmpScope::V6 => IcmpParser::new().v6_only(),
-    };
-    let stream = cap
-        .flow_stream(ext)
-        .datagram_stream(parser)
-        .filter_map(application_only_icmp);
-    Ok(Box::pin(stream))
-}
-
-// ── Filter helpers — keep only Application events, drop lifecycle. ──
-
-#[cfg(feature = "http")]
-fn application_only_http<K>(
-    r: Result<flowscope::SessionEvent<K, flowscope::http::HttpMessage>, Error>,
-) -> Option<Result<ProtocolEvent<K>, Error>> {
-    use flowscope::SessionEvent;
-    match r {
-        Err(e) => Some(Err(e)),
-        Ok(SessionEvent::Application {
-            key,
-            side,
-            message,
-            ts,
-            parser_kind,
-        }) => Some(Ok(ProtocolEvent::Message {
-            key,
-            side,
-            kind: parser_kind,
-            message: ProtocolMessage::Http(message),
-            ts,
-        })),
-        Ok(_) => None,
-    }
-}
-
-#[cfg(feature = "dns")]
-fn application_only_dns<K>(
-    r: Result<flowscope::SessionEvent<K, flowscope::dns::DnsMessage>, Error>,
-) -> Option<Result<ProtocolEvent<K>, Error>> {
-    use flowscope::SessionEvent;
-    match r {
-        Err(e) => Some(Err(e)),
-        Ok(SessionEvent::Application {
-            key,
-            side,
-            message,
-            ts,
-            parser_kind,
-        }) => Some(Ok(ProtocolEvent::Message {
-            key,
-            side,
-            kind: parser_kind,
-            message: ProtocolMessage::Dns(message),
-            ts,
-        })),
-        Ok(_) => None,
-    }
-}
-
-#[cfg(feature = "icmp")]
-fn application_only_icmp<K>(
-    r: Result<flowscope::SessionEvent<K, flowscope::icmp::IcmpMessage>, Error>,
-) -> Option<Result<ProtocolEvent<K>, Error>> {
-    use flowscope::SessionEvent;
-    match r {
-        Err(e) => Some(Err(e)),
-        Ok(SessionEvent::Application {
-            key,
-            side,
-            message,
-            ts,
-            parser_kind,
-        }) => Some(Ok(ProtocolEvent::Message {
-            key,
-            side,
-            kind: parser_kind,
-            message: ProtocolMessage::Icmp(message),
-            ts,
-        })),
-        Ok(_) => None,
-    }
-}
-
-#[cfg(feature = "tls")]
-fn application_only_tls<K>(
-    r: Result<flowscope::SessionEvent<K, flowscope::tls::TlsMessage>, Error>,
-) -> Option<Result<ProtocolEvent<K>, Error>> {
-    use flowscope::SessionEvent;
-    match r {
-        Err(e) => Some(Err(e)),
-        Ok(SessionEvent::Application {
-            key,
-            side,
-            message,
-            ts,
-            parser_kind,
-        }) => Some(Ok(ProtocolEvent::Message {
-            key,
-            side,
-            kind: parser_kind,
-            message: ProtocolMessage::Tls(message),
-            ts,
-        })),
-        Ok(_) => None,
-    }
-}
-
-#[cfg(feature = "tls")]
-fn application_only_tls_handshake<K>(
-    r: Result<flowscope::SessionEvent<K, flowscope::tls::TlsHandshake>, Error>,
-) -> Option<Result<ProtocolEvent<K>, Error>> {
-    use flowscope::SessionEvent;
-    match r {
-        Err(e) => Some(Err(e)),
-        Ok(SessionEvent::Application {
-            key,
-            side,
-            message,
-            ts,
-            parser_kind,
-        }) => Some(Ok(ProtocolEvent::Message {
-            key,
-            side,
-            kind: parser_kind,
-            message: ProtocolMessage::TlsHandshake(message),
-            ts,
-        })),
-        Ok(_) => None,
-    }
-}
-
-// ── BPF helpers ──────────────────────────────────────────────────
-
-#[cfg(any(feature = "http", feature = "dns", feature = "tls"))]
-fn bpf_tcp_ports(ports: &[u16]) -> Result<BpfFilter, Error> {
-    if ports.is_empty() {
-        return Err(Error::Config("empty port set".into()));
-    }
-    BpfFilter::builder()
-        .tcp()
-        .ports(ports.iter().copied())
-        .build()
-        .map_err(Error::from)
-}
-
-#[cfg(feature = "dns")]
-fn bpf_udp_ports(ports: &[u16]) -> Result<BpfFilter, Error> {
-    if ports.is_empty() {
-        return Err(Error::Config("empty port set".into()));
-    }
-    BpfFilter::builder()
-        .udp()
-        .ports(ports.iter().copied())
-        .build()
-        .map_err(Error::from)
-}
-
-#[cfg(feature = "icmp")]
-fn bpf_icmp(scope: IcmpScope) -> Result<BpfFilter, Error> {
-    // ICMPv4 is IP proto 1; ICMPv6 is IPv6 Next Header 58.
-    let b = BpfFilter::builder();
-    let b = match scope {
-        IcmpScope::V4 => b.icmp(),
-        IcmpScope::V6 => b.ipv6().ip_proto(58),
-        IcmpScope::Both => b.icmp().or(|b| b.ipv6().ip_proto(58)),
-    };
-    b.build().map_err(Error::from)
-}
+// Allow capturing the `Capture` source via `AsyncCapture::open`
+// for the default builder path.
+type _NetringCapture = Capture;
 
 #[cfg(test)]
 mod tests {
@@ -679,10 +438,6 @@ mod tests {
 
     #[test]
     fn builder_default_has_no_protocols_enabled() {
-        // Verify that the builder state correctly leaves all
-        // protocols off by default. The build-time error for "no
-        // protocol enabled" is exercised at the boundary via
-        // integration tests under `integration-tests`.
         let b = ProtocolMonitorBuilder::new().interface("lo");
         assert!(!b.enable_flow);
         #[cfg(feature = "http")]
@@ -693,7 +448,10 @@ mod tests {
             assert!(b.dns_tcp_ports.is_none());
         }
         #[cfg(feature = "tls")]
-        assert!(b.tls_ports.is_none());
+        {
+            assert!(b.tls_ports.is_none());
+            assert!(b.tls_handshake_ports.is_none());
+        }
     }
 
     #[test]

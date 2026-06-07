@@ -53,8 +53,6 @@ use netring::anomaly::{Anomaly, AnomalyRule, Severity};
 #[cfg(all(feature = "tokio", feature = "flow", feature = "parse"))]
 use netring::correlate::KeyIndexed;
 #[cfg(all(feature = "tokio", feature = "flow", feature = "parse"))]
-use netring::flow::FlowEvent;
-#[cfg(all(feature = "tokio", feature = "flow", feature = "parse"))]
 use netring::flow::extract::FiveTupleKey;
 #[cfg(all(feature = "tokio", feature = "flow", feature = "parse"))]
 use netring::protocol::ProtocolEvent;
@@ -113,7 +111,7 @@ impl AnomalyRule<FiveTupleKey> for LateralMovementRule {
         evt: &ProtocolEvent<FiveTupleKey>,
         emit: &mut Vec<Anomaly<FiveTupleKey>>,
     ) {
-        let ProtocolEvent::Flow(FlowEvent::Started { key, ts, .. }) = evt else {
+        let ProtocolEvent::FlowStarted { key, ts, .. } = evt else {
             return;
         };
         let src = key.a.ip();

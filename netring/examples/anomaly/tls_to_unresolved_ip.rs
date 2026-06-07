@@ -88,7 +88,7 @@ impl AnomalyRule<FiveTupleKey> for TlsToUnresolvedIpRule {
         match evt {
             // ── DNS Response: record resolutions per client IP ──
             ProtocolEvent::Message {
-                kind: flowscope::parser_kinds::DNS_UDP,
+                parser_kind: flowscope::parser_kinds::DNS_UDP,
                 message: ProtocolMessage::Dns(DnsMessage::Response(r)),
                 key,
                 ts,
@@ -99,7 +99,7 @@ impl AnomalyRule<FiveTupleKey> for TlsToUnresolvedIpRule {
             }
             // ── TLS ClientHello: check dst IP against client's cache ──
             ProtocolEvent::Message {
-                kind: flowscope::parser_kinds::TLS,
+                parser_kind: flowscope::parser_kinds::TLS,
                 message: ProtocolMessage::Tls(TlsMessage::ClientHello(ch)),
                 key,
                 ts,

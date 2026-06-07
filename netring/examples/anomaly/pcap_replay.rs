@@ -74,7 +74,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             emit: &mut Vec<Anomaly<FiveTupleKey>>,
         ) {
             let ProtocolEvent::Message {
-                kind: flowscope::parser_kinds::DNS_UDP,
+                parser_kind: flowscope::parser_kinds::DNS_UDP,
                 message: ProtocolMessage::Dns(DnsMessage::Query(_)),
                 key,
                 ts,
@@ -130,7 +130,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 let pe = ProtocolEvent::Message {
                     key,
                     side,
-                    kind: parser_kind,
+                    parser_kind,
                     message: ProtocolMessage::Dns(message),
                     ts,
                 };

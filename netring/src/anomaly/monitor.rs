@@ -90,7 +90,7 @@ impl<K> std::fmt::Debug for AnomalyMonitor<K> {
 
 #[cfg(test)]
 mod tests {
-    use flowscope::{FlowEvent, FlowSide, Timestamp};
+    use flowscope::Timestamp;
 
     use super::*;
     use crate::anomaly::rule::Severity;
@@ -98,12 +98,11 @@ mod tests {
     type Key = u32;
 
     fn fake_started(k: Key, ts: u32) -> ProtocolEvent<Key> {
-        ProtocolEvent::Flow(FlowEvent::Started {
+        ProtocolEvent::FlowStarted {
             key: k,
-            side: FlowSide::Initiator,
             l4: None,
             ts: Timestamp::new(ts, 0),
-        })
+        }
     }
 
     struct CountEvents {

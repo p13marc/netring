@@ -344,12 +344,17 @@ where
     /// reassembler high-watermark diagnostics. Lazy — pay only for
     /// what you consume.
     ///
-    /// Mirrors
-    /// [`flowscope::FlowTracker::all_flow_stats`].
+    /// Built on
+    /// [`flowscope::FlowTracker::iter_active`] (flowscope 0.8+);
+    /// projects to the historical `(key, stats)` shape for
+    /// callers that don't need per-flow user state, TCP state,
+    /// or L4 protocol. New callers should reach
+    /// `self.tracker().iter_active()` directly for the richer
+    /// `ActiveFlow` shape.
     pub fn snapshot_flow_stats(
         &self,
     ) -> impl Iterator<Item = (&E::Key, &flowscope::FlowStats)> + '_ {
-        self.tracker.all_flow_stats()
+        self.tracker.iter_active().map(|af| (af.key, af.stats))
     }
 
     /// Cumulative tracker counters: `flows_created`, `flows_ended`,

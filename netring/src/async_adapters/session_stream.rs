@@ -189,10 +189,11 @@ where
     }
 
     /// Borrow-iterator over live `(K, FlowStats)` pairs.
+    /// Built on [`flowscope::FlowTracker::iter_active`].
     pub fn snapshot_flow_stats(
         &self,
     ) -> impl Iterator<Item = (&E::Key, &flowscope::FlowStats)> + '_ {
-        self.tracker.all_flow_stats()
+        self.tracker.iter_active().map(|af| (af.key, af.stats))
     }
 
     /// Cumulative tracker counters: `flows_created`, `flows_ended`,

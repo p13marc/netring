@@ -474,9 +474,9 @@ checksum = "9f1f227452a390804cdb637b74a86990f2a7d7ba4b7d5693aac9b4dd6defd8d6"
 
 [[package]]
 name = "flowscope"
-version = "0.7.0"
+version = "0.10.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "74ef8566fcc4b5bd7a1413ee41e4816cf7260b30f1d783d543734a66198e3019"
+checksum = "bd0c08ff59c9f3193451c8ca1bc1c57749fa5cf242e22b793a24bc836a1b41aa"
 dependencies = [
  "ahash",
  "arrayvec",
@@ -487,7 +487,6 @@ dependencies = [
  "lru",
  "simple-dns",
  "smallvec",
- "thiserror 2.0.18",
  "tls-parser",
 ]
 

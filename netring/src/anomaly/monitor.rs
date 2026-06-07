@@ -314,4 +314,27 @@ mod tests {
         assert!(json.contains("\"nan\":null"));
         assert!(json.contains("\"inf\":null"));
     }
+
+    #[cfg(feature = "serde")]
+    #[test]
+    fn anomaly_to_json_value_wire_vocabulary() {
+        // Locks the serde wire vocabulary. If a future change
+        // renames a field or variant, this test catches it before
+        // downstream dashboards break.
+        let a: Anomaly<Key> = Anomaly::new("DnsBurst", Severity::Warning, Timestamp::new(42, 7))
+            .with_key(99)
+            .with_observation("src_ip", "10.0.0.1")
+            .with_metric("count", 12.5);
+        let v = a.to_json_value();
+        // Severity is the lowercase metric-vocabulary token.
+        assert_eq!(v["severity"], "warning");
+        assert_eq!(v["kind"], "DnsBurst");
+        assert_eq!(v["key"], 99);
+        // Timestamp serializes via flowscope's wire format
+        // (`{sec, nsec}`). The `ts` field is the outer field name.
+        assert!(v["ts"].is_object());
+        // Context fields are namespaced.
+        assert!(v["context"]["observations"].is_array());
+        assert!(v["context"]["metrics"].is_array());
+    }
 }

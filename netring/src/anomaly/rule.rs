@@ -24,6 +24,8 @@ impl From<flowscope::event::Severity> for Severity {
 /// Rule authors pick the tier; the [`AnomalyMonitor`](super::AnomalyMonitor)
 /// is policy-neutral about what to do with it (log, page, alert).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Default)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize))]
+#[cfg_attr(feature = "serde", serde(rename_all = "snake_case"))]
 pub enum Severity {
     /// Informational — pattern of interest, no immediate action.
     #[default]
@@ -43,7 +45,15 @@ pub enum Severity {
 /// flow / host / IP the anomaly is about (when applicable). The
 /// [`AnomalyContext`] carries detector-specific observations and
 /// numeric metrics for structured downstream sinks.
+///
+/// With the `serde` Cargo feature on, `Serialize` is derived. We
+/// intentionally don't derive `Deserialize` — the
+/// `kind` / observation-label fields are `&'static str`, which
+/// can't roundtrip through arbitrary input. Consumers that want
+/// to read serialized anomalies back should go via
+/// `serde_json::Value`.
 #[derive(Debug, Clone)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize))]
 pub struct Anomaly<K> {
     /// Stable detector identifier (e.g. `"DnsResolvedNoConnection"`).
     pub kind: &'static str,
@@ -205,6 +215,24 @@ impl<K: std::fmt::Debug> Anomaly<K> {
     }
 }
 
+#[cfg(feature = "serde")]
+impl<K: serde::Serialize> Anomaly<K> {
+    /// Serialize via the derived `serde::Serialize` impl and return
+    /// the `serde_json::Value` representation.
+    ///
+    /// Companion to [`Self::to_json_line`] for callers who want the
+    /// structured `Value` (e.g. to merge into a compound payload
+    /// before final serialization). The wire vocabulary is whatever
+    /// `serde_json` produces from the locked snake_case field /
+    /// variant names; flowscope's `serde` feature uses the same
+    /// convention for the underlying `ProtocolMessage` payload.
+    ///
+    /// Available behind the `serde` Cargo feature.
+    pub fn to_json_value(&self) -> serde_json::Value {
+        serde_json::to_value(self).expect("Anomaly is always serializable")
+    }
+}
+
 impl<K: std::fmt::Debug> Anomaly<K> {
     /// Emit this anomaly through the [`tracing`] crate at the
     /// level matching its [`Severity`].
@@ -326,6 +354,7 @@ fn json_string(out: &mut String, value: &str) {
 /// [`observations`](Self::observations) and machine-readable
 /// thresholds in [`metrics`](Self::metrics).
 #[derive(Debug, Clone, Default)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize))]
 pub struct AnomalyContext {
     /// `(label, value)` observations — e.g. `("qname",
     /// "example.com")`.

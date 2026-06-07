@@ -20,10 +20,40 @@ built on AF_PACKET with TPACKET_V3 (block-based mmap ring buffers) and AF_XDP.
 
 ## Implementation Status
 
-**Active.** netring 0.16.0 prepared (this branch); 0.15.0 published.
-~318 tests, ~53 examples, zero warnings.
+**Active.** netring 0.17.0 prepared (this branch); 0.15.0 published.
+~349 tests, ~57 examples, zero warnings.
 
-### Recent additions (netring 0.17 — flowscope 0.7 bump)
+### Recent additions (netring 0.17 — flowscope 0.10 lockstep bump)
+
+Driven by
+[`plans/netring-0.17-flowscope-0.10-bump-2026-06-07.md`](../plans/netring-0.17-flowscope-0.10-bump-2026-06-07.md).
+
+- **flowscope 0.7 → 0.10.1**. Dramatically backward-compatible
+  for netring (the plan's `flowscope::Error` migration and
+  `Established { l4 }` destructure work both ended up as
+  no-ops on master).
+- **`netring/serde` Cargo feature.** Derives `Serialize` on
+  `Anomaly<K>` / `AnomalyContext` / `Severity` + adds
+  `Anomaly::to_json_value() -> serde_json::Value`. Composes
+  with `flowscope/serde` (shipped 0.8) so users can ship full
+  parsed `ProtocolMessage` payloads through line-oriented
+  JSON sinks (Vector / Fluentd / Loki). `Deserialize` not
+  derived (`&'static str` fields can't roundtrip).
+- **`ProtocolMonitorBuilder::tls_handshake()`** opt-in leg
+  runs flowscope's `TlsHandshakeParser` aggregator alongside
+  (or instead of) `.tls()`. `ProtocolMessage::TlsHandshake`
+  variant carries SNI / ALPN / JA3 / JA4 / version / cipher /
+  outcome.
+- Detector simplification across the board: 16 string-literal
+  match sites switched to `flowscope::parser_kinds::*`
+  constants; `IcmpType::error_inner()` collapses
+  `icmp_explained_drop`'s 40-LoC extractor; `DnsResolutionCache`
+  replaces the per-source HashMap shape in `tls_to_unresolved_ip`;
+  `AnomalyKind::short_kind()` for stable Prometheus labels in
+  `FlowAnomalyRule`; `slow_tls_handshake` rewritten to alert
+  on `HandshakeOutcome::Truncated`.
+
+### Earlier — netring 0.17 (was scheduled as flowscope 0.7 bump)
 
 Driven by
 [`plans/netring-0.17-flowscope-0.7-bump-2026-06-03.md`](../plans/netring-0.17-flowscope-0.7-bump-2026-06-03.md).

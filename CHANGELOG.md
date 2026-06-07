@@ -1,5 +1,109 @@
 # Changelog
 
+## 0.17.0 — flowscope 0.10 lockstep bump + wishlist absorption
+
+Lockstep update to flowscope 0.10.1. flowscope shipped every
+actionable item across three rounds of netring feedback (rounds
+for 0.5/0.6, 0.7, 0.8) plus the absorbed 0.9 cycle (high-level
+`Pipeline`, `flowscope::correlate`, `FlowMultiSessionDriver`,
+JA4, OOO reassembler, unified `flowscope::Error`,
+`flowscope::layers`) plus the 0.10 cycle (centerpiece unified
+`Driver<E, M>` + `Event<K, M>`, exchange aggregators, parser
+ergonomics, correlate extensions, `detect` / `aggregate` /
+`emit` / `well_known` modules, signature recognizers, helper
+sweep).
+
+This release covers the **mechanical bump + immediate wishlist
+absorption**. The major architectural items (collapse
+`ProtocolMonitor` onto the unified driver; adopt the new
+correlate / detect / aggregate tooling in new detectors) are
+scheduled for netring 0.18 and 0.19 respectively.
+
+### Breaking
+
+- **None on the public netring API surface.** flowscope 0.10 is
+  dramatically more backward-compatible than the 0.17 plan
+  anticipated; the plan's unified-`Error` migration and
+  `Established { l4 }` destructure work are both no-ops on
+  master. Downstream consumers depending on flowscope-side
+  error types directly should follow flowscope's own 0.9
+  migration shape (see
+  [flowscope CHANGELOG](https://github.com/p13marc/flowscope/blob/master/CHANGELOG.md#090)).
+- **`netring::correlate::TimeBucketedCounter` and
+  `KeyIndexed`** are now joined by re-exports of flowscope's
+  `BurstDetector` / `BurstHit` / `Ewma` / `SequencePattern` /
+  `KeylessSequencePattern` / `TimeBucketedSet` / `TopK`. The
+  netring-owned types stay (their API surface — particularly
+  `drain_expired` — has no flowscope equivalent). Documented
+  inline.
+
+### Added
+
+- **`netring/serde` Cargo feature.** Derives `Serialize` on
+  `Anomaly<K>` / `AnomalyContext` / `Severity` and adds
+  `Anomaly::to_json_value() -> serde_json::Value`. Composes
+  with `flowscope/serde` for users shipping full parsed
+  `ProtocolMessage` payloads through line-oriented JSON sinks.
+  `Deserialize` is intentionally not derived (`&'static str`
+  fields can't roundtrip; consumers reverse via `Value`).
+  Wire vocabulary locked by a unit test that checks the
+  rendered field names.
+- **`ProtocolMessage::TlsHandshake(TlsHandshake)`** variant
+  under the `tls` feature gate — surfaces flowscope 0.9's
+  `TlsHandshakeParser` aggregator output (one synthesised
+  event per handshake; carries SNI, ALPN, optional JA3 / JA4,
+  negotiated version, cipher suite, `resumption_attempted`,
+  and `HandshakeOutcome`).
+- **`ProtocolMonitorBuilder::tls_handshake()` /
+  `tls_handshake_on_ports([...])`** — opt-in `.tls_handshake()`
+  builder leg that runs `TlsHandshakeParser` alongside (or
+  instead of) `.tls()`. Default ports 443, 8443.
+
+### Adopted across detectors
+
+- **`flowscope::parser_kinds::*` constants** at every match
+  site (`kind: "dns-udp"` → `kind: flowscope::parser_kinds::DNS_UDP`).
+  Compile-time typo protection across 16 sites in
+  `examples/anomaly/`, `tests/`, and `benches/`.
+- **`IcmpType::error_inner()`** in
+  `examples/anomaly/icmp_explained_drop.rs` — collapses the
+  prior 40-LoC pattern-match helper to a one-liner. Label is
+  now `&'static str` (a stable metric-friendly slug).
+- **`flowscope::dns::DnsResolutionCache`** in
+  `examples/anomaly/tls_to_unresolved_ip.rs` — replaces the
+  per-source `HashMap<IpAddr, KeyIndexed<IpAddr, ()>>` shape.
+  Gains LRU-bounded growth (16,384 entry default cap) and
+  hostname canonicalisation.
+  `examples/anomaly/dns_resolved_no_connection.rs` is **not**
+  migrated — its drain-on-expiry pattern depends on iterating
+  the dropped resolutions to surface them as anomalies, which
+  `DnsResolutionCache::sweep` (returns just a count) can't
+  express.
+- **`AnomalyKind::short_kind()`** in `FlowAnomalyRule` — the
+  per-flow + tracker anomaly arms now record the stable slug
+  for Prometheus-friendly metric labels instead of the
+  Display rendering with parameters.
+- **`TlsHandshakeParser`** in `examples/anomaly/slow_tls_handshake.rs`
+  — rule rewritten from per-message ClientHello/ServerHello
+  correlation to alert-on-`HandshakeOutcome::Truncated`. Loses
+  the "slow but completed" arm (the aggregator doesn't expose
+  a precomputed RTT field) but the simpler rule catches the
+  strongest case. Plan-of-record Path A; Path B (per-message
+  subscription for RTT) is a follow-up.
+- **`FlowTracker::iter_active()`** under the hood — the
+  `snapshot_flow_stats` accessors on `FlowStream`,
+  `SessionStream`, `DatagramStream` switch from the
+  flowscope-deprecated `all_flow_stats()` to
+  `iter_active().map(|af| (af.key, af.stats))`. Preserves the
+  historical `(key, stats)` return shape; doc comment points
+  callers at `tracker().iter_active()` for the richer view.
+
+### Tests
+
+20 anomaly module tests (was 19; +`anomaly_to_json_value_wire_vocabulary`).
+Workspace tests still 349 across all suites; clippy
+`--all-targets --all-features -- -D warnings` clean.
+
 ## 0.16.0 — flowscope 0.7 bump, ICMP correlation, anomaly harness
 
 Lockstep update to flowscope 0.7.0 plus the 0.16 anomaly-correlation

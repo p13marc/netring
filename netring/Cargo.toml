@@ -1,6 +1,6 @@
 [package]
 name = "netring"
-version = "0.16.0"
+version = "0.17.0"
 edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
@@ -46,6 +46,11 @@ metrics = { workspace = true, optional = true }
 # `bpf(2)` / netlink wrappers and XSKMAP map plumbing.
 aya = { version = "0.13", optional = true }
 
+# Optional serde derives on `Anomaly<K>` + `AnomalyContext` +
+# `Severity`. Pairs with `flowscope/serde` (shipped in 0.8).
+serde = { version = "1", optional = true, features = ["derive"] }
+serde_json = { version = "1", optional = true }
+
 [dev-dependencies]
 env_logger = "0.11"
 tempfile = "3"
@@ -82,6 +87,14 @@ tls = ["flow", "flowscope/tls"]
 icmp = ["flow", "flowscope/icmp"]
 # Umbrella for everything flowscope-side.
 all-parsers = ["http", "dns", "tls", "icmp"]
+
+# Opt-in serde derives on `Anomaly<K>` / `AnomalyContext` /
+# `Severity`. Composes with `flowscope/serde` (0.8+) so users
+# can ship `Anomaly`s carrying full parsed `ProtocolMessage`
+# payloads through line-oriented JSON sinks (Vector, Fluentd,
+# Loki, …). Provides `Anomaly::to_json_value() -> serde_json::Value`
+# alongside the zero-dep `to_json_line()`.
+serde = ["dep:serde", "dep:serde_json", "flowscope/serde"]
 
 [package.metadata.docs.rs]
 all-features = true

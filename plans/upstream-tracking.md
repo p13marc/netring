@@ -73,11 +73,11 @@ at each minor release and update the "Last checked" line.
   `Serialize` + `Deserialize` derives on every public event /
   message / accessor type, with locked snake_case wire
   vocabulary.
-- **Action**: tracked in
-  [`netring-0.17-flowscope-0.10-bump-2026-06-07.md`](./netring-0.17-flowscope-0.10-bump-2026-06-07.md)
-  B11 — netring 0.17 adds a `netring/serde` feature, derives
-  `Serialize`/`Deserialize` on `Anomaly<K>` / `AnomalyContext` /
-  `Severity`, and ships `Anomaly::to_json_value()`.
+- **Action**: ✅ adopted in netring 0.17 (`c1ec36b`).
+  `netring/serde` Cargo feature derives `Serialize` (not
+  `Deserialize` — `&'static str` fields can't roundtrip) on
+  `Anomaly<K>` / `AnomalyContext` / `Severity` and ships
+  `Anomaly::to_json_value()`. See CHANGELOG.md 0.17.0.
 - **Last checked**: 2026-06-07.
 
 ## flowscope correlate primitives (F6 / G8)
@@ -86,13 +86,15 @@ at each minor release and update the "Last checked" line.
   `TimeBucketedCounter` + `KeyIndexed` + `SequencePattern`
   (flowscope 0.9) plus `TimeBucketedSet` + `BurstDetector` +
   `TopK` + `Ewma` extensions (flowscope 0.10).
-- **Action**: tracked in
-  [`netring-0.17-flowscope-0.10-bump-2026-06-07.md`](./netring-0.17-flowscope-0.10-bump-2026-06-07.md)
-  B5 — netring's own `netring::correlate` collapses to a
-  re-export of flowscope's types; ~400 LoC deleted from
-  netring. Extensions adopted in
-  [`netring-0.19-new-detectors-2026-06-07.md`](./netring-0.19-new-detectors-2026-06-07.md)
-  D2-D5.
+- **Action**: partially adopted in netring 0.17 (`96f8d78`):
+  `netring::correlate` re-exports the new extensions
+  (`BurstDetector` / `BurstHit` / `Ewma` / `SequencePattern` /
+  `KeylessSequencePattern` / `TimeBucketedSet` / `TopK`)
+  alongside netring's own `KeyIndexed` + `TimeBucketedCounter`
+  (kept because flowscope's `KeyIndexed` lacks `drain_expired`).
+  Extensions further adopted in
+  [`netring-0.18-unified-driver-refactor-2026-06-07.md`](./netring-0.18-unified-driver-refactor-2026-06-07.md)
+  D2–D5 (port_scan, syn_flood_burst, top_n_flows, ewma_rate).
 - **Last checked**: 2026-06-07.
 
 ## flowscope unified `Driver<E, M>` + `Event<K, M>`
@@ -116,7 +118,7 @@ at each minor release and update the "Last checked" line.
   102 sub-C). `detect::signatures` = magic-byte recognizers
   (plan 113 sub-A).
 - **Action**: tracked in
-  [`netring-0.19-new-detectors-2026-06-07.md`](./netring-0.19-new-detectors-2026-06-07.md)
+  [`netring-0.18-unified-driver-refactor-2026-06-07.md`](./netring-0.18-unified-driver-refactor-2026-06-07.md)
   D1 (DNS tunnel via shannon_entropy), D7 (Zeek conn.log writer).
 - **Last checked**: 2026-06-07.
 
@@ -125,10 +127,9 @@ at each minor release and update the "Last checked" line.
 - **Status**: ✅ shipped in flowscope 0.9 (plan 99) — let-chains
   at expression position. AFIT + async closures + trait
   upcasting also available within the new MSRV.
-- **Action**: netring is already on MSRV 1.95; satisfied without
-  change. Verify in
-  [`netring-0.17-flowscope-0.10-bump`](./netring-0.17-flowscope-0.10-bump-2026-06-07.md)
-  B2.
+- **Action**: ✅ verified during netring 0.17 lockstep bump
+  (`151901e`). netring's MSRV 1.95 satisfies flowscope's 1.88
+  without change.
 - **Last checked**: 2026-06-07.
 
 ## CI hardening (post-0.5)

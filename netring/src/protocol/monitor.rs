@@ -157,6 +157,8 @@ pub struct ProtocolMonitorBuilder {
     dns_tcp_ports: Option<Vec<u16>>,
     #[cfg(feature = "tls")]
     tls_ports: Option<Vec<u16>>,
+    #[cfg(feature = "tls")]
+    tls_handshake_ports: Option<Vec<u16>>,
     #[cfg(feature = "icmp")]
     enable_icmp: Option<IcmpScope>,
 }
@@ -237,6 +239,27 @@ impl ProtocolMonitorBuilder {
         self
     }
 
+    /// Enable the TLS handshake **aggregator** parser (flowscope's
+    /// [`TlsHandshakeParser`](flowscope::tls::TlsHandshakeParser),
+    /// new in 0.9) on the default port set (443, 8443). Emits one
+    /// `ProtocolMessage::TlsHandshake` per observed handshake
+    /// instead of the message-granularity events `.tls()` produces.
+    ///
+    /// You can enable both `.tls()` and `.tls_handshake()` — they
+    /// run independent parsers. Most consumers want one or the
+    /// other.
+    #[cfg(feature = "tls")]
+    pub fn tls_handshake(self) -> Self {
+        self.tls_handshake_on_ports([443, 8443])
+    }
+
+    /// Enable the TLS handshake aggregator on a custom port set.
+    #[cfg(feature = "tls")]
+    pub fn tls_handshake_on_ports(mut self, ports: impl IntoIterator<Item = u16>) -> Self {
+        self.tls_handshake_ports = Some(ports.into_iter().collect());
+        self
+    }
+
     /// Enable ICMP parsing (both ICMPv4 and ICMPv6). The arm
     /// surfaces `ProtocolMessage::Icmp(IcmpMessage)` events,
     /// including `inner: Option<IcmpInner>` on error variants
@@ -301,6 +324,15 @@ impl ProtocolMonitorBuilder {
         #[cfg(feature = "tls")]
         if let Some(ports) = self.tls_ports.as_deref() {
             streams.push(build_tls_stream(&iface, extractor.clone(), ports)?);
+        }
+
+        #[cfg(feature = "tls")]
+        if let Some(ports) = self.tls_handshake_ports.as_deref() {
+            streams.push(build_tls_handshake_stream(
+                &iface,
+                extractor.clone(),
+                ports,
+            )?);
         }
 
         #[cfg(feature = "icmp")]
@@ -415,6 +447,27 @@ where
         .flow_stream(ext)
         .session_stream(TlsParser::default())
         .filter_map(application_only_tls);
+    Ok(Box::pin(stream))
+}
+
+#[cfg(feature = "tls")]
+fn build_tls_handshake_stream<E>(
+    iface: &str,
+    ext: E,
+    ports: &[u16],
+) -> Result<BoxedEventStream<E::Key>, Error>
+where
+    E: FlowExtractor + Unpin + Send + 'static,
+    E::Key: Eq + std::hash::Hash + Clone + Send + Sync + Unpin + 'static,
+{
+    use flowscope::tls::TlsHandshakeParser;
+
+    let filter = bpf_tcp_ports(ports)?;
+    let cap = AsyncCapture::open_with_filter(iface, filter)?;
+    let stream = cap
+        .flow_stream(ext)
+        .session_stream(TlsHandshakeParser::default())
+        .filter_map(application_only_tls_handshake);
     Ok(Box::pin(stream))
 }
 
@@ -536,6 +589,30 @@ fn application_only_tls<K>(
             side,
             kind: parser_kind,
             message: ProtocolMessage::Tls(message),
+            ts,
+        })),
+        Ok(_) => None,
+    }
+}
+
+#[cfg(feature = "tls")]
+fn application_only_tls_handshake<K>(
+    r: Result<flowscope::SessionEvent<K, flowscope::tls::TlsHandshake>, Error>,
+) -> Option<Result<ProtocolEvent<K>, Error>> {
+    use flowscope::SessionEvent;
+    match r {
+        Err(e) => Some(Err(e)),
+        Ok(SessionEvent::Application {
+            key,
+            side,
+            message,
+            ts,
+            parser_kind,
+        }) => Some(Ok(ProtocolEvent::Message {
+            key,
+            side,
+            kind: parser_kind,
+            message: ProtocolMessage::TlsHandshake(message),
             ts,
         })),
         Ok(_) => None,

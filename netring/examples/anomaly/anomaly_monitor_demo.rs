@@ -95,7 +95,7 @@ impl AnomalyRule<FiveTupleKey> for DnsBurstRule {
         emit: &mut Vec<Anomaly<FiveTupleKey>>,
     ) {
         let ProtocolEvent::Message {
-            kind: "dns-udp",
+            kind: flowscope::parser_kinds::DNS_UDP,
             message: ProtocolMessage::Dns(DnsMessage::Query(_)),
             key,
             ts,
@@ -149,7 +149,7 @@ impl AnomalyRule<FiveTupleKey> for DnsNoConnectionRule {
     fn observe(&mut self, evt: &ProtocolEvent<FiveTupleKey>, _: &mut Vec<Anomaly<FiveTupleKey>>) {
         match evt {
             ProtocolEvent::Message {
-                kind: "dns-udp",
+                kind: flowscope::parser_kinds::DNS_UDP,
                 message: ProtocolMessage::Dns(DnsMessage::Response(r)),
                 ts,
                 ..

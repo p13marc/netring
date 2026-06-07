@@ -65,7 +65,7 @@ impl<K: Clone> AnomalyRule<K> for FlowAnomalyRule {
                 emit.push(
                     Anomaly::new(KIND, sev, *ts)
                         .with_key(key.clone())
-                        .with_observation("kind", kind.to_string()),
+                        .with_observation("kind", kind.short_kind()),
                 );
             }
             ProtocolEvent::Flow(FlowEvent::TrackerAnomaly { kind, ts }) => {
@@ -73,7 +73,7 @@ impl<K: Clone> AnomalyRule<K> for FlowAnomalyRule {
                 if sev < self.min_severity {
                     return;
                 }
-                emit.push(Anomaly::new(KIND, sev, *ts).with_observation("kind", kind.to_string()));
+                emit.push(Anomaly::new(KIND, sev, *ts).with_observation("kind", kind.short_kind()));
             }
             _ => {}
         }

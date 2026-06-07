@@ -43,7 +43,7 @@ use std::net::IpAddr;
 use std::time::Duration;
 
 #[cfg(all(feature = "tokio", feature = "icmp"))]
-use flowscope::icmp::{IcmpInner, IcmpMessage, IcmpType, Icmpv4Type, Icmpv6Type};
+use flowscope::icmp::{IcmpInner, IcmpMessage};
 #[cfg(all(feature = "tokio", feature = "icmp"))]
 use flowscope::{L4Proto, Timestamp};
 #[cfg(all(feature = "tokio", feature = "icmp"))]
@@ -64,10 +64,11 @@ use netring::protocol::{ProtocolEvent, ProtocolMessage};
 type InnerKey = (IpAddr, IpAddr, Option<u16>, Option<u16>, L4Proto);
 
 #[cfg(all(feature = "tokio", feature = "icmp"))]
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Copy)]
 struct IcmpExplanation {
-    /// Human-readable summary: "ICMPv4 Destination Unreachable (code=Port)" etc.
-    label: String,
+    /// Stable variant slug (`"dest_unreachable"`, `"time_exceeded"`,
+    /// …) from flowscope's `IcmpType::error_inner()`.
+    label: &'static str,
     /// When the ICMP error arrived. The flow-died-vs-ICMP delta is
     /// what users want.
     ts: Timestamp,
@@ -88,47 +89,13 @@ impl IcmpExplainedDropRule {
 }
 
 #[cfg(all(feature = "tokio", feature = "icmp"))]
-fn extract_icmp_error(msg: &IcmpMessage) -> Option<(String, &IcmpInner)> {
-    match &msg.ty {
-        IcmpType::V4(v4) => match v4 {
-            Icmpv4Type::DestinationUnreachable {
-                code,
-                inner: Some(i),
-            } => Some((format!("ICMPv4 DestUnreachable({code:?})"), i)),
-            Icmpv4Type::TimeExceeded {
-                code,
-                inner: Some(i),
-            } => Some((format!("ICMPv4 TimeExceeded({code:?})"), i)),
-            Icmpv4Type::Redirect {
-                code,
-                inner: Some(i),
-                ..
-            } => Some((format!("ICMPv4 Redirect({code:?})"), i)),
-            Icmpv4Type::ParameterProblem { inner: Some(i), .. } => {
-                Some(("ICMPv4 ParameterProblem".to_string(), i))
-            }
-            _ => None,
-        },
-        IcmpType::V6(v6) => match v6 {
-            Icmpv6Type::DestinationUnreachable {
-                code,
-                inner: Some(i),
-            } => Some((format!("ICMPv6 DestUnreachable({code:?})"), i)),
-            Icmpv6Type::PacketTooBig {
-                mtu,
-                inner: Some(i),
-            } => Some((format!("ICMPv6 PacketTooBig(mtu={mtu})"), i)),
-            Icmpv6Type::TimeExceeded {
-                code,
-                inner: Some(i),
-            } => Some((format!("ICMPv6 TimeExceeded({code:?})"), i)),
-            Icmpv6Type::ParameterProblem { inner: Some(i), .. } => {
-                Some(("ICMPv6 ParameterProblem".to_string(), i))
-            }
-            _ => None,
-        },
-        _ => None,
-    }
+fn extract_icmp_error(msg: &IcmpMessage) -> Option<(&'static str, &IcmpInner)> {
+    // flowscope 0.8 (plan 84) ships `IcmpType::error_inner()` and
+    // returns `Option<(&'static str, &IcmpInner)>` for every
+    // error-class variant on both v4 and v6 in one call. The
+    // earlier 40-LoC pattern-match this replaces lives in git
+    // history.
+    msg.ty.error_inner()
 }
 
 #[cfg(all(feature = "tokio", feature = "icmp"))]
@@ -154,7 +121,7 @@ impl AnomalyRule<FiveTupleKey> for IcmpExplainedDropRule {
     ) {
         match evt {
             ProtocolEvent::Message {
-                kind: "icmp",
+                kind: flowscope::parser_kinds::ICMP,
                 message: ProtocolMessage::Icmp(msg),
                 ts,
                 ..

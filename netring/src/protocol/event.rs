@@ -100,9 +100,22 @@ pub enum ProtocolMessage {
     Dns(flowscope::dns::DnsMessage),
 
     /// TLS handshake observation (ClientHello / ServerHello /
-    /// Alert).
+    /// Alert) at the message granularity. For one synthesised
+    /// event per completed handshake, use
+    /// [`Self::TlsHandshake`] instead.
     #[cfg(feature = "tls")]
     Tls(flowscope::tls::TlsMessage),
+
+    /// One synthesised event per observed TLS handshake. Aggregated
+    /// from ClientHello + ServerHello + Alert by
+    /// [`flowscope::tls::TlsHandshakeParser`] (flowscope 0.9).
+    /// Carries SNI, ALPN, optional JA3/JA4, negotiated version,
+    /// cipher suite, `resumption_attempted`, and `HandshakeOutcome`
+    /// (`Completed` / `AlertedByServer` / `AlertedByClient` /
+    /// `Truncated`). `parser_kind` on the carrying event is
+    /// `"tls-handshake"`.
+    #[cfg(feature = "tls")]
+    TlsHandshake(flowscope::tls::TlsHandshake),
 
     /// ICMPv4 / ICMPv6 message. Error variants
     /// (`DestinationUnreachable` / `TimeExceeded` / …) carry

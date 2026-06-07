@@ -75,7 +75,7 @@ fn dns_query_event(o4: u8, ts: u32) -> ProtocolEvent<FiveTupleKey> {
     ProtocolEvent::Message {
         key: make_key(o4),
         side: FlowSide::Initiator,
-        kind: "dns-udp",
+        kind: flowscope::parser_kinds::DNS_UDP,
         message: ProtocolMessage::Dns(DnsMessage::Query(q)),
         ts: Timestamp::new(ts, 0),
     }
@@ -146,7 +146,7 @@ impl AnomalyRule<FiveTupleKey> for DnsBurstRule {
         emit: &mut Vec<Anomaly<FiveTupleKey>>,
     ) {
         let ProtocolEvent::Message {
-            kind: "dns-udp",
+            kind: flowscope::parser_kinds::DNS_UDP,
             message: ProtocolMessage::Dns(DnsMessage::Query(_)),
             key,
             ts,

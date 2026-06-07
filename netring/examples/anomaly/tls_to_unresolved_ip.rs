@@ -40,22 +40,16 @@
 //! Requires `CAP_NET_RAW`. Use `just setcap`.
 
 #[cfg(all(feature = "tokio", feature = "dns", feature = "tls"))]
-use std::collections::HashMap;
-#[cfg(all(feature = "tokio", feature = "dns", feature = "tls"))]
-use std::net::IpAddr;
-#[cfg(all(feature = "tokio", feature = "dns", feature = "tls"))]
 use std::time::Duration;
 
 #[cfg(all(feature = "tokio", feature = "dns", feature = "tls"))]
 use flowscope::Timestamp;
 #[cfg(all(feature = "tokio", feature = "dns", feature = "tls"))]
-use flowscope::dns::{DnsMessage, DnsRdata};
+use flowscope::dns::{DnsMessage, DnsResolutionCache};
 #[cfg(all(feature = "tokio", feature = "dns", feature = "tls"))]
 use flowscope::tls::TlsMessage;
 #[cfg(all(feature = "tokio", feature = "dns", feature = "tls"))]
 use netring::anomaly::{Anomaly, AnomalyRule, Severity};
-#[cfg(all(feature = "tokio", feature = "dns", feature = "tls"))]
-use netring::correlate::KeyIndexed;
 #[cfg(all(feature = "tokio", feature = "dns", feature = "tls"))]
 use netring::flow::extract::FiveTupleKey;
 #[cfg(all(feature = "tokio", feature = "dns", feature = "tls"))]
@@ -64,20 +58,18 @@ use netring::protocol::{ProtocolEvent, ProtocolMessage};
 /// TLS connections to IPs the source host never resolved.
 #[cfg(all(feature = "tokio", feature = "dns", feature = "tls"))]
 struct TlsToUnresolvedIpRule {
-    /// Per-source-IP: which dst IPs were DNS-resolved recently.
-    /// The presence of an entry is what matters; value `()` is a
-    /// placeholder. TTL gates "recent" — matches the OS resolver
-    /// cache lifetime.
-    resolved_by_host: HashMap<IpAddr, KeyIndexed<IpAddr, ()>>,
-    ttl: Duration,
+    /// flowscope 0.8 `DnsResolutionCache` (plan 85) — TTL'd
+    /// per-(client, target) cache with LRU-bounded growth.
+    /// Replaces the prior hand-rolled
+    /// `HashMap<IpAddr, KeyIndexed<IpAddr, ()>>` shape.
+    cache: DnsResolutionCache,
 }
 
 #[cfg(all(feature = "tokio", feature = "dns", feature = "tls"))]
 impl TlsToUnresolvedIpRule {
     fn new(ttl: Duration) -> Self {
         Self {
-            resolved_by_host: HashMap::new(),
-            ttl,
+            cache: DnsResolutionCache::new(ttl),
         }
     }
 }
@@ -94,31 +86,20 @@ impl AnomalyRule<FiveTupleKey> for TlsToUnresolvedIpRule {
         emit: &mut Vec<Anomaly<FiveTupleKey>>,
     ) {
         match evt {
-            // ── DNS Response: record resolutions per source IP ──
+            // ── DNS Response: record resolutions per client IP ──
             ProtocolEvent::Message {
-                kind: "dns-udp",
+                kind: flowscope::parser_kinds::DNS_UDP,
                 message: ProtocolMessage::Dns(DnsMessage::Response(r)),
                 key,
                 ts,
                 ..
             } => {
-                let host = key.b.ip(); // the resolver's client = us
-                let cache = self
-                    .resolved_by_host
-                    .entry(host)
-                    .or_insert_with(|| KeyIndexed::new(self.ttl));
-                for ans in &r.answers {
-                    let ip = match &ans.data {
-                        DnsRdata::A(v4) => IpAddr::V4(*v4),
-                        DnsRdata::AAAA(v6) => IpAddr::V6(*v6),
-                        _ => continue,
-                    };
-                    cache.insert(ip, (), *ts);
-                }
+                // Server responds to client; key.b is the client.
+                self.cache.observe_response(key.b.ip(), r, *ts);
             }
-            // ── TLS ClientHello: check dst IP against host's cache ──
+            // ── TLS ClientHello: check dst IP against client's cache ──
             ProtocolEvent::Message {
-                kind: "tls",
+                kind: flowscope::parser_kinds::TLS,
                 message: ProtocolMessage::Tls(TlsMessage::ClientHello(ch)),
                 key,
                 ts,
@@ -126,12 +107,7 @@ impl AnomalyRule<FiveTupleKey> for TlsToUnresolvedIpRule {
             } => {
                 let src = key.a.ip();
                 let dst = key.b.ip();
-                let resolved = self
-                    .resolved_by_host
-                    .get(&src)
-                    .map(|cache| cache.contains_fresh(&dst, *ts))
-                    .unwrap_or(false);
-                if !resolved {
+                if !self.cache.was_resolved(src, dst, *ts) {
                     let sni = ch.sni.as_deref().unwrap_or("<none>");
                     emit.push(
                         Anomaly::new(self.name(), Severity::Warning, *ts)
@@ -148,11 +124,7 @@ impl AnomalyRule<FiveTupleKey> for TlsToUnresolvedIpRule {
     }
 
     fn on_tick(&mut self, now: Timestamp, _: &mut Vec<Anomaly<FiveTupleKey>>) {
-        // Trim aged-out entries; drop empty per-host caches.
-        self.resolved_by_host.retain(|_, cache| {
-            cache.evict_expired(now);
-            !cache.is_empty()
-        });
+        self.cache.sweep(now);
     }
 }
 

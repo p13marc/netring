@@ -146,7 +146,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         ) {
             match evt {
                 ProtocolEvent::Message {
-                    kind: "dns-udp",
+                    kind: flowscope::parser_kinds::DNS_UDP,
                     message: ProtocolMessage::Dns(DnsMessage::Response(r)),
                     key,
                     ts,
@@ -167,7 +167,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                     }
                 }
                 ProtocolEvent::Message {
-                    kind: "tls",
+                    kind: flowscope::parser_kinds::TLS,
                     message: ProtocolMessage::Tls(TlsMessage::ClientHello(ch)),
                     key,
                     ts,

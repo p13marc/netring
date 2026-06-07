@@ -62,7 +62,7 @@ fn fake_dns_query(k: FiveTupleKey, ts_s: u32, qname: &str) -> ProtocolEvent<Five
     ProtocolEvent::Message {
         key: k,
         side: FlowSide::Initiator,
-        kind: "dns-udp",
+        kind: flowscope::parser_kinds::DNS_UDP,
         message: ProtocolMessage::Dns(DnsMessage::Query(q)),
         ts: Timestamp::new(ts_s, 0),
     }
@@ -85,7 +85,7 @@ fn fake_tls_client_hello(k: FiveTupleKey, ts_s: u32) -> ProtocolEvent<FiveTupleK
     ProtocolEvent::Message {
         key: k,
         side: FlowSide::Initiator,
-        kind: "tls",
+        kind: flowscope::parser_kinds::TLS,
         message: ProtocolMessage::Tls(TlsMessage::ClientHello(Box::new(ch))),
         ts: Timestamp::new(ts_s, 0),
     }
@@ -117,7 +117,7 @@ impl AnomalyRule<FiveTupleKey> for DnsBurstRule {
         emit: &mut Vec<Anomaly<FiveTupleKey>>,
     ) {
         let ProtocolEvent::Message {
-            kind: "dns-udp",
+            kind: flowscope::parser_kinds::DNS_UDP,
             message: ProtocolMessage::Dns(DnsMessage::Query(_)),
             key,
             ts,
@@ -187,7 +187,7 @@ impl AnomalyRule<FiveTupleKey> for SlowTlsHandshakeRule {
     }
     fn observe(&mut self, evt: &ProtocolEvent<FiveTupleKey>, _: &mut Vec<Anomaly<FiveTupleKey>>) {
         let ProtocolEvent::Message {
-            kind: "tls",
+            kind: flowscope::parser_kinds::TLS,
             message: ProtocolMessage::Tls(TlsMessage::ClientHello(_)),
             key,
             ts,

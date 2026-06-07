@@ -1,17 +1,20 @@
-# netring 0.19 — flowscope 0.10 bump + wishlist absorption
+# netring 0.17 — flowscope 0.10 bump + wishlist absorption
 
 **Date:** 2026-06-07
 **Author:** netring maintainer
 **Status:** 📝 drafted; ready to execute
-**Predecessor:** [`netring-0.16-roadmap-2026-05-29.md`](./netring-0.16-roadmap-2026-05-29.md),
-[`netring-0.17-flowscope-0.7-bump-2026-06-03.md`](./netring-0.17-flowscope-0.7-bump-2026-06-03.md),
-[`flowscope-wishlist-2026-06-06.md`](./flowscope-wishlist-2026-06-06.md).
+**Ships as:** netring **0.17.0** (Cargo.toml bump)
 
-**Driven by:** flowscope 0.10.1 (2026-06-07) — direct response to the
-consolidated wishlist plus the absorbed 0.9 and 0.10 design cycles.
-flowscope **shipped every item** from sections A and B of the
-wishlist, plus a major architectural redesign (unified
-`Driver<E, M>` + `Event<K, M>`) plus dozens of new helpers.
+**Driven by:** flowscope 0.10.1 (2026-06-07). flowscope absorbed
+every actionable item across three rounds of netring feedback
+(rounds for 0.5/0.6, 0.7, and the consolidated 0.8 wishlist) plus
+the 0.9 cycle (high-level `Pipeline`, `flowscope::correlate`,
+`FlowMultiSessionDriver`, JA4, OOO reassembler, unified
+`flowscope::Error`, `flowscope::layers`) plus the 0.10 cycle
+(centerpiece unified `Driver<E, M>` + `Event<K, M>`, exchange
+aggregators, parser ergonomics, correlate extensions, `detect` /
+`aggregate` / `emit` / `well_known` modules, signature
+recognizers, helper sweep).
 
 **Scope rule:** backward-incompatible breaks are explicitly
 allowed; pre-1.0; lockstep with flowscope.
@@ -20,25 +23,22 @@ allowed; pre-1.0; lockstep with flowscope.
 
 ## Three-phase absorption strategy
 
-flowscope 0.10 is the biggest release since 0.1. Trying to
-absorb it in one cycle invites mistakes. Three sequential
-netring roadmaps:
+flowscope 0.10 is the biggest release since 0.1. Three
+sequential netring releases absorb it:
 
-| Phase | Scope | This file? | Days |
-|---|---|---|---|
-| **netring 0.19** | Lockstep bump (0.7 → 0.10) + immediate wishlist absorption (cleanups that don't change netring's architecture) | **Yes** | ~2 |
-| **netring 0.20** | Collapse `ProtocolMonitor` onto flowscope's unified `Driver<E, M>` + `Event<K, M>`. Closes N5 (driver refactor) + N6 (single-ring fan-out) in one strike via the new flowscope-side API. | [`netring-0.20-unified-driver-refactor-2026-06-07.md`](./netring-0.20-unified-driver-refactor-2026-06-07.md) | ~5 |
-| **netring 0.21** | New detectors using `flowscope::detect` / `correlate` extensions / `aggregate` / `emit` / `well_known`. Polish + helper-sweep adoption. | [`netring-0.21-new-detectors-2026-06-07.md`](./netring-0.21-new-detectors-2026-06-07.md) | ~4 |
+| Phase | Crate version | Plan | Scope | Days |
+|---|---|---|---|---|
+| **1** | netring **0.17** | this file | Lockstep bump (0.7 → 0.10) + mechanical wishlist absorption (no architecture change) | ~2 |
+| **2** | netring **0.18** | [`netring-0.18-unified-driver-refactor-2026-06-07.md`](./netring-0.18-unified-driver-refactor-2026-06-07.md) | Collapse `ProtocolMonitor` onto flowscope's unified `Driver<E, M>` + `Event<K, M>`. Closes the long-deferred N5 / N6 / O1 / O2 in one strike. | ~4 |
+| **3** | netring **0.19** | [`netring-0.19-new-detectors-2026-06-07.md`](./netring-0.19-new-detectors-2026-06-07.md) | New detectors using `flowscope::detect` / `correlate` extensions / `aggregate` / `emit` / `well_known`. Polish + helper-sweep adoption. | ~3.5 |
 
-This file covers **0.19 only** — the mechanical migration plus
+This file covers **phase 1 only** — the mechanical migration plus
 the wishlist items that drop in without touching netring's
-architecture. Each absorbed item is tagged with its wishlist
-identifier from `flowscope-wishlist-2026-06-06.md` so the
-cross-reference stays explicit.
+architecture.
 
 ---
 
-## At a glance — netring 0.19 work items
+## At a glance — work items
 
 | # | Item | Wishlist | Tier | Break? |
 |---|---|---|---|---|
@@ -54,22 +54,9 @@ cross-reference stays explicit.
 | **B10** | Use `TlsHandshakeParser` in `slow_tls_handshake.rs` — drop the hand-rolled `KeyIndexed` correlation | B6 (wishlist) | **Med** | None |
 | **B11** | Add `serde` Cargo feature: `serde = ["dep:serde", "flowscope/serde"]` + derive `Serialize`/`Deserialize` on `Anomaly<K>` / `AnomalyContext` / `Severity` | A1 (wishlist) | **High** | None |
 | **B12** | Add `Anomaly::to_json_value() -> serde_json::Value` next to `to_json_line()` — full structured payload including the underlying parsed message | A1 (downstream) | **Med** | None |
-| **B13** | Cargo.toml version bump 0.16.0 → 0.17.0 (we publish 0.17 to match the just-shipped flowscope 0.10 in lockstep — naming aligned to the *flowscope* release, not the netring counter) | — | **High** | None |
-| **B14** | CHANGELOG.md entry for 0.17.0 with the wishlist scorecard | — | **High** | None |
+| **B13** | Cargo.toml version bump 0.16.0 → 0.17.0 | — | **High** | None |
+| **B14** | CHANGELOG.md entry for 0.17.0 | — | **High** | None |
 | **B15** | Doc sweep — README + CLAUDE.md + WRITING_DETECTORS + INDEX | — | Polish | None |
-
-**Versioning note.** netring's release-counter and flowscope's
-release-counter have drifted (netring 0.16 ↔ flowscope 0.10). We
-don't realign — netring's next minor is **0.17** (this plan), not
-0.19, despite the plan filename's "0.19" being the *flowscope-side*
-naming. See B13 for the rationale.
-
-> The plan filename uses `netring-0.19` because there are already
-> drafted plans `netring-0.18-roadmap-2026-06-03.md` and
-> `netring-0.18-flowscope-0.10-bump-…` would collide with the
-> 0.18 roadmap. We label the *plans* by counter increment
-> independently from the *crate version* on Cargo.toml. The
-> crate ships as netring 0.17.
 
 ---
 
@@ -169,7 +156,7 @@ flowscope 0.9 shipped `flowscope::correlate` with
 identical shape to netring's. plus `SequencePattern` and
 `KeylessSequencePattern` (new). flowscope 0.10 also shipped
 `TimeBucketedSet`, `BurstDetector`, `TopK`, `Ewma` — covered in
-the [`0.21 plan`](./netring-0.21-new-detectors-2026-06-07.md).
+the [`0.19 plan`](./netring-0.19-new-detectors-2026-06-07.md).
 
 ### Strategy
 
@@ -286,9 +273,14 @@ hand-rolled.
 + use flowscope::dns::DnsResolutionCache;
 + let mut cache = DnsResolutionCache::new(Duration::from_secs(ttl_s));
 + cache.observe_response(client_ip, r, ts);
-+ cache.was_resolved(client_ip, target_ip, ts);  // bool
-+ cache.lookup_name(client_ip, target_ip, ts);   // Option<&str>
-+ cache.sweep(now);
++ // Note: `was_resolved` and `lookup_name` take `&mut self`
++ // because they may evict expired entries during lookup. Call
++ // sites that previously held `&Cache` need to switch to
++ // `&mut Cache` access — straightforward inside an
++ // `AnomalyRule::observe(&mut self, …)`.
++ cache.was_resolved(client_ip, target_ip, ts);   // &mut self → bool
++ cache.lookup_name(client_ip, target_ip, ts);    // &mut self → Option<&str>
++ cache.sweep(now);                               // bulk evict
 ```
 
 Net: ~50 LoC deleted across the two examples.
@@ -328,43 +320,28 @@ shipped variants (per the flowscope changelog: "Same string as
 
 flowscope 0.9 (plan 97) shipped `TlsHandshakeParser` — aggregates
 ClientHello + ServerHello + Alert into one `TlsHandshake` event
-per handshake. Carries SNI, ALPN, JA3/JA4, negotiated version,
-cipher, `resumption_attempted`, and `HandshakeOutcome`
-discriminant.
+per handshake. Carries SNI, ALPN (client + server), JA3/JA4
+(feature-gated), negotiated TLS version, cipher suite,
+`resumption_attempted`, and `HandshakeOutcome`
+(`Completed` / `AlertedByServer { description }` /
+`AlertedByClient { description }` / `Truncated`).
 
-Replaces the hand-rolled `KeyIndexed<FiveTupleKey, Timestamp>`
-correlation in `slow_tls_handshake.rs`.
+**Important.** The aggregated `TlsHandshake` struct **does not
+expose a precomputed RTT field.** Each emitted event corresponds
+to one handshake (or its termination); the consumer is
+responsible for sub-flow timing if needed.
 
-### Migration
+This means the migration is not a simple drop-in. Two paths,
+both valid; ship whichever fits the existing example better:
+
+### Path A — drop the RTT timing, alert on `Truncated`
+
+The strongest slow-TLS signal *is* `HandshakeOutcome::Truncated`
+(ServerHello never arrived before the flow ended). The rule
+becomes synchronous — no `on_tick` needed:
 
 ```diff
-  let mut monitor = ProtocolMonitorBuilder::new()
-      .interface(&iface)
-      .flow()
--     .tls()              // emits ClientHello + ServerHello + Alert
-+     .tls_handshake()    // emits TlsHandshake per completed handshake
-      .build(FiveTuple::bidirectional())?;
-```
-
-Inside the rule:
-
-```diff
-- // Track ClientHello timestamps, correlate against ServerHello
-- // arrival, drain on TTL → unfulfilled = slow handshake
-- impl AnomalyRule<FiveTupleKey> for SlowTlsHandshakeRule {
--     fn observe(&mut self, evt, _emit) {
--         match (...) {
--             ClientHello => self.pending.insert(*key, *ts, *ts),
--             ServerHello => { self.pending.remove(key); }
--         }
--     }
--     fn on_tick(&mut self, now, emit) {
--         for (key, t0) in self.pending.drain_expired(now) {
--             emit.push(...);
--         }
--     }
-- }
-+ // One event per handshake; check its rtt/outcome
++ // One event per completed handshake; alert on Truncated.
 + impl AnomalyRule<FiveTupleKey> for SlowTlsHandshakeRule {
 +     fn observe(&mut self, evt, emit) {
 +         let ProtocolEvent::Message {
@@ -372,23 +349,71 @@ Inside the rule:
 +             message: ProtocolMessage::TlsHandshake(hs),
 +             ts, key, ..
 +         } = evt else { return };
-+         if hs.rtt > self.threshold || matches!(hs.outcome, HandshakeOutcome::Truncated) {
++         if matches!(hs.outcome, HandshakeOutcome::Truncated) {
 +             emit.push(Anomaly::new("SlowTlsHandshake", Severity::Warning, *ts)
 +                 .with_key(*key)
 +                 .with_observation("sni", hs.sni.as_deref().unwrap_or(""))
-+                 .with_metric("rtt_ms", hs.rtt.as_secs_f64() * 1000.0));
++                 .with_observation("outcome", "truncated"));
 +         }
 +     }
 + }
 ```
 
-Side-effects:
+Loses the "slow but completed" arm; covers the strongest case.
+
+### Path B — keep per-message timing, augment with handshake aggregator fields
+
+Subscribe to both `.tls()` (raw messages, for RTT timing) and
+`.tls_handshake()` (aggregator, for rich fields on the alert).
+
+```diff
++ impl AnomalyRule<FiveTupleKey> for SlowTlsHandshakeRule {
++     fn observe(&mut self, evt, emit) {
++         match evt {
++             ProtocolEvent::Message { kind: TLS, message: ProtocolMessage::Tls(
++                 TlsMessage::ClientHello(_)), key, ts, ..
++             } => self.pending.insert(*key, *ts, *ts),
++             ProtocolEvent::Message { kind: TLS_HANDSHAKE,
++                 message: ProtocolMessage::TlsHandshake(hs), key, ts, ..
++             } => {
++                 if let Some(client_ts) = self.pending.remove(key) {
++                     let rtt = ts.saturating_sub(client_ts);
++                     if rtt > self.threshold {
++                         emit.push(Anomaly::new("SlowTlsHandshake", Severity::Warning, *ts)
++                             .with_key(*key)
++                             .with_observation("sni", hs.sni.as_deref().unwrap_or(""))
++                             .with_observation("outcome", format!("{:?}", hs.outcome))
++                             .with_metric("rtt_ms", rtt.as_secs_f64() * 1000.0));
++                     }
++                 }
++             }
++             _ => {}
++         }
++     }
++     // on_tick stays for the case "ClientHello but no terminal
++     // event yet" — drain after TTL.
++ }
+```
+
+Bigger but preserves the original RTT-threshold semantics and
+adds SNI / outcome / JA4 to the alert payload.
+
+### Recommendation
+
+**Path A** for the default in this plan — simpler, no
+`on_tick`, alerts on the strongest signal. The hand-rolled
+correlation can come back as an opt-in detector later if a
+user wants per-RTT alerts on completed handshakes (`Path B`).
+
+### Side-effects (either path)
+
 - `ProtocolMessage` gains a `TlsHandshake(TlsHandshake)` variant.
 - `ProtocolMonitorBuilder` gains `.tls_handshake()` /
   `.tls_handshake_on_ports()`. The existing `.tls()` stays;
-  users pick the granularity they want.
+  users pick the granularity they want (or both, for Path B).
 
-Net: `slow_tls_handshake.rs` shrinks ~80 LoC; logic clarifies.
+Net (Path A): `slow_tls_handshake.rs` shrinks ~100 LoC; the
+remaining body is ~30 LoC.
 
 ## B11. `serde` Cargo feature
 
@@ -505,9 +530,8 @@ deprecation, B11 new feature) is breaking-ish but minor.
   `netring::correlate` references with `flowscope::correlate`;
   add a "Serde output" subsection in §8 next to the
   `to_json_line` / `emit_tracing` patterns
-- `plans/INDEX.md` — 0.17 / 0.20 / 0.21 plans registered, 0.18
-  roadmap marked superseded (most items absorbed by
-  flowscope-side work)
+- `plans/INDEX.md` — the three-phase 0.17 / 0.18 / 0.19 plans
+  registered as the active backlog
 - `plans/upstream-tracking.md` — `flowscope::correlate` move
   marks the upstream-tracking item done; flowscope serde
   feature shipped
@@ -548,9 +572,11 @@ tokio,channel,flow,parse,pcap,metrics,http,dns,tls,icmp`.
 
 ## Wishlist scorecard
 
-How items from
-[`flowscope-wishlist-2026-06-06.md`](./flowscope-wishlist-2026-06-06.md)
-land in this plan:
+Mapping of items requested across three netring feedback rounds
+(rounds for 0.5/0.6, 0.7, and the consolidated 0.8 wishlist
+— all rounds since retired per the *delete on ship* convention)
+to where they shipped in flowscope and how netring 0.17 adopts
+each:
 
 | Wishlist | Status in flowscope 0.10 | netring 0.17 work |
 |---|---|---|
@@ -558,14 +584,14 @@ land in this plan:
 | **A2** IcmpType::is_error + error_inner | ✅ shipped 0.8 (plan 84) | B7 — adopt in `icmp_explained_drop.rs` |
 | **A3** DnsResolutionCache | ✅ shipped 0.8 (plan 85) | B8 — adopt in 2 examples |
 | **B1** PARSER_KIND constants | ✅ shipped 0.8 (plan 86) | B6 — migrate match sites |
-| **B2** Multi-parser composite driver | ✅ shipped 0.9 (`FlowMultiSessionDriver`) + 0.10 (unified Driver<E,M>) | Adopted in netring 0.20 (separate plan) |
+| **B2** Multi-parser composite driver | ✅ shipped 0.9 (`FlowMultiSessionDriver`) + 0.10 (unified Driver<E,M>) | Adopted in netring 0.18 (separate plan) |
 | **B3** FlowEvent::Established { l4 } | ✅ shipped 0.8 (plan 87) | B4 — bind in destructures |
 | **B4** AnomalyKind::short_kind | ✅ shipped 0.8 (plan 88) | B9 — adopt in `FlowAnomalyRule` |
-| **B5** FlowTracker::force_close | ✅ shipped 0.8 (plan 89) | Optional — surface as `StreamCapture` convenience in 0.18+. Not in this plan. |
+| **B5** FlowTracker::force_close | ✅ shipped 0.8 (plan 89) | Optional — surface as `StreamCapture` convenience in 0.19+. Not in this plan. |
 | **B6** TlsHandshake aggregator | ✅ shipped 0.9 (plan 97 `TlsHandshakeParser`) | B10 — adopt in `slow_tls_handshake.rs` |
-| **B7** FlowTracker::iter_active | ✅ shipped 0.8 (plan 90) | Optional — ship a new example in 0.21 (separate plan) |
-| **C1** flowscope::correlate module | ✅ shipped 0.9 + 0.10 (4 new extensions) | B5 — re-export base primitives in 0.17; adopt extensions in 0.21 |
-| **C2** SequenceDetector | ✅ shipped 0.9 (`SequencePattern` trait) | Optional — examples in 0.21 |
+| **B7** FlowTracker::iter_active | ✅ shipped 0.8 (plan 90) | Optional — ship a new example in 0.19 (separate plan) |
+| **C1** flowscope::correlate module | ✅ shipped 0.9 + 0.10 (4 new extensions) | B5 — re-export base primitives in 0.17; adopt extensions in 0.19 |
+| **C2** SequenceDetector | ✅ shipped 0.9 (`SequencePattern` trait) | Optional — examples in 0.19 |
 | **C8** JA4 fingerprint | ✅ shipped 0.9 (plan 97 `ja4` Cargo feature) | Surface via `tls_handshake.ja4` field; documented in 0.17 |
 
 **flowscope absorbed 13 of 13 actionable wishlist items.**
@@ -611,11 +637,11 @@ After this plan lands:
 
 - **Unified `Driver<E, M>` + `Event<K, M>` adoption** —
   centerpiece refactor of `ProtocolMonitor`. Multi-day work.
-  See [`netring-0.20-unified-driver-refactor-2026-06-07.md`](./netring-0.20-unified-driver-refactor-2026-06-07.md).
+  See [`netring-0.18-unified-driver-refactor-2026-06-07.md`](./netring-0.18-unified-driver-refactor-2026-06-07.md).
 - **New detectors using the new correlate / detect / aggregate
   primitives** (`BurstDetector`, `TopK`, `Ewma`,
   `shannon_entropy`, `HttpExchangeParser`, `DnsExchangeParser`).
-  See [`netring-0.21-new-detectors-2026-06-07.md`](./netring-0.21-new-detectors-2026-06-07.md).
+  See [`netring-0.19-new-detectors-2026-06-07.md`](./netring-0.19-new-detectors-2026-06-07.md).
 - **`flowscope::emit::FlowEventNdjsonWriter` / `ZeekConnLogWriter`
   adoption** — would deduplicate netring's hand-rolled
   `Anomaly::to_json_line`. Re-evaluate in 0.21 — likely a
@@ -649,5 +675,5 @@ commit fails CI, fix in-place and don't merge unrelated
 follow-ups.
 
 The big architectural work (unified Driver) lives in the
-[next plan](./netring-0.20-unified-driver-refactor-2026-06-07.md).
+[next plan](./netring-0.18-unified-driver-refactor-2026-06-07.md).
 That one's where care is needed.

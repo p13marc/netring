@@ -1,9 +1,9 @@
-# netring 0.21 — new detectors + flowscope 0.10 tooling adoption
+# netring 0.19 — new detectors + flowscope 0.10 tooling adoption
 
 **Date:** 2026-06-07
 **Author:** netring maintainer
-**Status:** 📝 drafted; depends on 0.17 + 0.18 (= the 0.19 + 0.20 plan files)
-**Predecessor:** [`netring-0.20-unified-driver-refactor-2026-06-07.md`](./netring-0.20-unified-driver-refactor-2026-06-07.md)
+**Status:** 📝 drafted; depends on netring 0.17 + 0.18
+**Predecessor:** [`netring-0.18-unified-driver-refactor-2026-06-07.md`](./netring-0.18-unified-driver-refactor-2026-06-07.md)
 
 **Driven by:** flowscope 0.10 shipped seven new tooling modules
 that netring detectors can build on:
@@ -219,8 +219,8 @@ smoothed-rate to Prometheus / Loki / your sink.
 
 `FlowTracker::iter_active` (flowscope 0.8, plan 90) was
 deferred from the netring 0.17 wishlist absorption (in
-[`netring-0.19-flowscope-0.10-bump`](./netring-0.19-flowscope-0.10-bump-2026-06-07.md))
-as "optional — ship an example in 0.21". This is that
+[`netring-0.17-flowscope-0.10-bump`](./netring-0.17-flowscope-0.10-bump-2026-06-07.md))
+as "optional — ship an example in 0.19". This is that
 example.
 
 ```rust
@@ -509,9 +509,8 @@ Decide after the others land; ~120 LoC.
 | 0.19 | new detectors + helper sweep | 66 (+9) | ~410 (+85 incl. detector smoke tests) | 3.5 |
 | **Total** | flowscope 0.10 fully absorbed | +9 examples | +90 tests | **~9.5** |
 
-After the three releases, every actionable item from the
-[`flowscope-wishlist-2026-06-06`](./flowscope-wishlist-2026-06-06.md)
-plus the absorbed 0.9 and 0.10 cycles are integrated. netring
-becomes the showcase for what flowscope 0.10 enables —
-13 reference detectors covering the full anomaly-correlation
-pattern space.
+After the three releases, every actionable item across three
+rounds of netring feedback plus the absorbed flowscope 0.9 and
+0.10 cycles is integrated. netring becomes the showcase for
+what flowscope 0.10 enables — 13 reference detectors covering
+the full anomaly-correlation pattern space.

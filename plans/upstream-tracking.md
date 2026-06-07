@@ -74,7 +74,7 @@ at each minor release and update the "Last checked" line.
   message / accessor type, with locked snake_case wire
   vocabulary.
 - **Action**: tracked in
-  [`netring-0.19-flowscope-0.10-bump-2026-06-07.md`](./netring-0.19-flowscope-0.10-bump-2026-06-07.md)
+  [`netring-0.17-flowscope-0.10-bump-2026-06-07.md`](./netring-0.17-flowscope-0.10-bump-2026-06-07.md)
   B11 — netring 0.17 adds a `netring/serde` feature, derives
   `Serialize`/`Deserialize` on `Anomaly<K>` / `AnomalyContext` /
   `Severity`, and ships `Anomaly::to_json_value()`.
@@ -87,11 +87,11 @@ at each minor release and update the "Last checked" line.
   (flowscope 0.9) plus `TimeBucketedSet` + `BurstDetector` +
   `TopK` + `Ewma` extensions (flowscope 0.10).
 - **Action**: tracked in
-  [`netring-0.19-flowscope-0.10-bump-2026-06-07.md`](./netring-0.19-flowscope-0.10-bump-2026-06-07.md)
+  [`netring-0.17-flowscope-0.10-bump-2026-06-07.md`](./netring-0.17-flowscope-0.10-bump-2026-06-07.md)
   B5 — netring's own `netring::correlate` collapses to a
   re-export of flowscope's types; ~400 LoC deleted from
   netring. Extensions adopted in
-  [`netring-0.21-new-detectors-2026-06-07.md`](./netring-0.21-new-detectors-2026-06-07.md)
+  [`netring-0.19-new-detectors-2026-06-07.md`](./netring-0.19-new-detectors-2026-06-07.md)
   D2-D5.
 - **Last checked**: 2026-06-07.
 
@@ -101,7 +101,7 @@ at each minor release and update the "Last checked" line.
   the 0.9-era 6-driver / 4-event surface into one. Closes
   netring's long-deferred N5 + N6 in one strike.
 - **Action**: tracked in
-  [`netring-0.20-unified-driver-refactor-2026-06-07.md`](./netring-0.20-unified-driver-refactor-2026-06-07.md)
+  [`netring-0.18-unified-driver-refactor-2026-06-07.md`](./netring-0.18-unified-driver-refactor-2026-06-07.md)
   — ProtocolMonitor adopts the unified Driver; ~1300 LoC
   deleted from netring's `async_adapters/session_stream.rs` +
   `datagram_stream.rs`.
@@ -116,7 +116,7 @@ at each minor release and update the "Last checked" line.
   102 sub-C). `detect::signatures` = magic-byte recognizers
   (plan 113 sub-A).
 - **Action**: tracked in
-  [`netring-0.21-new-detectors-2026-06-07.md`](./netring-0.21-new-detectors-2026-06-07.md)
+  [`netring-0.19-new-detectors-2026-06-07.md`](./netring-0.19-new-detectors-2026-06-07.md)
   D1 (DNS tunnel via shannon_entropy), D7 (Zeek conn.log writer).
 - **Last checked**: 2026-06-07.
 
@@ -127,7 +127,7 @@ at each minor release and update the "Last checked" line.
   upcasting also available within the new MSRV.
 - **Action**: netring is already on MSRV 1.95; satisfied without
   change. Verify in
-  [`netring-0.19-flowscope-0.10-bump`](./netring-0.19-flowscope-0.10-bump-2026-06-07.md)
+  [`netring-0.17-flowscope-0.10-bump`](./netring-0.17-flowscope-0.10-bump-2026-06-07.md)
   B2.
 - **Last checked**: 2026-06-07.
 
@@ -142,12 +142,12 @@ at each minor release and update the "Last checked" line.
 
 ## Anomaly path benchmarks (post-0.16)
 
-- **Status**: untracked. The `ProtocolMonitor` + `AnomalyMonitor` path
-  shipped without perf characterization. Open questions: per-event cost,
-  rule-count scaling, sweep tick cost, `Vec::take` realloc impact.
-- **Action**: tracked as O6 in
-  [`netring-0.18-roadmap-2026-06-03.md`](./netring-0.18-roadmap-2026-06-03.md).
-- **Last checked**: 2026-06-03 — not yet measured.
+- **Status**: ✅ shipped 2026-06-03 (commit `fb9bdc0`,
+  `benches/anomaly.rs`). 8 criterion benches / 13 input
+  parameterizations. Baseline numbers pinned in the bench file's
+  module rustdoc. Re-run after each refactor:
+  `cargo bench --bench anomaly --features ... -- --save-baseline X`.
+- **Last checked**: 2026-06-07.
 
 ## Review cadence
 

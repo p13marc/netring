@@ -1,21 +1,23 @@
-# netring 0.20 — unified-`Driver<E, M>` refactor (closes N5 + N6)
+# netring 0.18 — unified-`Driver<E, M>` refactor (closes N5 + N6)
 
 **Date:** 2026-06-07
 **Author:** netring maintainer
-**Status:** 📝 drafted; await 0.17 (= 0.19 plan file) lockstep bump
-**Predecessor:** [`netring-0.19-flowscope-0.10-bump-2026-06-07.md`](./netring-0.19-flowscope-0.10-bump-2026-06-07.md)
+**Status:** 📝 drafted; await 0.17 lockstep bump
+**Predecessor:** [`netring-0.17-flowscope-0.10-bump-2026-06-07.md`](./netring-0.17-flowscope-0.10-bump-2026-06-07.md)
 
 **Driven by:** flowscope 0.10's centerpiece plan 116 — unified
 `Driver<E, M>` + `Event<K, M>` + `driver_unified::Pipeline`.
-Also closes the long-deferred netring items:
+Also closes four long-deferred netring items (whose origin
+roadmaps are retired per project convention — `git log` is the
+historical record):
 
-- **N5** (driver refactor) from
-  [`netring-0.16-roadmap-2026-05-29.md`](./netring-0.16-roadmap-2026-05-29.md)
-  — netring's hand-rolled session/datagram stream state machines
-- **N6** (single-ring fan-out) from the same roadmap — the
-  "ProtocolMonitor opens N captures" memory cost
-- **O2** (driver refactor) and **O1** (broadcast(n)) from
-  [`netring-0.18-roadmap-2026-06-03.md`](./netring-0.18-roadmap-2026-06-03.md)
+- **N5** — netring's hand-rolled session/datagram stream state
+  machines (originally from the 0.16 roadmap)
+- **N6** — single-ring fan-out (the "ProtocolMonitor opens N
+  captures" memory cost; same roadmap)
+- **O1** — `AsyncCapture::broadcast(n)` (from the 0.18 roadmap)
+- **O2** — collapse session/datagram drivers onto flowscope's
+  (same roadmap)
 
 flowscope 0.10 shipped both halves of the long-blocked work: the
 multi-parser driver (closes N6/O1) **and** the migration
@@ -255,7 +257,8 @@ These constructors stay; internals adopt the unified driver.
 
 `AsyncPcapSource::protocol_monitor()` ships as a new builder
 entry for multi-protocol pcap replay — fulfills the deferred
-`netring-0.18-roadmap` O9 (`ProtocolMonitorBuilder::pcap(path)`)
+the deferred O9 (`ProtocolMonitorBuilder::pcap(path)`, originally
+from the retired 0.18 roadmap)
 and supersedes the manual "open twice + merge by timestamp"
 pattern in `examples/anomaly/pcap_replay_multi.rs`.
 

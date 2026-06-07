@@ -3,8 +3,31 @@
 **Date:** 2026-06-03
 **Author:** netring maintainer
 **Predecessor:** [`netring-0.16-roadmap-2026-05-29.md`](./netring-0.16-roadmap-2026-05-29.md)
-**Status:** 📝 drafted; awaiting flowscope 0.8 for the items
-gated on G5 (serde).
+**Status:** 🟢 **partially shipped + partially superseded by
+flowscope 0.10**.
+
+Items shipped in netring 0.16 (on master): O5 ✅
+(WRITING_DETECTORS.md), O6 ✅ (anomaly benches), O7 ✅
+(pcap_replay_multi), O10 ✅ (emit_tracing).
+
+Items superseded by flowscope 0.10's shipping (2026-06-07,
+absorbed via [`netring-0.19-flowscope-0.10-bump-2026-06-07.md`](./netring-0.19-flowscope-0.10-bump-2026-06-07.md)
+and follow-on plans):
+
+- **O1** (`AsyncCapture::broadcast(n)`) → absorbed by the
+  unified Driver work in 0.18 (= [`netring-0.20-unified-driver-refactor-2026-06-07.md`](./netring-0.20-unified-driver-refactor-2026-06-07.md)).
+- **O2** (collapse session/datagram drivers) → same.
+- **O3** (`with_message_tap`) → folded; flowscope's
+  `FlowEventNdjsonWriter` covers the use case at the event
+  level.
+- **O4** (`serde::Serialize for Anomaly<K>`) → flowscope 0.10
+  shipped its serde feature; netring 0.17 derives.
+- **O8** (lockstep flowscope bump) → netring 0.17 is the bump.
+- **O9** (`ProtocolMonitorBuilder::pcap(path)`) → absorbed by
+  the unified Driver work in 0.18.
+
+This roadmap is **kept as historical context.** Active work
+lives in the three follow-on plans above.
 
 **Scope rule:** backward-incompatible breaks are explicitly
 allowed. Pre-1.0; releases ship in lockstep with flowscope.

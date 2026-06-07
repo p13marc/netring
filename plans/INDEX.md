@@ -77,7 +77,25 @@ the next.
 
 | Plan | Goal | Status |
 |------|------|--------|
-| [`netring-0.18-roadmap-2026-06-03.md`](./netring-0.18-roadmap-2026-06-03.md) | N5 driver refactor + N6 `AsyncCapture::broadcast(n)` + N12 message tap (once flowscope G5 lands) + anomaly tutorial doc + benches. | 📝 drafted |
+| [`netring-0.18-roadmap-2026-06-03.md`](./netring-0.18-roadmap-2026-06-03.md) | N5 driver refactor + N6 `AsyncCapture::broadcast(n)` + N12 message tap + anomaly tutorial doc + benches + emit_tracing. | 🟢 partially shipped (O5/O6/O7/O10) + superseded by flowscope 0.10 (O1/O2/O3/O4/O8/O9 absorbed via 0.19/0.20 plans) |
+
+### netring 0.17 / 0.18 / 0.19 — three-phase flowscope 0.10 absorption
+
+flowscope 0.10 shipped the entire wishlist (sections A + B) +
+the absorbed 0.9 cycle + the 0.10 cycle (unified Driver). Three
+sequential netring plans absorb it without trying to land
+everything at once:
+
+| Plan | Goal | Status |
+|------|------|--------|
+| [`netring-0.19-flowscope-0.10-bump-2026-06-07.md`](./netring-0.19-flowscope-0.10-bump-2026-06-07.md) | Lockstep dep bump 0.7 → 0.10 + immediate wishlist absorption (PARSER_KIND constants, IcmpType helpers, DnsResolutionCache, short_kind, TlsHandshakeParser, serde feature). 15 items. **Ships as netring 0.17.** | 📝 drafted; ~2 days |
+| [`netring-0.20-unified-driver-refactor-2026-06-07.md`](./netring-0.20-unified-driver-refactor-2026-06-07.md) | Collapse `ProtocolMonitor` onto `flowscope::driver_unified::Driver<E, M>`. Closes the long-deferred N5/N6/O1/O2. ~1300 LoC deleted from netring. **Ships as netring 0.18.** | 📝 drafted; ~4 days |
+| [`netring-0.21-new-detectors-2026-06-07.md`](./netring-0.21-new-detectors-2026-06-07.md) | 9 new example detectors using `flowscope::detect` / `correlate` extensions / `aggregate` / `emit` / `well_known`. Helper sweep adoption. **Ships as netring 0.19.** | 📝 drafted; ~3.5 days |
+
+(Note: the plan-file numbering is decoupled from the crate
+version — see the 0.19 plan for rationale. The 0.19 plan ships
+as netring 0.17.0; the 0.20 plan ships as 0.18.0; the 0.21
+plan ships as 0.19.0.)
 
 ### Cross-repo (flowscope)
 

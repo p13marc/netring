@@ -69,24 +69,67 @@ at each minor release and update the "Last checked" line.
 
 ## flowscope `serde` feature (G5)
 
-- **Status**: queued in
-  [`flowscope-0.8-feedback-2026-06-03.md`](./flowscope-0.8-feedback-2026-06-03.md)
-  G5; not yet shipped.
-- **Action when shipped**: netring picks up the bump as part of the
-  next flowscope-lockstep release (see
-  [`netring-0.18-roadmap-2026-06-03.md`](./netring-0.18-roadmap-2026-06-03.md)
-  O3 + O4). Unblocks `with_message_tap` (O3) and serde-derive on
-  `Anomaly<K>` / `AnomalyContext` / `Severity` (O4).
-- **Last checked**: 2026-06-03 — flowscope 0.8 not released.
+- **Status**: ✅ shipped in flowscope 0.8 (plan 83) — opt-in
+  `Serialize` + `Deserialize` derives on every public event /
+  message / accessor type, with locked snake_case wire
+  vocabulary.
+- **Action**: tracked in
+  [`netring-0.19-flowscope-0.10-bump-2026-06-07.md`](./netring-0.19-flowscope-0.10-bump-2026-06-07.md)
+  B11 — netring 0.17 adds a `netring/serde` feature, derives
+  `Serialize`/`Deserialize` on `Anomaly<K>` / `AnomalyContext` /
+  `Severity`, and ships `Anomaly::to_json_value()`.
+- **Last checked**: 2026-06-07.
 
 ## flowscope correlate primitives (F6 / G8)
 
-- **Status**: netring shipped its own `netring::correlate` module with
-  `KeyIndexed` and `TimeBucketedCounter`. flowscope side still open; if /
-  when flowscope ships an equivalent, netring re-exports.
-- **Action when shipped**: tag the netring types with a deprecation note
-  pointing at `flowscope::correlate::*`; remove on a major.
-- **Last checked**: 2026-06-03 — netring keeps its own copy for now.
+- **Status**: ✅ shipped — `flowscope::correlate` module with
+  `TimeBucketedCounter` + `KeyIndexed` + `SequencePattern`
+  (flowscope 0.9) plus `TimeBucketedSet` + `BurstDetector` +
+  `TopK` + `Ewma` extensions (flowscope 0.10).
+- **Action**: tracked in
+  [`netring-0.19-flowscope-0.10-bump-2026-06-07.md`](./netring-0.19-flowscope-0.10-bump-2026-06-07.md)
+  B5 — netring's own `netring::correlate` collapses to a
+  re-export of flowscope's types; ~400 LoC deleted from
+  netring. Extensions adopted in
+  [`netring-0.21-new-detectors-2026-06-07.md`](./netring-0.21-new-detectors-2026-06-07.md)
+  D2-D5.
+- **Last checked**: 2026-06-07.
+
+## flowscope unified `Driver<E, M>` + `Event<K, M>`
+
+- **Status**: ✅ shipped in flowscope 0.10 (plan 116) — collapses
+  the 0.9-era 6-driver / 4-event surface into one. Closes
+  netring's long-deferred N5 + N6 in one strike.
+- **Action**: tracked in
+  [`netring-0.20-unified-driver-refactor-2026-06-07.md`](./netring-0.20-unified-driver-refactor-2026-06-07.md)
+  — ProtocolMonitor adopts the unified Driver; ~1300 LoC
+  deleted from netring's `async_adapters/session_stream.rs` +
+  `datagram_stream.rs`.
+- **Last checked**: 2026-06-07.
+
+## flowscope `emit` + `aggregate` + `detect` modules
+
+- **Status**: ✅ shipped in flowscope 0.10. `emit` =
+  CSV/NDJSON/Zeek writers (plan 101). `aggregate` = Histogram +
+  Percentile (plan 102 sub-B). `detect` = shannon_entropy,
+  ngram_distribution, is_base64ish, is_hex_string, etc. (plan
+  102 sub-C). `detect::signatures` = magic-byte recognizers
+  (plan 113 sub-A).
+- **Action**: tracked in
+  [`netring-0.21-new-detectors-2026-06-07.md`](./netring-0.21-new-detectors-2026-06-07.md)
+  D1 (DNS tunnel via shannon_entropy), D7 (Zeek conn.log writer).
+- **Last checked**: 2026-06-07.
+
+## flowscope MSRV bump (1.85 → 1.88)
+
+- **Status**: ✅ shipped in flowscope 0.9 (plan 99) — let-chains
+  at expression position. AFIT + async closures + trait
+  upcasting also available within the new MSRV.
+- **Action**: netring is already on MSRV 1.95; satisfied without
+  change. Verify in
+  [`netring-0.19-flowscope-0.10-bump`](./netring-0.19-flowscope-0.10-bump-2026-06-07.md)
+  B2.
+- **Last checked**: 2026-06-07.
 
 ## CI hardening (post-0.5)
 

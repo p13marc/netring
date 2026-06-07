@@ -154,7 +154,7 @@ impl AnomalyRule<FiveTupleKey> for IcmpExplainedDropRule {
                             .with_key(*key)
                             .with_observation("status", "explained")
                             .with_observation("icmp", expl.label)
-                            .with_observation("reason", reason.to_string())
+                            .with_observation("reason", reason.as_str())
                             .with_metric("delta_ms", delta.as_secs_f64() * 1000.0),
                     );
                 } else {
@@ -162,7 +162,7 @@ impl AnomalyRule<FiveTupleKey> for IcmpExplainedDropRule {
                         Anomaly::new(self.name(), Severity::Warning, died_ts)
                             .with_key(*key)
                             .with_observation("status", "unexplained")
-                            .with_observation("reason", reason.to_string()),
+                            .with_observation("reason", reason.as_str()),
                     );
                 }
             }

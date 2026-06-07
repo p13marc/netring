@@ -100,7 +100,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                     tag = l4_label(l4),
                     a = key.a,
                     b = key.b,
-                    p = stats.packets_initiator + stats.packets_responder,
+                    p = stats.total_packets(),
                 );
                 totals.flow_ended += 1;
                 if matches!(reason, EndReason::Rst) {

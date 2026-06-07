@@ -41,7 +41,7 @@ mistakes; three sequential netring releases instead.
 | Crate | Plan | Scope | Days |
 |---|---|---|---|
 | netring **0.17** | ✅ **shipped** (`151901e`/`96f8d78`/`c1ec36b`) | Lockstep dep bump 0.7 → 0.10 + mechanical wishlist absorption (PARSER_KIND constants, IcmpType helpers, DnsResolutionCache, AnomalyKind::short_kind, TlsHandshakeParser, serde feature). See CHANGELOG.md and `git log`. | done |
-| netring **0.18** | [`netring-0.18-unified-driver-refactor-2026-06-07.md`](./netring-0.18-unified-driver-refactor-2026-06-07.md) | **One big release.** Two strands: (1) collapse `ProtocolMonitor` onto `flowscope::driver_unified::Driver<E, M>` + `Event<K, M>` (closes long-deferred N5 + N6 + O1 + O2; deletes ~1300 LoC; adds heuristic-routing via `flowscope::detect::signatures`); (2) 9 new reference detectors using flowscope's new tooling (`shannon_entropy`, `TimeBucketedSet`, `BurstDetector`, `TopK`, `Ewma`, `iter_active`, `ZeekConnLogWriter`, `HttpExchangeParser`, `DnsExchangeParser`) + helper-sweep adoption + WRITING_DETECTORS doc expansion. Pre-merged from the original 0.18 + 0.19 split because shipping the architectural refactor solo would burn a release without delivering visible value; pairing it with new detectors proves the refactor on real workloads. | ~7.5 |
+| netring **0.18** | ✅ **shipped** (Commits A/B/C/D, 7a147a4–HEAD) | Unified-driver refactor + 7 new reference examples (3 anomaly detectors: DnsTunnel/PortScan/SynFlood; 4 flow demos: top_n_flows/ewma_rate/active_flows_snapshot/zeek_export) + heuristic-routing builder methods + WRITING_DETECTORS migration notes + helper-sweep adoption. Deferred to 0.19: D8/D9 (HTTP/DNS exchange correlators — need new ProtocolMessage variants + builder slots). See CHANGELOG.md. | done |
 
 ---
 

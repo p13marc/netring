@@ -1,5 +1,99 @@
 # Changelog
 
+## 0.18.0 — unified-driver refactor + new detectors
+
+Centerpiece architectural refactor + flowscope-tooling adoption:
+`ProtocolMonitor` collapses N captures + N kernel BPF filters
+down to ONE capture + flowscope's unified `Driver<E, M>`. Memory
+savings scale linearly with the protocol count (5-protocol
+monitor: 5 × tpacket_v3 rings → 1, typically 80–160 MiB → 16–32
+MiB). Plus 7 new reference examples (3 anomaly detectors, 4
+flow-level demos) and a heuristic-routing builder for
+port-agnostic protocol matching.
+
+### Breaking
+
+- **`ProtocolEvent<K>` variant rename.** Variants flatten to
+  match flowscope's `Event<K, M>`:
+  `Flow(FlowEvent::Started { … })` → `FlowStarted { … }`,
+  `Flow(FlowEvent::Ended { … })` → `FlowEnded { … }`,
+  `Flow(FlowEvent::FlowAnomaly { … })` → `FlowAnomaly { … }`,
+  `Flow(FlowEvent::TrackerAnomaly { … })` → `TrackerAnomaly { … }`,
+  etc. `ProtocolEvent<K>` itself is now a type alias for
+  `flowscope::driver_unified::Event<K, ProtocolMessage>` (path
+  A from the 0.18 plan).
+- **`ProtocolEvent::Message` field rename.** `kind` →
+  `parser_kind` to match flowscope.
+- Both changes mechanical: most detectors only needed a
+  variant-pattern rewrite. The migration table is documented in
+  `protocol/event.rs` docs and `WRITING_DETECTORS.md` (new
+  Migration notes section).
+
+### Added
+
+- **`ProtocolMonitorBuilder::http_heuristic()` /
+  `tls_handshake_heuristic()`** — port-agnostic protocol
+  dispatch via flowscope's signature-based heuristic slots
+  (plan 116 / `flowscope::detect::signatures::*`). Routes any
+  TCP flow whose first packet matches a curated payload
+  signature to the corresponding parser, regardless of port.
+  Combines with `.http_on_ports()` / `.tls_handshake_on_ports()`
+  for "well-known ports plus catch-all" deployments. Useful for
+  port-randomized C2 detection, proxy discovery, and HTTP/TLS
+  on debug ports.
+- **`netring/emit` Cargo feature.** Pass-through for flowscope's
+  `emit` module — pulls `flowscope/emit` (no extra deps). Used
+  by the new `zeek_export.rs` example.
+- **Three new anomaly detectors** under `examples/anomaly/`,
+  each with parallel integration tests in
+  `tests/anomaly_new_detectors.rs` (9 unit tests total):
+  - `dns_tunnel_detect.rs` — high-entropy + base64-shaped DNS
+    subdomain labels (MITRE T1071.004 / T1041). Uses
+    `flowscope::detect::shannon_entropy` + `is_base64ish`.
+  - `port_scan.rs` — distinct dst-port cardinality per source
+    over a sliding window (MITRE T1046). Uses
+    `flowscope::correlate::TimeBucketedSet`.
+  - `syn_flood_burst.rs` — burst flow-starts per source within
+    a short window (MITRE T1498.001). Uses
+    `flowscope::correlate::BurstDetector`. Severity Critical.
+- **Four new flow-level examples** under `examples/flow/`:
+  - `top_n_flows.rs` — streaming top-K by total bytes
+    (`flowscope::correlate::TopK`).
+  - `ewma_rate.rs` — per-flow exponential-moving-average
+    smoothed packet size (`flowscope::correlate::Ewma`).
+  - `active_flows_snapshot.rs` — periodic live-flow snapshot
+    via `FlowStream::snapshot_flow_stats` (which calls
+    `FlowTracker::iter_active`).
+  - `zeek_export.rs` — Zeek-compatible `conn.log` writer via
+    `flowscope::emit::ZeekConnLogWriter`.
+- **`WRITING_DETECTORS.md`** gains a §5 subsection
+  "Port-agnostic routing (heuristic dispatch)" + a top-of-doc
+  "Migration notes (netring 0.18)" section with the variant
+  rename table.
+
+### Changed
+
+- **`ProtocolMonitor` internals.** Pre-0.18 opened N
+  `AsyncCapture`s, one per enabled protocol, each with a
+  per-protocol kernel BPF filter. As of 0.18 the monitor opens
+  ONE capture (no kernel filter) and dispatches user-side
+  through flowscope's unified `Driver<E, M>` with one slot per
+  enabled protocol. Trade-off: memory wins linearly with
+  protocol count; per-packet user-side dispatch adds one match
+  in exchange for one fewer kernel BPF eval. Public surface
+  (`.flow()` / `.http()` / `.dns()` / `.tls()` / `.icmp()` /
+  `.tls_handshake()`) unchanged.
+- **`examples/l7/multi_protocol_monitor.rs`** — `describe()`
+  collapsed from a 40-LoC `either_port` chain to one call to
+  `flowscope::well_known::protocol_label`. Now covers ~70
+  services (the previous chain hard-coded 6).
+- **`examples/anomaly/icmp_explained_drop.rs`** —
+  `reason.to_string()` → `reason.as_str()` (zero-alloc; uses
+  `EndReason::as_str()` shipped in flowscope 0.10).
+- **`examples/flow/summary.rs` + `examples/l7/full_monitor.rs`**
+  — `stats.bytes_initiator + stats.bytes_responder` →
+  `stats.total_bytes()`; same for `total_packets()`.
+
 ## 0.17.0 — flowscope 0.10 lockstep bump + wishlist absorption
 
 Lockstep update to flowscope 0.10.1. flowscope shipped every

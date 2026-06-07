@@ -89,46 +89,28 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 }
 
 /// Map `(key, l4)` to a short tag plus an optional port-hint suffix
-/// for protocols that commonly use a well-known port.
+/// for protocols that commonly use a well-known port. Uses
+/// `flowscope::well_known::protocol_label` for ~70 services
+/// (HTTP, DNS, TLS, SSH, NTP, QUIC, postgres, redis, …) in one
+/// call.
 #[cfg(all(feature = "tokio", feature = "flow"))]
 fn describe(
     key: &netring::flow::extract::FiveTupleKey,
     l4: Option<netring::flow::L4Proto>,
 ) -> (&'static str, String) {
     use netring::flow::L4Proto;
-    match l4 {
-        Some(L4Proto::Icmp) | Some(L4Proto::IcmpV6) => ("ICMP", String::new()),
-        Some(L4Proto::Tcp) => {
-            let hint = if key.either_port(80) || key.either_port(8080) {
-                "  (HTTP port)"
-            } else if key.either_port(443) {
-                "  (TLS port)"
-            } else if key.either_port(22) {
-                "  (SSH port)"
-            } else {
-                ""
-            };
-            ("TCP", hint.to_string())
-        }
-        Some(L4Proto::Udp) => {
-            let hint = if key.either_port(53) {
-                "  (DNS port)"
-            } else if key.either_port(123) {
-                "  (NTP port)"
-            } else if key.either_port(443) {
-                "  (QUIC port)"
-            } else {
-                ""
-            };
-            ("UDP", hint.to_string())
-        }
-        Some(other) => {
-            // Other L4 (GRE, SCTP, ESP, …) — flowscope's L4Proto covers them.
-            let _ = other;
-            ("L4", String::new())
-        }
-        None => ("?", String::new()),
-    }
+    let tag = match l4 {
+        Some(L4Proto::Icmp) | Some(L4Proto::IcmpV6) => "ICMP",
+        Some(L4Proto::Tcp) => "TCP",
+        Some(L4Proto::Udp) => "UDP",
+        Some(_) => "L4",
+        None => "?",
+    };
+    let hint = l4
+        .and_then(|p| flowscope::well_known::protocol_label(p, key.a.port(), key.b.port()))
+        .map(|name| format!("  ({name} port)"))
+        .unwrap_or_default();
+    (tag, hint)
 }
 
 #[cfg(all(feature = "tokio", feature = "flow"))]

@@ -1,6 +1,6 @@
 [package]
 name = "netring"
-version = "0.17.0"
+version = "0.18.0"
 edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
@@ -95,6 +95,10 @@ all-parsers = ["http", "dns", "tls", "icmp"]
 # Loki, …). Provides `Anomaly::to_json_value() -> serde_json::Value`
 # alongside the zero-dep `to_json_line()`.
 serde = ["dep:serde", "dep:serde_json", "flowscope/serde"]
+# Pass-through for flowscope's `emit` module (Zeek conn.log,
+# CSV writers). Pulls no extra deps. Used by
+# `examples/flow/zeek_export.rs`.
+emit = ["flow", "flowscope/emit"]
 
 [package.metadata.docs.rs]
 all-features = true
@@ -290,6 +294,26 @@ required-features = ["tokio", "flow"]
 name = "async_flow_with_tap"
 path = "examples/flow/with_tap.rs"
 required-features = ["tokio", "flow", "parse", "pcap"]
+
+[[example]]
+name = "top_n_flows"
+path = "examples/flow/top_n_flows.rs"
+required-features = ["tokio", "flow", "parse"]
+
+[[example]]
+name = "ewma_rate"
+path = "examples/flow/ewma_rate.rs"
+required-features = ["tokio", "flow", "parse"]
+
+[[example]]
+name = "active_flows_snapshot"
+path = "examples/flow/active_flows_snapshot.rs"
+required-features = ["tokio", "flow", "parse"]
+
+[[example]]
+name = "zeek_export"
+path = "examples/flow/zeek_export.rs"
+required-features = ["tokio", "flow", "parse", "emit"]
 
 # l7/ — session/datagram parsers (HTTP, DNS, custom)
 [[example]]

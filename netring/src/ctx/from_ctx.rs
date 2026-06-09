@@ -1,49 +1,23 @@
-//! [`FromCtx`] trait + per-monitor storage maps.
+//! Storage maps that back [`crate::ctx::Ctx`]'s typed accessors.
 //!
-//! Handler closures receive their arguments by *extracting* them
-//! from the per-event [`Ctx`](crate::ctx::Ctx). `FromCtx` is the
-//! axum-style extractor trait that defines what an argument type
-//! produces when called on `&mut Ctx<'_>`.
+//! [`StateMap`] holds per-monitor user state keyed by `TypeId`.
+//! [`CounterRegistry`] holds pre-registered
+//! [`TimeBucketedCounter`](crate::correlate::TimeBucketedCounter)s
+//! by their key-type's `TypeId`.
 //!
-//! [`StateMap`] and [`CounterRegistry`] are the storage backings
-//! for the [`State<T>`](crate::ctx::State) and
-//! [`Counter<K>`](crate::ctx::Counter) extractors. Both are
-//! `TypeId`-keyed and Phase B doesn't expose them publicly except
-//! as `pub(crate)` fields on `Ctx`.
+//! Both are `pub` so [`crate::monitor::MonitorBuilder`] can
+//! prepopulate them; the live access path (from inside a handler)
+//! is the `Ctx::state_mut` / `Ctx::counter_mut` methods.
 
 use std::any::{Any, TypeId};
 
 use rustc_hash::FxHashMap;
 
 use crate::correlate::TimeBucketedCounter;
-use crate::ctx::Ctx;
-
-/// Extract a typed view from `&mut Ctx<'_>`.
-///
-/// `Target<'a>` is the lifetime-bound view returned. For
-/// [`State<T>`](crate::ctx::State) this is `&'a mut T`; for
-/// [`Sink<()>`](crate::ctx::Sink) it's `&'a mut dyn AnomalySink`;
-/// for [`Now`](crate::ctx::Now) it's [`flowscope::Timestamp`] by
-/// value.
-///
-/// Phase B's blanket `Handler<E, M>` impls (B.2) sequence
-/// `FromCtx::from_ctx` calls per extractor parameter, so an
-/// extractor type may be present 0-or-1 times per handler — two
-/// `&mut State<Same>` extractors would conflict at borrow-check
-/// (intentionally). Phase C's `Ctx::split_state_sink::<T>()` and
-/// friends are the disjoint-borrow escape hatch.
-pub trait FromCtx {
-    /// The lifetime-bound view returned by extraction. Often
-    /// `&'a mut T` or a `Copy` value.
-    type Target<'a>;
-
-    /// Pull the view out of the context.
-    fn from_ctx<'a>(ctx: &'a mut Ctx<'_>) -> Self::Target<'a>;
-}
 
 /// Type-keyed state map. One slot per `T: Default` registered via
 /// `MonitorBuilder::state::<T>()` or first-accessed via
-/// `State<T>` in a handler. Lazy-initializes on first access.
+/// `Ctx::state_mut::<T>()`. Lazy-initializes on first access.
 #[derive(Default)]
 pub struct StateMap {
     by_type: FxHashMap<TypeId, Box<dyn Any + Send>>,
@@ -68,7 +42,6 @@ impl StateMap {
     }
 
     /// Number of distinct state slots currently registered.
-    /// Useful for tests + diagnostics.
     pub fn len(&self) -> usize {
         self.by_type.len()
     }
@@ -79,9 +52,9 @@ impl StateMap {
     }
 }
 
-/// Type-keyed counter registry. Each `K: Eq + Hash` registered
-/// via `MonitorBuilder::counter::<K>(window, bucket)` gets one
-/// preallocated [`TimeBucketedCounter<K>`].
+/// Type-keyed counter registry. Each `K: Hash + Eq + Clone`
+/// registered via `MonitorBuilder::counter::<K>(window, bucket)`
+/// gets one preallocated [`TimeBucketedCounter<K>`].
 #[derive(Default)]
 pub struct CounterRegistry {
     by_type: FxHashMap<TypeId, Box<dyn Any + Send>>,
@@ -99,9 +72,7 @@ impl CounterRegistry {
     }
 
     /// Borrow the `K`-keyed counter. Panics if the user didn't
-    /// register it on the builder — caught early in development;
-    /// production code should pair every `Counter<K>` extractor
-    /// with a matching `.counter::<K>(...)` builder call.
+    /// register it on the builder.
     pub fn get_mut<K>(&mut self) -> &mut TimeBucketedCounter<K>
     where
         K: std::hash::Hash + Eq + Clone + Send + 'static,
@@ -144,12 +115,8 @@ mod tests {
     #[test]
     fn state_map_lazy_creates_then_returns_same() {
         let mut m = StateMap::default();
-        {
-            let c = m.get_or_init_mut::<Counter1>();
-            c.n = 7;
-        }
-        let c = m.get_or_init_mut::<Counter1>();
-        assert_eq!(c.n, 7);
+        m.get_or_init_mut::<Counter1>().n = 7;
+        assert_eq!(m.get_or_init_mut::<Counter1>().n, 7);
         assert_eq!(m.len(), 1);
     }
 

@@ -18,6 +18,8 @@ pub mod error;
 pub mod interface;
 #[cfg(feature = "metrics")]
 pub mod metrics;
+#[cfg(all(feature = "flow", feature = "tokio"))]
+pub mod monitor;
 pub mod packet;
 #[cfg(feature = "pcap")]
 pub mod pcap;

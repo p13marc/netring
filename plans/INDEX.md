@@ -25,23 +25,33 @@ backlog. Released work documented in `CHANGELOG.md`.
 
 ## Active backlog
 
-### flowscope 0.10 absorption — three-phase rollout
+### netring 0.20 — Monitor redesign (Protocol trait + Handler + Layer + macro + sharding)
 
-flowscope 0.10 (2026-06-07) shipped the entire 3-round netring
-feedback wishlist (rounds for 0.5/0.6, 0.7, 0.8) plus the 0.9
-cycle (high-level `Pipeline`, `flowscope::correlate`,
-`FlowMultiSessionDriver`, JA4, OOO reassembler, unified
-`flowscope::Error`, `flowscope::layers`) plus the 0.10 cycle
-(centerpiece unified `Driver<E, M>` + `Event<K, M>`, exchange
-aggregators, parser ergonomics, correlate extensions, `detect` /
-`aggregate` / `emit` / `well_known` modules, signature
-recognizers, helper sweep). Absorbing it in one cycle invites
-mistakes; three sequential netring releases instead.
+The 0.20 release replaces the closed `ProtocolMonitor` / `AnomalyMonitor` / `AnomalyRule` surface with a protocol-agnostic `Monitor::builder()` + `Handler<E, M>` blanket impls + tower-style middleware + `detector!` macro + per-CPU sharding. Driven by an in-session API review (June 2026) that concluded the 0.18 architecture is sound but the user-facing surface reads like 2022-era Rust; 0.20 brings it in line with 2026 axum/bevy/tower idioms.
 
-| Crate | Plan | Scope | Days |
+Execution split into 7 sequential phases. Each ships as 2–4 commits on a `0.20-dev` branch; the final phase tags + publishes.
+
+| Phase | Plan | Scope | Days |
 |---|---|---|---|
-| netring **0.17** | ✅ **shipped** (`151901e`/`96f8d78`/`c1ec36b`) | Lockstep dep bump 0.7 → 0.10 + mechanical wishlist absorption (PARSER_KIND constants, IcmpType helpers, DnsResolutionCache, AnomalyKind::short_kind, TlsHandshakeParser, serde feature). See CHANGELOG.md and `git log`. | done |
-| netring **0.18** | ✅ **shipped** (Commits A/B/C/D, 7a147a4–HEAD) | Unified-driver refactor + 7 new reference examples (3 anomaly detectors: DnsTunnel/PortScan/SynFlood; 4 flow demos: top_n_flows/ewma_rate/active_flows_snapshot/zeek_export) + heuristic-routing builder methods + WRITING_DETECTORS migration notes + helper-sweep adoption. Deferred to 0.19: D8/D9 (HTTP/DNS exchange correlators — need new ProtocolMessage variants + builder slots). See CHANGELOG.md. | done |
+| **A** | [`netring-0.20-phase-A-protocol-trait.md`](./netring-0.20-phase-A-protocol-trait.md) | `Protocol` trait + `Event` trait + 7 builtin marker types (`Tcp`/`Udp`/`Icmp`/`Http`/`Dns`/`Tls`/`TlsHandshake`) | 2–3 |
+| **B** | [`netring-0.20-phase-B-handler-trait.md`](./netring-0.20-phase-B-handler-trait.md) | `Handler<E, M>` trait + blanket impls for 0..8 extractors + `Ctx<'a>` + `FromCtx` + `Dispatcher` + `Monitor` builder skeleton | 4–6 |
+| **C** | [`netring-0.20-phase-C-perf-hardening.md`](./netring-0.20-phase-C-perf-hardening.md) | `AnomalyWriter` + shipped sinks + `Ctx::split_*` + dhat-gated CI bench (≤512 B / 100k events) | 2–3 |
+| **D** | [`netring-0.20-phase-D-middleware.md`](./netring-0.20-phase-D-middleware.md) | `AsyncHandler<E, M>` + `on_async` + 5 tower-style layers (Dedupe / RateLimit / MinSeverity / Sample / Tee) | 3–4 |
+| **E** | [`netring-0.20-phase-E-macro-prelude.md`](./netring-0.20-phase-E-macro-prelude.md) | `detector!` macro + `netring::prelude` + multi-interface via `AsyncMultiCapture` | 3–4 |
+| **F** | [`netring-0.20-phase-F-percpu-sharding.md`](./netring-0.20-phase-F-percpu-sharding.md) | `fanout_per_cpu` + `merge_state` + sharded run loop + per-CPU state merging | 3–4 |
+| **G** | [`netring-0.20-phase-G-migration-release.md`](./netring-0.20-phase-G-migration-release.md) | Rewrite 13 examples + ship `netring-compat` + migration docs + release | 4–5 |
+
+**Total: 21–29 working days.** Single breaking release as netring 0.20.0.
+
+See [`netring-0.20-INDEX-2026-06-09.md`](./netring-0.20-INDEX-2026-06-09.md) for orchestration (sequencing, cross-phase invariants, dependency rules).
+
+### Recently shipped
+
+| Crate | Plan | Status |
+|---|---|---|
+| netring **0.17** | absorbed flowscope 0.10 (mechanical bump + parser_kinds + DnsResolutionCache + serde feature) | ✅ shipped — see CHANGELOG.md |
+| netring **0.18** | unified-driver refactor + 3 new anomaly detectors + 4 flow demos + heuristic routing | ✅ shipped (Commits A/B/C/D, 7a147a4) |
+| netring **0.19** | flowscope 0.11.1 absorption: typed `Driver<E>` + `SlotHandle<M, K>` + scratch-buffer parsers + `Bytes`-based HTTP payloads. Stream loses `+ Send` bound (`SlotHandle` is `Rc/RefCell`-based, single-thread-by-design). | ✅ shipped at `daf8557` |
 
 ---
 
@@ -49,6 +59,7 @@ mistakes; three sequential netring releases instead.
 
 | File | Status |
 |------|--------|
+| [`api-review-2026-06-09.md`](./api-review-2026-06-09.md) | Live — the analytical "why" behind the 0.20 redesign. Companion to the phase plans. |
 | [`upstream-tracking.md`](./upstream-tracking.md) | Live — rustc / kernel / flowscope features being watched |
 
 ---

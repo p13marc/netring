@@ -44,6 +44,8 @@
 mod event;
 mod monitor;
 
+pub mod builtin;
+
 pub use event::{ProtocolEvent, ProtocolMessage};
 pub use monitor::{ProtocolMonitor, ProtocolMonitorBuilder};
 

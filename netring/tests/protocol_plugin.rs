@@ -5,7 +5,9 @@
 
 #![cfg(all(feature = "tokio", feature = "flow"))]
 
-use netring::protocol::{Dispatch, ParserKind, Protocol, ProtocolInitError, SignatureMatch};
+use flowscope::driver::{Driver, DriverBuilder, SlotHandle};
+use flowscope::extract::{FiveTuple, FiveTupleKey};
+use netring::protocol::{Dispatch, Protocol, ProtocolInitError, SignatureMatch};
 
 /// Imagine this lives in a downstream crate. No netring edit needed.
 #[derive(Debug, Clone, Copy)]
@@ -19,9 +21,11 @@ impl Protocol for MyCustomProtocol {
         Dispatch::Tcp(vec![9999])
     }
 
-    fn parser() -> Result<ParserKind<()>, ProtocolInitError> {
-        // A lifecycle-only stand-in for this test; real third-party
-        // crates would return `Ok(ParserKind::Session(Box::new(my_parser)))`.
+    fn register(
+        _builder: &mut DriverBuilder<FiveTuple>,
+    ) -> Result<SlotHandle<Self::Message, FiveTupleKey>, ProtocolInitError> {
+        // Lifecycle-only stand-in for this test; real third-party
+        // crates would call `builder.session_on_ports(parser, ports)`.
         Err(ProtocolInitError("integration-test stub".into()))
     }
 }
@@ -56,6 +60,9 @@ fn builtin_http_marker_round_trip() {
         Dispatch::Tcp(ports) => assert_eq!(ports, vec![80, 8080]),
         other => panic!("expected Dispatch::Tcp([80,8080]), got {other:?}"),
     }
+    // register() actually registers a parser with a real builder
+    let mut b = Driver::builder(FiveTuple::bidirectional());
+    assert!(<Http as Protocol>::register(&mut b).is_ok());
 }
 
 #[test]
@@ -63,6 +70,7 @@ fn builtin_tcp_and_udp_are_lifecycle_only() {
     use netring::protocol::builtin::{Tcp, Udp};
     assert!(matches!(<Tcp as Protocol>::dispatch(), Dispatch::AllTcp));
     assert!(matches!(<Udp as Protocol>::dispatch(), Dispatch::AllUdp));
-    assert!(<Tcp as Protocol>::parser().is_err());
-    assert!(<Udp as Protocol>::parser().is_err());
+    let mut b = Driver::builder(FiveTuple::bidirectional());
+    assert!(<Tcp as Protocol>::register(&mut b).is_err());
+    assert!(<Udp as Protocol>::register(&mut b).is_err());
 }

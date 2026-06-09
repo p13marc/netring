@@ -1,6 +1,9 @@
 //! HTTP/1.x protocol marker.
 
-use crate::protocol::{Dispatch, ParserKind, Protocol, ProtocolInitError};
+use flowscope::driver::{DriverBuilder, SlotHandle};
+use flowscope::extract::{FiveTuple, FiveTupleKey};
+
+use crate::protocol::{Dispatch, Protocol, ProtocolInitError};
 
 /// HTTP/1.x — RFC 7230 request/response over TCP.
 ///
@@ -18,10 +21,14 @@ impl Protocol for Http {
         Dispatch::Tcp(vec![80, 8080])
     }
 
-    fn parser() -> Result<ParserKind<Self::Message>, ProtocolInitError> {
-        Ok(ParserKind::Session(Box::new(
-            flowscope::http::HttpParser::default(),
-        )))
+    fn register(
+        builder: &mut DriverBuilder<FiveTuple>,
+    ) -> Result<SlotHandle<Self::Message, FiveTupleKey>, ProtocolInitError> {
+        let ports = match Self::dispatch() {
+            Dispatch::Tcp(p) => p,
+            _ => unreachable!("Http::dispatch is Dispatch::Tcp by construction"),
+        };
+        Ok(builder.session_on_ports(flowscope::http::HttpParser::default(), ports))
     }
 }
 
@@ -43,9 +50,9 @@ mod tests {
     }
 
     #[test]
-    fn parser_constructs_successfully() {
-        let p = <Http as Protocol>::parser();
-        assert!(p.is_ok());
-        assert!(matches!(p.unwrap(), ParserKind::Session(_)));
+    fn register_returns_handle() {
+        let mut b = flowscope::driver::Driver::builder(FiveTuple::bidirectional());
+        let h = <Http as Protocol>::register(&mut b);
+        assert!(h.is_ok());
     }
 }

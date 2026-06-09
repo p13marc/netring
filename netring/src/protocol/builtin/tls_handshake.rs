@@ -1,7 +1,10 @@
 //! TLS handshake aggregator marker — one synthesised event per
 //! completed handshake.
 
-use crate::protocol::{Dispatch, ParserKind, Protocol, ProtocolInitError};
+use flowscope::driver::{DriverBuilder, SlotHandle};
+use flowscope::extract::{FiveTuple, FiveTupleKey};
+
+use crate::protocol::{Dispatch, Protocol, ProtocolInitError};
 
 /// TLS handshake aggregator. Emits one
 /// [`flowscope::tls::TlsHandshake`] per completed handshake,
@@ -23,10 +26,14 @@ impl Protocol for TlsHandshake {
         Dispatch::Tcp(vec![443, 8443])
     }
 
-    fn parser() -> Result<ParserKind<Self::Message>, ProtocolInitError> {
-        Ok(ParserKind::Session(Box::new(
-            flowscope::tls::TlsHandshakeParser::default(),
-        )))
+    fn register(
+        builder: &mut DriverBuilder<FiveTuple>,
+    ) -> Result<SlotHandle<Self::Message, FiveTupleKey>, ProtocolInitError> {
+        let ports = match Self::dispatch() {
+            Dispatch::Tcp(p) => p,
+            _ => unreachable!("TlsHandshake::dispatch is Dispatch::Tcp by construction"),
+        };
+        Ok(builder.session_on_ports(flowscope::tls::TlsHandshakeParser::default(), ports))
     }
 }
 
@@ -43,10 +50,9 @@ mod tests {
     }
 
     #[test]
-    fn parser_constructs_successfully() {
-        assert!(matches!(
-            <TlsHandshake as Protocol>::parser().unwrap(),
-            ParserKind::Session(_)
-        ));
+    fn register_returns_handle() {
+        let mut b = flowscope::driver::Driver::builder(FiveTuple::bidirectional());
+        let h = <TlsHandshake as Protocol>::register(&mut b);
+        assert!(h.is_ok());
     }
 }

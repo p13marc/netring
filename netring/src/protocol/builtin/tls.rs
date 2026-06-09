@@ -1,6 +1,9 @@
 //! TLS message-granularity parser marker.
 
-use crate::protocol::{Dispatch, ParserKind, Protocol, ProtocolInitError};
+use flowscope::driver::{DriverBuilder, SlotHandle};
+use flowscope::extract::{FiveTuple, FiveTupleKey};
+
+use crate::protocol::{Dispatch, Protocol, ProtocolInitError};
 
 /// TLS handshake observation at message granularity
 /// (ClientHello / ServerHello / Alert). For one synthesised
@@ -20,10 +23,14 @@ impl Protocol for Tls {
         Dispatch::Tcp(vec![443, 8443])
     }
 
-    fn parser() -> Result<ParserKind<Self::Message>, ProtocolInitError> {
-        Ok(ParserKind::Session(Box::new(
-            flowscope::tls::TlsParser::default(),
-        )))
+    fn register(
+        builder: &mut DriverBuilder<FiveTuple>,
+    ) -> Result<SlotHandle<Self::Message, FiveTupleKey>, ProtocolInitError> {
+        let ports = match Self::dispatch() {
+            Dispatch::Tcp(p) => p,
+            _ => unreachable!("Tls::dispatch is Dispatch::Tcp by construction"),
+        };
+        Ok(builder.session_on_ports(flowscope::tls::TlsParser::default(), ports))
     }
 }
 
@@ -42,5 +49,12 @@ mod tests {
     #[test]
     fn name_matches_flowscope_parser_kind() {
         assert_eq!(<Tls as Protocol>::NAME, flowscope::parser_kinds::TLS);
+    }
+
+    #[test]
+    fn register_returns_handle() {
+        let mut b = flowscope::driver::Driver::builder(FiveTuple::bidirectional());
+        let h = <Tls as Protocol>::register(&mut b);
+        assert!(h.is_ok());
     }
 }

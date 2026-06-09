@@ -3,7 +3,10 @@
 //! DNS-over-TCP is intentionally not a built-in marker; users who
 //! want it ship their own `Protocol` impl with the parser they want.
 
-use crate::protocol::{Dispatch, ParserKind, Protocol, ProtocolInitError};
+use flowscope::driver::{DriverBuilder, SlotHandle};
+use flowscope::extract::{FiveTuple, FiveTupleKey};
+
+use crate::protocol::{Dispatch, Protocol, ProtocolInitError};
 
 /// DNS over UDP. Default port: 53. Uses
 /// [`flowscope::dns::DnsUdpParser::with_correlation`] so responses
@@ -20,10 +23,14 @@ impl Protocol for Dns {
         Dispatch::Udp(vec![53])
     }
 
-    fn parser() -> Result<ParserKind<Self::Message>, ProtocolInitError> {
-        Ok(ParserKind::Datagram(Box::new(
-            flowscope::dns::DnsUdpParser::with_correlation(),
-        )))
+    fn register(
+        builder: &mut DriverBuilder<FiveTuple>,
+    ) -> Result<SlotHandle<Self::Message, FiveTupleKey>, ProtocolInitError> {
+        let ports = match Self::dispatch() {
+            Dispatch::Udp(p) => p,
+            _ => unreachable!("Dns::dispatch is Dispatch::Udp by construction"),
+        };
+        Ok(builder.datagram_on_ports(flowscope::dns::DnsUdpParser::with_correlation(), ports))
     }
 }
 
@@ -45,10 +52,9 @@ mod tests {
     }
 
     #[test]
-    fn parser_constructs_successfully() {
-        assert!(matches!(
-            <Dns as Protocol>::parser().unwrap(),
-            ParserKind::Datagram(_)
-        ));
+    fn register_returns_handle() {
+        let mut b = flowscope::driver::Driver::builder(FiveTuple::bidirectional());
+        let h = <Dns as Protocol>::register(&mut b);
+        assert!(h.is_ok());
     }
 }

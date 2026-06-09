@@ -152,7 +152,7 @@ pub use protocol::{ProtocolEvent, ProtocolMessage, ProtocolMonitor, ProtocolMoni
 // 0.20 plugin layer re-exports (Phase A). These get consumed by
 // the new `Monitor::builder()` API landing in Phase B.
 #[cfg(all(feature = "flow", feature = "tokio"))]
-pub use protocol::{Dispatch, FlowKey, ParserKind, Protocol, ProtocolInitError, SignatureMatch};
+pub use protocol::{Dispatch, FlowKey, Protocol, ProtocolInitError, SignatureMatch};
 
 #[cfg(all(feature = "flow", feature = "tokio"))]
 pub use anomaly::{

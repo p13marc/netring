@@ -1,6 +1,9 @@
 //! TCP lifecycle marker.
 
-use crate::protocol::{Dispatch, ParserKind, Protocol, ProtocolInitError};
+use flowscope::driver::{DriverBuilder, SlotHandle};
+use flowscope::extract::{FiveTuple, FiveTupleKey};
+
+use crate::protocol::{Dispatch, Protocol, ProtocolInitError};
 
 /// TCP lifecycle marker. Registering this protocol enables
 /// `FlowStarted<Tcp>`, `FlowEstablished<Tcp>`, `FlowEnded<Tcp>`
@@ -18,7 +21,9 @@ impl Protocol for Tcp {
         Dispatch::AllTcp
     }
 
-    fn parser() -> Result<ParserKind<()>, ProtocolInitError> {
+    fn register(
+        _builder: &mut DriverBuilder<FiveTuple>,
+    ) -> Result<SlotHandle<Self::Message, FiveTupleKey>, ProtocolInitError> {
         Err(ProtocolInitError(
             "Tcp marker is lifecycle-only — no parser; \
              handled by the central flow tracker"
@@ -37,8 +42,9 @@ mod tests {
     }
 
     #[test]
-    fn parser_returns_err_for_lifecycle_only_marker() {
-        assert!(<Tcp as Protocol>::parser().is_err());
+    fn register_returns_err_for_lifecycle_only_marker() {
+        let mut b = flowscope::driver::Driver::builder(FiveTuple::bidirectional());
+        assert!(<Tcp as Protocol>::register(&mut b).is_err());
     }
 
     #[test]

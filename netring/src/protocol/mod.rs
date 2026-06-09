@@ -76,6 +76,16 @@ pub use monitor::{ProtocolMonitor, ProtocolMonitorBuilder};
 ///
 /// Built-in markers ship in [`builtin`]; downstream crates can
 /// add their own without editing netring.
+///
+/// ## Why [`Self::register`] instead of returning a boxed parser
+///
+/// flowscope's `DriverBuilder::session_on_ports` (and friends)
+/// require `P: SessionParser + Clone + Send + 'static`. A boxed
+/// trait object (`Box<dyn SessionParser<Message = M>>`) can't
+/// satisfy `Clone` and is `!Sized`, so the "give me your boxed
+/// parser, I'll register it" shape doesn't compile. Instead the
+/// `Protocol` impl drives the registration itself — it keeps the
+/// parser as its concrete type all the way to the call site.
 pub trait Protocol: Send + Sync + 'static {
     /// The typed message this protocol's parser emits. Must be
     /// `'static` (owning) — the framework downcasts via `Any`,
@@ -92,38 +102,26 @@ pub trait Protocol: Send + Sync + 'static {
     /// How packets get routed to this protocol's parser.
     fn dispatch() -> Dispatch;
 
-    /// Construct the parser instance — a flowscope session or
-    /// datagram parser ready to register against the typed
-    /// `Driver<E>`. Called once at builder time.
+    /// Register this protocol's parser with the given flowscope
+    /// driver builder and return the typed drain handle.
+    ///
+    /// The builder is parameterised on
+    /// [`flowscope::extract::FiveTuple`] — netring's canonical
+    /// flow extractor. The handle yields per-parser typed
+    /// messages of [`Self::Message`].
     ///
     /// Lifecycle-only markers ([`builtin::Tcp`] / [`builtin::Udp`])
-    /// return `Err`; the builder treats [`Dispatch::AllTcp`] /
-    /// [`Dispatch::AllUdp`] as "no parser slot to register; just
-    /// record the marker for typed lifecycle event filtering."
-    fn parser() -> Result<ParserKind<Self::Message>, ProtocolInitError>;
-}
-
-/// flowscope 0.11 has two parser-trait flavors. A [`Protocol`]
-/// impl declares which one it produces; netring's builder routes
-/// to the matching `Driver<E>` registration method.
-pub enum ParserKind<M> {
-    /// TCP-shaped parser (HTTP, DNS-over-TCP, TLS, …).
-    Session(Box<dyn flowscope::SessionParser<Message = M>>),
-    /// UDP / ICMP-shaped parser (DNS-over-UDP, ICMP, …).
-    Datagram(Box<dyn flowscope::DatagramParser<Message = M>>),
-}
-
-impl<M> std::fmt::Debug for ParserKind<M> {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        match self {
-            ParserKind::Session(_) => {
-                f.write_str("ParserKind::Session(<flowscope::SessionParser>)")
-            }
-            ParserKind::Datagram(_) => {
-                f.write_str("ParserKind::Datagram(<flowscope::DatagramParser>)")
-            }
-        }
-    }
+    /// have no parser to register and return
+    /// [`ProtocolInitError`]; the [`Monitor`] builder treats
+    /// [`Dispatch::AllTcp`] / [`Dispatch::AllUdp`] as "lifecycle
+    /// dispatch only — central tracker handles it" and ignores
+    /// the error.
+    fn register(
+        builder: &mut flowscope::driver::DriverBuilder<flowscope::extract::FiveTuple>,
+    ) -> Result<
+        flowscope::driver::SlotHandle<Self::Message, flowscope::extract::FiveTupleKey>,
+        ProtocolInitError,
+    >;
 }
 
 /// How a protocol selects packets for its parser.
@@ -177,10 +175,11 @@ impl From<flowscope::detect::signatures::SignatureMatch> for SignatureMatch {
     }
 }
 
-/// Error type for [`Protocol::parser`]. Most parsers are infallible
-/// to construct; flowscope parsers that take config can fail.
-/// Lifecycle-only markers (Tcp, Udp) use this to indicate "no
-/// parser slot needed — handled by the central flow tracker."
+/// Error type for [`Protocol::register`]. Most parsers are
+/// infallible to construct; flowscope parsers that take config
+/// can fail. Lifecycle-only markers (Tcp, Udp) use this to
+/// indicate "no parser slot needed — handled by the central
+/// flow tracker."
 #[derive(Debug, thiserror::Error)]
 #[error("protocol parser init failed: {0}")]
 pub struct ProtocolInitError(pub String);

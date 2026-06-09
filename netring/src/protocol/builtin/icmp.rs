@@ -1,6 +1,11 @@
 //! ICMP message parser marker.
 
-use crate::protocol::{Dispatch, ParserKind, Protocol, ProtocolInitError};
+#[cfg(feature = "icmp")]
+use flowscope::driver::{DriverBuilder, SlotHandle};
+#[cfg(feature = "icmp")]
+use flowscope::extract::{FiveTuple, FiveTupleKey};
+
+use crate::protocol::{Dispatch, Protocol, ProtocolInitError};
 
 /// ICMPv4 + ICMPv6 message parser. Surfaces `IcmpMessage` events
 /// including `inner: Option<IcmpInner>` on error variants — the
@@ -18,10 +23,10 @@ impl Protocol for Icmp {
         Dispatch::Icmp
     }
 
-    fn parser() -> Result<ParserKind<Self::Message>, ProtocolInitError> {
-        Ok(ParserKind::Datagram(Box::new(
-            flowscope::icmp::IcmpParser::new(),
-        )))
+    fn register(
+        builder: &mut DriverBuilder<FiveTuple>,
+    ) -> Result<SlotHandle<Self::Message, FiveTupleKey>, ProtocolInitError> {
+        Ok(builder.datagram_broadcast(flowscope::icmp::IcmpParser::new()))
     }
 }
 
@@ -40,9 +45,9 @@ mod tests {
     }
 
     #[test]
-    fn parser_constructs_successfully() {
-        let p = <Icmp as Protocol>::parser();
-        assert!(p.is_ok());
-        assert!(matches!(p.unwrap(), ParserKind::Datagram(_)));
+    fn register_returns_handle() {
+        let mut b = flowscope::driver::Driver::builder(FiveTuple::bidirectional());
+        let h = <Icmp as Protocol>::register(&mut b);
+        assert!(h.is_ok());
     }
 }

@@ -45,8 +45,12 @@ mod event;
 mod monitor;
 
 pub mod builtin;
+pub mod event_typed;
 
 pub use event::{ProtocolEvent, ProtocolMessage};
+pub use event_typed::{
+    AnyFlowAnomaly, Event, FlowEnded, FlowEstablished, FlowStarted, Side, TcpInfo, Tick,
+};
 pub use monitor::{ProtocolMonitor, ProtocolMonitorBuilder};
 
 // ─── Plugin layer (netring 0.20, Phase A) ──────────────────────────────────

@@ -149,6 +149,11 @@ pub use pcap_tap::{PcapTap, TapErrorPolicy};
 #[cfg(all(feature = "flow", feature = "tokio"))]
 pub use protocol::{ProtocolEvent, ProtocolMessage, ProtocolMonitor, ProtocolMonitorBuilder};
 
+// 0.20 plugin layer re-exports (Phase A). These get consumed by
+// the new `Monitor::builder()` API landing in Phase B.
+#[cfg(all(feature = "flow", feature = "tokio"))]
+pub use protocol::{Dispatch, FlowKey, ParserKind, Protocol, ProtocolInitError, SignatureMatch};
+
 #[cfg(all(feature = "flow", feature = "tokio"))]
 pub use anomaly::{
     Anomaly, AnomalyContext, AnomalyMonitor, AnomalyRule, FlowAnomalyRule, Severity,

@@ -62,6 +62,8 @@ mod builtin;
 mod monitor;
 mod rule;
 
+pub mod sink;
+
 pub use builtin::FlowAnomalyRule;
 pub use monitor::AnomalyMonitor;
 pub use rule::{Anomaly, AnomalyContext, AnomalyRule, Severity};

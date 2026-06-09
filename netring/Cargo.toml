@@ -51,6 +51,12 @@ aya = { version = "0.13", optional = true }
 serde = { version = "1", optional = true, features = ["derive"] }
 serde_json = { version = "1", optional = true }
 
+# 0.20 plugin-layer dependencies (Phase B).
+# - rustc-hash: TypeId-keyed maps in the handler registry + state map
+# - arrayvec: small inline arrays in the dispatcher slot table
+rustc-hash = "2"
+arrayvec = "0.7"
+
 [dev-dependencies]
 env_logger = "0.11"
 tempfile = "3"

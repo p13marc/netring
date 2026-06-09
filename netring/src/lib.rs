@@ -11,6 +11,8 @@ pub mod bridge;
 pub mod config;
 #[cfg(feature = "flow")]
 pub mod correlate;
+#[cfg(all(feature = "flow", feature = "tokio"))]
+pub mod ctx;
 pub mod dedup;
 pub mod error;
 pub mod interface;

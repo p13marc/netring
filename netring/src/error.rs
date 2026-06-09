@@ -51,10 +51,47 @@ pub enum Error {
     /// [`BpfFilter::new`](crate::BpfFilter::new) and the typed builder.
     #[error("BPF filter: {0}")]
     Bpf(#[from] crate::config::BuildError),
+
+    /// `Monitor` builder rejected the configuration (0.20+).
+    #[error("monitor build: {0}")]
+    Build(#[from] BuildError),
 }
 
 /// Convenience alias used throughout the crate.
 pub type Result<T> = std::result::Result<T, Error>;
+
+/// Build-time errors for the 0.20 `Monitor` API. Surfaced from
+/// [`crate::monitor::MonitorBuilder::build`].
+#[derive(Debug, thiserror::Error)]
+pub enum BuildError {
+    /// `.interface(...)` / `.interfaces(...)` was not called.
+    #[error(
+        "at least one interface required (call .interface(...) or .interfaces([...]) on the builder)"
+    )]
+    NoInterface,
+
+    /// Multi-interface monitors land in Phase E; today the builder
+    /// rejects more than one interface.
+    #[error(
+        "multi-interface monitors land in netring 0.20 phase E (Phase B accepts one interface)"
+    )]
+    MultiInterfaceNotYetSupported,
+
+    /// More than the dispatcher's per-monitor handler-type cap.
+    #[error("too many event types registered: limit {limit}, found {actual}")]
+    TooManyEventTypes {
+        /// Maximum number of distinct event types supported.
+        limit: usize,
+        /// Actual count from the builder.
+        actual: usize,
+    },
+
+    /// A `Protocol` impl's `dispatch()` shape and `register()` outcome
+    /// disagree (e.g. `Dispatch::Tcp(_)` but `register()` returned
+    /// `Err` outside the lifecycle-only fast path).
+    #[error("dispatch shape mismatch in Protocol impl: {0}")]
+    ProtocolDispatchMismatch(String),
+}
 
 #[cfg(test)]
 mod tests {

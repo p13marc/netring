@@ -1,42 +1,43 @@
 //! [`ProtocolMonitor`] — async stream over a single capture +
-//! one flowscope-side [`Driver<E, ProtocolMessage>`] that fans
-//! packets to every registered parser internally.
+//! one flowscope-side [`Driver<E>`] that fans packets to every
+//! registered parser internally.
 //!
-//! ## What changed in 0.18
+//! ## What changed in 0.19
 //!
-//! Pre-0.18 [`ProtocolMonitor`] opened **N** `AsyncCapture`s — one
-//! per enabled protocol — each with a per-protocol kernel BPF
-//! filter. As of netring 0.18 the monitor opens **1** capture (no
-//! kernel filter) and dispatches user-side through flowscope's
-//! unified [`Driver<E, M>`]. The trade-off:
+//! flowscope 0.11 (plan 121) replaced the closed `Driver<E, M>`
+//! shape with a typed [`Driver<E>`](flowscope::driver::Driver)
+//! that emits flow-lifecycle [`Event<K>`](flowscope::driver::Event)
+//! only — per-parser typed messages flow through
+//! [`SlotHandle<M, K>`](flowscope::driver::SlotHandle) returned
+//! from each `session_*` / `datagram_*` builder method.
 //!
-//! - **Memory.** 5-protocol monitor goes from 5 × `tpacket_v3`
-//!   ring (typically 80–160 MiB total) to 1 × ring (16–32 MiB).
-//! - **CPU.** Slightly more user-side dispatch (one match per
-//!   packet to route to the right parser slot) in exchange for
-//!   one fewer kernel BPF eval per packet. Net wash on typical
-//!   workloads.
-//! - **Filter expressiveness.** Per-protocol BPF narrowing is no
-//!   longer used; parser slots route by L4 + port set
-//!   user-side. Users who want a kernel-side coarse filter (e.g.
-//!   "only watch a single subnet") can still pre-apply one
-//!   externally and feed the source through a pcap or alternative
-//!   `AsyncPacketSource`.
+//! [`ProtocolMonitor`]'s public-facing surface
+//! ([`ProtocolMonitorBuilder`], the per-protocol method shortcuts,
+//! the `Stream<Item = Result<ProtocolEvent<K>, Error>>` shape) is
+//! unchanged from netring 0.18 *except* the stream is no longer
+//! `+ Send`: flowscope's `SlotHandle` uses `Rc<RefCell<…>>`
+//! internally (single-thread-by-design), which transitively makes
+//! the monitor `!Send`. Users on the standard
+//! `#[tokio::main(flavor = "current_thread")]` runtime (recommended
+//! for packet capture anyway) see no impact.
 //!
-//! ## API
+//! The internal driver loop is:
 //!
-//! The user-facing surface
-//! ([`ProtocolMonitorBuilder`] + the per-protocol method
-//! shortcuts) is unchanged from 0.17. Event variant shapes
-//! shifted to match flowscope — see the [`super::event`] module
-//! docs for the migration table.
+//! 1. `Driver::track_into(view, &mut lifecycle_events)` —
+//!    zero-alloc lifecycle event drain.
+//! 2. For each registered protocol's [`SlotHandle<M, K>`], drain
+//!    typed messages into a scratch buffer, lift `M` into
+//!    [`ProtocolMessage`], yield as
+//!    [`ProtocolEvent::Message`].
+//! 3. Translate lifecycle [`Event<K>`] variants into the
+//!    corresponding [`ProtocolEvent`] variants 1:1.
 
 use std::collections::VecDeque;
 use std::pin::Pin;
 use std::task::{Context, Poll};
 
 use flowscope::FlowExtractor;
-use flowscope::driver_unified::{Driver, DriverBuilder};
+use flowscope::driver::{Driver, DriverBuilder, Event as FsEvent, SlotHandle, SlotMessage};
 use futures_core::Stream;
 
 use super::event::{ProtocolEvent, ProtocolMessage};
@@ -45,19 +46,26 @@ use crate::error::Error;
 use crate::traits::PacketSource;
 use crate::{AsyncCapture, Capture};
 
-type BoxedEventStream<K> = Pin<Box<dyn Stream<Item = Result<ProtocolEvent<K>, Error>> + Send>>;
+type BoxedEventStream<K> = Pin<Box<dyn Stream<Item = Result<ProtocolEvent<K>, Error>>>>;
 
 /// A unified async stream of [`ProtocolEvent`]s from a single
 /// underlying capture.
 ///
 /// Produced by [`ProtocolMonitorBuilder::build`]. Owns one
 /// [`AsyncCapture`] internally + a flowscope-side
-/// `Driver` with one slot per enabled protocol.
+/// [`Driver<E>`](flowscope::driver::Driver) with one typed
+/// [`SlotHandle`](flowscope::driver::SlotHandle) per registered
+/// parser.
+///
+/// **Note: this type is `!Send` as of netring 0.19.** flowscope
+/// 0.11's slot handles use `Rc<RefCell>` for single-thread-by-design
+/// efficiency. Run the monitor on `#[tokio::main(flavor =
+/// "current_thread")]` (the recommended pattern for packet
+/// capture) and this constraint is transparent.
 pub struct ProtocolMonitor<K> {
     inner: BoxedEventStream<K>,
     /// Number of registered parser slots inside the unified driver.
-    /// Always at least 1 (the central flow tracker always emits
-    /// lifecycle events).
+    /// Excludes the always-on central flow tracker.
     slots: usize,
 }
 
@@ -94,7 +102,7 @@ impl<K> ProtocolMonitor<K> {
 
 impl<K> Stream for ProtocolMonitor<K>
 where
-    K: Send + Unpin + 'static,
+    K: Unpin + 'static,
 {
     type Item = Result<ProtocolEvent<K>, Error>;
 
@@ -314,60 +322,47 @@ impl ProtocolMonitorBuilder {
             Error::Config("ProtocolMonitorBuilder: .interface(...) is required".into())
         })?;
 
-        // Build the unified Driver with one slot per enabled
-        // protocol. The central flow tracker always runs and
-        // emits lifecycle events regardless of slots.
-        let mut builder: DriverBuilder<E, ProtocolMessage> = Driver::builder(extractor);
-        let mut slots: usize = 0;
+        // Build the typed Driver. Each `session_*` / `datagram_*`
+        // call returns a `SlotHandle<P::Message, K>` — we wrap it
+        // in a type-erased `Box<dyn ProtocolSlot<K>>` that knows
+        // how to drain typed messages and lift them into
+        // `ProtocolMessage`.
+        let mut builder: DriverBuilder<E> = Driver::builder(extractor);
+        let mut slots: Vec<Box<dyn ProtocolSlot<E::Key>>> = Vec::new();
 
         #[cfg(feature = "http")]
         if let Some(ports) = self.http_ports {
-            builder = builder.session_on_ports(
-                flowscope::http::HttpParser::default(),
-                ports,
-                ProtocolMessage::Http,
-            );
-            slots += 1;
+            let handle = builder.session_on_ports(flowscope::http::HttpParser::default(), ports);
+            slots.push(Box::new(TypedSlot::new(handle, ProtocolMessage::Http)));
         }
 
         #[cfg(feature = "dns")]
         if let Some(ports) = self.dns_udp_ports {
-            builder = builder.datagram_on_ports(
-                flowscope::dns::DnsUdpParser::with_correlation(),
-                ports,
-                ProtocolMessage::Dns,
-            );
-            slots += 1;
+            let handle =
+                builder.datagram_on_ports(flowscope::dns::DnsUdpParser::with_correlation(), ports);
+            slots.push(Box::new(TypedSlot::new(handle, ProtocolMessage::Dns)));
         }
 
         #[cfg(feature = "dns")]
         if let Some(ports) = self.dns_tcp_ports {
-            builder = builder.session_on_ports(
-                flowscope::dns::DnsTcpParser::default(),
-                ports,
-                ProtocolMessage::Dns,
-            );
-            slots += 1;
+            let handle = builder.session_on_ports(flowscope::dns::DnsTcpParser::default(), ports);
+            slots.push(Box::new(TypedSlot::new(handle, ProtocolMessage::Dns)));
         }
 
         #[cfg(feature = "tls")]
         if let Some(ports) = self.tls_ports {
-            builder = builder.session_on_ports(
-                flowscope::tls::TlsParser::default(),
-                ports,
-                ProtocolMessage::Tls,
-            );
-            slots += 1;
+            let handle = builder.session_on_ports(flowscope::tls::TlsParser::default(), ports);
+            slots.push(Box::new(TypedSlot::new(handle, ProtocolMessage::Tls)));
         }
 
         #[cfg(feature = "tls")]
         if let Some(ports) = self.tls_handshake_ports {
-            builder = builder.session_on_ports(
-                flowscope::tls::TlsHandshakeParser::default(),
-                ports,
+            let handle =
+                builder.session_on_ports(flowscope::tls::TlsHandshakeParser::default(), ports);
+            slots.push(Box::new(TypedSlot::new(
+                handle,
                 ProtocolMessage::TlsHandshake,
-            );
-            slots += 1;
+            )));
         }
 
         #[cfg(feature = "icmp")]
@@ -377,30 +372,32 @@ impl ProtocolMonitorBuilder {
                 IcmpScope::V4 => flowscope::icmp::IcmpParser::new().v4_only(),
                 IcmpScope::V6 => flowscope::icmp::IcmpParser::new().v6_only(),
             };
-            builder = builder.datagram_broadcast(parser, ProtocolMessage::Icmp);
-            slots += 1;
+            let handle = builder.datagram_broadcast(parser);
+            slots.push(Box::new(TypedSlot::new(handle, ProtocolMessage::Icmp)));
         }
 
         #[cfg(feature = "http")]
         if self.http_heuristic {
-            builder = builder.session_heuristic(
+            let handle = builder.session_heuristic(
                 flowscope::http::HttpParser::default(),
                 flowscope::detect::signatures::http_request,
-                ProtocolMessage::Http,
             );
-            slots += 1;
+            slots.push(Box::new(TypedSlot::new(handle, ProtocolMessage::Http)));
         }
 
         #[cfg(feature = "tls")]
         if self.tls_handshake_heuristic {
-            builder = builder.session_heuristic(
+            let handle = builder.session_heuristic(
                 flowscope::tls::TlsHandshakeParser::default(),
                 flowscope::detect::signatures::tls_client_hello,
-                ProtocolMessage::TlsHandshake,
             );
-            slots += 1;
+            slots.push(Box::new(TypedSlot::new(
+                handle,
+                ProtocolMessage::TlsHandshake,
+            )));
         }
 
+        let slot_count = slots.len();
         let driver = builder.build();
 
         // One capture — no kernel filter.
@@ -410,30 +407,106 @@ impl ProtocolMonitorBuilder {
         let inner: BoxedEventStream<E::Key> = Box::pin(DriverDrivenStream {
             packet_stream,
             driver,
+            slots,
             pending: VecDeque::new(),
+            lifecycle_buf: Vec::with_capacity(64),
         });
 
-        Ok(ProtocolMonitor { inner, slots })
+        Ok(ProtocolMonitor {
+            inner,
+            slots: slot_count,
+        })
+    }
+}
+
+/// Type-erased drain wrapper around a flowscope [`SlotHandle<M, K>`].
+/// Each registered parser slot owns one of these; the inner stream
+/// drains them on every tick.
+trait ProtocolSlot<K> {
+    fn drain_into(&mut self, out: &mut VecDeque<ProtocolEvent<K>>);
+}
+
+/// Concrete typed slot. Stores the typed `SlotHandle<M, K>` and a
+/// pointer-cast lift function `fn(M) -> ProtocolMessage`. Per drain,
+/// pulls all pending `SlotMessage<M, K>` into a scratch Vec (reused
+/// across calls), lifts each `M` into [`ProtocolMessage`], and emits
+/// [`ProtocolEvent::Message`].
+struct TypedSlot<M, K>
+where
+    M: 'static,
+    K: 'static,
+{
+    handle: SlotHandle<M, K>,
+    lift: fn(M) -> ProtocolMessage,
+    parser_kind: &'static str,
+    scratch: Vec<SlotMessage<M, K>>,
+}
+
+impl<M, K> TypedSlot<M, K>
+where
+    M: 'static,
+    K: 'static,
+{
+    fn new(handle: SlotHandle<M, K>, lift: fn(M) -> ProtocolMessage) -> Self {
+        let parser_kind = handle.parser_kind();
+        Self {
+            handle,
+            lift,
+            parser_kind,
+            scratch: Vec::new(),
+        }
+    }
+}
+
+impl<M, K> ProtocolSlot<K> for TypedSlot<M, K>
+where
+    M: 'static,
+    K: Clone + 'static,
+{
+    fn drain_into(&mut self, out: &mut VecDeque<ProtocolEvent<K>>) {
+        self.scratch.clear();
+        let n = self.handle.drain(&mut self.scratch);
+        if n == 0 {
+            return;
+        }
+        // Cache lift + parser_kind into locals to avoid borrow
+        // checker issues iterating self.scratch while reading
+        // self.lift / self.parser_kind.
+        let lift = self.lift;
+        let parser_kind = self.parser_kind;
+        for slot_msg in self.scratch.drain(..) {
+            out.push_back(ProtocolEvent::Message {
+                key: slot_msg.key,
+                side: slot_msg.side,
+                parser_kind,
+                message: lift(slot_msg.message),
+                ts: slot_msg.ts,
+            });
+        }
     }
 }
 
 /// Inner stream: pulls owned-packet batches from the underlying
-/// `AsyncCapture` and feeds them through the unified driver,
-/// buffering the resulting events.
+/// `AsyncCapture`, feeds them through the typed `Driver<E>`, drains
+/// each registered slot, and buffers the resulting events.
 struct DriverDrivenStream<S, E>
 where
     S: PacketSource + std::os::fd::AsRawFd,
     E: FlowExtractor,
+    E::Key: 'static,
 {
     packet_stream: PacketStream<S>,
-    driver: Driver<E, ProtocolMessage>,
+    driver: Driver<E>,
+    slots: Vec<Box<dyn ProtocolSlot<E::Key>>>,
     pending: VecDeque<ProtocolEvent<E::Key>>,
+    /// Reused scratch buffer for `Driver::track_into` —
+    /// zero-allocation on the hot path.
+    lifecycle_buf: Vec<FsEvent<E::Key>>,
 }
 
 // All fields are owned values without self-references; the struct
-// is Unpin whenever its field types are. Since flowscope's Driver
-// and the netring PacketStream are both Unpin given Unpin sources,
-// we don't need a manual impl.
+// is Unpin whenever its field types are. flowscope's Driver and
+// SlotHandle are both Unpin; PacketStream is Unpin given Unpin S.
 
 impl<S, E> Stream for DriverDrivenStream<S, E>
 where
@@ -445,8 +518,9 @@ where
 
     fn poll_next(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
         loop {
-            // Drain pending first — driver.track() may have queued
-            // many events from a single batch.
+            // Drain pending first — a single packet can produce
+            // many events (one lifecycle + N messages across all
+            // slots).
             if let Some(ev) = self.pending.pop_front() {
                 return Poll::Ready(Some(Ok(ev)));
             }
@@ -456,9 +530,27 @@ where
                 Poll::Ready(Some(Ok(batch))) => {
                     for owned in batch {
                         let view = flowscope::PacketView::new(&owned.data, owned.timestamp);
-                        this.pending.extend(this.driver.track(view));
+
+                        // (1) Lifecycle events from the central
+                        //     flow tracker, zero-alloc via
+                        //     `track_into`.
+                        this.lifecycle_buf.clear();
+                        this.driver.track_into(view, &mut this.lifecycle_buf);
+                        for fs_evt in this.lifecycle_buf.drain(..) {
+                            if let Some(ev) = translate_lifecycle(fs_evt) {
+                                this.pending.push_back(ev);
+                            }
+                        }
+
+                        // (2) Typed messages from each registered
+                        //     parser slot. Each `drain_into` is a
+                        //     zero-alloc drain of the slot's internal
+                        //     buffer (capacity reused across calls).
+                        for slot in &mut this.slots {
+                            slot.drain_into(&mut this.pending);
+                        }
                     }
-                    // Loop back and drain pending.
+                    // Loop back and drain `this.pending`.
                 }
                 Poll::Ready(Some(Err(e))) => return Poll::Ready(Some(Err(e))),
                 Poll::Ready(None) => return Poll::Ready(None),
@@ -466,6 +558,66 @@ where
             }
         }
     }
+}
+
+/// Translate a flowscope lifecycle [`FsEvent<K>`] into netring's
+/// owned [`ProtocolEvent<K>`]. 1:1 mapping — field names and shapes
+/// match exactly, so user pattern matches (which destructure with
+/// `..`) continue to compile.
+///
+/// Returns `None` for future `#[non_exhaustive]` flowscope variants
+/// netring doesn't yet know how to translate. Forwards-compatible
+/// behavior: unknown future events are silently skipped rather than
+/// crashing the stream. Adding a new arm here when flowscope ships
+/// a new variant is a one-line patch.
+fn translate_lifecycle<K>(evt: FsEvent<K>) -> Option<ProtocolEvent<K>> {
+    Some(match evt {
+        FsEvent::FlowStarted { key, ts, l4 } => ProtocolEvent::FlowStarted { key, ts, l4 },
+        FsEvent::FlowEstablished { key, ts, l4 } => ProtocolEvent::FlowEstablished { key, ts, l4 },
+        FsEvent::FlowPacket {
+            key,
+            side,
+            len,
+            ts,
+            tcp,
+        } => ProtocolEvent::FlowPacket {
+            key,
+            side,
+            len,
+            ts,
+            tcp,
+        },
+        FsEvent::FlowEnded {
+            key,
+            reason,
+            stats,
+            history,
+            l4,
+            ts,
+        } => ProtocolEvent::FlowEnded {
+            key,
+            reason,
+            stats,
+            history,
+            l4,
+            ts,
+        },
+        FsEvent::FlowTick { key, stats, ts } => ProtocolEvent::FlowTick { key, stats, ts },
+        FsEvent::ParserClosed {
+            key,
+            parser_kind,
+            reason,
+            ts,
+        } => ProtocolEvent::ParserClosed {
+            key,
+            parser_kind,
+            reason,
+            ts,
+        },
+        FsEvent::FlowAnomaly { key, kind, ts } => ProtocolEvent::FlowAnomaly { key, kind, ts },
+        FsEvent::TrackerAnomaly { kind, ts } => ProtocolEvent::TrackerAnomaly { kind, ts },
+        _ => return None,
+    })
 }
 
 // Allow capturing the `Capture` source via `AsyncCapture::open`

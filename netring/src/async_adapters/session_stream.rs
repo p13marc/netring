@@ -24,8 +24,8 @@
 //! # struct MyParser;
 //! # impl SessionParser for MyParser {
 //! #     type Message = ();
-//! #     fn feed_initiator(&mut self, _: &[u8], _: Timestamp) -> Vec<()> { Vec::new() }
-//! #     fn feed_responder(&mut self, _: &[u8], _: Timestamp) -> Vec<()> { Vec::new() }
+//! #     fn feed_initiator(&mut self, _: &[u8], _: Timestamp, _: &mut Vec<()>) {}
+//! #     fn feed_responder(&mut self, _: &[u8], _: Timestamp, _: &mut Vec<()>) {}
 //! # }
 //! # async fn ex() -> Result<(), Box<dyn std::error::Error>> {
 //! let cap = AsyncCapture::open("eth0")?;
@@ -279,13 +279,20 @@ where
                 // closed by this sweep) *before* the Closed events land.
                 let sweep_events: Vec<_> = this.tracker.sweep(now).into_iter().collect();
 
-                // flowscope 0.4 `SessionParser::on_tick` — periodic
-                // time-driven hook. Default impl is a no-op; parsers
-                // that override it can emit timeout / unanswered-request
-                // messages attributed to the initiator side.
+                // flowscope 0.11 `SessionParser::on_tick` —
+                // periodic time-driven hook. Default impl is a
+                // no-op; parsers that override it can emit
+                // timeout / unanswered-request messages attributed
+                // to the initiator side. flowscope 0.11 plan 119
+                // changed the signature from `Vec<M>`-returning to
+                // scratch-buffer; we reuse the scratch buf across
+                // parsers within a single sweep.
+                let mut scratch = Vec::new();
                 for (key, parser) in parsers.iter_mut() {
                     let parser_kind = parser.parser_kind();
-                    for m in parser.on_tick(now) {
+                    scratch.clear();
+                    parser.on_tick(now, &mut scratch);
+                    for m in scratch.drain(..) {
                         pending.push_back(SessionEvent::Application {
                             key: key.clone(),
                             side: FlowSide::Initiator,
@@ -442,10 +449,11 @@ fn process_session_event<K, F>(
                 .entry(key.clone())
                 .or_insert_with(|| parser_factory.new_parser(&key));
             let parser_kind = parser.parser_kind();
-            let messages = match side {
-                FlowSide::Initiator => parser.feed_initiator(&drained, ts),
-                FlowSide::Responder => parser.feed_responder(&drained, ts),
-            };
+            let mut messages = Vec::new();
+            match side {
+                FlowSide::Initiator => parser.feed_initiator(&drained, ts, &mut messages),
+                FlowSide::Responder => parser.feed_responder(&drained, ts, &mut messages),
+            }
             for m in messages {
                 pending.push_back(SessionEvent::Application {
                     key: key.clone(),
@@ -480,10 +488,15 @@ fn process_session_event<K, F>(
                             .entry(key.clone())
                             .or_insert_with(|| parser_factory.new_parser(&key));
                         let parser_kind = parser.parser_kind();
-                        let messages = match side {
-                            FlowSide::Initiator => parser.feed_initiator(&drained, stats.last_seen),
-                            FlowSide::Responder => parser.feed_responder(&drained, stats.last_seen),
-                        };
+                        let mut messages = Vec::new();
+                        match side {
+                            FlowSide::Initiator => {
+                                parser.feed_initiator(&drained, stats.last_seen, &mut messages)
+                            }
+                            FlowSide::Responder => {
+                                parser.feed_responder(&drained, stats.last_seen, &mut messages)
+                            }
+                        }
                         for m in messages {
                             pending.push_back(SessionEvent::Application {
                                 key: key.clone(),
@@ -501,7 +514,9 @@ fn process_session_event<K, F>(
                 let parser_kind = parser.parser_kind();
                 match reason {
                     EndReason::Fin | EndReason::IdleTimeout => {
-                        for m in parser.fin_initiator() {
+                        let mut fin_msgs = Vec::new();
+                        parser.fin_initiator(&mut fin_msgs);
+                        for m in fin_msgs.drain(..) {
                             pending.push_back(SessionEvent::Application {
                                 key: key.clone(),
                                 side: FlowSide::Initiator,
@@ -510,7 +525,8 @@ fn process_session_event<K, F>(
                                 parser_kind,
                             });
                         }
-                        for m in parser.fin_responder() {
+                        parser.fin_responder(&mut fin_msgs);
+                        for m in fin_msgs.drain(..) {
                             pending.push_back(SessionEvent::Application {
                                 key: key.clone(),
                                 side: FlowSide::Responder,
@@ -613,11 +629,11 @@ mod tests {
 
     impl SessionParser for EchoParser {
         type Message = (FlowSide, Vec<u8>);
-        fn feed_initiator(&mut self, b: &[u8], _ts: Timestamp) -> Vec<(FlowSide, Vec<u8>)> {
-            vec![(FlowSide::Initiator, b.to_vec())]
+        fn feed_initiator(&mut self, b: &[u8], _ts: Timestamp, out: &mut Vec<(FlowSide, Vec<u8>)>) {
+            out.push((FlowSide::Initiator, b.to_vec()));
         }
-        fn feed_responder(&mut self, b: &[u8], _ts: Timestamp) -> Vec<(FlowSide, Vec<u8>)> {
-            vec![(FlowSide::Responder, b.to_vec())]
+        fn feed_responder(&mut self, b: &[u8], _ts: Timestamp, out: &mut Vec<(FlowSide, Vec<u8>)>) {
+            out.push((FlowSide::Responder, b.to_vec()));
         }
     }
 

@@ -74,7 +74,7 @@ fn fake_tls_client_hello(k: FiveTupleKey, ts_s: u32) -> ProtocolEvent<FiveTupleK
         random: [0u8; 32],
         session_id: Default::default(),
         cipher_suites: Vec::new(),
-        compression: Vec::new(),
+        compression: Default::default(), // 0.11: Bytes (plan 120)
         sni: Some("example.com".into()),
         alpn: Vec::new(),
         supported_versions: Vec::new(),

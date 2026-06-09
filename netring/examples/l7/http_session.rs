@@ -73,8 +73,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                     req_count += 1;
                     println!(
                         "  →  {method} {path} {ver:?}",
-                        method = req.method,
-                        path = req.path,
+                        method = String::from_utf8_lossy(&req.method),
+                        path = String::from_utf8_lossy(&req.path),
                         ver = req.version
                     );
                 }
@@ -83,7 +83,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                     println!(
                         "  ←  {status} {reason}   {len} bytes",
                         status = resp.status,
-                        reason = resp.reason,
+                        reason = String::from_utf8_lossy(&resp.reason),
                         len = resp.body.len()
                     );
                 }

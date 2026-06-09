@@ -15,7 +15,7 @@
 //! # struct MyParser;
 //! # impl DatagramParser for MyParser {
 //! #     type Message = ();
-//! #     fn parse(&mut self, _: &[u8], _: FlowSide, _: Timestamp) -> Vec<()> { Vec::new() }
+//! #     fn parse(&mut self, _: &[u8], _: FlowSide, _: Timestamp, _: &mut Vec<()>) {}
 //! # }
 //! # async fn ex() -> Result<(), Box<dyn std::error::Error>> {
 //! let cap = AsyncCapture::open("eth0")?;
@@ -251,12 +251,17 @@ where
                 );
                 let sweep_events: Vec<_> = this.tracker.sweep(now).into_iter().collect();
 
-                // flowscope 0.4 `DatagramParser::on_tick`. Default
-                // impl is a no-op; DNS parsers (e.g.) emit
+                // flowscope 0.11 `DatagramParser::on_tick`.
+                // Default impl is a no-op; DNS parsers (e.g.) emit
                 // `DnsMessage::Unanswered` events from this hook.
+                // 0.11 plan 119 changed the signature to take a
+                // `&mut Vec<M>` scratch buffer; reused per parser.
+                let mut tick_scratch = Vec::new();
                 for (key, parser) in this.parsers.iter_mut() {
                     let parser_kind = parser.parser_kind();
-                    for m in parser.on_tick(now) {
+                    tick_scratch.clear();
+                    parser.on_tick(now, &mut tick_scratch);
+                    for m in tick_scratch.drain(..) {
                         this.pending.push_back(SessionEvent::Application {
                             key: key.clone(),
                             side: flowscope::FlowSide::Initiator,
@@ -335,7 +340,8 @@ where
                                 .entry(key.clone())
                                 .or_insert_with(|| this.factory.new_parser(key));
                             let parser_kind = parser.parser_kind();
-                            let messages = parser.parse(payload, side, view_ts);
+                            let mut messages = Vec::new();
+                            parser.parse(payload, side, view_ts, &mut messages);
                             for message in messages {
                                 this.pending.push_back(SessionEvent::Application {
                                     key: key.clone(),

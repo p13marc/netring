@@ -40,26 +40,30 @@ enum HeartbeatMsg {
 impl DatagramParser for HeartbeatParser {
     type Message = HeartbeatMsg;
 
-    fn parse(&mut self, payload: &[u8], side: FlowSide, ts: Timestamp) -> Vec<Self::Message> {
+    fn parse(
+        &mut self,
+        payload: &[u8],
+        side: FlowSide,
+        ts: Timestamp,
+        out: &mut Vec<Self::Message>,
+    ) {
         self.last_seen = Some(ts);
-        vec![HeartbeatMsg::Datagram {
+        out.push(HeartbeatMsg::Datagram {
             side,
             len: payload.len(),
-        }]
+        });
     }
 
-    fn on_tick(&mut self, now: Timestamp) -> Vec<Self::Message> {
+    fn on_tick(&mut self, now: Timestamp, out: &mut Vec<Self::Message>) {
         let Some(last) = self.last_seen else {
-            return Vec::new();
+            return;
         };
         let idle = now.saturating_sub(last);
         if idle >= HEARTBEAT_AFTER {
             // Push the "last seen" anchor forward so we don't fire
             // every single tick — once per HEARTBEAT_AFTER window.
             self.last_seen = Some(now);
-            vec![HeartbeatMsg::Heartbeat { idle }]
-        } else {
-            Vec::new()
+            out.push(HeartbeatMsg::Heartbeat { idle });
         }
     }
 }

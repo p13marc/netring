@@ -1,5 +1,81 @@
 # Changelog
 
+## 0.19.0 — flowscope 0.11.1 absorption
+
+Mechanical lockstep bump to flowscope 0.11.1. flowscope's plan 121
+shipped the typed `Driver<E>` + `SlotHandle<M, K>` shape (replacing
+the closed `Driver<E, M>` from 0.10), plan 119 added scratch-buffer
+parser APIs + `Driver::track_into`, and plan 120 migrated HTTP
+payloads (method/path/reason/headers) to `Bytes` throughout.
+
+netring 0.19.0 absorbs these changes while preserving the existing
+public API surface — `ProtocolMonitorBuilder`, `ProtocolMonitor`,
+`ProtocolEvent`, `ProtocolMessage`, every per-protocol method,
+every example, every detector continues to work without code
+changes *except* the single Send-bound note below.
+
+The larger user-facing redesign — `Protocol` trait + `Handler<E,
+M>` blanket impls + tower-style middleware — is documented in
+[`plans/netring-0.19-redesign-2026-06-09.md`](plans/netring-0.19-redesign-2026-06-09.md)
+and lands as a future release on top of this 0.19.0 baseline.
+
+### Breaking
+
+- **`ProtocolMonitor`'s `Stream` impl is no longer `+ Send`.**
+  flowscope 0.11's `SlotHandle<M, K>` uses `Rc<RefCell>` for
+  single-thread-by-design dispatch; this transitively makes
+  `ProtocolMonitor` `!Send`. Users on
+  `#[tokio::main(flavor = "current_thread")]` (the recommended
+  pattern for packet capture) see zero impact. Users who were
+  `tokio::spawn`-ing a `ProtocolMonitor` on the default multi-
+  thread runtime need to either:
+    1. switch to `flavor = "current_thread"` (recommended; better
+       perf on capture workloads anyway), or
+    2. wrap the monitor in a worker that forwards events over a
+       `tokio::sync::mpsc::channel` (the channel's
+       `Receiver` is `Send`).
+- **`ProtocolEvent<K>` is now a netring-owned `enum`** instead
+  of a `pub type` alias for flowscope's `Event<K, M>`. Variant
+  names, field names, and pattern-match shapes are unchanged
+  from 0.18 — existing `ProtocolEvent::FlowStarted { key, l4, ts,
+  .. }` / `ProtocolEvent::Message { parser_kind, message, .. }`
+  patterns continue to compile.
+
+### Changed (internal)
+
+- `flowscope = "0.10"` → `flowscope = "0.11"` in `Cargo.toml`.
+- `src/protocol/monitor.rs` rewritten internally to use
+  flowscope's typed `Driver<E>` + per-protocol `SlotHandle<M, K>`
+  drain pattern. Eliminates the prior need for a closed `M`
+  lift across all parsers.
+- `src/protocol/event.rs` now defines `ProtocolEvent<K>` as a
+  netring-owned enum that mirrors flowscope's lifecycle
+  `Event<K>` variants 1:1 plus the netring-synthesized `Message`
+  variant.
+- `src/async_adapters/session_stream.rs` + `datagram_stream.rs`
+  parser-feed paths updated to the new
+  `feed_initiator(&mut self, bytes, ts, &mut Vec<M>)` /
+  `parse(&mut self, bytes, side, ts, &mut Vec<M>)` /
+  `on_tick(&mut self, now, &mut Vec<M>)` scratch-buffer
+  signatures (flowscope plan 119).
+- HTTP-handling examples (`http_session.rs`, `full_monitor.rs`)
+  format `req.method` / `req.path` / `resp.reason` via
+  `String::from_utf8_lossy(&bytes)` since flowscope 0.11
+  exposes them as `Bytes` (plan 120).
+- `TlsClientHello::compression` is now `Bytes` (was `Vec<u8>`);
+  test fixture in `tests/anomaly_monitor_smoke.rs` uses
+  `Default::default()`.
+- Internal: zero-alloc gains from flowscope's `track_into` +
+  scratch-buffer parsers compose through to netring's hot path.
+  No netring-side change required to inherit them.
+
+### Tests
+
+- 299/299 unit + integration tests pass.
+- All doctests pass (the three that referenced the old parser
+  signatures were updated mechanically).
+- Clippy clean under `--all-targets --features tokio,channel,flow,parse,pcap,metrics,http,dns,tls,icmp,emit -- -D warnings`.
+
 ## 0.18.0 — unified-driver refactor + new detectors
 
 Centerpiece architectural refactor + flowscope-tooling adoption:

@@ -27,9 +27,10 @@
 //!
 //! while let Some(evt) = monitor.next().await {
 //!     match evt? {
-//!         ProtocolEvent::Flow(_) => { /* flow lifecycle */ }
-//!         ProtocolEvent::Message { kind, message: ProtocolMessage::Http(_), .. } => {
-//!             let _ = kind;
+//!         ProtocolEvent::FlowStarted { .. }
+//!         | ProtocolEvent::FlowEnded { .. } => { /* flow lifecycle */ }
+//!         ProtocolEvent::Message { parser_kind, message: ProtocolMessage::Http(_), .. } => {
+//!             let _ = parser_kind;
 //!         }
 //!         ProtocolEvent::Message { message: ProtocolMessage::Dns(_), .. } => {
 //!             /* dns query/response/unanswered */

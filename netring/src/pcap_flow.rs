@@ -188,8 +188,8 @@ impl AsyncPcapSource {
     /// # struct MyParser;
     /// # impl SessionParser for MyParser {
     /// #     type Message = ();
-    /// #     fn feed_initiator(&mut self, _: &[u8], _: Timestamp) -> Vec<()> { Vec::new() }
-    /// #     fn feed_responder(&mut self, _: &[u8], _: Timestamp) -> Vec<()> { Vec::new() }
+    /// #     fn feed_initiator(&mut self, _: &[u8], _: Timestamp, _: &mut Vec<()>) {}
+    /// #     fn feed_responder(&mut self, _: &[u8], _: Timestamp, _: &mut Vec<()>) {}
     /// # }
     /// # async fn _ex() -> Result<(), Box<dyn std::error::Error>> {
     /// let source = AsyncPcapSource::open("trace.pcap").await?;

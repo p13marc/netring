@@ -36,20 +36,20 @@ struct Counted {
 impl SessionParser for ByteCounter {
     type Message = Counted;
 
-    fn feed_initiator(&mut self, b: &[u8], ts: Timestamp) -> Vec<Self::Message> {
-        vec![Counted {
+    fn feed_initiator(&mut self, b: &[u8], ts: Timestamp, out: &mut Vec<Self::Message>) {
+        out.push(Counted {
             side: FlowSide::Initiator,
             bytes: b.len(),
             ts,
-        }]
+        });
     }
 
-    fn feed_responder(&mut self, b: &[u8], ts: Timestamp) -> Vec<Self::Message> {
-        vec![Counted {
+    fn feed_responder(&mut self, b: &[u8], ts: Timestamp, out: &mut Vec<Self::Message>) {
+        out.push(Counted {
             side: FlowSide::Responder,
             bytes: b.len(),
             ts,
-        }]
+        });
     }
 }
 

@@ -52,7 +52,12 @@ pub struct SourceIdx(pub u8);
 /// methods so the storage maps can stay `pub(crate)`.
 pub struct Ctx<'a> {
     /// The flow key for the current event, if any.
-    pub flow: Option<&'a FlowKey>,
+    ///
+    /// Held by value (`FlowKey` is `Copy`) so dispatch sites can
+    /// stamp a per-message key without lifetime gymnastics —
+    /// borrowing through `Option<&'a FlowKey>` would require a
+    /// place to anchor the borrow that outlives the `Ctx`.
+    pub flow: Option<FlowKey>,
 
     /// Timestamp of the current event.
     pub ts: Timestamp,

@@ -62,6 +62,7 @@ mod builtin;
 mod monitor;
 mod rule;
 
+pub mod shipped_sinks;
 pub mod sink;
 
 pub use builtin::FlowAnomalyRule;

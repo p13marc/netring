@@ -23,7 +23,9 @@ use crate::error::Result;
 use crate::monitor::Monitor;
 use crate::monitor::dispatcher::Dispatcher;
 use crate::protocol::FlowKey;
-use crate::protocol::builtin::{Icmp, Tcp, Udp};
+#[cfg(feature = "icmp")]
+use crate::protocol::builtin::Icmp;
+use crate::protocol::builtin::{Tcp, Udp};
 use crate::protocol::event_typed::{AnyFlowAnomaly, FlowEnded, FlowEstablished, FlowStarted};
 
 /// How long to keep the run loop alive.
@@ -189,6 +191,7 @@ fn dispatch_lifecycle(
                     ts
                 );
             }
+            #[cfg(feature = "icmp")]
             Some(L4Proto::Icmp) | Some(L4Proto::IcmpV6) => {
                 dispatch_one!(
                     FlowStarted<Icmp>,
@@ -223,6 +226,7 @@ fn dispatch_lifecycle(
                     ts
                 );
             }
+            #[cfg(feature = "icmp")]
             Some(L4Proto::Icmp) | Some(L4Proto::IcmpV6) => {
                 dispatch_one!(
                     FlowEnded<Icmp>,

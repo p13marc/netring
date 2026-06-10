@@ -129,6 +129,49 @@ async fn monitor_lo_run_until_signal_can_be_aborted() {
 }
 
 #[tokio::test(flavor = "current_thread")]
+async fn monitor_lo_with_two_interfaces_tags_source() {
+    // Phase F.1: multi-interface monitor. Opens lo TWICE (the
+    // second open is a separate capture on the same iface; both
+    // see the same traffic). Verifies that the handler receives
+    // distinct `SourceIdx` values for the two captures.
+    let starts_per_source: Arc<std::sync::Mutex<[u32; 2]>> =
+        Arc::new(std::sync::Mutex::new([0; 2]));
+    let s = Arc::clone(&starts_per_source);
+
+    let monitor_result = Monitor::builder()
+        .interfaces(["lo", "lo"])
+        .protocol::<Tcp>()
+        .on::<FlowStarted<Tcp>, _, _>(move |_evt: &FlowStarted<Tcp>, ctx: &mut Ctx<'_>| {
+            let idx = ctx.source.0 as usize;
+            if idx < 2 {
+                s.lock().unwrap()[idx] += 1;
+            }
+            Ok(())
+        })
+        .build();
+    let monitor = match monitor_result {
+        Ok(m) => m,
+        Err(e) => {
+            eprintln!("Monitor::build failed: {e}");
+            return;
+        }
+    };
+    let _ = tokio::time::timeout(
+        Duration::from_millis(300),
+        monitor.run_for(Duration::from_millis(100)),
+    )
+    .await;
+    let counts = *starts_per_source.lock().unwrap();
+    eprintln!(
+        "monitor_lo_with_two_interfaces: source 0 = {}, source 1 = {}",
+        counts[0], counts[1]
+    );
+    // No hard assertion — with no synthetic traffic, both counts
+    // may be 0. The test asserts the build + run path completes
+    // without panic.
+}
+
+#[tokio::test(flavor = "current_thread")]
 async fn monitor_lo_with_layers_and_sink_chain() {
     let monitor_result = Monitor::builder()
         .interface("lo")

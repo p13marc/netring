@@ -66,8 +66,13 @@ pub use tick::TickRegistration;
 /// The 0.20 top-level monitor — a fully-constructed graph of
 /// (driver, dispatcher, parser-slots, state) that runs to a
 /// stop condition.
+///
+/// `interfaces` carries one or more capture interfaces. Phase F.1
+/// shipped multi-interface support; events are tagged with
+/// [`crate::ctx::SourceIdx`] reflecting which interface the packet
+/// came from (in builder-registration order).
 pub struct Monitor {
-    pub(crate) interface: String,
+    pub(crate) interfaces: Vec<String>,
     pub(crate) driver: Driver<FiveTuple>,
     pub(crate) dispatcher: Dispatcher,
     pub(crate) protocol_slots: Vec<Box<dyn ProtocolSlot>>,
@@ -103,7 +108,7 @@ impl Monitor {
 impl std::fmt::Debug for Monitor {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("Monitor")
-            .field("interface", &self.interface)
+            .field("interfaces", &self.interfaces)
             .field("dispatcher", &self.dispatcher)
             .field("protocol_slots", &self.protocol_slots.len())
             .field("tick_handlers", &self.tick_handlers.len())
@@ -129,10 +134,16 @@ pub struct MonitorBuilder {
 }
 
 impl MonitorBuilder {
-    /// Set the capture interface(s). Phase B accepts a single
-    /// interface; calling with more produces
-    /// [`BuildError::MultiInterfaceNotYetSupported`] at
-    /// [`Self::build`] time.
+    /// Set the capture interface(s). Phase F.1 enables N > 1 —
+    /// each event is tagged with its source-interface index
+    /// (`SourceIdx(0)` for the first interface in registration
+    /// order, etc.). Handlers can branch on `ctx.source` if
+    /// per-interface behaviour is needed.
+    ///
+    /// All interfaces share the same driver, dispatcher, state,
+    /// and sink — multi-interface is fan-in, not fan-out. For
+    /// per-CPU fan-out on a single interface, see Phase F.3's
+    /// `fanout_per_cpu` (when shipped).
     pub fn interfaces<I, S>(mut self, ifaces: I) -> Self
     where
         I: IntoIterator<Item = S>,
@@ -302,9 +313,6 @@ impl MonitorBuilder {
         if self.interfaces.is_empty() {
             return Err(BuildError::NoInterface.into());
         }
-        if self.interfaces.len() > 1 {
-            return Err(BuildError::MultiInterfaceNotYetSupported.into());
-        }
         let driver = self
             .driver_builder
             .unwrap_or_else(|| Driver::builder(FiveTuple::bidirectional()))
@@ -318,11 +326,8 @@ impl MonitorBuilder {
         for layer in self.layers.into_iter().rev() {
             sink = layer.wrap(sink);
         }
-        // interfaces.len() == 1 — pop it off so we don't keep two copies.
-        let mut ifaces = self.interfaces;
-        let interface = ifaces.remove(0);
         Ok(Monitor {
-            interface,
+            interfaces: self.interfaces,
             driver,
             dispatcher,
             protocol_slots: self.protocol_slots,
@@ -364,15 +369,16 @@ mod tests {
     }
 
     #[test]
-    fn build_with_multiple_interfaces_fails() {
-        let err = Monitor::builder()
+    fn build_with_multiple_interfaces_succeeds() {
+        // Phase F.1: multi-interface accepted. Build doesn't open
+        // any AF_PACKET rings — that happens at run-loop start —
+        // so two interfaces succeed at build even without root.
+        let m = Monitor::builder()
             .interfaces(["lo", "eth0"])
+            .on::<FlowStarted<Tcp>, _, _>(|_evt: &FlowStarted<Tcp>| Ok(()))
             .build()
-            .unwrap_err();
-        match err {
-            crate::error::Error::Build(BuildError::MultiInterfaceNotYetSupported) => {}
-            other => panic!("expected MultiInterfaceNotYetSupported, got {other:?}"),
-        }
+            .unwrap();
+        assert_eq!(m.interfaces, vec!["lo".to_string(), "eth0".to_string()]);
     }
 
     #[test]
@@ -385,7 +391,7 @@ mod tests {
             .on::<FlowStarted<Tcp>, _, _>(|_evt: &FlowStarted<Tcp>| Ok(()))
             .build()
             .unwrap();
-        assert_eq!(m.interface, "lo");
+        assert_eq!(m.interfaces, vec!["lo".to_string()]);
     }
 
     #[test]

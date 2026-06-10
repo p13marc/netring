@@ -11,13 +11,18 @@
 //! 3. drain each protocol-slot's typed parser messages and
 //!    dispatch them.
 
+use std::pin::Pin;
+use std::task::{Context, Poll};
 use std::time::Instant;
 
 use flowscope::L4Proto;
 use flowscope::driver::Event as FsEvent;
+use futures_core::Stream;
 
 use crate::AsyncCapture;
+use crate::OwnedPacket;
 use crate::anomaly::sink::AnomalySink;
+use crate::async_adapters::tokio_adapter::PacketStream;
 use crate::ctx::{CounterRegistry, Ctx, SourceIdx, StateMap};
 use crate::error::Result;
 use crate::monitor::Monitor;
@@ -40,26 +45,44 @@ pub(crate) enum StopCondition {
 
 pub(crate) async fn run_loop(monitor: Monitor, stop: StopCondition) -> Result<()> {
     let Monitor {
-        interface,
+        interfaces,
         mut driver,
         mut dispatcher,
         mut protocol_slots,
         mut state_map,
         mut counters,
         mut sink,
-        tick_handlers: _, // Phase F lights this up; B accepts the registration only
+        tick_handlers: _, // Phase F.2 lights this up; F.1 accepts the registration only
     } = monitor;
 
-    let mut cap = AsyncCapture::open(&interface)?;
+    // Phase F.1: open one AsyncCapture per interface. The order
+    // matches the builder's `.interfaces([...])` order; each event
+    // gets the corresponding `SourceIdx`. A single-interface
+    // monitor (the common case) opens exactly one ring — the
+    // round-robin select reduces to a one-armed select with the
+    // same latency as the prior single-cap path.
+    let mut streams: Vec<PacketStream<_>> = Vec::with_capacity(interfaces.len());
+    for iface in &interfaces {
+        let cap = AsyncCapture::open(iface)?;
+        streams.push(cap.into_stream());
+    }
+
     let mut events: Vec<FsEvent<FlowKey>> = Vec::with_capacity(64);
     let mut shutdown = ShutdownSignal::new(stop);
+    let mut rr_anchor: usize = 0;
 
     loop {
-        let batch = tokio::select! {
+        let next = tokio::select! {
             biased;
             _ = shutdown.recv() => break,
-            r = cap.recv() => r?,
+            packet = next_packet(&mut streams, &mut rr_anchor) => packet,
         };
+        let (source_idx, batch) = match next {
+            Some((i, Ok(b))) => (i, b),
+            Some((_, Err(e))) => return Err(e),
+            None => break, // all streams exhausted
+        };
+        let source = SourceIdx(source_idx as u8);
 
         for pkt in batch {
             let view = flowscope::PacketView::new(&pkt.data, pkt.timestamp);
@@ -75,42 +98,77 @@ pub(crate) async fn run_loop(monitor: Monitor, stop: StopCondition) -> Result<()
                     &mut state_map,
                     &mut counters,
                     evt.clone(),
+                    source,
                 )?;
                 dispatch_lifecycle_async(&mut dispatcher, evt).await?;
             }
 
             // (2) Typed messages from each registered slot.
             for slot in &mut protocol_slots {
-                let mut ctx = Ctx {
-                    flow: None,
-                    ts: pkt.timestamp,
-                    source: SourceIdx(0),
-                    state_map: &mut state_map,
-                    sink: sink.as_mut(),
-                    counters: &mut counters,
-                };
+                let mut ctx = Ctx::new(
+                    None,
+                    pkt.timestamp,
+                    source,
+                    &mut state_map,
+                    sink.as_mut(),
+                    &mut counters,
+                );
                 slot.drain_and_dispatch(&mut dispatcher, &mut ctx)?;
             }
-
-            // (3) Async handlers fire after the sync pipeline
-            // for the lifecycle events buffered this packet. Async
-            // handlers for parser-emitted messages would need their
-            // own pump — Phase E or F can lift them in when the
-            // detector! macro lands. The dispatcher's
-            // dispatch_async is a no-op when no async handlers are
-            // registered (zero allocation).
-            //
-            // TODO(0.20-phase-D): wire async lifecycle dispatch
-            // here. For now, async handlers fire only on parser
-            // message events that route through TypedProtocolSlot
-            // — which already does sync-only dispatch. The
-            // straightforward extension is to mirror
-            // `dispatch_lifecycle` with `dispatch_lifecycle_async`
-            // and await it after the sync pass.
         }
     }
 
     Ok(())
+}
+
+/// Round-robin poll across the N capture streams. Returns
+/// `Some((source_idx, batch))` on the next ready stream, or
+/// `None` when every stream is exhausted.
+///
+/// The poll is fair: `anchor` records the index just past the
+/// last successful batch, so the next call starts the scan there.
+/// A chatty stream can't starve the quieter ones — even if every
+/// stream is always ready, we cycle through them.
+async fn next_packet<S>(
+    streams: &mut [PacketStream<S>],
+    anchor: &mut usize,
+) -> Option<(usize, Result<Vec<OwnedPacket>>)>
+where
+    S: crate::traits::PacketSource + std::os::unix::io::AsRawFd + Unpin,
+{
+    std::future::poll_fn(
+        |cx: &mut Context<'_>| -> Poll<Option<(usize, Result<Vec<OwnedPacket>>)>> {
+            let n = streams.len();
+            if n == 0 {
+                return Poll::Ready(None);
+            }
+            let start = *anchor % n;
+            let mut all_done = true;
+            for offset in 0..n {
+                let i = (start + offset) % n;
+                match Pin::new(&mut streams[i]).poll_next(cx) {
+                    Poll::Ready(Some(item)) => {
+                        *anchor = (i + 1) % n;
+                        return Poll::Ready(Some((i, item)));
+                    }
+                    Poll::Ready(None) => {
+                        // This stream is exhausted; keep checking the
+                        // others. `all_done` stays true only if every
+                        // stream reports Ready(None).
+                    }
+                    Poll::Pending => {
+                        all_done = false;
+                    }
+                }
+            }
+            if all_done {
+                Poll::Ready(None)
+            } else {
+                Poll::Pending
+            }
+        },
+    )
+    .await
 }
 
 /// Tracks both a packet-batch deadline and an OS shutdown signal.
@@ -259,6 +317,7 @@ fn dispatch_lifecycle(
     state_map: &mut StateMap,
     counters: &mut CounterRegistry,
     evt: FsEvent<FlowKey>,
+    source: SourceIdx,
 ) -> Result<()> {
     // Macro inlines the Ctx construction at each match arm so the
     // borrow checker can shorten each `&mut` borrow to the
@@ -269,7 +328,7 @@ fn dispatch_lifecycle(
             let mut ctx = Ctx {
                 flow: $flow,
                 ts: $ts,
-                source: SourceIdx(0),
+                source,
                 state_map: &mut *state_map,
                 sink: &mut *sink,
                 counters: &mut *counters,

@@ -20,8 +20,126 @@ built on AF_PACKET with TPACKET_V3 (block-based mmap ring buffers) and AF_XDP.
 
 ## Implementation Status
 
-**Active.** netring 0.17.0 prepared (this branch); 0.15.0 published.
-~349 tests, ~57 examples, zero warnings.
+**Active.** netring 0.20.0 prepared (this branch); 0.19.0 last
+published. ~399 tests + zero warnings + dhat zero-alloc bench
+(`Δ 0 bytes / 0 blocks` over 100k synthetic dispatches).
+
+### Recent additions (netring 0.20 — declarative Monitor API)
+
+Driven by `plans/netring-0.20-phase-{A..G}-*.md` (7 phase plans).
+The Phase G commit deletes the plans per the "delete on ship"
+convention.
+
+The 0.20 release adds a fluent `Monitor::builder()` API alongside
+the existing 0.19 `ProtocolMonitor` / `AnomalyMonitor` surface
+(both coexist; 0.21.x will `#[deprecated]` the legacy types;
+0.22.0 will remove them).
+
+**Phase A — Protocol trait + 7 builtin markers:**
+- `pub trait Protocol { type Message; const NAME; fn dispatch(); fn register(builder) -> Result<SlotHandle, _>; }`
+- `Dispatch` enum: `Tcp(Vec<u16>)`, `Udp(Vec<u16>)`, `Icmp`,
+  `AllTcp`, `AllUdp`, `Signature(fn(&[u8]) -> SignatureMatch)`
+- `SignatureMatch` enum mirroring `flowscope::detect::signatures::SignatureMatch`
+- `ProtocolInitError(String)` thiserror struct
+- Builtin markers in `src/protocol/builtin/`: `Tcp`, `Udp` (lifecycle-only),
+  `Icmp` (feature = "icmp"), `Http`, `Dns`, `Tls`, `TlsHandshake`
+- A.4 corrected the trait shape: `parser()` returned a `Box<dyn …>`
+  which failed flowscope's `P: SessionParser + Clone + Send` bound;
+  `register(builder)` keeps the parser concrete at the call site.
+- Typed events under `src/protocol/event_typed.rs`:
+  `FlowStarted<P>`, `FlowEnded<P>`, `FlowEstablished<P>`,
+  `AnyFlowAnomaly`, `Tick`. `Event` trait + blanket
+  `impl<P: Protocol> Event for P { type Payload = P::Message; }`.
+
+**Phase B — Handler trait + Ctx + Dispatcher + Monitor builder:**
+- `src/ctx/` — `Ctx<'a>` + `SourceIdx` + ctx-method accessors
+  (`state_mut::<T>()`, `counter_mut::<K>()`, `sink_mut()`).
+  Plus `StateMap` (TypeId-keyed `FxHashMap`) and `CounterRegistry`.
+- `src/monitor/handler.rs` — `Handler<E, Marker>` trait with two
+  blanket impls (`PayloadOnly` / `PayloadCtx`). Multi-extractor
+  closures don't work in sync Rust (mutual `&mut Ctx` borrows);
+  the method-on-Ctx pattern recovers the same ergonomics.
+- `src/monitor/dispatcher.rs` — `Dispatcher` with TypeId-keyed
+  `ArrayVec<(TypeId, u8), 16>` slot table (`MAX_EVENT_TYPES = 16`).
+  Sync + async slots in parallel `Box<[Vec<…>]>` arrays.
+- `src/monitor/registry.rs` — `HandlerRegistry` collects boxed
+  handlers; `into_dispatcher()` freezes. `TypedProtocolSlot<P>`
+  wraps a `flowscope::driver::SlotHandle` for the run loop drain.
+- `src/monitor/mod.rs` — `Monitor` + `MonitorBuilder`. Builder
+  surface: `.interface(s)`, `.protocol::<P>()`,
+  `.on::<E, _, _>()`, `.state::<T>()`, `.counter::<K>(...)`,
+  `.sink(s)`, `.tick(...)`, `.build()`. Run modes:
+  `run_until(Instant)`, `run_for(Duration)`, `run_until_signal()`.
+- `src/monitor/run.rs` — single-stream run loop, `dispatch_lifecycle`
+  translates `flowscope::driver::Event` into typed payloads, awaits
+  sync + async passes per event. `ShutdownSignal` manages
+  SIGINT/SIGTERM via `tokio::signal::unix`.
+- `src/monitor/tick.rs` — `TickRegistration` recorded by `.tick()`
+  (Phase F lights up the firing pump).
+- Monitor is `!Send` (flowscope's SlotHandle uses `Rc<RefCell<…>>`).
+  Use with `flavor = "current_thread"` or `LocalSet`.
+- `error::BuildError` with `NoInterface`, `MultiInterfaceNotYetSupported`,
+  `TooManyEventTypes`, `ProtocolDispatchMismatch`.
+
+**Phase C — Perf hardening + AnomalyWriter + dhat bench:**
+- `src/anomaly/sink.rs` — real `AnomalySink` trait body:
+  `write(kind, severity, ts, key, observations, metrics)` +
+  default `flush()`. Object-safe. `begin(...)` lives on both
+  `impl dyn AnomalySink + '_` and a blanket `AnomalySinkExt`
+  trait — works through trait objects (layered chains) AND
+  typed sinks.
+- `AnomalyWriter<'sink>` — stack-only builder with
+  `ArrayVec<(&'static str, Cow<'sink, str>), 8>` observations
+  and `ArrayVec<(&'static str, f64), 8>` metrics. Overflow
+  silently dropped. `&'static str` values stay `Cow::Borrowed`.
+- `src/anomaly/shipped_sinks.rs` — `StdoutSink`, `StdoutJsonSink`
+  (`feature = "serde"`), `TracingSink`, `ChannelSink` + `OwnedAnomaly`.
+- `src/ctx/split.rs` — `split_state_sink::<T>()`,
+  `split_state_counter::<T, K>()`, `split_sink_counter::<K>()`,
+  `split_state_sink_counter::<T, K>()` — disjoint-field
+  projection via audited `unsafe` (one `// SAFETY:` block per helper).
+- `benches/zero_alloc.rs` (`feature = "bench-zero-alloc"`) —
+  dhat profiler over 100k synthetic dispatches asserts
+  `Δ heap < 512 bytes / Δ blocks < 100`. Measured: **Δ 0 / 0**.
+  Run: `cargo bench --features bench-zero-alloc --bench zero_alloc`.
+
+**Phase D — Async escape hatch + 5 middleware layers:**
+- `src/monitor/async_handler.rs` — `AsyncHandler<E>` trait,
+  blanket impl over `Fn(&E::Payload) -> impl Future<Output = Result<()>> + 'static`.
+  Payload-only (no `&mut Ctx<'_>` — the HRTB lifetime gymnastics
+  don't coerce cleanly in stable Rust). Async closures that
+  need state capture `Arc<…>` or pair with `ChannelSink`.
+- `Dispatcher::dispatch_async::<P>(&P)` + parallel `async_slots`
+  table. Sequential awaits per event (short-circuit on first error).
+- `MonitorBuilder::on_async::<E, _>(handler)`.
+- `src/layer/` — netring-internal `Layer` trait (object-safe);
+  builder applies layers innermost-first so the first
+  `.layer(X)` ends up outermost at runtime.
+- 5 shipped layers: `MinSeverity`, `DedupeAnomalies`,
+  `RateLimitAnomalies`, `Sample` (inline xorshift64*, no rand
+  dep), `Tee` (fan-out).
+
+**Phase E — detector! macro + prelude + monitor umbrella feature:**
+- `src/detector_macro.rs` — `detector!` macro_rules! DSL.
+  Expands to `Handler<E, PayloadCtx>` closure.
+- `MonitorBuilder::detect(handler)` — sugar alias for `.on(...)`.
+- `src/prelude.rs` — `use netring::prelude::*;` brings ~30 names
+  (Monitor, builtin markers, event types, Ctx, Severity, sinks,
+  layers, correlate primitives, common externals).
+- Cargo feature `monitor = ["tokio", "channel", "flow", "parse",
+  "metrics", "http", "dns", "tls", "icmp", "emit", "serde"]` —
+  umbrella for app users.
+- Multi-interface support and tick-handler firing deferred to
+  Phase F (sharded run loop).
+
+**Phase G — version bump + CHANGELOG + migration guide:**
+- `Cargo.toml` 0.19.0 → 0.20.0.
+- `CHANGELOG.md` 0.20.0 entry covering all Phase A–E work.
+- `docs/migration-0.19-to-0.20.md` — 4 recipes for the legacy →
+  0.20 transition.
+- Phase F (per-CPU sharding) deferred to 0.21+.
+- Legacy `ProtocolMonitor` / `AnomalyMonitor` deletion deferred
+  to 0.22.0 (0.21.x adds `#[deprecated]`).
 
 ### Recent additions (netring 0.17 — flowscope 0.10 lockstep bump)
 
@@ -413,6 +531,65 @@ just ci-full         # setcap + full test suite
   `FlowDatagramDriver`) for one-line offline L7 pipelines
   (`pcap + tokio + flow`)
 - `docs/scaling.md` — fanout decision matrix + anti-patterns (plan 22)
+
+### 0.20 Monitor API (gated `flow + tokio`)
+
+- `src/protocol/` — Protocol plugin layer
+  - `mod.rs` — `Protocol` trait, `Dispatch`, `SignatureMatch`,
+    `ProtocolInitError`, `FlowKey` alias. Also still hosts the
+    legacy `ProtocolMonitor` from 0.16; both coexist.
+  - `event_typed.rs` — `Event` trait + typed event markers
+    (`FlowStarted<P>`, `FlowEnded<P>`, `FlowEstablished<P>`,
+    `AnyFlowAnomaly`, `Tick`).
+  - `builtin/{tcp,udp,icmp,http,dns,tls,tls_handshake}.rs` —
+    the 7 builtin `Protocol` impls.
+- `src/ctx/` — per-event context
+  - `mod.rs` — `Ctx<'a>` struct + `SourceIdx` + method accessors
+    (`state_mut`, `counter_mut`, `sink_mut`).
+  - `from_ctx.rs` — `StateMap` + `CounterRegistry` (TypeId-keyed
+    `FxHashMap`).
+  - `split.rs` — `split_state_sink::<T>` / `split_state_counter`
+    / `split_state_sink_counter` / `split_sink_counter` — audited
+    `unsafe` for disjoint-field projection.
+- `src/monitor/` — the dispatcher + builder + run loop
+  - `mod.rs` — `Monitor` + `MonitorBuilder` (public). Builder
+    accumulates protocols, handlers, state, sinks, layers, ticks;
+    `build()` freezes into the dispatcher and applies layers
+    innermost-first.
+  - `handler.rs` — `Handler<E, Marker>` trait + blanket impls
+    for `Fn(&E::Payload)` and `Fn(&E::Payload, &mut Ctx<'_>)`.
+    `PayloadOnly` / `PayloadCtx` marker types.
+  - `async_handler.rs` — `AsyncHandler<E>` trait + blanket impl
+    over `Fn(&E::Payload) -> impl Future + 'static`. `BoxFuture`
+    type alias for the boxed-future return.
+  - `dispatcher.rs` — `Dispatcher` (TypeId-keyed slot table,
+    `MAX_EVENT_TYPES = 16`). `dispatch::<P>` (sync) +
+    `dispatch_async::<P>` (async). `BoxedHandler`,
+    `BoxedAsyncHandler`, `DynAsyncHandler` trait.
+  - `registry.rs` — `HandlerRegistry` build-time collector,
+    `ProtocolSlot` trait + `TypedProtocolSlot<P>` adapter for
+    flowscope's `SlotHandle` drain.
+  - `run.rs` — `run_loop` + `dispatch_lifecycle` +
+    `dispatch_lifecycle_async`. `ShutdownSignal` for SIGINT/SIGTERM.
+  - `tick.rs` — `TickRegistration` boxed callback (Phase F
+    consumer).
+- `src/anomaly/sink.rs` — `AnomalySink` trait + `AnomalyWriter`
+  + `NoopSink` + `AnomalySinkExt`. `ANOMALY_INLINE_CAPACITY = 8`.
+- `src/anomaly/shipped_sinks.rs` — `StdoutSink`, `StdoutJsonSink`
+  (`feature = "serde"`), `TracingSink`, `ChannelSink` +
+  `OwnedAnomaly`.
+- `src/layer/` — middleware over the sink chain
+  - `mod.rs` — `Layer` trait (object-safe).
+  - `min_severity.rs` — `MinSeverity` + `MinSeverityLayered`.
+  - `dedupe.rs` — `DedupeAnomalies` + sliding-window `FxHashMap`.
+  - `rate_limit.rs` — `RateLimitAnomalies` per-kind token bucket.
+  - `sample.rs` — `Sample` with inline xorshift64* RNG.
+  - `tee.rs` — `Tee` fan-out wrapper.
+- `src/detector_macro.rs` — `detector!` `macro_rules!` DSL.
+- `src/prelude.rs` — `use netring::prelude::*;` glob surface.
+- `benches/zero_alloc.rs` — dhat allocation regression bench
+  (`feature = "bench-zero-alloc"`).
+- `docs/migration-0.19-to-0.20.md` — legacy → 0.20 migration recipes.
 
 ## Architecture
 

@@ -57,12 +57,62 @@
 //!     .build()?;
 //! ```
 
-/// Build a stateless detector closure for the 0.20
+/// Typed detector wrapper produced by the [`detector!`] macro.
+///
+/// Carries the event type `E` and the handler closure `F`
+/// together so [`crate::monitor::MonitorBuilder::detect`] can
+/// infer `E` from the macro's return value — users avoid the
+/// `.detect::<E, _, _>(...)` turbofish papercut.
+///
+/// You usually never name this type — `detector! { … }` returns
+/// it; the builder unwraps it.
+pub struct Detector<E, F> {
+    /// The detector's handler closure (satisfies
+    /// `Handler<E, PayloadCtx>`).
+    pub handler: F,
+    /// Carries `E` at the type level so the builder can
+    /// dispatch through it.
+    pub _marker: ::std::marker::PhantomData<fn() -> E>,
+}
+
+impl<E, F> Detector<E, F> {
+    /// Build from a closure + phantom event tag. Used by the
+    /// `detector!` macro; rarely called directly.
+    pub fn new(handler: F) -> Self {
+        Self {
+            handler,
+            _marker: ::std::marker::PhantomData,
+        }
+    }
+}
+
+/// `Detector<E, F>` forwards to its wrapped `F`. Lets users
+/// register a detector via the raw [`crate::monitor::HandlerRegistry`]
+/// or hand-roll dispatch in tests without unwrapping.
+impl<E, F> crate::monitor::handler::Handler<E, crate::monitor::handler::PayloadCtx>
+    for Detector<E, F>
+where
+    E: crate::protocol::event_typed::Event,
+    F: crate::monitor::handler::Handler<E, crate::monitor::handler::PayloadCtx>,
+{
+    #[inline]
+    fn call(
+        &self,
+        payload: &E::Payload,
+        ctx: &mut crate::ctx::Ctx<'_>,
+    ) -> crate::error::Result<()> {
+        self.handler.call(payload, ctx)
+    }
+}
+
+/// Build a stateless detector for the 0.20
 /// [`Monitor`](crate::monitor::Monitor) builder.
 ///
-/// See the module rustdoc for the grammar; the macro returns a
-/// closure that satisfies
-/// `Handler<E, PayloadCtx>` for the configured `E` event type.
+/// Returns a [`Detector<E, F>`] where `E` is the configured event
+/// type and `F` is an opaque closure satisfying
+/// `Handler<E, PayloadCtx>`. Pair with
+/// [`crate::monitor::MonitorBuilder::detect`] — `E` is inferred
+/// from the macro's return value, no turbofish needed.
 #[macro_export]
 macro_rules! detector {
     (
@@ -79,7 +129,7 @@ macro_rules! detector {
         let _ = $name;
         let _: $crate::anomaly::Severity = $crate::anomaly::Severity::$sev;
 
-        move |__payload: &<$ev as $crate::protocol::event_typed::Event>::Payload,
+        let __handler = move |__payload: &<$ev as $crate::protocol::event_typed::Event>::Payload,
               __ctx: &mut $crate::ctx::Ctx<'_>|
               -> $crate::error::Result<()> {
             $(
@@ -92,9 +142,18 @@ macro_rules! detector {
             )?
             let $payload = __payload;
             let $ctx = __ctx;
-            { $emit_body }
+            // Wrapping in a `()`-returning inner closure lets the
+            // user's emit body use a bare `return;` for early-exit
+            // (e.g. inside an `if let … else { return }` pattern)
+            // without colliding with the outer closure's
+            // `Result<()>` return type. clippy's
+            // `redundant_closure_call` doesn't see the early-exit
+            // motive — silence locally.
+            #[allow(clippy::redundant_closure_call)]
+            (|| -> () { $emit_body })();
             ::std::result::Result::Ok(())
-        }
+        };
+        $crate::detector_macro::Detector::<$ev, _>::new(__handler)
     }};
 }
 

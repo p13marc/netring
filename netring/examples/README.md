@@ -110,6 +110,29 @@ production-style "watch this interface for everything" recipe.
 | `async_pcap_replay` | `AsyncPcapSource::open(...).flow_events(ext)` for flow-level replay |
 | `async_pcap_sessions` | `AsyncPcapSource::open(...).sessions(ext, parser)` one-liner |
 
+## monitor/ — declarative Monitor API (0.20+)
+
+The 0.20 `Monitor::builder()` API. Each example targets a single
+aspect of the surface; compose them as needed for your own code.
+
+| Example | What it shows |
+|---|---|
+| `monitor_basic` | `Monitor::builder()` + `.on::<FlowStarted<Tcp>>(...)` + StdoutSink |
+| `monitor_detector_macro` | `detector!` macro for 3 stateless detectors (SshAttempt / HttpRequest / DnsQuery) |
+| `monitor_layered_sinks` | `MinSeverity` + `DedupeAnomalies` + `RateLimitAnomalies` over `StdoutSink` |
+| `monitor_async_handler` | `on_async::<E>(...)` with `Arc<Pool>` capture for simulated I/O |
+
+All four take an `<iface>` argument (default `lo`) and an
+optional `<seconds>` deadline. Pair with `synthetic_traffic` for
+self-demoable runs.
+
+```sh
+cargo run --features "tokio,flow" --example monitor_basic -- lo 10
+```
+
+See [`docs/migration-0.19-to-0.20.md`](../docs/migration-0.19-to-0.20.md)
+for the legacy → 0.20 transition guide.
+
 ## anomaly/ — multi-protocol anomaly correlators
 
 Real-life detectors built on `netring::correlate`'s primitives

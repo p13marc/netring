@@ -16,7 +16,7 @@ pub mod ctx;
 pub mod dedup;
 #[cfg(all(feature = "flow", feature = "tokio"))]
 #[macro_use]
-mod detector_macro;
+pub mod detector_macro;
 pub mod error;
 pub mod interface;
 #[cfg(all(feature = "flow", feature = "tokio"))]

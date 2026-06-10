@@ -98,6 +98,28 @@ impl<'a> Ctx<'a> {
         }
     }
 
+    /// Constructor exposed for integration tests that need to
+    /// drive the dispatcher with a custom `Ctx`. Not part of the
+    /// documented public API (`#[doc(hidden)]`).
+    #[doc(hidden)]
+    pub fn new(
+        flow: Option<FlowKey>,
+        ts: Timestamp,
+        source: SourceIdx,
+        state_map: &'a mut StateMap,
+        sink: &'a mut dyn crate::anomaly::sink::AnomalySink,
+        counters: &'a mut CounterRegistry,
+    ) -> Self {
+        Self {
+            flow,
+            ts,
+            source,
+            state_map,
+            sink,
+            counters,
+        }
+    }
+
     /// Borrow per-monitor state `T` mutably.
     ///
     /// `T: Default` so the slot is lazy-created on first access.

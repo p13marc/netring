@@ -30,19 +30,13 @@ struct StubParser;
 
 impl SessionParser for StubParser {
     type Message = ();
-    fn feed_initiator(&mut self, _: &[u8], _ts: Timestamp) -> Vec<()> {
-        Vec::new()
-    }
-    fn feed_responder(&mut self, _: &[u8], _ts: Timestamp) -> Vec<()> {
-        Vec::new()
-    }
+    fn feed_initiator(&mut self, _: &[u8], _ts: Timestamp, _out: &mut Vec<()>) {}
+    fn feed_responder(&mut self, _: &[u8], _ts: Timestamp, _out: &mut Vec<()>) {}
 }
 
 impl DatagramParser for StubParser {
     type Message = ();
-    fn parse(&mut self, _: &[u8], _: FlowSide, _ts: Timestamp) -> Vec<()> {
-        Vec::new()
-    }
+    fn parse(&mut self, _: &[u8], _: FlowSide, _ts: Timestamp, _out: &mut Vec<()>) {}
 }
 
 #[derive(Default, Clone)]

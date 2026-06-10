@@ -179,22 +179,29 @@ impl MonitorBuilder {
         self
     }
 
-    /// Sugar alias for [`Self::on`] — reads more naturally for
-    /// detector closures produced by [`crate::detector!`]:
+    /// Register a [`Detector<E, F>`] produced by the
+    /// [`crate::detector!`] macro. Inference flows from the
+    /// Detector's `E` type parameter, so users don't need to
+    /// spell out a turbofish:
     ///
     /// ```ignore
     /// Monitor::builder()
     ///     .protocol::<TlsHandshake>()
-    ///     .detect(detector! { … })
+    ///     .detect(detector! {
+    ///         name: "TruncatedTls", severity: Warning, event: TlsHandshake,
+    ///         emit: |hs, ctx| { /* … */ },
+    ///     })
     ///     .build()?
     /// ```
-    pub fn detect<E, H, M>(self, handler: H) -> Self
+    ///
+    /// For closures *not* produced by `detector!`, use [`Self::on`]
+    /// directly — `.on::<E, _, _>(handler)`.
+    pub fn detect<E, F>(self, detector: crate::detector_macro::Detector<E, F>) -> Self
     where
         E: Event,
-        H: Handler<E, M>,
-        M: 'static,
+        F: Handler<E, crate::monitor::handler::PayloadCtx>,
     {
-        self.on::<E, H, M>(handler)
+        self.on::<E, F, crate::monitor::handler::PayloadCtx>(detector.handler)
     }
 
     /// Register an async handler for event type `E`.

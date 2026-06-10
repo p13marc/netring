@@ -37,12 +37,8 @@ struct StubSessionParser;
 
 impl SessionParser for StubSessionParser {
     type Message = ();
-    fn feed_initiator(&mut self, _: &[u8], _ts: Timestamp) -> Vec<()> {
-        Vec::new()
-    }
-    fn feed_responder(&mut self, _: &[u8], _ts: Timestamp) -> Vec<()> {
-        Vec::new()
-    }
+    fn feed_initiator(&mut self, _: &[u8], _ts: Timestamp, _out: &mut Vec<()>) {}
+    fn feed_responder(&mut self, _: &[u8], _ts: Timestamp, _out: &mut Vec<()>) {}
 }
 
 #[derive(Default, Clone)]
@@ -60,9 +56,7 @@ struct StubDatagramParser;
 
 impl DatagramParser for StubDatagramParser {
     type Message = ();
-    fn parse(&mut self, _: &[u8], _: flowscope::FlowSide, _ts: Timestamp) -> Vec<()> {
-        Vec::new()
-    }
+    fn parse(&mut self, _: &[u8], _: flowscope::FlowSide, _ts: Timestamp, _out: &mut Vec<()>) {}
 }
 
 #[derive(Default, Clone)]

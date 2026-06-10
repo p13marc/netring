@@ -11,7 +11,7 @@ mostly used as the underlying source for the async wrappers.
 
 ```toml
 [dependencies]
-netring = { version = "0.16", features = ["tokio"] }
+netring = { version = "0.20", features = ["tokio"] }
 ```
 
 ```rust,no_run
@@ -72,7 +72,7 @@ considerations.
 
 ```toml
 [dependencies]
-netring = { version = "0.16", features = ["tokio", "flow"] }
+netring = { version = "0.20", features = ["tokio", "flow"] }
 futures = "0.3"
 ```
 
@@ -110,7 +110,109 @@ works on any source of `&[u8]` frames.
 parser + correlator), `icmp` (ICMPv4 + ICMPv6 with `IcmpInner`
 cross-protocol correlation), and `pcap` (offline replay).
 
-## Multi-protocol monitor + anomaly correlation
+## Declarative Monitor (0.20+, recommended)
+
+The 0.20 `Monitor::builder()` API replaces hand-rolled `tokio::select!`
+loops + custom `AnomalyRule` impls with a single fluent surface:
+typed event handlers, a tower-style middleware chain over the
+anomaly sink, an opt-in async escape hatch, and a `detector!`
+macro for stateless detectors.
+
+```toml
+[dependencies]
+netring = { version = "0.20", features = ["monitor"] }   # umbrella for the full experience
+```
+
+```rust,ignore
+use std::time::Duration;
+use netring::prelude::*;
+
+#[derive(Default)]
+struct HttpStats { requests: u64 }
+
+let truncated_tls = detector! {
+    name:     "TruncatedTls",
+    severity: Warning,
+    event:    TlsHandshake,
+    matches:  |hs| hs.outcome == flowscope::tls::HandshakeOutcome::Truncated,
+    emit:     |hs, ctx| {
+        let now = ctx.ts;
+        ctx.sink_mut()
+            .begin("TruncatedTls", Severity::Warning, now)
+            .with("sni", hs.sni.as_deref().unwrap_or("<none>"))
+            .emit();
+    },
+};
+
+Monitor::builder()
+    .interface("eth0")
+    .protocol::<Tcp>()             // FlowStarted/Ended<Tcp> lifecycle events
+    .protocol::<Http>()            // HttpMessage events from flowscope's HttpParser
+    .protocol::<TlsHandshake>()    // one synthesised event per completed TLS handshake
+    .state::<HttpStats>()
+    .on::<Http, _, _>(|_msg, ctx| {
+        ctx.state_mut::<HttpStats>().requests += 1;
+        Ok(())
+    })
+    .detect(truncated_tls)
+    .layer(MinSeverity::warning())                          // outermost: drop Info
+    .layer(DedupeAnomalies::within(Duration::from_secs(60)))// drop dups
+    .sink(StdoutJsonSink::default())                        // innermost: stdout
+    .run_until_signal()
+    .await?;
+```
+
+**Builder surface** — `.interface(s)` / `.protocol::<P>()` /
+`.on::<E, _, _>(handler)` / `.on_async::<E, _>(handler)` /
+`.state::<T>()` / `.counter::<K>(window, bucket)` /
+`.sink(s)` / `.layer(L)` / `.tick(period, handler)` /
+`.detect(handler)` / `.build()`.
+
+**Run modes** — `run_until(Instant)`, `run_for(Duration)`,
+`run_until_signal()` (SIGINT/SIGTERM).
+
+**`Ctx` accessors** — handlers receive `&mut Ctx<'_>`:
+`ctx.state_mut::<T>()`, `ctx.counter_mut::<K>()`,
+`ctx.sink_mut()`, plus the public fields `ctx.ts`, `ctx.flow`,
+`ctx.source`. The `split_state_sink::<T>()` /
+`split_state_counter::<T, K>()` helpers project disjoint
+`&mut` references when a handler needs simultaneous access.
+
+**5 shipped middleware** —
+[`MinSeverity`](docs.rs/netring/latest/netring/layer/struct.MinSeverity.html),
+[`DedupeAnomalies`](docs.rs/netring/latest/netring/layer/struct.DedupeAnomalies.html),
+[`RateLimitAnomalies`](docs.rs/netring/latest/netring/layer/struct.RateLimitAnomalies.html),
+[`Sample`](docs.rs/netring/latest/netring/layer/struct.Sample.html),
+[`Tee`](docs.rs/netring/latest/netring/layer/struct.Tee.html).
+Compose freely; ordering is outermost-first.
+
+**4 shipped sinks** — `StdoutSink` (text), `StdoutJsonSink`
+(JSON, `feature = "serde"`), `TracingSink` (`tracing::event!` at
+the matching `tracing::Level`), `ChannelSink` (tokio mpsc with
+`OwnedAnomaly` payloads).
+
+**Zero allocations on the dispatch path.** Verified by the
+`benches/zero_alloc.rs` dhat benchmark: 100k synthetic dispatches
+(state mutation, counter bump, sink emit) measure
+Δ 0 bytes / 0 blocks in steady state.
+
+**Async escape hatch.** `on_async::<E>(handler)` runs each
+event through a boxed future (one allocation per event per
+handler — only when explicitly registered). Async handlers
+receive payload only; capture `Arc<Pool>` in the closure or
+pair with `ChannelSink` to ship anomalies to an async I/O
+task.
+
+See [`docs/migration-0.19-to-0.20.md`](docs/migration-0.19-to-0.20.md)
+for the legacy → 0.20 recipes, and `examples/monitor/` for
+runnable demos.
+
+The legacy `ProtocolMonitor` + `AnomalyMonitor` API continues
+to work in 0.20.0 — both APIs coexist. A future 0.21.x will
+add `#[deprecated]` attributes; 0.22.0 will remove the legacy
+surface.
+
+## Legacy monitor + anomaly correlation (0.19, still supported)
 
 For the common case of watching one interface for several
 protocols simultaneously, `ProtocolMonitorBuilder` collapses the

@@ -429,6 +429,27 @@ name = "syn_flood_burst"
 path = "examples/anomaly/syn_flood_burst.rs"
 required-features = ["tokio", "flow", "parse"]
 
+# monitor/ — 0.20 Monitor::builder() API demos
+[[example]]
+name = "monitor_basic"
+path = "examples/monitor/basic.rs"
+required-features = ["tokio", "flow"]
+
+[[example]]
+name = "monitor_detector_macro"
+path = "examples/monitor/detector_macro.rs"
+required-features = ["tokio", "flow", "http", "dns"]
+
+[[example]]
+name = "monitor_layered_sinks"
+path = "examples/monitor/layered_sinks.rs"
+required-features = ["tokio", "flow"]
+
+[[example]]
+name = "monitor_async_handler"
+path = "examples/monitor/async_handler.rs"
+required-features = ["tokio", "flow"]
+
 # util/ — helper companions for the demos
 [[example]]
 name = "synthetic_traffic"

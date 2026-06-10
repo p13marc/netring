@@ -131,12 +131,8 @@ fn session_stream_with_compiles_with_full_config() {
     impl SessionParser for StubParser {
         type Message = ();
 
-        fn feed_initiator(&mut self, _: &[u8], _: Timestamp) -> Vec<Self::Message> {
-            Vec::new()
-        }
-        fn feed_responder(&mut self, _: &[u8], _: Timestamp) -> Vec<Self::Message> {
-            Vec::new()
-        }
+        fn feed_initiator(&mut self, _: &[u8], _: Timestamp, _out: &mut Vec<Self::Message>) {}
+        fn feed_responder(&mut self, _: &[u8], _: Timestamp, _out: &mut Vec<Self::Message>) {}
     }
 
     impl SessionParserFactory<FiveTupleKey> for StubFactory {

@@ -67,8 +67,11 @@ impl<P: Protocol> FlowStarted<P> {
         Self::new(key, l4, ts)
     }
 
-    #[allow(dead_code)]
-    pub(crate) fn new(key: FlowKey, l4: Option<L4Proto>, ts: Timestamp) -> Self {
+    /// Constructor exposed for integration tests that need to
+    /// synthesise events without driving a real capture.
+    /// `#[doc(hidden)]` to keep the docs.rs surface clean.
+    #[doc(hidden)]
+    pub fn new(key: FlowKey, l4: Option<L4Proto>, ts: Timestamp) -> Self {
         Self {
             key,
             l4,

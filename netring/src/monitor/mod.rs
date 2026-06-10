@@ -49,12 +49,14 @@ use crate::error::{BuildError, Result};
 use crate::protocol::Protocol;
 use crate::protocol::event_typed::{Event, Tick};
 
+pub mod async_handler;
 pub mod dispatcher;
 pub mod handler;
 pub mod registry;
 pub mod run;
 pub mod tick;
 
+pub use async_handler::{AsyncHandler, BoxFuture};
 pub use dispatcher::{Dispatcher, MAX_EVENT_TYPES};
 pub use handler::{Handler, PayloadCtx, PayloadOnly};
 pub use registry::{HandlerRegistry, ProtocolSlot, TypedProtocolSlot};
@@ -169,6 +171,32 @@ impl MonitorBuilder {
         M: 'static,
     {
         self.handlers.register::<E, H, M>(handler);
+        self
+    }
+
+    /// Register an async handler for event type `E`.
+    ///
+    /// The handler closure receives `&E::Payload` only — no
+    /// `&mut Ctx<'_>` access. Async closures that need shared
+    /// state should capture an `Arc<…>` themselves; closures
+    /// that need to emit anomalies should pair with a
+    /// [`crate::anomaly::shipped_sinks::ChannelSink`] in the
+    /// sync `on::<E>` path (anomalies cross the channel to a
+    /// downstream async task that does the I/O).
+    ///
+    /// Each dispatched event pays **one boxed-future allocation
+    /// per async handler**. Prefer sync [`Self::on`] when the body
+    /// doesn't actually `.await`.
+    ///
+    /// Sync and async handlers for the same event compose: sync
+    /// runs first (zero-cost dispatch), then async fires
+    /// sequentially.
+    pub fn on_async<E, H>(mut self, handler: H) -> Self
+    where
+        E: Event,
+        H: AsyncHandler<E>,
+    {
+        self.handlers.register_async::<E, H>(handler);
         self
     }
 

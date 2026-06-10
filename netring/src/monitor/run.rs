@@ -74,8 +74,9 @@ pub(crate) async fn run_loop(monitor: Monitor, stop: StopCondition) -> Result<()
                     sink.as_mut(),
                     &mut state_map,
                     &mut counters,
-                    evt,
+                    evt.clone(),
                 )?;
+                dispatch_lifecycle_async(&mut dispatcher, evt).await?;
             }
 
             // (2) Typed messages from each registered slot.
@@ -90,6 +91,22 @@ pub(crate) async fn run_loop(monitor: Monitor, stop: StopCondition) -> Result<()
                 };
                 slot.drain_and_dispatch(&mut dispatcher, &mut ctx)?;
             }
+
+            // (3) Async handlers fire after the sync pipeline
+            // for the lifecycle events buffered this packet. Async
+            // handlers for parser-emitted messages would need their
+            // own pump — Phase E or F can lift them in when the
+            // detector! macro lands. The dispatcher's
+            // dispatch_async is a no-op when no async handlers are
+            // registered (zero allocation).
+            //
+            // TODO(0.20-phase-D): wire async lifecycle dispatch
+            // here. For now, async handlers fire only on parser
+            // message events that route through TypedProtocolSlot
+            // — which already does sync-only dispatch. The
+            // straightforward extension is to mirror
+            // `dispatch_lifecycle` with `dispatch_lifecycle_async`
+            // and await it after the sync pass.
         }
     }
 
@@ -146,6 +163,94 @@ impl ShutdownSignal {
             },
         }
     }
+}
+
+/// Async sibling of [`dispatch_lifecycle`]. Translates each
+/// flowscope lifecycle event into its typed `FlowStarted<P>` /
+/// `FlowEnded<P>` / `FlowEstablished<P>` / `AnyFlowAnomaly`
+/// payload and dispatches through the async handler chain.
+///
+/// Cheap when no async handlers are registered:
+/// [`Dispatcher::dispatch_async`] returns immediately if the
+/// payload TypeId has no async slot. No allocation in that case.
+async fn dispatch_lifecycle_async(
+    dispatcher: &mut Dispatcher,
+    evt: FsEvent<FlowKey>,
+) -> Result<()> {
+    match evt {
+        FsEvent::FlowStarted { key, ts, l4 } => match l4 {
+            Some(L4Proto::Tcp) => {
+                dispatcher
+                    .dispatch_async(&FlowStarted::<Tcp>::new(key, l4, ts))
+                    .await?;
+            }
+            Some(L4Proto::Udp) => {
+                dispatcher
+                    .dispatch_async(&FlowStarted::<Udp>::new(key, l4, ts))
+                    .await?;
+            }
+            #[cfg(feature = "icmp")]
+            Some(L4Proto::Icmp) | Some(L4Proto::IcmpV6) => {
+                dispatcher
+                    .dispatch_async(&FlowStarted::<Icmp>::new(key, l4, ts))
+                    .await?;
+            }
+            _ => {}
+        },
+        FsEvent::FlowEnded {
+            key,
+            reason,
+            stats,
+            ts,
+            l4,
+            ..
+        } => match l4 {
+            Some(L4Proto::Tcp) => {
+                dispatcher
+                    .dispatch_async(&FlowEnded::<Tcp>::new(key, reason, stats, l4, ts))
+                    .await?;
+            }
+            Some(L4Proto::Udp) => {
+                dispatcher
+                    .dispatch_async(&FlowEnded::<Udp>::new(key, reason, stats, l4, ts))
+                    .await?;
+            }
+            #[cfg(feature = "icmp")]
+            Some(L4Proto::Icmp) | Some(L4Proto::IcmpV6) => {
+                dispatcher
+                    .dispatch_async(&FlowEnded::<Icmp>::new(key, reason, stats, l4, ts))
+                    .await?;
+            }
+            _ => {}
+        },
+        FsEvent::FlowEstablished { key, ts, l4 } => {
+            if matches!(l4, Some(L4Proto::Tcp)) {
+                dispatcher
+                    .dispatch_async(&FlowEstablished::<Tcp>::new(key, ts))
+                    .await?;
+            }
+        }
+        FsEvent::FlowAnomaly { key, kind, ts } => {
+            dispatcher
+                .dispatch_async(&AnyFlowAnomaly {
+                    key: Some(key),
+                    kind,
+                    ts,
+                })
+                .await?;
+        }
+        FsEvent::TrackerAnomaly { kind, ts } => {
+            dispatcher
+                .dispatch_async(&AnyFlowAnomaly {
+                    key: None,
+                    kind,
+                    ts,
+                })
+                .await?;
+        }
+        _ => {}
+    }
+    Ok(())
 }
 
 fn dispatch_lifecycle(

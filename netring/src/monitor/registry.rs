@@ -18,8 +18,13 @@ use flowscope::driver::{SlotHandle, SlotMessage};
 use rustc_hash::FxHashMap;
 
 use crate::ctx::Ctx;
+use crate::error::Result as NetringResult;
 use crate::error::{BuildError, Result};
-use crate::monitor::dispatcher::{BoxedHandler, Dispatcher, HandlerSlot, MAX_EVENT_TYPES};
+use crate::monitor::async_handler::{AsyncHandler, BoxFuture};
+use crate::monitor::dispatcher::{
+    AsyncHandlerSlot, BoxedAsyncHandler, BoxedHandler, Dispatcher, DynAsyncHandler, HandlerSlot,
+    MAX_EVENT_TYPES,
+};
 use crate::monitor::handler::Handler;
 use crate::protocol::Protocol;
 use crate::protocol::event_typed::Event;
@@ -28,6 +33,7 @@ use crate::protocol::event_typed::Event;
 #[derive(Default)]
 pub struct HandlerRegistry {
     by_type: FxHashMap<TypeId, Vec<BoxedHandler>>,
+    async_by_type: FxHashMap<TypeId, Vec<BoxedAsyncHandler>>,
 }
 
 impl HandlerRegistry {
@@ -59,37 +65,124 @@ impl HandlerRegistry {
             .push(boxed);
     }
 
-    /// Number of distinct event types registered.
-    pub fn type_count(&self) -> usize {
-        self.by_type.len()
+    /// Add an async handler `H` for event type `E`.
+    ///
+    /// Each dispatch produces one boxed future per async handler;
+    /// prefer the sync [`Self::register`] when the handler body
+    /// doesn't actually `.await`.
+    pub fn register_async<E, H>(&mut self, handler: H)
+    where
+        E: Event,
+        H: AsyncHandler<E>,
+    {
+        let boxed: BoxedAsyncHandler = Box::new(AsyncHandlerWrapper::<E, H>::new(handler));
+        self.async_by_type
+            .entry(TypeId::of::<E::Payload>())
+            .or_default()
+            .push(boxed);
     }
 
-    /// Total handler count across all event types.
+    /// Number of distinct event types registered (sync + async
+    /// combined; a type that has both kinds counts once).
+    pub fn type_count(&self) -> usize {
+        let mut ids: std::collections::HashSet<TypeId> = std::collections::HashSet::new();
+        ids.extend(self.by_type.keys().copied());
+        ids.extend(self.async_by_type.keys().copied());
+        ids.len()
+    }
+
+    /// Total sync handler count across all event types.
     pub fn handler_count(&self) -> usize {
         self.by_type.values().map(|v| v.len()).sum()
     }
 
+    /// Total async handler count across all event types.
+    pub fn async_handler_count(&self) -> usize {
+        self.async_by_type.values().map(|v| v.len()).sum()
+    }
+
     /// Freeze into a [`Dispatcher`]. Fails if more than
-    /// [`MAX_EVENT_TYPES`] distinct event types are registered.
-    pub fn into_dispatcher(self) -> std::result::Result<Dispatcher, BuildError> {
-        if self.by_type.len() > MAX_EVENT_TYPES {
+    /// [`MAX_EVENT_TYPES`] distinct event types are registered
+    /// (sync + async combined).
+    pub fn into_dispatcher(mut self) -> std::result::Result<Dispatcher, BuildError> {
+        // Collect the union of event TypeIds — sync and async
+        // share the same slot index so dispatch can find both
+        // sets in one lookup.
+        let mut all_types: Vec<TypeId> = self
+            .by_type
+            .keys()
+            .copied()
+            .chain(self.async_by_type.keys().copied())
+            .collect();
+        all_types.sort_unstable_by_key(|t| format!("{t:?}"));
+        all_types.dedup();
+
+        if all_types.len() > MAX_EVENT_TYPES {
             return Err(BuildError::TooManyEventTypes {
                 limit: MAX_EVENT_TYPES,
-                actual: self.by_type.len(),
+                actual: all_types.len(),
             });
         }
+
         let mut slot_by_type: ArrayVec<(TypeId, u8), MAX_EVENT_TYPES> = ArrayVec::new();
-        let mut slots: Vec<Vec<HandlerSlot>> = Vec::with_capacity(self.by_type.len());
-        for (i, (type_id, handlers)) in self.by_type.into_iter().enumerate() {
+        let mut slots: Vec<Vec<HandlerSlot>> = Vec::with_capacity(all_types.len());
+        let mut async_slots: Vec<Vec<AsyncHandlerSlot>> = Vec::with_capacity(all_types.len());
+
+        for (i, type_id) in all_types.into_iter().enumerate() {
             slot_by_type.push((type_id, i as u8));
             slots.push(
-                handlers
+                self.by_type
+                    .remove(&type_id)
+                    .unwrap_or_default()
                     .into_iter()
                     .map(|h| HandlerSlot { handler: h })
                     .collect(),
             );
+            async_slots.push(
+                self.async_by_type
+                    .remove(&type_id)
+                    .unwrap_or_default()
+                    .into_iter()
+                    .map(|h| AsyncHandlerSlot { handler: h })
+                    .collect(),
+            );
         }
-        Ok(Dispatcher::new(slot_by_type, slots.into_boxed_slice()))
+        Ok(Dispatcher::new(
+            slot_by_type,
+            slots.into_boxed_slice(),
+            async_slots.into_boxed_slice(),
+        ))
+    }
+}
+
+/// Wraps a typed [`AsyncHandler<E>`] in a trait object that
+/// can be stored as `Box<dyn DynAsyncHandler>` without exposing
+/// the (E, H) type params to the dispatcher.
+struct AsyncHandlerWrapper<E, H> {
+    handler: H,
+    _marker: PhantomData<fn() -> E>,
+}
+
+impl<E, H> AsyncHandlerWrapper<E, H> {
+    fn new(handler: H) -> Self {
+        Self {
+            handler,
+            _marker: PhantomData,
+        }
+    }
+}
+
+impl<E, H> DynAsyncHandler for AsyncHandlerWrapper<E, H>
+where
+    E: Event,
+    H: AsyncHandler<E>,
+{
+    fn call(&self, ptr: *const ()) -> BoxFuture<NetringResult<()>> {
+        // SAFETY: registry only inserts wrappers keyed by
+        // `TypeId::of::<E::Payload>()`, and the dispatcher only
+        // invokes a slot when the runtime payload type matches.
+        let typed: &E::Payload = unsafe { &*(ptr as *const E::Payload) };
+        self.handler.call(typed)
     }
 }
 

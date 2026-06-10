@@ -12,6 +12,7 @@ use arrayvec::ArrayVec;
 
 use crate::ctx::Ctx;
 use crate::error::Result;
+use crate::monitor::async_handler::BoxFuture;
 
 /// Maximum distinct event-payload types per monitor.
 ///
@@ -32,8 +33,27 @@ pub const MAX_EVENT_TYPES: usize = 16;
 /// future flexibility.
 pub(crate) type BoxedHandler = Box<dyn FnMut(*const (), &mut Ctx<'_>) -> Result<()> + Send>;
 
+/// Async dispatch trampoline. The user's typed
+/// `AsyncHandler<E>` is wrapped in an `AsyncHandlerWrapper` that
+/// erases `E` and implements [`DynAsyncHandler`]. The wrapper's
+/// `call` casts the type-erased payload pointer back to
+/// `&E::Payload` and produces a 'static-future from the user's
+/// closure (the closure must own anything it `.await`s on).
+pub(crate) trait DynAsyncHandler: Send + Sync {
+    /// SAFETY contract — see [`super::registry::HandlerRegistry::register_async`].
+    /// `ptr` must point at a `E::Payload` of the same TypeId used
+    /// at registration.
+    fn call(&self, ptr: *const ()) -> BoxFuture<Result<()>>;
+}
+
+pub(crate) type BoxedAsyncHandler = Box<dyn DynAsyncHandler>;
+
 pub(crate) struct HandlerSlot {
     pub(crate) handler: BoxedHandler,
+}
+
+pub(crate) struct AsyncHandlerSlot {
+    pub(crate) handler: BoxedAsyncHandler,
 }
 
 /// The build-time-finalized dispatcher. Constructed via
@@ -43,19 +63,27 @@ pub(crate) struct HandlerSlot {
 /// slot table shape so test failures stay readable.
 pub struct Dispatcher {
     /// `TypeId::of::<E::Payload>()` → u8 slot index. ≤ MAX_EVENT_TYPES entries.
+    /// One row in the table covers both sync and async handlers
+    /// for the same event type (parallel slot vectors below).
     slot_by_type: ArrayVec<(TypeId, u8), MAX_EVENT_TYPES>,
-    /// Slot table — handlers grouped by payload type.
+    /// Slot table — sync handlers grouped by payload type.
     slots: Box<[Vec<HandlerSlot>]>,
+    /// Slot table — async handlers grouped by payload type, in
+    /// lockstep with `slots`. Both vectors are indexed by the same
+    /// `slot_by_type` lookup.
+    async_slots: Box<[Vec<AsyncHandlerSlot>]>,
 }
 
 impl Dispatcher {
     pub(crate) fn new(
         slot_by_type: ArrayVec<(TypeId, u8), MAX_EVENT_TYPES>,
         slots: Box<[Vec<HandlerSlot>]>,
+        async_slots: Box<[Vec<AsyncHandlerSlot>]>,
     ) -> Self {
         Self {
             slot_by_type,
             slots,
+            async_slots,
         }
     }
 
@@ -86,6 +114,33 @@ impl Dispatcher {
         Ok(())
     }
 
+    /// Dispatch async handlers for the typed payload `P`.
+    ///
+    /// The future resolves once *all* registered async handlers
+    /// for this event type have run to completion. Stops on the
+    /// first handler error (same short-circuit semantics as
+    /// [`Self::dispatch`]).
+    ///
+    /// Each async handler boxes its future; that allocation is
+    /// the documented cost of `MonitorBuilder::on_async`.
+    pub async fn dispatch_async<P: 'static>(&mut self, payload: &P) -> Result<()> {
+        let target = TypeId::of::<P>();
+        let Some((_, slot_idx)) = self
+            .slot_by_type
+            .iter()
+            .copied()
+            .find(|(t, _)| *t == target)
+        else {
+            return Ok(());
+        };
+
+        let ptr = payload as *const P as *const ();
+        for slot in self.async_slots[slot_idx as usize].iter() {
+            slot.handler.call(ptr).await?;
+        }
+        Ok(())
+    }
+
     /// Number of distinct event types registered. Useful for tests.
     pub fn type_count(&self) -> usize {
         self.slot_by_type.len()
@@ -94,6 +149,11 @@ impl Dispatcher {
     /// Total handler count across all slots.
     pub fn handler_count(&self) -> usize {
         self.slots.iter().map(|s| s.len()).sum()
+    }
+
+    /// Total async handler count across all slots.
+    pub fn async_handler_count(&self) -> usize {
+        self.async_slots.iter().map(|s| s.len()).sum()
     }
 }
 
@@ -131,7 +191,11 @@ mod tests {
 
     #[test]
     fn empty_dispatch_is_noop() {
-        let mut d = Dispatcher::new(ArrayVec::new(), Vec::new().into_boxed_slice());
+        let mut d = Dispatcher::new(
+            ArrayVec::new(),
+            Vec::new().into_boxed_slice(),
+            Vec::new().into_boxed_slice(),
+        );
         let mut s = StateMap::default();
         let mut k = NoopSink;
         let mut c = CounterRegistry::default();
@@ -179,7 +243,9 @@ mod tests {
             }],
         ]
         .into_boxed_slice();
-        let mut d = Dispatcher::new(slot_by_type, slots);
+        let async_slots: Box<[Vec<AsyncHandlerSlot>]> =
+            vec![Vec::new(), Vec::new()].into_boxed_slice();
+        let mut d = Dispatcher::new(slot_by_type, slots, async_slots);
 
         let mut s = StateMap::default();
         let mut k = NoopSink;

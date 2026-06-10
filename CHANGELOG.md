@@ -1,5 +1,274 @@
 # Changelog
 
+## 0.20.0 — declarative Monitor API (Protocol trait + Handler + Layer + macro)
+
+The biggest API redesign since 0.13. Brings a single fluent
+entrypoint for multi-protocol monitors built around a
+[`Protocol`](netring::protocol::Protocol) plugin trait, a typed
+event dispatcher with sync + async [`Handler`](netring::monitor::Handler)
+slots, tower-style [`Layer`](netring::layer::Layer) middleware
+over anomaly emission, and a `detector!` macro for stateless
+detector definitions.
+
+```rust
+use netring::prelude::*;
+
+Monitor::builder()
+    .interface("eth0")
+    .protocol::<Tcp>()
+    .protocol::<Http>()
+    .on::<FlowStarted<Tcp>, _, _>(|evt: &FlowStarted<Tcp>, ctx: &mut Ctx<'_>| {
+        ctx.state_mut::<HttpStats>().connections += 1;
+        Ok(())
+    })
+    .on::<Http, _, _>(|msg: &flowscope::http::HttpMessage, ctx: &mut Ctx<'_>| {
+        ctx.counter_mut::<IpAddr>().bump(client_ip, ctx.ts);
+        Ok(())
+    })
+    .layer(MinSeverity::warning())
+    .layer(DedupeAnomalies::within(Duration::from_secs(60)))
+    .sink(StdoutJsonSink::default())
+    .run_until_signal()
+    .await?;
+```
+
+The legacy `ProtocolMonitor` / `ProtocolMonitorBuilder` /
+`AnomalyMonitor` / `AnomalyRule` API surface continues to work
+in 0.20.0 — both APIs coexist. The legacy types are *not* yet
+deprecated; a future 0.21.x release will mark them `#[deprecated]`,
+and 0.22.0 will remove them. The migration is mechanical: see
+`docs/migration-0.19-to-0.20.md` for recipes.
+
+### Added — `netring::protocol::Protocol` plugin layer
+
+- **`Protocol` trait** — open-set plugin layer for protocols. Implementors
+  are zero-sized markers (e.g. `pub struct Http;`); they expose
+  `type Message`, `const NAME: &'static str`, `fn dispatch() -> Dispatch`
+  and `fn register(&mut DriverBuilder<FiveTuple>) -> Result<SlotHandle…>`.
+- **7 builtin markers in `netring::protocol::builtin`**: `Tcp`, `Udp`
+  (lifecycle-only — central tracker emits events), `Icmp` (under
+  `feature = "icmp"`), `Http`, `Dns`, `Tls`, `TlsHandshake` (under
+  their respective L7 features).
+- **`Dispatch` enum**: `Tcp(Vec<u16>)`, `Udp(Vec<u16>)`, `Icmp`,
+  `AllTcp`, `AllUdp`, `Signature(fn(&[u8]) -> SignatureMatch)`.
+  Routes packets to protocol slots; the `Signature` variant
+  enables heuristic, port-agnostic dispatch.
+- **`FlowKey` type alias** = `flowscope::extract::FiveTupleKey`.
+- **`SignatureMatch` enum** mirroring flowscope's: `Match` /
+  `NoMatch` / `NeedMoreData`. `From<flowscope::detect::signatures::SignatureMatch>`
+  for lossless interop with flowscope's signature library.
+- **`ProtocolInitError`** — thiserror struct surfaced from
+  `Protocol::register`; lifecycle-only markers return `Err` to
+  signal "no parser slot needed."
+
+### Added — `netring::monitor::Monitor` + `MonitorBuilder`
+
+- **`Monitor::builder()`** fluent API for assembling a fully-wired
+  monitor — interface, protocols, handlers, state, counters, sink,
+  layers, ticks — and running it.
+- **`MonitorBuilder` methods**:
+  - `.interface("eth0")` / `.interfaces([…])` — capture interface(s).
+  - `.protocol::<P>()` — register a `Protocol` impl; calls
+    `P::register(&mut driver_builder)` to install the parser slot.
+  - `.on::<E, _, _>(handler)` — register a sync handler for event `E`.
+  - `.on_async::<E, _>(handler)` — register an async handler.
+  - `.state::<T>()` / `.state_with(value)` — pre-register monitor state.
+  - `.counter::<K>(window, bucket)` — register a `TimeBucketedCounter<K>`.
+  - `.sink(s)` — replace the default `NoopSink`.
+  - `.layer(L)` — wrap the sink chain in a middleware layer
+    (outermost-first; runtime order: emit → L1 → L2 → S).
+  - `.tick(period, handler)` — register a periodic tick handler
+    (recorded but not yet fired; lights up in Phase F).
+  - `.detect(handler)` — sugar alias for `.on(...)`.
+  - `.build() -> Result<Monitor>`.
+- **Run modes**: `Monitor::run_until(deadline)` /
+  `run_for(duration)` / `run_until_signal()` (SIGINT/SIGTERM via
+  tokio::signal::unix).
+- **`!Send` `Monitor`** — flowscope's `SlotHandle` holds `Rc<RefCell<…>>`.
+  Use with `#[tokio::main(flavor = "current_thread")]` or
+  `LocalSet`. Documented in the `Monitor` rustdoc.
+
+### Added — `Handler` + `AsyncHandler` traits
+
+- **`Handler<E, Marker>`** trait — sync handler shape. Blanket
+  impls via the axum coherence-marker trick:
+  - `Fn(&E::Payload) -> Result<()>` — `Handler<E, PayloadOnly>`
+  - `Fn(&E::Payload, &mut Ctx<'_>) -> Result<()>` — `Handler<E, PayloadCtx>`
+- **`AsyncHandler<E>`** trait — async handler shape:
+  - `Fn(&E::Payload) -> Fut where Fut: Future<Output = Result<()>> + 'static`
+  - Per-dispatch cost: one boxed future per async handler per
+    event. Sync handlers cost zero allocations.
+  - Async handlers receive payload-only — capture an `Arc<…>` for
+    shared state, or pair with a `ChannelSink` for downstream I/O.
+
+### Added — `Ctx<'a>` per-event context
+
+- **`Ctx::flow: Option<FlowKey>`**, **`Ctx::ts: Timestamp`**,
+  **`Ctx::source: SourceIdx`** — public fields populated by the
+  dispatcher per event.
+- **`Ctx::state_mut::<T>()`** — `&mut T` lazy-created on first
+  access; `T: Default + Send + 'static`.
+- **`Ctx::counter_mut::<K>()`** — `&mut TimeBucketedCounter<K>`
+  registered via `MonitorBuilder::counter::<K>(...)`.
+- **`Ctx::sink_mut()`** — `&mut dyn AnomalySink` for emission.
+- **`Ctx::split_state_sink::<T>()`** and friends — disjoint-borrow
+  helpers via audited `unsafe` for handlers that need
+  simultaneous `&mut` to two or three Ctx fields.
+
+### Added — typed event markers
+
+- **`FlowStarted<P: Protocol>`**, **`FlowEnded<P>`**,
+  **`FlowEstablished<P>`** — typed lifecycle events that the
+  dispatcher routes by `TypeId`. A handler for `FlowStarted<Tcp>`
+  never fires for UDP starts.
+- **`AnyFlowAnomaly`** — cross-protocol anomaly event from the
+  flowscope tracker.
+- **`Tick`** — periodic tick payload (recorded; firing path lands
+  in Phase F).
+- **`Event` trait** — what handlers subscribe to. Blanket impl
+  `impl<P: Protocol> Event for P { type Payload = P::Message }`
+  lets users write `.on::<Http>(...)` for raw HTTP messages.
+
+### Added — `netring::anomaly::sink` + `AnomalyWriter`
+
+- **`AnomalySink` trait** — replaces ad-hoc `Anomaly<K>` push to
+  a `Vec`. Object-safe; exposes a single `write(...)` method.
+- **`AnomalyWriter<'sink>`** — stack-only builder for one anomaly.
+  `ArrayVec<_, 8>` for observations and metrics; `&'static str`
+  literals pass through `with(...)` as `Cow::Borrowed` (zero
+  alloc). Overflow past 8 entries is silently dropped.
+- **`AnomalySinkExt`** blanket extension — gives typed sinks a
+  `.begin(...)` method without coercing through `&mut dyn`.
+
+### Added — 4 shipped sinks
+
+- **`StdoutSink`** — one greppable text line per anomaly to
+  stdout. Reused scratch buffer (zero allocations in steady state).
+- **`StdoutJsonSink`** — one JSON object per anomaly, feature
+  `serde`. One allocation per emit (serde_json::Map).
+- **`TracingSink`** — emits `tracing::event!` at the level
+  matching the anomaly's `Severity`. Target = `netring::anomaly`.
+- **`ChannelSink`** — forwards owned `OwnedAnomaly` payloads to a
+  tokio mpsc receiver. The only shipped sink that allocates per
+  anomaly (intentional — retains payload past dispatch frame).
+
+### Added — `netring::layer` middleware
+
+- **`Layer` trait** — netring-internal middleware shape (object-safe).
+- **`MinSeverity`** — drops anomalies below a `Severity` floor.
+- **`DedupeAnomalies`** — suppresses repeated `(kind, key)`
+  anomalies within a sliding window.
+- **`RateLimitAnomalies`** — per-kind token-bucket rate limiter.
+- **`Sample`** — probabilistic per-anomaly sampling (inline
+  xorshift64*; no rand dep).
+- **`Tee`** — fan-out to two sinks.
+
+### Added — `detector!` macro
+
+Declarative DSL for stateless detectors. Expands to a closure
+that satisfies `Handler<E, PayloadCtx>`:
+
+```rust
+let det = detector! {
+    name:     "TruncatedTls",
+    severity: Warning,
+    event:    TlsHandshake,
+    matches:  |hs| hs.outcome == HandshakeOutcome::Truncated,
+    emit:     |hs, ctx| {
+        let now = ctx.ts;
+        ctx.sink_mut()
+            .begin("TruncatedTls", Severity::Warning, now)
+            .with("sni", hs.sni.as_deref().unwrap_or("<none>"))
+            .emit();
+    },
+};
+Monitor::builder().protocol::<TlsHandshake>().detect(det).build()?;
+```
+
+### Added — `netring::prelude`
+
+Glob-importable surface: `use netring::prelude::*;` brings in
+~30 names covering the canonical monitor + detector flow.
+
+### Added — `monitor` umbrella Cargo feature
+
+```toml
+netring = { version = "0.20", features = ["monitor"] }
+```
+
+Pulls `tokio + channel + flow + parse + metrics + http + dns + tls
++ icmp + emit + serde` — the full Monitor experience. Embedded
+users who need a lean build keep using the granular features.
+
+### Added — `bench-zero-alloc` Cargo feature + dhat benchmark
+
+`benches/zero_alloc.rs` runs 100k synthetic dispatches through a
+fully-wired `Dispatcher` (3 handlers + state + counter + sink)
+under `dhat` and asserts `Δ heap < 512 bytes / Δ blocks < 100`
+in steady state. Local run measures **Δ 0 bytes / Δ 0 blocks** —
+the dispatcher + sink path is allocation-free.
+
+```sh
+cargo bench --features bench-zero-alloc --bench zero_alloc
+```
+
+On regression `dhat-heap.json` drops in CWD with the per-callsite
+profile.
+
+### Added — `error::BuildError`
+
+New error enum surfaced from `MonitorBuilder::build`. Variants:
+`NoInterface`, `MultiInterfaceNotYetSupported`,
+`TooManyEventTypes { limit: 16, actual }`,
+`ProtocolDispatchMismatch(String)`.
+
+### Coexistence with the 0.19 API
+
+The legacy `ProtocolMonitor` / `ProtocolMonitorBuilder` /
+`ProtocolEvent` / `AnomalyMonitor` / `AnomalyRule` /
+`FlowAnomalyRule` continue to exist and work in 0.20.0 — no
+existing example or detector required code changes. A future
+0.21.x will add `#[deprecated]` attributes; 0.22.0 will remove
+them.
+
+### Phase F / G placeholders (deferred to 0.21+)
+
+- **Per-CPU sharding** (PACKET_FANOUT-backed `fanout_per_cpu`
+  builder method + per-shard state merging) — Phase F. Defers to
+  0.21.
+- **Multi-interface monitors** (`.interfaces([a, b, c])` building
+  on `AsyncMultiCapture`) — currently errors at build time with
+  `BuildError::MultiInterfaceNotYetSupported`. Will land alongside
+  per-CPU sharding.
+- **Tick handler firing** — registrations are recorded but the
+  periodic pump comes with the per-CPU run loop.
+
+### New deps
+
+- `rustc-hash = "2"` — `FxHashMap` for `TypeId`-keyed maps.
+- `arrayvec = "0.7"` — `ArrayVec` for the dispatcher slot table
+  + the anomaly writer's inline observations/metrics.
+- `dhat = "0.3"` (optional, `bench-zero-alloc` feature only) —
+  steady-state allocation regression benchmark.
+
+### Tests
+
+463 tests at landing time (up from 314 at 0.19.0). Coverage adds
+unit tests per layer, dispatcher + registry tests, async-handler
+integration tests, the dhat zero-alloc bench, and end-to-end
+Monitor smoke tests on `lo`.
+
+### Files / module changes
+
+- New: `src/ctx/`, `src/monitor/`, `src/layer/`, `src/prelude.rs`,
+  `src/detector_macro.rs`, `src/anomaly/sink.rs`,
+  `src/anomaly/shipped_sinks.rs`, `benches/zero_alloc.rs`.
+- Modified: `src/lib.rs` (new module declarations + re-exports),
+  `src/error.rs` (BuildError + Build variant), `src/protocol/mod.rs`
+  (Protocol trait + Dispatch + SignatureMatch + ProtocolInitError),
+  `src/protocol/builtin/*.rs` (each impls Protocol via
+  `register`).
+
 ## 0.19.0 — flowscope 0.11.1 absorption
 
 Mechanical lockstep bump to flowscope 0.11.1. flowscope's plan 121

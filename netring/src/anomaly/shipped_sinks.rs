@@ -306,6 +306,7 @@ impl AnomalySink for ChannelSink {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::anomaly::sink::AnomalySinkExt;
 
     #[test]
     fn stdout_sink_default_uses_4kib_buffer() {

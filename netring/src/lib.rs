@@ -16,6 +16,8 @@ pub mod ctx;
 pub mod dedup;
 pub mod error;
 pub mod interface;
+#[cfg(all(feature = "flow", feature = "tokio"))]
+pub mod layer;
 #[cfg(feature = "metrics")]
 pub mod metrics;
 #[cfg(all(feature = "flow", feature = "tokio"))]

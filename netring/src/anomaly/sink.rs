@@ -56,17 +56,13 @@ pub const ANOMALY_INLINE_CAPACITY: usize = 8;
 /// scratch buffer; the trait is **object-safe** so handlers can
 /// receive `&mut dyn AnomalySink` without monomorphising per
 /// sink type.
+///
+/// `begin(...)` (the writer-starting method) is provided in two
+/// places to satisfy both monomorphic and trait-object call
+/// sites:
+/// - `impl dyn AnomalySink + '_` (below) for `&mut dyn AnomalySink`
+/// - blanket [`AnomalySinkExt`] for any `T: AnomalySink + Sized`
 pub trait AnomalySink: Send {
-    /// Begin building an anomaly. The default implementation
-    /// constructs an [`AnomalyWriter`] anchored on `self`; sinks
-    /// rarely override this.
-    fn begin(&mut self, kind: &'static str, severity: Severity, ts: Timestamp) -> AnomalyWriter<'_>
-    where
-        Self: Sized,
-    {
-        AnomalyWriter::new(self, kind, severity, ts)
-    }
-
     /// Render the anomaly. Called by [`AnomalyWriter::emit`]; sinks
     /// own this — that's the one method every impl provides.
     fn write(
@@ -84,6 +80,36 @@ pub trait AnomalySink: Send {
         Ok(())
     }
 }
+
+/// `begin(...)` on `&mut dyn AnomalySink` — used by layered sink
+/// chains and any code that holds a trait object.
+impl dyn AnomalySink + '_ {
+    /// Construct an [`AnomalyWriter`] anchored on this trait object.
+    pub fn begin(
+        &mut self,
+        kind: &'static str,
+        severity: Severity,
+        ts: Timestamp,
+    ) -> AnomalyWriter<'_> {
+        AnomalyWriter::new(self, kind, severity, ts)
+    }
+}
+
+/// Convenience extension — lets typed sinks call `.begin(...)`
+/// directly without coercing through `&mut dyn AnomalySink`.
+pub trait AnomalySinkExt: AnomalySink + Sized {
+    /// Construct an [`AnomalyWriter`] anchored on this sink.
+    fn begin(
+        &mut self,
+        kind: &'static str,
+        severity: Severity,
+        ts: Timestamp,
+    ) -> AnomalyWriter<'_> {
+        AnomalyWriter::new(self, kind, severity, ts)
+    }
+}
+
+impl<T: AnomalySink + Sized> AnomalySinkExt for T {}
 
 /// Erased key borrow — lets [`AnomalyWriter`] stay non-generic in
 /// the key type so it can be returned from a `&mut dyn AnomalySink`.

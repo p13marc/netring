@@ -46,6 +46,7 @@ use crate::anomaly::sink::{AnomalySink, NoopSink};
 use crate::correlate::TimeBucketedCounter;
 use crate::ctx::{CounterRegistry, StateMap};
 use crate::error::{BuildError, Result};
+use crate::layer::Layer;
 use crate::protocol::Protocol;
 use crate::protocol::event_typed::{Event, Tick};
 
@@ -120,6 +121,10 @@ pub struct MonitorBuilder {
     state_map: StateMap,
     counters: CounterRegistry,
     sink: Option<Box<dyn AnomalySink>>,
+    /// Layers in registration order — outermost-first. Applied
+    /// innermost-first at [`Self::build`] time, so the first
+    /// `.layer(X)` call wraps the final composed chain.
+    layers: Vec<Box<dyn Layer>>,
     tick_handlers: Vec<TickRegistration>,
 }
 
@@ -234,6 +239,24 @@ impl MonitorBuilder {
         self
     }
 
+    /// Wrap the sink chain in `layer`. **The first registered
+    /// layer is the outermost** — it sees every emission first,
+    /// before subsequent layers and the underlying sink.
+    ///
+    /// ```ignore
+    /// .layer(MinSeverity::warning())    // outermost
+    /// .layer(DedupeAnomalies::within(Duration::from_secs(60)))
+    /// .sink(StdoutJsonSink::default())  // innermost
+    /// ```
+    ///
+    /// At runtime: emit → MinSeverity.write → Dedupe.write →
+    /// StdoutJsonSink.write. So `MinSeverity` drops anything
+    /// below Warning before `Dedupe` ever sees it.
+    pub fn layer<L: Layer + 'static>(mut self, layer: L) -> Self {
+        self.layers.push(Box::new(layer));
+        self
+    }
+
     /// Periodic tick handler. **Phase B accepts the registration
     /// but does not yet fire the handler** — Phase F's per-CPU
     /// run loop adds the tick pump. The registration round-trips
@@ -262,7 +285,14 @@ impl MonitorBuilder {
             .unwrap_or_else(|| Driver::builder(FiveTuple::bidirectional()))
             .build();
         let dispatcher = self.handlers.into_dispatcher()?;
-        let sink = self.sink.unwrap_or_else(|| Box::new(NoopSink));
+        let base_sink: Box<dyn AnomalySink> = self.sink.unwrap_or_else(|| Box::new(NoopSink));
+        // Apply layers innermost-first so the first .layer(X)
+        // call ends up outermost in the runtime chain. See the
+        // .layer rustdoc for the ordering convention.
+        let mut sink = base_sink;
+        for layer in self.layers.into_iter().rev() {
+            sink = layer.wrap(sink);
+        }
         // interfaces.len() == 1 — pop it off so we don't keep two copies.
         let mut ifaces = self.interfaces;
         let interface = ifaces.remove(0);

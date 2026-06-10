@@ -293,11 +293,19 @@ impl MonitorBuilder {
         self
     }
 
-    /// Periodic tick handler. **Phase B accepts the registration
-    /// but does not yet fire the handler** — Phase F's per-CPU
-    /// run loop adds the tick pump. The registration round-trips
-    /// through the builder so user code can be written today
-    /// without an API churn later.
+    /// Periodic tick handler.
+    ///
+    /// Phase F.2 lights this up — the run loop now polls a per-handler
+    /// tokio interval alongside the packet stream. The first tick
+    /// fires one `period` after run-loop start (not immediately);
+    /// missed ticks (from a slow handler) are skipped, not queued.
+    ///
+    /// On each fire, the framework runs:
+    /// 1. The closure passed here (the "ergonomic" registration),
+    /// 2. The dispatcher's typed `Tick` slot — so any
+    ///    `.on::<Tick, _, _>(handler)` registrations also fire.
+    ///
+    /// Both paths receive the same [`Tick`] payload + `&mut Ctx`.
     pub fn tick<H, M>(mut self, period: Duration, handler: H) -> Self
     where
         H: Handler<Tick, M>,

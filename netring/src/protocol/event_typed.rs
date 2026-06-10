@@ -215,6 +215,19 @@ pub struct Tick {
     pub period: std::time::Duration,
 }
 
+impl Tick {
+    /// Constructor exposed for integration tests that need to
+    /// synthesise a [`Tick`] payload without going through the
+    /// run loop. Not part of the documented public API (`Tick`
+    /// is `#[non_exhaustive]` so external code can't construct
+    /// it directly — this `#[doc(hidden)]` constructor lets the
+    /// integration test suite synthesise one).
+    #[doc(hidden)]
+    pub fn new(now: Timestamp, period: std::time::Duration) -> Self {
+        Self { now, period }
+    }
+}
+
 impl Event for Tick {
     type Payload = Tick;
 }

@@ -198,6 +198,44 @@ async fn sync_and_async_handlers_for_same_event_both_fire() {
 }
 
 #[test]
+fn dispatcher_routes_tick_payload_to_on_tick_handler() {
+    // Phase F.2: users may register tick handlers via either
+    // `.tick(period, handler)` (boxed registration; run loop
+    // drives) OR `.on::<Tick, _, _>(handler)` (dispatcher slot).
+    // The latter is what gets exercised here — verifies the run
+    // loop's `dispatcher.dispatch::<Tick>` call hits the right
+    // slot for a synthetic Tick payload.
+    use netring::protocol::event_typed::Tick;
+    let count = Arc::new(AtomicU32::new(0));
+    let c = Arc::clone(&count);
+    let mut reg = HandlerRegistry::default();
+    reg.register::<Tick, _, _>(move |_t: &Tick| {
+        c.fetch_add(1, Ordering::Relaxed);
+        Ok(())
+    });
+    let mut disp = reg.into_dispatcher().unwrap();
+
+    let mut state = StateMap::default();
+    let mut sink = NoopSink;
+    let mut counters = CounterRegistry::default();
+    let mut ctx = fresh_ctx(&mut state, &mut sink, &mut counters);
+
+    // `Tick` is `#[non_exhaustive]` so external code can't use
+    // field-init syntax; the `#[doc(hidden)] pub fn new` lets
+    // integration tests synthesise one (same pattern as
+    // `FlowStarted::<P>::new` used by the dispatcher tests
+    // above).
+    let tick = Tick::new(
+        Timestamp::new(123, 456),
+        std::time::Duration::from_millis(100),
+    );
+    for _ in 0..4 {
+        disp.dispatch::<Tick>(&tick, &mut ctx).unwrap();
+    }
+    assert_eq!(count.load(Ordering::Relaxed), 4);
+}
+
+#[test]
 fn dispatcher_carries_correct_type_and_handler_counts() {
     let mut reg = HandlerRegistry::default();
     reg.register::<FlowStarted<Tcp>, _, _>(|_evt: &FlowStarted<Tcp>| Ok(()));

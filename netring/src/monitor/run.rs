@@ -1,15 +1,24 @@
 //! Run loop for the 0.20 [`Monitor`].
 //!
-//! Single-stream over a single [`AsyncCapture`]; the per-CPU
-//! sharded version lands in Phase F. Each iteration:
+//! Phase F.1 added multi-interface fan-in (N [`AsyncCapture`]s
+//! round-robin'd into one driver+dispatcher); F.2 added the
+//! tick handler firing path. F.3 (per-CPU sharding) lives
+//! separately and isn't reached from this run loop. Each
+//! iteration:
 //!
-//! 1. await a packet batch from the capture,
-//! 2. feed each packet to the flowscope driver and translate the
-//!    resulting lifecycle events into typed `FlowStarted<P>` /
-//!    `FlowEnded<P>` / `FlowEstablished<P>` / `AnyFlowAnomaly`
-//!    payloads dispatched through the handler table,
-//! 3. drain each protocol-slot's typed parser messages and
-//!    dispatch them.
+//! 1. await *either* the next packet batch (across all N
+//!    interfaces, fair-round-robin) *or* the next tick from any
+//!    registered tick handler,
+//! 2. on packet: feed it to the flowscope driver and translate
+//!    the resulting lifecycle events into typed `FlowStarted<P>`
+//!    / `FlowEnded<P>` / `FlowEstablished<P>` / `AnyFlowAnomaly`
+//!    payloads dispatched through the handler table — with
+//!    `ctx.source` set to the interface's SourceIdx,
+//! 3. on packet: drain each protocol-slot's typed parser
+//!    messages and dispatch them,
+//! 4. on tick: invoke the registered `.tick(period, handler)`
+//!    closure *and* dispatch the typed `Tick` event so users
+//!    who registered via `.on::<Tick>(...)` see it too.
 
 use std::pin::Pin;
 use std::task::{Context, Poll};
@@ -31,7 +40,8 @@ use crate::protocol::FlowKey;
 #[cfg(feature = "icmp")]
 use crate::protocol::builtin::Icmp;
 use crate::protocol::builtin::{Tcp, Udp};
-use crate::protocol::event_typed::{AnyFlowAnomaly, FlowEnded, FlowEstablished, FlowStarted};
+use crate::protocol::event_typed::{AnyFlowAnomaly, FlowEnded, FlowEstablished, FlowStarted, Tick};
+use std::time::SystemTime;
 
 /// How long to keep the run loop alive.
 pub(crate) enum StopCondition {
@@ -52,7 +62,7 @@ pub(crate) async fn run_loop(monitor: Monitor, stop: StopCondition) -> Result<()
         mut state_map,
         mut counters,
         mut sink,
-        tick_handlers: _, // Phase F.2 lights this up; F.1 accepts the registration only
+        mut tick_handlers,
     } = monitor;
 
     // Phase F.1: open one AsyncCapture per interface. The order
@@ -71,11 +81,41 @@ pub(crate) async fn run_loop(monitor: Monitor, stop: StopCondition) -> Result<()
     let mut shutdown = ShutdownSignal::new(stop);
     let mut rr_anchor: usize = 0;
 
+    // Phase F.2: one tokio interval per registered tick handler.
+    // First tick fires after `period` (interval_at with deadline =
+    // now + period), not immediately. `Skip` missed-tick behaviour
+    // so a slow tick handler doesn't pile up backlog ticks.
+    let mut tick_intervals: Vec<tokio::time::Interval> = tick_handlers
+        .iter()
+        .map(|t| {
+            let mut int =
+                tokio::time::interval_at(tokio::time::Instant::now() + t.period, t.period);
+            int.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+            int
+        })
+        .collect();
+
     loop {
+        // tokio::select! waits on shutdown, the next packet, OR
+        // the next tick. The `if !tick_intervals.is_empty()`
+        // gate keeps the tick branch from being polled when no
+        // handlers are registered (saves one cx wake per loop).
         let next = tokio::select! {
             biased;
             _ = shutdown.recv() => break,
             packet = next_packet(&mut streams, &mut rr_anchor) => packet,
+            tick_idx = next_tick(&mut tick_intervals), if !tick_intervals.is_empty() => {
+                fire_tick(
+                    tick_idx,
+                    &mut tick_handlers,
+                    &mut dispatcher,
+                    sink.as_mut(),
+                    &mut state_map,
+                    &mut counters,
+                )
+                .await?;
+                continue;
+            }
         };
         let (source_idx, batch) = match next {
             Some((i, Ok(b))) => (i, b),
@@ -169,6 +209,64 @@ where
         },
     )
     .await
+}
+
+/// Round-robin poll across N tick intervals. Returns the index of
+/// whichever interval ticked first.
+///
+/// Symmetric to [`next_packet`] — the same fairness story applies,
+/// just without an `anchor` because interval ticks are
+/// time-driven, not rate-driven (the slowest interval can't
+/// starve the fastest one even with naive ordering). We still
+/// scan from index 0 every poll; the win from an anchor is
+/// negligible for tick handlers.
+async fn next_tick(intervals: &mut [tokio::time::Interval]) -> usize {
+    std::future::poll_fn(|cx: &mut Context<'_>| -> Poll<usize> {
+        for (i, interval) in intervals.iter_mut().enumerate() {
+            if interval.poll_tick(cx).is_ready() {
+                return Poll::Ready(i);
+            }
+        }
+        Poll::Pending
+    })
+    .await
+}
+
+/// Fire the tick handler at `tick_idx`.
+///
+/// Two paths fire on every tick:
+///
+/// 1. The `.tick(period, handler)` registration's boxed closure —
+///    drives the period scheduling and is the ergonomic
+///    registration form.
+/// 2. The dispatcher's typed `Tick` slot (sync + async) — so
+///    users who registered via `.on::<Tick>(...)` also receive
+///    the event.
+///
+/// Both run in the order: closure first, then dispatcher.
+async fn fire_tick(
+    tick_idx: usize,
+    tick_handlers: &mut [crate::monitor::tick::TickRegistration],
+    dispatcher: &mut Dispatcher,
+    sink: &mut dyn AnomalySink,
+    state_map: &mut StateMap,
+    counters: &mut CounterRegistry,
+) -> Result<()> {
+    let reg = &mut tick_handlers[tick_idx];
+    let tick = Tick {
+        now: flowscope::Timestamp::from_system_time(SystemTime::now()),
+        period: reg.period,
+    };
+    {
+        let mut ctx = Ctx::new(None, tick.now, SourceIdx(0), state_map, sink, counters);
+        (reg.handler)(&tick, &mut ctx)?;
+    }
+    {
+        let mut ctx = Ctx::new(None, tick.now, SourceIdx(0), state_map, sink, counters);
+        dispatcher.dispatch::<Tick>(&tick, &mut ctx)?;
+    }
+    dispatcher.dispatch_async::<Tick>(&tick).await?;
+    Ok(())
 }
 
 /// Tracks both a packet-batch deadline and an OS shutdown signal.

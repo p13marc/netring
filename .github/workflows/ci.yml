@@ -98,6 +98,25 @@ jobs:
       - uses: Swatinem/rust-cache@v2
       - run: cargo bench -p netring --no-run
 
+  # ── Zero-alloc regression bench (dhat) ────────────────────────────────────
+  # Locks in netring 0.20's Δ 0 bytes / Δ 0 blocks steady-state
+  # allocation contract over 100k synthetic Monitor dispatches.
+  # On regression `dhat-heap.json` is uploaded for postmortem.
+  zero-alloc:
+    name: Zero-alloc bench (dhat)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - name: Run zero-alloc regression bench
+        run: cargo bench -p netring --features bench-zero-alloc --bench zero_alloc
+      - uses: actions/upload-artifact@v4
+        if: failure()
+        with:
+          name: dhat-heap
+          path: dhat-heap.json
+
   # ── Examples compile ──────────────────────────────────────────────────────
   examples:
     name: Examples compile

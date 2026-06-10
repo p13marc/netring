@@ -53,6 +53,19 @@ pub use event_typed::{
 };
 pub use monitor::{ProtocolMonitor, ProtocolMonitorBuilder};
 
+// Re-export the 7 built-in `Protocol` markers at the protocol
+// module level so `use netring::protocol::Http;` works (without
+// the intermediate `::builtin::` path). The markers also live at
+// `netring::protocol::builtin::*` and `netring::prelude::*` for
+// users who prefer those paths.
+#[cfg(feature = "dns")]
+pub use builtin::Dns;
+#[cfg(feature = "http")]
+pub use builtin::Http;
+pub use builtin::{Icmp, Tcp, Udp};
+#[cfg(feature = "tls")]
+pub use builtin::{Tls, TlsHandshake};
+
 // ─── Plugin layer (netring 0.20, Phase A) ──────────────────────────────────
 //
 // The `Protocol` trait + supporting types define a protocol-agnostic plugin

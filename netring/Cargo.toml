@@ -57,6 +57,12 @@ serde_json = { version = "1", optional = true }
 rustc-hash = "2"
 arrayvec = "0.7"
 
+# Optional dhat dependency, gated on the `bench-zero-alloc` feature.
+# Drives the steady-state allocation regression test in
+# `benches/zero_alloc.rs`. Off by default to keep the dependency
+# tree slim for users not running the bench.
+dhat = { version = "0.3", optional = true }
+
 [dev-dependencies]
 env_logger = "0.11"
 tempfile = "3"
@@ -105,6 +111,11 @@ serde = ["dep:serde", "dep:serde_json", "flowscope/serde"]
 # CSV writers). Pulls no extra deps. Used by
 # `examples/flow/zeek_export.rs`.
 emit = ["flow", "flowscope/emit"]
+# Opt-in: drives the dhat-based allocation regression test in
+# `benches/zero_alloc.rs`. Pulls `flow + tokio + parse` because
+# the dispatcher + builtin Protocol markers + Ctx surface live
+# under those gates.
+bench-zero-alloc = ["dep:dhat", "flow", "tokio", "parse"]
 
 [package.metadata.docs.rs]
 all-features = true
@@ -433,3 +444,8 @@ harness = false
 name = "anomaly"
 harness = false
 required-features = ["tokio", "flow", "parse", "dns", "tls"]
+
+[[bench]]
+name = "zero_alloc"
+harness = false
+required-features = ["bench-zero-alloc"]

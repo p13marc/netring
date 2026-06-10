@@ -46,10 +46,6 @@ use crate::anomaly::sink::{AnomalySink, NoopSink};
 use crate::correlate::TimeBucketedCounter;
 use crate::ctx::{CounterRegistry, StateMap};
 use crate::error::{BuildError, Result};
-use crate::monitor::dispatcher::Dispatcher;
-use crate::monitor::handler::Handler;
-use crate::monitor::registry::{HandlerRegistry, ProtocolSlot, TypedProtocolSlot};
-use crate::monitor::tick::TickRegistration;
 use crate::protocol::Protocol;
 use crate::protocol::event_typed::{Event, Tick};
 
@@ -58,6 +54,11 @@ pub mod handler;
 pub mod registry;
 pub mod run;
 pub mod tick;
+
+pub use dispatcher::{Dispatcher, MAX_EVENT_TYPES};
+pub use handler::{Handler, PayloadCtx, PayloadOnly};
+pub use registry::{HandlerRegistry, ProtocolSlot, TypedProtocolSlot};
+pub use tick::TickRegistration;
 
 /// The 0.20 top-level monitor — a fully-constructed graph of
 /// (driver, dispatcher, parser-slots, state) that runs to a

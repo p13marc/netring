@@ -59,9 +59,14 @@ pub struct FlowStarted<P: Protocol> {
 
 impl<P: Protocol> FlowStarted<P> {
     /// Constructor — `pub(crate)` because user code obtains these
-    /// via the dispatcher, not by direct construction. Phase B
-    /// dispatcher consumes this; `allow(dead_code)` for Phase A's
-    /// landing.
+    /// via the dispatcher, not by direct construction. Exposed
+    /// publicly only under the `bench-zero-alloc` feature so
+    /// `benches/zero_alloc.rs` can synthesise events.
+    #[cfg(feature = "bench-zero-alloc")]
+    pub fn new_for_bench(key: FlowKey, l4: Option<L4Proto>, ts: Timestamp) -> Self {
+        Self::new(key, l4, ts)
+    }
+
     #[allow(dead_code)]
     pub(crate) fn new(key: FlowKey, l4: Option<L4Proto>, ts: Timestamp) -> Self {
         Self {

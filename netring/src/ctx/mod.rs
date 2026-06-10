@@ -33,6 +33,7 @@
 use flowscope::Timestamp;
 
 mod from_ctx;
+mod split;
 
 pub use from_ctx::{CounterRegistry, StateMap};
 
@@ -76,6 +77,27 @@ pub struct Ctx<'a> {
 }
 
 impl<'a> Ctx<'a> {
+    /// Bench-only constructor — `benches/zero_alloc.rs` needs to
+    /// manually assemble a `Ctx` to drive the dispatcher without
+    /// a full `Monitor`. Not part of the public API outside the
+    /// bench feature.
+    #[cfg(feature = "bench-zero-alloc")]
+    pub fn new_for_bench(
+        ts: Timestamp,
+        state_map: &'a mut StateMap,
+        sink: &'a mut dyn crate::anomaly::sink::AnomalySink,
+        counters: &'a mut CounterRegistry,
+    ) -> Self {
+        Self {
+            flow: None,
+            ts,
+            source: SourceIdx(0),
+            state_map,
+            sink,
+            counters,
+        }
+    }
+
     /// Borrow per-monitor state `T` mutably.
     ///
     /// `T: Default` so the slot is lazy-created on first access.

@@ -5,6 +5,7 @@ use flowscope::driver::{DriverBuilder, SlotHandle};
 #[cfg(feature = "icmp")]
 use flowscope::extract::{FiveTuple, FiveTupleKey};
 
+#[cfg(feature = "icmp")]
 use crate::protocol::{Dispatch, Protocol, ProtocolInitError};
 
 /// ICMPv4 + ICMPv6 message parser. Surfaces `IcmpMessage` events

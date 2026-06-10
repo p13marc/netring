@@ -54,12 +54,8 @@ fn capture_stats_survives_session_stream_conversion() {
     struct StubParser;
     impl SessionParser for StubParser {
         type Message = ();
-        fn feed_initiator(&mut self, _: &[u8], _ts: Timestamp) -> Vec<()> {
-            Vec::new()
-        }
-        fn feed_responder(&mut self, _: &[u8], _ts: Timestamp) -> Vec<()> {
-            Vec::new()
-        }
+        fn feed_initiator(&mut self, _: &[u8], _ts: Timestamp, _out: &mut Vec<()>) {}
+        fn feed_responder(&mut self, _: &[u8], _ts: Timestamp, _out: &mut Vec<()>) {}
     }
     #[derive(Default, Clone)]
     struct StubFactory;

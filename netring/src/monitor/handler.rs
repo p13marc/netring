@@ -11,7 +11,7 @@
 //! `Counter<K>`, …) were considered but don't compile in sync
 //! Rust: sequential `from_ctx(&mut ctx)` calls all hold `&mut
 //! Ctx` simultaneously. The same ergonomics are recovered by
-//! methods on [`Ctx`](crate::ctx::Ctx) (`state_mut::<T>()`,
+//! methods on [`Ctx`] (`state_mut::<T>()`,
 //! `counter_mut::<K>()`, `sink_mut()`), since each method call
 //! is its own bounded borrow and the compiler tracks disjoint
 //! field accesses correctly.

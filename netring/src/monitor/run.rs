@@ -1,4 +1,4 @@
-//! Run loop for the 0.20 [`Monitor`](super::Monitor).
+//! Run loop for the 0.20 [`Monitor`].
 //!
 //! Single-stream over a single [`AsyncCapture`]; the per-CPU
 //! sharded version lands in Phase F. Each iteration:

@@ -57,7 +57,7 @@
 //!     .build()?;
 //! ```
 
-/// Typed detector wrapper produced by the [`detector!`] macro.
+/// Typed detector wrapper produced by the [`crate::detector!`] macro.
 ///
 /// Carries the event type `E` and the handler closure `F`
 /// together so [`crate::monitor::MonitorBuilder::detect`] can

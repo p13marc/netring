@@ -179,7 +179,7 @@ impl MonitorBuilder {
         self
     }
 
-    /// Register a [`Detector<E, F>`] produced by the
+    /// Register a [`crate::detector_macro::Detector<E, F>`] produced by the
     /// [`crate::detector!`] macro. Inference flows from the
     /// Detector's `E` type parameter, so users don't need to
     /// spell out a turbofish:

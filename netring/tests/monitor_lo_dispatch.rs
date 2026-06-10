@@ -56,14 +56,7 @@ async fn monitor_lo_fires_on_synthetic_traffic() {
     let target = listener.local_addr().expect("local_addr");
 
     // Accept and immediately drop incoming connections.
-    let accept_task = tokio::spawn(async move {
-        loop {
-            match listener.accept().await {
-                Ok(_) => {}
-                Err(_) => break,
-            }
-        }
-    });
+    let accept_task = tokio::spawn(async move { while listener.accept().await.is_ok() {} });
 
     let starts = Arc::new(AtomicU32::new(0));
     let s = Arc::clone(&starts);

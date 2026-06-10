@@ -3,7 +3,7 @@
 //! These types pair with the [`Event`] trait to let users write
 //! `Monitor::builder().on::<E>(handler)` for typed payload
 //! dispatch. They re-package the existing lifecycle variants of
-//! [`super::ProtocolEvent`] into per-[`Protocol`](super::Protocol)
+//! [`super::ProtocolEvent`] into per-[`Protocol`]
 //! typed structs, letting handlers scope to a single L4
 //! protocol (e.g. `FlowStarted<Tcp>`) without writing a runtime
 //! filter.

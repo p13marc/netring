@@ -2,7 +2,7 @@
 //! [`Monitor`](crate::monitor::Monitor) handler pipeline.
 //!
 //! Handlers do **not** construct an [`Anomaly`](crate::anomaly::Anomaly)
-//! value. They invoke [`AnomalySink::begin`] which returns an
+//! value. They invoke [`AnomalySinkExt::begin`] which returns an
 //! [`AnomalyWriter`] — a stack-only builder that writes directly
 //! into a sink-owned buffer. The framework never materialises an
 //! `Anomaly<K>` on the hot path, so the steady-state allocation
@@ -50,7 +50,7 @@ use crate::anomaly::Severity;
 /// docs surface the limit.
 pub const ANOMALY_INLINE_CAPACITY: usize = 8;
 
-/// Destination for anomalies emitted by the 0.20 [`Monitor`].
+/// Destination for anomalies emitted by the 0.20 [`crate::monitor::Monitor`].
 ///
 /// Implementations are usually small structs with a reusable
 /// scratch buffer; the trait is **object-safe** so handlers can

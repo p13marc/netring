@@ -112,7 +112,7 @@ pub trait Protocol: Send + Sync + 'static {
     ///
     /// Lifecycle-only markers ([`builtin::Tcp`] / [`builtin::Udp`])
     /// have no parser to register and return
-    /// [`ProtocolInitError`]; the [`Monitor`] builder treats
+    /// [`ProtocolInitError`]; the [`crate::monitor::Monitor`] builder treats
     /// [`Dispatch::AllTcp`] / [`Dispatch::AllUdp`] as "lifecycle
     /// dispatch only — central tracker handles it" and ignores
     /// the error.

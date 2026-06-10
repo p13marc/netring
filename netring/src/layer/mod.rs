@@ -1,4 +1,4 @@
-//! Middleware over the [`AnomalySink`](crate::anomaly::sink::AnomalySink)
+//! Middleware over the [`AnomalySink`]
 //! chain.
 //!
 //! A [`Layer`] takes an inner sink and wraps it with new

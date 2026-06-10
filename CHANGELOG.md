@@ -231,17 +231,30 @@ existing example or detector required code changes. A future
 0.21.x will add `#[deprecated]` attributes; 0.22.0 will remove
 them.
 
-### Phase F / G placeholders (deferred to 0.21+)
+### Phase F shipped (parts F.1 + F.2)
+
+- **Multi-interface monitors** (`.interfaces([a, b, c])`) — Phase
+  F.1. Run loop fans in N AF_PACKET captures with a fair
+  round-robin select; each event tagged with its source
+  interface's `SourceIdx` (0 for the first registered iface,
+  etc.). Single-interface monitors continue to work unchanged.
+  `BuildError::MultiInterfaceNotYetSupported` is now
+  `#[deprecated]` and no longer returned by the builder.
+- **Tick handler firing** — Phase F.2. The run loop now runs a
+  per-handler `tokio::time::interval` alongside the packet
+  stream. First tick fires at `now + period`; missed ticks are
+  skipped, not queued. Both the `.tick(period, handler)`
+  closure and any `.on::<Tick, _, _>(handler)` registrations
+  fire on each tick.
+
+### Phase F placeholder (deferred to 0.21+)
 
 - **Per-CPU sharding** (PACKET_FANOUT-backed `fanout_per_cpu`
-  builder method + per-shard state merging) — Phase F. Defers to
-  0.21.
-- **Multi-interface monitors** (`.interfaces([a, b, c])` building
-  on `AsyncMultiCapture`) — currently errors at build time with
-  `BuildError::MultiInterfaceNotYetSupported`. Will land alongside
-  per-CPU sharding.
-- **Tick handler firing** — registrations are recorded but the
-  periodic pump comes with the per-CPU run loop.
+  builder + `merge_state` + `ShardedMonitor`) — Phase F.3. Needs
+  resolution of the "handler factory" problem (per-shard
+  dispatchers need either `Fn + Clone` user handlers or
+  `Arc<dyn Fn>` factories — not addressed by the original Phase
+  F plan). Targeted for 0.21.
 
 ### New deps
 

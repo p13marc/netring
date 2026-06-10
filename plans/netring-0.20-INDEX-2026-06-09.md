@@ -57,18 +57,50 @@ The six shipped phase plans were deleted on ship per the
   `#[deprecated]`; 0.22.0 removes. CHANGELOG documents this
   timeline explicitly.
 
-## Active backlog
+## Phase F — partially shipped
 
-| # | Phase | Plan file | Status |
-|---|---|---|---|
-| F | Per-CPU sharding + state merging | [`netring-0.20-phase-F-percpu-sharding.md`](./netring-0.20-phase-F-percpu-sharding.md) | deferred to **0.21+**; multi-interface + tick-handler firing land alongside |
+Phase F was split into three sub-commits to ship the user-facing
+pieces (multi-interface and tick firing) without bundling them
+with the per-CPU sharding design work.
 
-Phase F is the major performance feature for 0.21+. Until it
-lands:
-- `MonitorBuilder::interfaces([a, b])` rejects with
-  `BuildError::MultiInterfaceNotYetSupported` at build time.
-- `MonitorBuilder::tick(...)` records the handler but the run
-  loop doesn't fire it.
+| # | Sub-phase | Status |
+|---|---|---|
+| F.1 | Multi-interface run loop | shipped 0.20 |
+| F.2 | Tick handler firing | shipped 0.20 |
+| F.3 | Per-CPU sharding + `fanout_per_cpu` + `merge_state` | deferred to **0.21+** |
+
+### F.1 and F.2 shipped
+
+- `MonitorBuilder::interfaces([…])` accepts N > 1; the run loop
+  fans in N AF_PACKET captures and tags each event with its
+  source interface's `SourceIdx` (registration order). Multi-
+  interface is **fan-in** (one driver + one dispatcher), not
+  fan-out.
+- `BuildError::MultiInterfaceNotYetSupported` is
+  `#[deprecated(since = "0.20.0")]` and no longer returned —
+  kept for source-compat; will be removed in 0.22.0.
+- `MonitorBuilder::tick(period, handler)` registrations fire
+  via per-handler `tokio::time::interval`. First tick at
+  `now + period`, missed ticks skipped. Both the recorded
+  closure and any `.on::<Tick, _, _>(...)` dispatcher slots
+  fire on each tick.
+
+### F.3 — still in [`phase-F-percpu-sharding.md`](./netring-0.20-phase-F-percpu-sharding.md)
+
+Per-CPU sharding has an unresolved design gap the plan didn't
+address: the shipped `BoxedHandler = Box<dyn FnMut + Send>`
+isn't cloneable, so building N per-shard dispatchers from one
+builder needs either:
+1. A `Fn + Clone + Send + Sync` bound on user handlers — limits
+   what closures can do.
+2. Handler **factory** closures (`Arc<dyn Fn() -> BoxedHandler +
+   Send + Sync>`) — significant API churn on
+   `MonitorBuilder::on::<E>`.
+
+Targeted for 0.21 once the design is resolved. The plan file
+captures the broader sharding shape (merge worker, snapshots,
+AddAssign auto-merge, FanoutWithoutMerge validation) but the
+handler-cloning gap will dominate the redesign.
 
 ## Reading the F plan
 

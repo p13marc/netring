@@ -129,15 +129,51 @@ the existing 0.19 `ProtocolMonitor` / `AnomalyMonitor` surface
 - Cargo feature `monitor = ["tokio", "channel", "flow", "parse",
   "metrics", "http", "dns", "tls", "icmp", "emit", "serde"]` —
   umbrella for app users.
-- Multi-interface support and tick-handler firing deferred to
-  Phase F (sharded run loop).
+- Multi-interface support → Phase F.1 (shipped).
+- Tick-handler firing → Phase F.2 (shipped).
+
+**Phase F.1 — multi-interface run loop:**
+- `Monitor::interface: String` → `Monitor::interfaces: Vec<String>`.
+- `MonitorBuilder::interfaces([…])` accepts N > 1 cleanly; build
+  no longer returns `BuildError::MultiInterfaceNotYetSupported`
+  (now `#[deprecated]`, removed in 0.22.0).
+- `src/monitor/run.rs` opens one `AsyncCapture` per interface
+  (registration order), drives them through a round-robin
+  `poll_fn` select. The `next_packet(streams, anchor)` helper
+  uses an explicit `anchor` for fairness — a chatty source can't
+  starve quiet ones.
+- `dispatch_lifecycle` gains a `SourceIdx` parameter; the per-arm
+  `Ctx` construction macro stamps the real source so handlers
+  see `ctx.source.0 == i` for interface index `i`.
+- Root-gated integration test in `tests/monitor_lo_dispatch.rs`
+  (`monitor_lo_with_two_interfaces_tags_source`) opens lo twice
+  + asserts both `SourceIdx` values reach the handler.
+
+**Phase F.2 — tick handler firing:**
+- Run loop builds a `Vec<tokio::time::Interval>` aligned with
+  the registered tick handlers, initialised via `interval_at(now
+  + period, period)` so the first tick fires one `period` after
+  start (not immediately).
+- New `next_tick(intervals)` helper polls all intervals; the
+  run loop's `tokio::select!` gains a third branch (gated `if
+  !tick_intervals.is_empty()` so no-tick monitors stay zero-cost).
+- `fire_tick(idx, …)` runs **both** tick paths: (1) the boxed
+  closure from `.tick(period, handler)` registration, then (2)
+  `dispatcher.dispatch::<Tick>` + `dispatch_async::<Tick>` so
+  users who registered via `.on::<Tick>` also see the event.
+- `Tick::new(now, period)` — `pub` + `#[doc(hidden)]` — lets
+  integration tests synthesise a Tick (the struct is
+  `#[non_exhaustive]` for external code).
 
 **Phase G — version bump + CHANGELOG + migration guide:**
 - `Cargo.toml` 0.19.0 → 0.20.0.
-- `CHANGELOG.md` 0.20.0 entry covering all Phase A–E work.
+- `CHANGELOG.md` 0.20.0 entry covering Phase A–E + F.1 + F.2.
 - `docs/migration-0.19-to-0.20.md` — 4 recipes for the legacy →
   0.20 transition.
-- Phase F (per-CPU sharding) deferred to 0.21+.
+- Phase F.3 (per-CPU sharding) deferred to 0.21+; the original
+  Phase F plan didn't address the handler-cloning gap (per-shard
+  dispatchers need either `Fn + Clone` user handlers or
+  `Arc<dyn Fn>` factories — significant API churn either way).
 - Legacy `ProtocolMonitor` / `AnomalyMonitor` deletion deferred
   to 0.22.0 (0.21.x adds `#[deprecated]`).
 

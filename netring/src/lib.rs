@@ -14,6 +14,9 @@ pub mod correlate;
 #[cfg(all(feature = "flow", feature = "tokio"))]
 pub mod ctx;
 pub mod dedup;
+#[cfg(all(feature = "flow", feature = "tokio"))]
+#[macro_use]
+mod detector_macro;
 pub mod error;
 pub mod interface;
 #[cfg(all(feature = "flow", feature = "tokio"))]
@@ -31,6 +34,8 @@ pub mod pcap_flow;
 pub mod pcap_source;
 #[cfg(all(feature = "pcap", feature = "tokio"))]
 pub mod pcap_tap;
+#[cfg(all(feature = "flow", feature = "tokio"))]
+pub mod prelude;
 #[cfg(all(feature = "flow", feature = "tokio"))]
 pub mod protocol;
 pub mod stats;

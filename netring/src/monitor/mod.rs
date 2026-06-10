@@ -179,6 +179,24 @@ impl MonitorBuilder {
         self
     }
 
+    /// Sugar alias for [`Self::on`] — reads more naturally for
+    /// detector closures produced by [`crate::detector!`]:
+    ///
+    /// ```ignore
+    /// Monitor::builder()
+    ///     .protocol::<TlsHandshake>()
+    ///     .detect(detector! { … })
+    ///     .build()?
+    /// ```
+    pub fn detect<E, H, M>(self, handler: H) -> Self
+    where
+        E: Event,
+        H: Handler<E, M>,
+        M: 'static,
+    {
+        self.on::<E, H, M>(handler)
+    }
+
     /// Register an async handler for event type `E`.
     ///
     /// The handler closure receives `&E::Payload` only — no

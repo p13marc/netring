@@ -100,6 +100,16 @@ icmp = ["flow", "flowscope/icmp"]
 # Umbrella for everything flowscope-side.
 all-parsers = ["http", "dns", "tls", "icmp"]
 
+# 0.20: convenience umbrella for app users that want the full
+# Monitor + detector! macro experience without enumerating every
+# sub-feature. Embedded users who need a leaner build keep using
+# the granular feature set.
+monitor = [
+    "tokio", "channel", "flow", "parse", "metrics",
+    "http", "dns", "tls", "icmp",
+    "emit", "serde",
+]
+
 # Opt-in serde derives on `Anomaly<K>` / `AnomalyContext` /
 # `Severity`. Composes with `flowscope/serde` (0.8+) so users
 # can ship `Anomaly`s carrying full parsed `ProtocolMessage`

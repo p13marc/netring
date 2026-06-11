@@ -79,6 +79,8 @@ pub(crate) async fn run_loop(monitor: Monitor, stop: StopCondition) -> Result<()
         broadcast_handles: _,
         #[cfg(all(feature = "pcap", feature = "tokio"))]
             pcap_source_path: _,
+        #[cfg(all(feature = "pcap", feature = "tokio"))]
+            pcap_speed_factor: _,
         mut flow_states,
         fanout,
     } = monitor;
@@ -273,6 +275,7 @@ pub(crate) async fn replay_loop(
         drain_timeout,
         broadcast_handles: _,
         pcap_source_path: _,
+        pcap_speed_factor: _,
         mut flow_states,
         fanout: _,
     } = monitor;

@@ -114,6 +114,33 @@ async fn replay_without_pcap_source_returns_error() {
     }
 }
 
+#[tokio::test(flavor = "current_thread")]
+async fn replay_with_pcap_speed_factor_setter() {
+    let pcap = write_synthetic_pcap();
+    let counter = Arc::new(AtomicU32::new(0));
+    let c = Arc::clone(&counter);
+
+    // 0.21 E.1: builder-side `pcap_speed_factor(2.0)` should land
+    // in the `AsyncPcapConfig::replay_speed` consumed by replay().
+    // Smoke-test: at 2× speed the 3-packet pcap replays quickly
+    // and at least one FlowStarted fires.
+    Monitor::builder()
+        .pcap_source(pcap.path())
+        .pcap_speed_factor(2.0)
+        .protocol::<Udp>()
+        .on::<FlowStarted<Udp>>(move |_e: &FlowStarted<Udp>| {
+            c.fetch_add(1, Ordering::Relaxed);
+            Ok(())
+        })
+        .build()
+        .expect("build with pcap_speed_factor")
+        .replay()
+        .await
+        .expect("replay completes");
+
+    assert!(counter.load(Ordering::Relaxed) >= 1);
+}
+
 #[test]
 fn builder_pcap_source_relaxes_no_interface_check() {
     let pcap = write_synthetic_pcap();

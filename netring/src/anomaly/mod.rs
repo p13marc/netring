@@ -87,6 +87,12 @@ pub use flowscope::OwnedAnomaly;
 /// `into_anomaly(ts) -> OwnedAnomaly` path.
 pub use flowscope::DetectorScore;
 
+/// 0.21 B.1: flowscope's structured-anomaly accessor trait. Used
+/// by sinks that route per-anomaly fields (e.g. EveSink, MetricsSink)
+/// to avoid stringifying everything through observations. Mirrors
+/// `KeyFields` on the key side.
+pub use flowscope::AnomalyFields;
+
 #[cfg(feature = "eve-sink")]
 pub use eve_sink::EveSink;
 

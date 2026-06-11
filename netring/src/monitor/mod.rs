@@ -112,6 +112,10 @@ pub struct Monitor {
     /// [`Self::replay`] / [`Self::replay_with_config`].
     #[cfg(all(feature = "pcap", feature = "tokio"))]
     pub(crate) pcap_source_path: Option<std::path::PathBuf>,
+    /// 0.21 E.1: pcap replay pacing factor. Threaded into the
+    /// default `AsyncPcapConfig` used by `Self::replay`.
+    #[cfg(all(feature = "pcap", feature = "tokio"))]
+    pub(crate) pcap_speed_factor: Option<f32>,
     /// 0.21 I.7: per-flow user-state slots registered via
     /// [`MonitorBuilder::flow_state`]. Each entry's
     /// `FlowStateMap` lazy-creates `T::default()` per-flow on
@@ -174,7 +178,14 @@ impl Monitor {
             .pcap_source_path
             .clone()
             .ok_or(BuildError::PcapSourceRequired)?;
-        run::replay_loop(self, path, crate::pcap_source::AsyncPcapConfig::default()).await
+        // 0.21 E.1: pick up `pcap_speed_factor` if the builder set
+        // it. Other fields stay at AsyncPcapConfig defaults; users
+        // wanting full control reach for `replay_with_config`.
+        let mut config = crate::pcap_source::AsyncPcapConfig::default();
+        if let Some(factor) = self.pcap_speed_factor {
+            config.replay_speed = factor;
+        }
+        run::replay_loop(self, path, config).await
     }
 
     /// 0.21 E.1: as [`Self::replay`] but with a caller-supplied
@@ -352,6 +363,12 @@ pub struct MonitorBuilder {
     /// 0.21 C: optional AF_PACKET fanout config; see
     /// [`Monitor::fanout`].
     fanout: Option<(crate::config::FanoutMode, u16)>,
+    /// 0.21 E.1: pcap replay pacing factor; threaded into the
+    /// default `AsyncPcapConfig` used by `Monitor::replay`. `None`
+    /// = no pacing (as-fast-as-possible). Set via
+    /// [`Self::pcap_speed_factor`].
+    #[cfg(all(feature = "pcap", feature = "tokio"))]
+    pcap_speed_factor: Option<f32>,
 }
 
 impl MonitorBuilder {
@@ -435,6 +452,28 @@ impl MonitorBuilder {
     #[cfg(all(feature = "pcap", feature = "tokio"))]
     pub fn pcap_source(mut self, path: impl Into<std::path::PathBuf>) -> Self {
         self.pcap_source_path = Some(path.into());
+        self
+    }
+
+    /// 0.21 E.1: pace pcap replay by `factor`.
+    ///
+    /// - `0.0` (default; unset) — replay as fast as possible.
+    /// - `1.0` — replay at the packet's recorded wire rate.
+    /// - `0.5` / `2.0` — half / double the recorded speed.
+    ///
+    /// Wire-speed pacing relies on `std::thread::sleep`, which on
+    /// Linux has ~1–10 ms granularity; sub-millisecond timing
+    /// stretches are best-effort.
+    ///
+    /// Equivalent to constructing an [`AsyncPcapConfig`] with
+    /// `replay_speed = factor` and calling
+    /// [`Self::replay_with_config`], but more ergonomic for the
+    /// common "just slow it down to wire-speed" case.
+    ///
+    /// Requires the `pcap` Cargo feature.
+    #[cfg(all(feature = "pcap", feature = "tokio"))]
+    pub fn pcap_speed_factor(mut self, factor: f32) -> Self {
+        self.pcap_speed_factor = Some(factor);
         self
     }
 
@@ -886,6 +925,8 @@ impl MonitorBuilder {
             broadcast_handles: self.broadcast_handles,
             #[cfg(all(feature = "pcap", feature = "tokio"))]
             pcap_source_path: self.pcap_source_path,
+            #[cfg(all(feature = "pcap", feature = "tokio"))]
+            pcap_speed_factor: self.pcap_speed_factor,
             flow_states: self.flow_states,
             fanout: self.fanout,
         })

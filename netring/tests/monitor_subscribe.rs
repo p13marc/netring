@@ -59,6 +59,22 @@ fn cloned_subscribers_each_have_their_own_queue() {
 }
 
 #[test]
+fn event_stream_satisfies_futures_core_stream_trait() {
+    // 0.21 F.4 — compile-time check that `EventStream<M>` implements
+    // `futures_core::Stream<Item = M>` so consumers can plug it into
+    // standard combinators (`StreamExt::next()`, `tokio::select!`, …).
+    fn _accept_stream<S: futures_core::Stream + Unpin>(_s: S) {}
+
+    let m = Monitor::builder()
+        .interface("lo")
+        .with_broadcast::<Http>()
+        .build()
+        .expect("build");
+    let stream = m.subscribe::<Http>().expect("subscribe");
+    _accept_stream(stream);
+}
+
+#[test]
 fn subscribe_for_unbroadcast_protocol_errors_on_lifecycle_marker() {
     // Tcp is lifecycle-only — no parser, no broadcast. Subscribe
     // should surface ProtocolNotBroadcast even after

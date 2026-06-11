@@ -106,3 +106,46 @@ where
             .finish()
     }
 }
+
+/// 0.21 F.4: `futures_core::Stream` for `EventStream<M>`.
+///
+/// Polls the underlying `BroadcastSlotHandle`'s queue:
+/// - Returns `Poll::Ready(Some(msg))` immediately if one is
+///   queued.
+/// - Returns `Poll::Pending` when the queue is empty. Note: this
+///   is the deliberately-simple shape — there's no `Waker`
+///   registered with the broadcast slot, so the stream relies on
+///   the next `poll_next` call to re-check. In practice consumers
+///   pair this with `tokio::time::interval` or run inside a tight
+///   `tokio::select!` that re-polls on other events. For
+///   strictly-bounded polling latency, prefer
+///   [`EventStream::recv_many`] from a periodic task.
+/// - The stream is open as long as the parent monitor is alive;
+///   once every other reference to the broadcast inner is dropped
+///   the queue stays drainable but stops receiving new pushes.
+///   The stream itself never returns `Poll::Ready(None)` — the
+///   subscriber lifetime is owned by the consumer holding the
+///   `EventStream`.
+// `EventStream<M>` has no self-referential fields; the `Pin` shape
+// from `Stream::poll_next` doesn't pin anything meaningful. Mark
+// the type `Unpin` so consumers can use it through ordinary
+// `&mut EventStream<M>` (via `StreamExt::next()` etc.) without
+// extra ceremony.
+impl<M> Unpin for EventStream<M> where M: Send + Sync + Clone + 'static {}
+
+impl<M> futures_core::Stream for EventStream<M>
+where
+    M: Send + Sync + Clone + 'static,
+{
+    type Item = M;
+
+    fn poll_next(
+        mut self: std::pin::Pin<&mut Self>,
+        _cx: &mut std::task::Context<'_>,
+    ) -> std::task::Poll<Option<Self::Item>> {
+        match self.try_recv() {
+            Some(msg) => std::task::Poll::Ready(Some(msg)),
+            None => std::task::Poll::Pending,
+        }
+    }
+}

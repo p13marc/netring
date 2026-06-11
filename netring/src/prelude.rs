@@ -47,6 +47,10 @@ pub use crate::anomaly::metrics_sink::MetricsSink;
 pub use crate::anomaly::shipped_sinks::StdoutJsonSink;
 pub use crate::anomaly::shipped_sinks::{ChannelSink, StdoutSink, TracingSink};
 pub use crate::anomaly::sink::{AnomalySink, AnomalySinkExt, AnomalyWriter, NoopSink};
+/// 0.21 B.1 — structured-anomaly + key accessor traits +
+/// `DetectorScore` trait routing detector outputs through
+/// `OwnedAnomaly`. Re-exported from flowscope.
+pub use crate::anomaly::{AnomalyFields, DetectorScore, Key, KeyFields};
 
 // ─── Middleware (Phase D) ────────────────────────────────────────
 pub use crate::layer::{DedupeAnomalies, Layer, MinSeverity, RateLimitAnomalies, Sample, Tee};

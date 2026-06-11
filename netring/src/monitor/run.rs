@@ -22,7 +22,7 @@
 
 use std::pin::Pin;
 use std::task::{Context, Poll};
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
 use flowscope::L4Proto;
 use flowscope::driver::Event as FsEvent;
@@ -55,6 +55,12 @@ pub(crate) enum StopCondition {
     /// `signal` feature is on; today that's transitively enabled
     /// by netring's `tokio` feature.
     Signal,
+    /// 0.21 E.2: stop after `window` of inactivity. The run loop
+    /// resets a deadline each time a packet batch arrives; if the
+    /// deadline expires before the next batch, the loop exits.
+    /// Useful for pcap replay (auto-stop after EOF + grace) and
+    /// one-shot scans where the upstream traffic stops cleanly.
+    Idle(Duration),
 }
 
 pub(crate) async fn run_loop(monitor: Monitor, stop: StopCondition) -> Result<()> {
@@ -91,6 +97,12 @@ pub(crate) async fn run_loop(monitor: Monitor, stop: StopCondition) -> Result<()
     let mut events: Vec<FsEvent<FlowKey>> = Vec::with_capacity(64);
     let mut shutdown = ShutdownSignal::new(stop);
     let mut rr_anchor: usize = 0;
+    // 0.21 E.2: bumped on every packet batch + every tick. Idle
+    // mode computes its deadline as `last_event_at + window`,
+    // so refreshing this resets the idle timer. Initialized to
+    // "now" so the loop has the full window of grace before the
+    // first event arrives.
+    let mut last_event_at = Instant::now();
 
     // Phase F.2: one tokio interval per registered tick handler.
     // First tick fires after `period` (interval_at with deadline =
@@ -113,9 +125,14 @@ pub(crate) async fn run_loop(monitor: Monitor, stop: StopCondition) -> Result<()
         // handlers are registered (saves one cx wake per loop).
         let next = tokio::select! {
             biased;
-            _ = shutdown.recv() => break,
+            _ = shutdown.recv(last_event_at) => break,
             packet = next_packet(&mut streams, &mut rr_anchor) => packet,
             tick_idx = next_tick(&mut tick_intervals), if !tick_intervals.is_empty() => {
+                // Reset idle timer on every tick — periodic
+                // tick fires are intended user activity, not
+                // dead air. Without this, a 1s idle timeout +
+                // 500ms tick handler would never resolve.
+                last_event_at = Instant::now();
                 fire_tick(
                     tick_idx,
                     &mut tick_handlers,
@@ -135,6 +152,8 @@ pub(crate) async fn run_loop(monitor: Monitor, stop: StopCondition) -> Result<()
             None => break, // all streams exhausted
         };
         let source = SourceIdx(source_idx as u8);
+        // Reset idle timer on every received batch.
+        last_event_at = Instant::now();
 
         for pkt in batch {
             let view = flowscope::PacketView::new(&pkt.data, pkt.timestamp);
@@ -406,7 +425,7 @@ impl ShutdownSignal {
                     tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate()).ok();
                 (sigint, sigterm)
             }
-            StopCondition::Deadline(_) => (None, None),
+            StopCondition::Deadline(_) | StopCondition::Idle(_) => (None, None),
         };
         Self {
             stop,
@@ -415,10 +434,15 @@ impl ShutdownSignal {
         }
     }
 
-    async fn recv(&mut self) {
+    /// 0.21 E.2: `last_event_at` parameterizes the idle-window
+    /// deadline. For `Deadline` / `Signal` it's ignored.
+    async fn recv(&mut self, last_event_at: Instant) {
         match &mut self.stop {
             StopCondition::Deadline(t) => {
                 tokio::time::sleep_until((*t).into()).await;
+            }
+            StopCondition::Idle(window) => {
+                tokio::time::sleep_until((last_event_at + *window).into()).await;
             }
             StopCondition::Signal => match (self.sig_int.as_mut(), self.sig_term.as_mut()) {
                 (Some(i), Some(t)) => {

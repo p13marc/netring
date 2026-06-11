@@ -119,6 +119,26 @@ impl Monitor {
         run::run_loop(self, run::StopCondition::Signal).await
     }
 
+    /// 0.21 E.2: run until `window` of inactivity.
+    ///
+    /// The run loop resets a deadline each time a packet batch
+    /// arrives (or a tick fires); if the deadline expires before
+    /// the next event, the loop exits. Useful for:
+    ///
+    /// - **pcap replay** — auto-stop after EOF + a small grace
+    ///   window so trailing periodic-sweep events still land.
+    /// - **one-shot scans** — record traffic until the upstream
+    ///   source stops cleanly.
+    /// - **test fixtures** — exit deterministically once the
+    ///   synthetic traffic generator is done.
+    ///
+    /// The initial deadline starts ticking from `run_until_idle`
+    /// invocation, not from the first packet — so a monitor that
+    /// never sees any traffic will exit after `window` regardless.
+    pub async fn run_until_idle(self, window: Duration) -> Result<()> {
+        run::run_loop(self, run::StopCondition::Idle(window)).await
+    }
+
     /// Registered detector slugs in builder-registration order.
     /// 0.21 A.9: includes every name from `.detect(detector!{ name: "X", … })`
     /// and `.on_named("X", handler)`. Anonymous `.on::<E>(closure)`

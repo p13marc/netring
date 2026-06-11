@@ -72,7 +72,9 @@ pub mod sink;
 
 pub use builtin::FlowAnomalyRule;
 pub use key::{Key, KeyFields};
+#[allow(deprecated)]
 pub use monitor::AnomalyMonitor;
+#[allow(deprecated)]
 pub use rule::{Anomaly, AnomalyContext, AnomalyRule, Severity};
 
 /// 0.21 A.10 — canonical owned-anomaly value type is now upstream.

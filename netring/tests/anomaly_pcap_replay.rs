@@ -1,3 +1,6 @@
+#![allow(deprecated)]
+// 0.21 H.3: this file uses the legacy ProtocolMonitor / AnomalyMonitor / AnomalyRule API; remove with the legacy types in 0.22.
+
 //! Integration test: synthesize a pcap with N DNS queries from
 //! one source IP, replay through `AsyncPcapSource::datagrams` +
 //! `AnomalyMonitor` + a `DnsBurstRule`, assert the rule fires.

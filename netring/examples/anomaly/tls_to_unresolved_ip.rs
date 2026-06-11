@@ -1,3 +1,6 @@
+#![allow(deprecated)]
+// 0.21 H.3: this file uses the legacy ProtocolMonitor / AnomalyMonitor / AnomalyRule API; remove with the legacy types in 0.22.
+
 //! Anomaly: TLS handshake to an IP this host never DNS-resolved.
 //!
 //! Real production signal — MITRE ATT&CK T1571 / T1090. A

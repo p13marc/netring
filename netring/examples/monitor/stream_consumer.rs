@@ -20,7 +20,10 @@ use std::time::Duration;
 use netring::monitor::Monitor;
 use netring::protocol::builtin::Http;
 
-#[tokio::main(flavor = "current_thread")]
+// 0.21 H.2: `Monitor` is `Send` since flowscope 0.13's typed
+// driver became `Send + Sync`. We can use the default
+// multi-thread runtime and the regular `tokio::spawn`.
+#[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let iface = std::env::args().nth(1).unwrap_or_else(|| "lo".into());
 
@@ -46,7 +49,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     // Consumer task — independent of the run loop. Polls every
     // 100ms; bounded drain via `recv_many(buf, 32)` prevents
     // queue growth from monopolizing one tick.
-    let consumer = tokio::task::spawn_local(async move {
+    let consumer = tokio::spawn(async move {
         let mut buf = Vec::new();
         let mut total = 0u64;
         loop {

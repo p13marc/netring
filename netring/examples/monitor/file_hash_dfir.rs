@@ -19,7 +19,7 @@ use flowscope::detect::file::{FileHashSink, FileType, Sha256Sink};
 use flowscope::http::HttpMessage;
 use netring::prelude::*;
 
-#[tokio::main(flavor = "current_thread")]
+#[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let iface = std::env::args().nth(1).unwrap_or_else(|| "lo".into());
 

@@ -1,3 +1,6 @@
+#![allow(deprecated)]
+// 0.21 H.3: this file uses the legacy ProtocolMonitor / AnomalyMonitor / AnomalyRule API; remove with the legacy types in 0.22.
+
 //! Multi-protocol pcap replay through an [`AnomalyMonitor`].
 //!
 //! Sibling to `pcap_replay.rs` (which drives a single-protocol

@@ -1,3 +1,6 @@
+#![allow(deprecated)]
+// 0.21 H.3: this file uses the legacy ProtocolMonitor / AnomalyMonitor / AnomalyRule API; remove with the legacy types in 0.22.
+
 //! Anomaly: one source IP touches > N distinct destination TCP
 //! ports inside a sliding window — the canonical horizontal-scan
 //! signature.

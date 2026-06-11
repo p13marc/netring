@@ -1,3 +1,6 @@
+#![allow(deprecated)]
+// 0.21 H.3: this file uses the legacy ProtocolMonitor / AnomalyMonitor / AnomalyRule API; remove with the legacy types in 0.22.
+
 //! Smoke tests for the [`AnomalyMonitor`] + [`AnomalyRule`] harness.
 //!
 //! Build a synthetic `ProtocolEvent` stream and drive the same rule

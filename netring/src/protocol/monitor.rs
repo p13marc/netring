@@ -1,3 +1,8 @@
+//! 0.21 H.3: this whole module is `#[deprecated]`. Internal impls
+//! allow the deprecation; external consumers see the warning at
+//! the re-export.
+#![allow(deprecated)]
+
 //! [`ProtocolMonitor`] — async stream over a single capture +
 //! one flowscope-side [`Driver<E>`] that fans packets to every
 //! registered parser internally.
@@ -62,6 +67,11 @@ type BoxedEventStream<K> = Pin<Box<dyn Stream<Item = Result<ProtocolEvent<K>, Er
 /// efficiency. Run the monitor on `#[tokio::main(flavor =
 /// "current_thread")]` (the recommended pattern for packet
 /// capture) and this constraint is transparent.
+#[deprecated(
+    since = "0.21.0",
+    note = "Use `netring::monitor::Monitor::builder()` (the 0.20 typed-handler API) instead. \
+            ProtocolMonitor is scheduled for removal in 0.22.0. See docs/MIGRATING_0.20_TO_0.21.md."
+)]
 pub struct ProtocolMonitor<K> {
     inner: BoxedEventStream<K>,
     /// Number of registered parser slots inside the unified driver.
@@ -122,6 +132,11 @@ where
 /// Then call [`build`](Self::build) with the
 /// [`FlowExtractor`](flowscope::FlowExtractor) (typically
 /// `FiveTuple::bidirectional()`).
+#[deprecated(
+    since = "0.21.0",
+    note = "Use `netring::monitor::Monitor::builder()` (the 0.20 typed-handler API) instead. \
+            Removed in 0.22.0. See docs/MIGRATING_0.20_TO_0.21.md."
+)]
 #[derive(Debug, Default)]
 pub struct ProtocolMonitorBuilder {
     interface: Option<String>,

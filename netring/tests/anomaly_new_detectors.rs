@@ -1,3 +1,6 @@
+#![allow(deprecated)]
+// 0.21 H.3: this file uses the legacy ProtocolMonitor / AnomalyMonitor / AnomalyRule API; remove with the legacy types in 0.22.
+
 //! Integration tests for the three new 0.18 anomaly detectors:
 //!
 //! - **DnsTunnel** (D1) — high-entropy + base64-shaped DNS labels

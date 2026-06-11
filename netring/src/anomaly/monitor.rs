@@ -1,4 +1,10 @@
 //! [`AnomalyMonitor`] — fan an event into N [`AnomalyRule`]s.
+//!
+//! 0.21 H.3: this whole module is `#[deprecated]`. Internal use
+//! (the impls in this file) is exempt via the module-level allow;
+//! external consumers still see the deprecation warning at the
+//! re-export.
+#![allow(deprecated)]
 
 use flowscope::Timestamp;
 
@@ -11,6 +17,11 @@ use crate::protocol::ProtocolEvent;
 /// Owns a reusable scratch `Vec<Anomaly<K>>` so each call to
 /// [`observe`](Self::observe) / [`on_tick`](Self::on_tick) doesn't
 /// re-allocate when rules emit nothing — the typical case.
+#[deprecated(
+    since = "0.21.0",
+    note = "Use `netring::monitor::Monitor::builder()` + `detect(detector!{...})` (the 0.20 typed-handler API) instead. \
+            Removed in 0.22.0. See docs/MIGRATING_0.20_TO_0.21.md."
+)]
 pub struct AnomalyMonitor<K> {
     rules: Vec<Box<dyn AnomalyRule<K> + Send>>,
     scratch: Vec<Anomaly<K>>,

@@ -1,3 +1,6 @@
+#![allow(deprecated)]
+// 0.21 H.3: this file uses the legacy ProtocolMonitor / AnomalyMonitor / AnomalyRule API; remove with the legacy types in 0.22.
+
 //! Anomaly: DNS query whose label payload has high Shannon entropy
 //! and a base64-shaped charset — the canonical DNS-tunnel exfil
 //! fingerprint.

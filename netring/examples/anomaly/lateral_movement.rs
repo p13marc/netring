@@ -1,3 +1,6 @@
+#![allow(deprecated)]
+// 0.21 H.3: this file uses the legacy ProtocolMonitor / AnomalyMonitor / AnomalyRule API; remove with the legacy types in 0.22.
+
 //! Anomaly: a single source IP contacts an unusually high number
 //! of **distinct** internal destination IPs within a sliding
 //! window — classic lateral-movement signal.

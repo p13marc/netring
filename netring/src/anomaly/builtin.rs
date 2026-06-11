@@ -1,4 +1,8 @@
 //! Built-in [`AnomalyRule`] implementations shipped with netring.
+//!
+//! 0.21 H.3: this module's contents implement the deprecated
+//! `AnomalyRule` trait; impls allow the deprecation locally.
+#![allow(deprecated)]
 
 use super::rule::{Anomaly, AnomalyRule, Severity};
 use crate::protocol::ProtocolEvent;

@@ -13,7 +13,7 @@
 use netring::prelude::*;
 use netring::protocol::event_typed::{FlowEnded, FlowStarted};
 
-#[tokio::main(flavor = "current_thread")]
+#[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let pcap = std::env::args()
         .nth(1)

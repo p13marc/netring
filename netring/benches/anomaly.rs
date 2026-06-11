@@ -1,3 +1,5 @@
+#![allow(deprecated)] // 0.21 H.3: this benchmark targets the legacy AnomalyMonitor API; remove with the legacy types in 0.22.
+
 //! Anomaly-path benchmarks — characterize the `AnomalyMonitor`
 //! + `AnomalyRule` cost at the granularity actual detectors hit.
 //!

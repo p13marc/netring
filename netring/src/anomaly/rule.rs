@@ -1,4 +1,9 @@
 //! [`AnomalyRule`] trait + [`Anomaly`] value type.
+//!
+//! 0.21 H.3: the `AnomalyRule` trait is `#[deprecated]`. Internal
+//! impls in this file allow the deprecation; external consumers
+//! still see the warning at the trait import.
+#![allow(deprecated)]
 
 use flowscope::Timestamp;
 
@@ -397,6 +402,11 @@ pub struct AnomalyContext {
 /// findings into the shared `emit` buffer — the
 /// [`AnomalyMonitor`](super::AnomalyMonitor) reuses one allocation
 /// across rules.
+#[deprecated(
+    since = "0.21.0",
+    note = "Use `netring::monitor::Monitor::builder()` + `detect(detector!{...})` or `pattern_detector!{...}` (the 0.20+ typed-handler API) instead. \
+            Removed in 0.22.0. See docs/MIGRATING_0.20_TO_0.21.md."
+)]
 pub trait AnomalyRule<K>: Send {
     /// Stable detector identifier — also used as the default
     /// `Anomaly::kind` slug.

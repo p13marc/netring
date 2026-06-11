@@ -22,7 +22,7 @@ use std::time::Duration;
 
 use netring::prelude::*;
 
-#[tokio::main(flavor = "current_thread")]
+#[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let iface = std::env::args().nth(1).unwrap_or_else(|| "lo".into());
     let dur_secs: u64 = std::env::args()

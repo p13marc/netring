@@ -164,6 +164,7 @@ pub use pcap_source::{AsyncPcapConfig, AsyncPcapSource, PcapFormat};
 #[cfg(all(feature = "pcap", feature = "tokio"))]
 pub use pcap_tap::{PcapTap, TapErrorPolicy};
 #[cfg(all(feature = "flow", feature = "tokio"))]
+#[allow(deprecated)]
 pub use protocol::{ProtocolEvent, ProtocolMessage, ProtocolMonitor, ProtocolMonitorBuilder};
 
 // 0.20 plugin layer re-exports (Phase A). These get consumed by
@@ -172,6 +173,7 @@ pub use protocol::{ProtocolEvent, ProtocolMessage, ProtocolMonitor, ProtocolMoni
 pub use protocol::{Dispatch, FlowKey, Protocol, ProtocolInitError, SignatureMatch};
 
 #[cfg(all(feature = "flow", feature = "tokio"))]
+#[allow(deprecated)]
 pub use anomaly::{
     Anomaly, AnomalyContext, AnomalyMonitor, AnomalyRule, FlowAnomalyRule, Severity,
 };

@@ -220,7 +220,16 @@ where
 /// message through the netring dispatcher. Hides the generic
 /// `P: Protocol` parameter so the run loop can hold
 /// `Vec<Box<dyn ProtocolSlot>>`.
-pub trait ProtocolSlot {
+///
+/// 0.21 H.2: `Send` supertrait makes `Box<dyn ProtocolSlot>`
+/// `Send`, which in turn makes the parent `Monitor` `Send`
+/// (flowscope 0.13's `Driver<E>: Send + Sync` covered the rest).
+/// All shipped impls (`TypedProtocolSlot<P>`,
+/// `TypedBroadcastProtocolSlot<P>`) are `Send` structurally —
+/// flowscope's `SlotHandle`/`BroadcastSlotHandle` are `Send + Sync`
+/// and `P::Message: Send + Sync + 'static` per the `Protocol`
+/// trait bound.
+pub trait ProtocolSlot: Send {
     /// Drain pending messages from the wrapped flowscope handle
     /// and dispatch each one through the supplied dispatcher.
     fn drain_and_dispatch(&mut self, dispatcher: &mut Dispatcher, ctx: &mut Ctx<'_>) -> Result<()>;

@@ -52,6 +52,7 @@ pub use event_typed::{
     AnyFlowAnomaly, Event, FlowEnded, FlowEstablished, FlowPacket, FlowStarted, FlowTick,
     ParserClosed, Side, Tick,
 };
+#[allow(deprecated)]
 pub use monitor::{ProtocolMonitor, ProtocolMonitorBuilder};
 
 // Re-export the 7 built-in `Protocol` markers at the protocol

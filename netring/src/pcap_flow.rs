@@ -80,7 +80,7 @@ where
     /// Mirrors [`FlowStream::with_idle_timeout_fn`](crate::FlowStream::with_idle_timeout_fn).
     pub fn with_idle_timeout_fn<G>(mut self, f: G) -> Self
     where
-        G: Fn(&E::Key, Option<flowscope::L4Proto>) -> Option<Duration> + Send + 'static,
+        G: Fn(&E::Key, Option<flowscope::L4Proto>) -> Option<Duration> + Send + Sync + 'static,
     {
         self.tracker.set_idle_timeout_fn(f);
         self
@@ -204,7 +204,7 @@ impl AsyncPcapSource {
     where
         E: FlowExtractor,
         E::Key: std::hash::Hash + Eq + Clone + Send + 'static,
-        P: flowscope::SessionParser + Clone,
+        P: flowscope::SessionParser + Clone + Send + Sync,
     {
         PcapSessionStream::new(self, FlowSessionDriver::new(extractor, parser))
     }
@@ -216,7 +216,7 @@ impl AsyncPcapSource {
     where
         E: FlowExtractor,
         E::Key: std::hash::Hash + Eq + Clone + Send + 'static,
-        P: flowscope::DatagramParser + Clone,
+        P: flowscope::DatagramParser + Clone + Send + Sync,
     {
         PcapDatagramStream::new(self, FlowDatagramDriver::new(extractor, parser))
     }
@@ -240,7 +240,7 @@ where
     /// call `AsyncPcapSource::sessions(...)` directly.
     pub fn session_stream<P>(self, parser: P) -> PcapSessionStream<E, P>
     where
-        P: flowscope::SessionParser + Clone,
+        P: flowscope::SessionParser + Clone + Send + Sync,
     {
         let config = self.tracker.config().clone();
         let extractor = self.tracker.into_extractor();
@@ -253,7 +253,7 @@ where
     /// UDP-datagram mirror of [`Self::session_stream`].
     pub fn datagram_stream<P>(self, parser: P) -> PcapDatagramStream<E, P>
     where
-        P: flowscope::DatagramParser + Clone,
+        P: flowscope::DatagramParser + Clone + Send + Sync,
     {
         let config = self.tracker.config().clone();
         let extractor = self.tracker.into_extractor();
@@ -278,7 +278,7 @@ pub struct PcapSessionStream<E, P>
 where
     E: FlowExtractor,
     E::Key: std::hash::Hash + Eq + Clone + Send + 'static,
-    P: flowscope::SessionParser + Clone,
+    P: flowscope::SessionParser + Clone + Send + Sync,
 {
     source: AsyncPcapSource,
     driver: FlowSessionDriver<E, P>,
@@ -292,7 +292,7 @@ impl<E, P> PcapSessionStream<E, P>
 where
     E: FlowExtractor,
     E::Key: std::hash::Hash + Eq + Clone + Send + 'static,
-    P: flowscope::SessionParser + Clone,
+    P: flowscope::SessionParser + Clone + Send + Sync,
 {
     pub(crate) fn new(source: AsyncPcapSource, driver: FlowSessionDriver<E, P>) -> Self {
         Self {
@@ -330,7 +330,7 @@ impl<E, P> Stream for PcapSessionStream<E, P>
 where
     E: FlowExtractor + Unpin,
     E::Key: std::hash::Hash + Eq + Clone + Send + Unpin + 'static,
-    P: flowscope::SessionParser + Clone + Unpin,
+    P: flowscope::SessionParser + Clone + Send + Sync + Unpin + Send + Sync,
     <P as flowscope::SessionParser>::Message: Unpin,
 {
     type Item = Result<SessionEvent<E::Key, <P as flowscope::SessionParser>::Message>, Error>;
@@ -378,7 +378,7 @@ pub struct PcapDatagramStream<E, P>
 where
     E: FlowExtractor,
     E::Key: std::hash::Hash + Eq + Clone + Send + 'static,
-    P: flowscope::DatagramParser + Clone,
+    P: flowscope::DatagramParser + Clone + Send + Sync,
 {
     source: AsyncPcapSource,
     driver: FlowDatagramDriver<E, P>,
@@ -390,7 +390,7 @@ impl<E, P> PcapDatagramStream<E, P>
 where
     E: FlowExtractor,
     E::Key: std::hash::Hash + Eq + Clone + Send + 'static,
-    P: flowscope::DatagramParser + Clone,
+    P: flowscope::DatagramParser + Clone + Send + Sync,
 {
     pub(crate) fn new(source: AsyncPcapSource, driver: FlowDatagramDriver<E, P>) -> Self {
         Self {
@@ -426,7 +426,7 @@ impl<E, P> Stream for PcapDatagramStream<E, P>
 where
     E: FlowExtractor + Unpin,
     E::Key: std::hash::Hash + Eq + Clone + Send + Unpin + 'static,
-    P: flowscope::DatagramParser + Clone + Unpin,
+    P: flowscope::DatagramParser + Clone + Send + Sync + Unpin + Send + Sync,
     <P as flowscope::DatagramParser>::Message: Unpin,
 {
     type Item = Result<SessionEvent<E::Key, <P as flowscope::DatagramParser>::Message>, Error>;

@@ -115,7 +115,7 @@ where
     pub fn with_state<U, F>(self, init: F) -> FlowStream<S, E, U, NoReassembler>
     where
         U: Send + 'static,
-        F: FnMut(&E::Key) -> U + Send + 'static,
+        F: FnMut(&E::Key) -> U + Send + Sync + 'static,
     {
         let config = self.tracker.config().clone();
         let extractor = self.tracker.into_extractor();
@@ -319,7 +319,7 @@ where
     /// ```
     pub fn with_idle_timeout_fn<F>(mut self, f: F) -> Self
     where
-        F: Fn(&E::Key, Option<flowscope::L4Proto>) -> Option<Duration> + Send + 'static,
+        F: Fn(&E::Key, Option<flowscope::L4Proto>) -> Option<Duration> + Send + Sync + 'static,
     {
         self.tracker.set_idle_timeout_fn(f);
         self

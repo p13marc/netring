@@ -68,19 +68,14 @@ fn fake_dns_query(k: FiveTupleKey, ts_s: u32, qname: &str) -> ProtocolEvent<Five
 }
 
 fn fake_tls_client_hello(k: FiveTupleKey, ts_s: u32) -> ProtocolEvent<FiveTupleKey> {
-    let ch = TlsClientHello {
-        record_version: TlsVersion::Tls1_0,
-        legacy_version: TlsVersion::Tls1_2,
-        random: [0u8; 32],
-        session_id: Default::default(),
-        cipher_suites: Vec::new(),
-        compression: Default::default(), // 0.11: Bytes (plan 120)
-        sni: Some("example.com".into()),
-        alpn: Vec::new(),
-        supported_versions: Vec::new(),
-        supported_groups: Vec::new(),
-        extension_types: Vec::new(),
-    };
+    // flowscope 0.13 made `TlsClientHello` `#[non_exhaustive]` (plan 144 — ECH).
+    // Default initializer + selective field overrides so future field additions
+    // don't break this fixture.
+    let mut ch = TlsClientHello::default();
+    ch.record_version = TlsVersion::Tls1_0;
+    ch.legacy_version = TlsVersion::Tls1_2;
+    ch.random = [0u8; 32];
+    ch.sni = Some("example.com".into());
     ProtocolEvent::Message {
         key: k,
         side: FlowSide::Initiator,

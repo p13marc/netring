@@ -433,8 +433,8 @@ trait ProtocolSlot<K> {
 /// [`ProtocolEvent::Message`].
 struct TypedSlot<M, K>
 where
-    M: 'static,
-    K: 'static,
+    M: Send + 'static,
+    K: Send + 'static,
 {
     handle: SlotHandle<M, K>,
     lift: fn(M) -> ProtocolMessage,
@@ -444,8 +444,8 @@ where
 
 impl<M, K> TypedSlot<M, K>
 where
-    M: 'static,
-    K: 'static,
+    M: Send + 'static,
+    K: Send + 'static,
 {
     fn new(handle: SlotHandle<M, K>, lift: fn(M) -> ProtocolMessage) -> Self {
         let parser_kind = handle.parser_kind();
@@ -460,8 +460,8 @@ where
 
 impl<M, K> ProtocolSlot<K> for TypedSlot<M, K>
 where
-    M: 'static,
-    K: Clone + 'static,
+    M: Send + 'static,
+    K: Send + Clone + 'static,
 {
     fn drain_into(&mut self, out: &mut VecDeque<ProtocolEvent<K>>) {
         self.scratch.clear();

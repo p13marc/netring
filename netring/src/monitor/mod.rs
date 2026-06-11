@@ -10,7 +10,7 @@
 //! Monitor::builder()
 //!     .interface("lo")
 //!     .protocol::<Http>()
-//!     .on::<Http>(|msg| {
+//!     .on::<Http, _, _>(|msg: &flowscope::http::HttpMessage| {
 //!         println!("http: {msg:?}");
 //!         Ok(())
 //!     })

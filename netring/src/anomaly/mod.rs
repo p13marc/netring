@@ -62,6 +62,8 @@ mod builtin;
 #[cfg(feature = "eve-sink")]
 pub mod eve_sink;
 pub mod key;
+#[cfg(feature = "metrics")]
+pub mod metrics_sink;
 mod monitor;
 mod rule;
 
@@ -80,3 +82,9 @@ pub use flowscope::OwnedAnomaly;
 
 #[cfg(feature = "eve-sink")]
 pub use eve_sink::EveSink;
+
+/// 0.21 B.3 — `MetricsSink` adapter over the `metrics`-rs facade.
+/// Gated on the same `metrics` Cargo feature that pulls the
+/// `metrics` crate.
+#[cfg(feature = "metrics")]
+pub use metrics_sink::MetricsSink;

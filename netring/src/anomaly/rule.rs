@@ -82,17 +82,29 @@ pub struct Anomaly<K> {
     pub context: AnomalyContext,
 }
 
+impl Severity {
+    /// Lowercase short label as a `&'static str` (`"info"` /
+    /// `"warning"` / `"error"` / `"critical"`). Matches the same
+    /// vocabulary as the [`Display`](std::fmt::Display) impl, but
+    /// without going through formatting — useful for sinks that
+    /// promote severity to a metric label (e.g.
+    /// [`MetricsSink`](crate::anomaly::MetricsSink)).
+    pub const fn as_str(&self) -> &'static str {
+        match self {
+            Severity::Info => "info",
+            Severity::Warning => "warning",
+            Severity::Error => "error",
+            Severity::Critical => "critical",
+        }
+    }
+}
+
 impl std::fmt::Display for Severity {
     /// Lowercase short label (`info` / `warning` / `error` /
     /// `critical`) matching flowscope's metric-vocabulary
     /// convention.
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.write_str(match self {
-            Severity::Info => "info",
-            Severity::Warning => "warning",
-            Severity::Error => "error",
-            Severity::Critical => "critical",
-        })
+        f.write_str(self.as_str())
     }
 }
 

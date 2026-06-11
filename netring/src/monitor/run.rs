@@ -67,7 +67,12 @@ pub(crate) async fn run_loop(monitor: Monitor, stop: StopCondition) -> Result<()
         mut sink,
         mut tick_handlers,
         detector_names: _,
+        monitor_name,
     } = monitor;
+    // Borrow the monitor name as `&str` for the run loop's
+    // dispatch sites. The owned `Box<str>` lives in this stack
+    // frame so the borrow is valid for the run loop's lifetime.
+    let monitor_name_borrow: Option<&str> = monitor_name.as_deref();
 
     // Phase F.1: open one AsyncCapture per interface. The order
     // matches the builder's `.interfaces([...])` order; each event
@@ -116,6 +121,7 @@ pub(crate) async fn run_loop(monitor: Monitor, stop: StopCondition) -> Result<()
                     sink.as_mut(),
                     &mut state_map,
                     &mut counters,
+                    monitor_name_borrow,
                 )
                 .await?;
                 continue;
@@ -143,6 +149,7 @@ pub(crate) async fn run_loop(monitor: Monitor, stop: StopCondition) -> Result<()
                     &mut counters,
                     evt.clone(),
                     source,
+                    monitor_name_borrow,
                 )?;
                 dispatch_lifecycle_async(&mut dispatcher, evt).await?;
             }
@@ -157,6 +164,11 @@ pub(crate) async fn run_loop(monitor: Monitor, stop: StopCondition) -> Result<()
                     sink.as_mut(),
                     &mut counters,
                 );
+                // 0.21 D.4: stamp the monitor name on this ctx so
+                // typed-message handlers see it too. `Ctx::new`
+                // defaults `monitor_name` to `None`; set it
+                // explicitly after construction.
+                ctx.monitor_name = monitor_name_borrow;
                 slot.drain_and_dispatch(&mut dispatcher, &mut ctx)?;
             }
         }
@@ -255,6 +267,7 @@ async fn fire_tick(
     sink: &mut dyn AnomalySink,
     state_map: &mut StateMap,
     counters: &mut CounterRegistry,
+    monitor_name: Option<&str>,
 ) -> Result<()> {
     let reg = &mut tick_handlers[tick_idx];
     let tick = Tick {
@@ -263,10 +276,12 @@ async fn fire_tick(
     };
     {
         let mut ctx = Ctx::new(None, tick.now, SourceIdx(0), state_map, sink, counters);
+        ctx.monitor_name = monitor_name;
         (reg.handler)(&tick, &mut ctx)?;
     }
     {
         let mut ctx = Ctx::new(None, tick.now, SourceIdx(0), state_map, sink, counters);
+        ctx.monitor_name = monitor_name;
         dispatcher.dispatch::<Tick>(&tick, &mut ctx)?;
     }
     dispatcher.dispatch_async::<Tick>(&tick).await?;
@@ -488,6 +503,7 @@ fn dispatch_lifecycle(
     counters: &mut CounterRegistry,
     evt: FsEvent<FlowKey>,
     source: SourceIdx,
+    monitor_name: Option<&str>,
 ) -> Result<()> {
     // Macro inlines the Ctx construction at each match arm so the
     // borrow checker can shorten each `&mut` borrow to the
@@ -499,6 +515,7 @@ fn dispatch_lifecycle(
                 flow: $flow,
                 ts: $ts,
                 source,
+                monitor_name,
                 state_map: &mut *state_map,
                 sink: &mut *sink,
                 counters: &mut *counters,

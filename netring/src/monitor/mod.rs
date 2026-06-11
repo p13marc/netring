@@ -85,6 +85,12 @@ pub struct Monitor {
     /// `.on::<E>(closure)` registrations stay anonymous (not in
     /// this list). Surfaces via [`Self::detector_names`].
     pub(crate) detector_names: Vec<&'static str>,
+    /// 0.21 D.4: optional monitor name set via
+    /// [`MonitorBuilder::name`]. Borrowed at dispatch time into
+    /// [`crate::ctx::Ctx::monitor_name`]. `Box<str>` over `String`
+    /// because the storage is write-once at build time and never
+    /// reallocated — saves the 8-byte capacity overhead.
+    pub(crate) monitor_name: Option<Box<str>>,
 }
 
 impl Monitor {
@@ -158,6 +164,10 @@ pub struct MonitorBuilder {
     /// `Self::build` walks these and validates against
     /// [`CounterRegistry::registered_type_names`].
     declared_counters: Vec<(&'static str, Vec<&'static str>)>,
+    /// 0.21 D.4: optional human-readable monitor name set via
+    /// [`Self::name`]. Propagates to [`Monitor::monitor_name`]
+    /// and through to handler-visible [`crate::ctx::Ctx::monitor_name`].
+    monitor_name: Option<Box<str>>,
 }
 
 impl MonitorBuilder {
@@ -183,6 +193,33 @@ impl MonitorBuilder {
     /// Single-interface convenience.
     pub fn interface(self, iface: impl Into<String>) -> Self {
         self.interfaces([iface])
+    }
+
+    /// 0.21 D.4: tag this monitor with a human-readable name.
+    ///
+    /// The name surfaces on every dispatched [`Ctx`] as
+    /// [`Ctx::monitor_name`] (`Option<&'a str>`); user handlers
+    /// running under multiple monitors in the same process can
+    /// branch on it to disambiguate.
+    ///
+    /// Pattern: stamp the name as an observation on each
+    /// emission so downstream sinks carry it through —
+    ///
+    /// ```ignore
+    /// .on_ctx::<FlowStarted<Tcp>>(|_evt, ctx| {
+    ///     let monitor = ctx.monitor_name.unwrap_or("default");
+    ///     ctx.emit("FlowStarted", Severity::Info)
+    ///         .with("monitor", monitor.to_string())
+    ///         .emit();
+    ///     Ok(())
+    /// })
+    /// ```
+    ///
+    /// Storage shape: `Box<str>` — one allocation for the
+    /// lifetime of the monitor; `&str` view at dispatch time.
+    pub fn name(mut self, name: impl Into<Box<str>>) -> Self {
+        self.monitor_name = Some(name.into());
+        self
     }
 
     /// Register a protocol. Calls `P::register(driver_builder)` to
@@ -492,6 +529,7 @@ impl MonitorBuilder {
             counters: self.counters,
             sink,
             tick_handlers: self.tick_handlers,
+            monitor_name: self.monitor_name,
         })
     }
 }

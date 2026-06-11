@@ -77,6 +77,16 @@ pub struct Ctx<'a> {
     /// Source-interface index.
     pub source: SourceIdx,
 
+    /// 0.21 D.4: optional human-readable name set on the parent
+    /// monitor via [`crate::monitor::MonitorBuilder::name`].
+    /// Handlers running under multiple monitors in the same
+    /// process can branch on this to disambiguate (e.g. log
+    /// `target = monitor_name` or stamp `with("monitor", name)`
+    /// on emitted anomalies). Borrowed from the [`Monitor`]'s
+    /// owned `Box<str>` storage at dispatch time; `None` when
+    /// `.name(...)` was not called.
+    pub monitor_name: Option<&'a str>,
+
     /// Per-monitor user state, keyed by `TypeId`.
     pub(crate) state_map: &'a mut StateMap,
 
@@ -103,6 +113,7 @@ impl<'a> Ctx<'a> {
             flow: None,
             ts,
             source: SourceIdx(0),
+            monitor_name: None,
             state_map,
             sink,
             counters,
@@ -111,7 +122,9 @@ impl<'a> Ctx<'a> {
 
     /// Constructor exposed for integration tests that need to
     /// drive the dispatcher with a custom `Ctx`. Not part of the
-    /// documented public API (`#[doc(hidden)]`).
+    /// documented public API (`#[doc(hidden)]`). `monitor_name`
+    /// defaults to `None`; production callers in the run loop
+    /// set it via the [`Ctx`] struct literal directly.
     #[doc(hidden)]
     pub fn new(
         flow: Option<FlowKey>,
@@ -125,6 +138,7 @@ impl<'a> Ctx<'a> {
             flow,
             ts,
             source,
+            monitor_name: None,
             state_map,
             sink,
             counters,
@@ -206,6 +220,7 @@ mod tests {
             flow: None,
             ts: Timestamp::new(0, 0),
             source: SourceIdx(0),
+            monitor_name: None,
             state_map: state,
             sink,
             counters,

@@ -149,6 +149,7 @@ mod tests {
             flow: None,
             ts: Timestamp::new(0, 0),
             source: SourceIdx(0),
+            monitor_name: None,
             state_map: state,
             sink,
             counters,

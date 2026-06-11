@@ -12,6 +12,7 @@
 
 use std::any::TypeId;
 use std::marker::PhantomData;
+use std::sync::Arc;
 
 use arrayvec::ArrayVec;
 use flowscope::driver::{SlotHandle, SlotMessage};
@@ -49,7 +50,7 @@ impl HandlerRegistry {
         H: Handler<E, M>,
         M: 'static,
     {
-        let boxed: BoxedHandler = Box::new(move |ptr, ctx| {
+        let boxed: BoxedHandler = Arc::new(move |ptr, ctx| {
             // SAFETY: Soundness contract — `HandlerRegistry` only
             // inserts handlers keyed by
             // `TypeId::of::<E::Payload>()`, and the dispatcher
@@ -75,7 +76,7 @@ impl HandlerRegistry {
         E: Event,
         H: AsyncHandler<E>,
     {
-        let boxed: BoxedAsyncHandler = Box::new(AsyncHandlerWrapper::<E, H>::new(handler));
+        let boxed: BoxedAsyncHandler = Arc::new(AsyncHandlerWrapper::<E, H>::new(handler));
         self.async_by_type
             .entry(TypeId::of::<E::Payload>())
             .or_default()

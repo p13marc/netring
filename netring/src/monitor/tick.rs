@@ -7,6 +7,7 @@
 //! pump; this module is its forward declaration so the builder
 //! API stays stable.
 
+use std::sync::Arc;
 use std::time::Duration;
 
 use crate::ctx::Ctx;
@@ -14,10 +15,11 @@ use crate::error::Result;
 use crate::monitor::handler::Handler;
 use crate::protocol::event_typed::Tick;
 
-/// Boxed tick callback. The type alias keeps clippy
-/// `type_complexity` happy and lets future commits swap in a
-/// richer signature without touching every call-site.
-type BoxedTickHandler = Box<dyn FnMut(&Tick, &mut Ctx<'_>) -> Result<()> + Send>;
+/// Shared tick callback. `Arc<dyn Fn + Send + Sync>` to match
+/// `BoxedHandler` for Phase C's `Dispatcher::clone_for_shard`.
+/// The blanket `Handler<Tick, _>` impls already require `Fn`, so
+/// the trampoline's `Fn` shape is natural.
+type BoxedTickHandler = Arc<dyn Fn(&Tick, &mut Ctx<'_>) -> Result<()> + Send + Sync>;
 
 /// One registered tick handler. The stored closure boxes the
 /// caller's `Handler<Tick, _>` into a uniform call shape so the
@@ -41,7 +43,7 @@ impl TickRegistration {
     {
         Self {
             period,
-            handler: Box::new(move |tick, ctx| handler.call(tick, ctx)),
+            handler: Arc::new(move |tick, ctx| handler.call(tick, ctx)),
         }
     }
 }
@@ -69,7 +71,7 @@ mod tests {
     fn tick_registration_invokes_handler() {
         let counter = Arc::new(AtomicU32::new(0));
         let c = Arc::clone(&counter);
-        let mut reg = TickRegistration::new(Duration::from_millis(100), move |_t: &Tick| {
+        let reg = TickRegistration::new(Duration::from_millis(100), move |_t: &Tick| {
             c.fetch_add(1, Ordering::Relaxed);
             Ok(())
         });

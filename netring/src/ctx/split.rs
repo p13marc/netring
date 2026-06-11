@@ -144,6 +144,7 @@ mod tests {
         state: &'a mut StateMap,
         sink: &'a mut NoopSink,
         counters: &'a mut CounterRegistry,
+        flow_states: &'a mut crate::ctx::FlowStateRegistry,
     ) -> Ctx<'a> {
         Ctx {
             flow: None,
@@ -153,6 +154,7 @@ mod tests {
             state_map: state,
             sink,
             counters,
+            flow_states,
         }
     }
 
@@ -161,7 +163,8 @@ mod tests {
         let mut state = StateMap::default();
         let mut sink = NoopSink;
         let mut counters = CounterRegistry::default();
-        let mut ctx = make_ctx(&mut state, &mut sink, &mut counters);
+        let mut flow_states = crate::ctx::FlowStateRegistry::default();
+        let mut ctx = make_ctx(&mut state, &mut sink, &mut counters, &mut flow_states);
 
         let (s, k) = ctx.split_state_sink::<State1>();
         s.n = 9;
@@ -180,7 +183,8 @@ mod tests {
             Duration::from_secs(10),
             Duration::from_secs(1),
         ));
-        let mut ctx = make_ctx(&mut state, &mut sink, &mut counters);
+        let mut flow_states = crate::ctx::FlowStateRegistry::default();
+        let mut ctx = make_ctx(&mut state, &mut sink, &mut counters, &mut flow_states);
 
         let (s, c) = ctx.split_state_counter::<State1, u32>();
         s.n = 7;
@@ -197,7 +201,8 @@ mod tests {
             Duration::from_secs(10),
             Duration::from_secs(1),
         ));
-        let mut ctx = make_ctx(&mut state, &mut sink, &mut counters);
+        let mut flow_states = crate::ctx::FlowStateRegistry::default();
+        let mut ctx = make_ctx(&mut state, &mut sink, &mut counters, &mut flow_states);
 
         let (k, c) = ctx.split_sink_counter::<u16>();
         c.bump(42u16, Timestamp::new(0, 0));
@@ -213,7 +218,8 @@ mod tests {
             Duration::from_secs(10),
             Duration::from_secs(1),
         ));
-        let mut ctx = make_ctx(&mut state, &mut sink, &mut counters);
+        let mut flow_states = crate::ctx::FlowStateRegistry::default();
+        let mut ctx = make_ctx(&mut state, &mut sink, &mut counters, &mut flow_states);
 
         let (s, k, c) = ctx.split_state_sink_counter::<State2, u64>();
         s.m = 11;
@@ -229,7 +235,8 @@ mod tests {
         let mut state = StateMap::default();
         let mut sink = NoopSink;
         let mut counters = CounterRegistry::default();
-        let mut ctx = make_ctx(&mut state, &mut sink, &mut counters);
+        let mut flow_states = crate::ctx::FlowStateRegistry::default();
+        let mut ctx = make_ctx(&mut state, &mut sink, &mut counters, &mut flow_states);
 
         {
             let (s, _k) = ctx.split_state_sink::<State1>();

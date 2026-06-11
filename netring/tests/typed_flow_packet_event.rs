@@ -29,6 +29,7 @@ fn fresh_ctx<'a>(
     state: &'a mut StateMap,
     sink: &'a mut NoopSink,
     counters: &'a mut CounterRegistry,
+    flow_states: &'a mut netring::ctx::FlowStateRegistry,
 ) -> Ctx<'a> {
     Ctx::new(
         None,
@@ -37,6 +38,7 @@ fn fresh_ctx<'a>(
         state,
         sink,
         counters,
+        flow_states,
     )
 }
 
@@ -61,7 +63,8 @@ fn flow_packet_tcp_handler_fires_only_for_tcp_payloads() {
     let mut state = StateMap::default();
     let mut sink = NoopSink;
     let mut counters = CounterRegistry::default();
-    let mut ctx = fresh_ctx(&mut state, &mut sink, &mut counters);
+    let mut flow_states = netring::ctx::FlowStateRegistry::default();
+    let mut ctx = fresh_ctx(&mut state, &mut sink, &mut counters, &mut flow_states);
 
     let tcp_pkt = FlowPacket::<Tcp>::new(
         key(L4Proto::Tcp),
@@ -107,7 +110,8 @@ fn flow_tick_handler_receives_stats_payload() {
     let mut state = StateMap::default();
     let mut sink = NoopSink;
     let mut counters = CounterRegistry::default();
-    let mut ctx = fresh_ctx(&mut state, &mut sink, &mut counters);
+    let mut flow_states = netring::ctx::FlowStateRegistry::default();
+    let mut ctx = fresh_ctx(&mut state, &mut sink, &mut counters, &mut flow_states);
 
     let mut stats = FlowStats::default();
     stats.packets_initiator = 7;
@@ -134,7 +138,8 @@ fn parser_closed_handler_observes_kind_and_reason() {
     let mut state = StateMap::default();
     let mut sink = NoopSink;
     let mut counters = CounterRegistry::default();
-    let mut ctx = fresh_ctx(&mut state, &mut sink, &mut counters);
+    let mut flow_states = netring::ctx::FlowStateRegistry::default();
+    let mut ctx = fresh_ctx(&mut state, &mut sink, &mut counters, &mut flow_states);
 
     let evt = ParserClosed::<Tcp>::new(
         key(L4Proto::Tcp),

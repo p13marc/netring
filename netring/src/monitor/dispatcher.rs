@@ -222,6 +222,7 @@ mod tests {
         state: &'a mut StateMap,
         sink: &'a mut NoopSink,
         counters: &'a mut CounterRegistry,
+        flow_states: &'a mut crate::ctx::FlowStateRegistry,
     ) -> Ctx<'a> {
         Ctx {
             flow: None,
@@ -231,6 +232,7 @@ mod tests {
             state_map: state,
             sink,
             counters,
+            flow_states,
         }
     }
 
@@ -268,7 +270,8 @@ mod tests {
         let mut s = StateMap::default();
         let mut sink = NoopSink;
         let mut c = CounterRegistry::default();
-        let mut ctx = fresh_ctx(&mut s, &mut sink, &mut c);
+        let mut fs = crate::ctx::FlowStateRegistry::default();
+        let mut ctx = fresh_ctx(&mut s, &mut sink, &mut c, &mut fs);
 
         primary.dispatch::<u32>(&payload, &mut ctx).unwrap();
         shard.dispatch::<u32>(&payload, &mut ctx).unwrap();
@@ -288,7 +291,8 @@ mod tests {
         let mut s = StateMap::default();
         let mut k = NoopSink;
         let mut c = CounterRegistry::default();
-        let mut ctx = fresh_ctx(&mut s, &mut k, &mut c);
+        let mut fs = crate::ctx::FlowStateRegistry::default();
+        let mut ctx = fresh_ctx(&mut s, &mut k, &mut c, &mut fs);
 
         // Dispatch a payload nobody registered for — no error.
         let payload: u32 = 7;
@@ -339,7 +343,8 @@ mod tests {
         let mut s = StateMap::default();
         let mut k = NoopSink;
         let mut c = CounterRegistry::default();
-        let mut ctx = fresh_ctx(&mut s, &mut k, &mut c);
+        let mut fs = crate::ctx::FlowStateRegistry::default();
+        let mut ctx = fresh_ctx(&mut s, &mut k, &mut c, &mut fs);
 
         let u32_payload: u32 = 7;
         d.dispatch::<u32>(&u32_payload, &mut ctx).unwrap();

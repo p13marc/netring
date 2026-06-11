@@ -106,6 +106,7 @@ fn pattern_detector_macro_threads_through_publish_owned() {
     let mut state = StateMap::default();
     let mut sink = Capture::default();
     let mut counters = CounterRegistry::default();
+    let mut flow_states = netring::ctx::FlowStateRegistry::default();
     let mut ctx = Ctx::new(
         None,
         Timestamp::new(0, 0),
@@ -113,6 +114,7 @@ fn pattern_detector_macro_threads_through_publish_owned() {
         &mut state,
         &mut sink,
         &mut counters,
+        &mut flow_states,
     );
 
     let evt = dummy_evt();

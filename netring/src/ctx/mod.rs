@@ -35,7 +35,7 @@ use flowscope::Timestamp;
 mod from_ctx;
 mod split;
 
-pub use from_ctx::{CounterRegistry, StateMap};
+pub use from_ctx::{CounterRegistry, FlowStateRegistry, StateMap};
 
 use crate::correlate::TimeBucketedCounter;
 use crate::protocol::FlowKey;
@@ -95,6 +95,14 @@ pub struct Ctx<'a> {
 
     /// Per-monitor counter storage.
     pub(crate) counters: &'a mut CounterRegistry,
+
+    /// 0.21 I.7: per-flow user state. Each `T: Default + Send +
+    /// 'static` registered via
+    /// [`crate::monitor::MonitorBuilder::flow_state`] gets a
+    /// per-flow slot lazily created on
+    /// [`Self::flow_state_mut::<T>`] access. Backed by
+    /// [`flowscope::correlate::FlowStateMap`].
+    pub(crate) flow_states: &'a mut FlowStateRegistry,
 }
 
 impl<'a> Ctx<'a> {
@@ -108,6 +116,7 @@ impl<'a> Ctx<'a> {
         state_map: &'a mut StateMap,
         sink: &'a mut dyn crate::anomaly::sink::AnomalySink,
         counters: &'a mut CounterRegistry,
+        flow_states: &'a mut FlowStateRegistry,
     ) -> Self {
         Self {
             flow: None,
@@ -117,6 +126,7 @@ impl<'a> Ctx<'a> {
             state_map,
             sink,
             counters,
+            flow_states,
         }
     }
 
@@ -133,6 +143,7 @@ impl<'a> Ctx<'a> {
         state_map: &'a mut StateMap,
         sink: &'a mut dyn crate::anomaly::sink::AnomalySink,
         counters: &'a mut CounterRegistry,
+        flow_states: &'a mut FlowStateRegistry,
     ) -> Self {
         Self {
             flow,
@@ -142,6 +153,7 @@ impl<'a> Ctx<'a> {
             state_map,
             sink,
             counters,
+            flow_states,
         }
     }
 
@@ -174,6 +186,50 @@ impl<'a> Ctx<'a> {
     #[inline]
     pub fn sink_mut(&mut self) -> &mut dyn crate::anomaly::sink::AnomalySink {
         self.sink
+    }
+
+    /// 0.21 I.7: borrow per-flow user state `T` mutably.
+    ///
+    /// Returns `None` when:
+    /// - `T` was not registered via
+    ///   [`crate::monitor::MonitorBuilder::flow_state::<T>`].
+    /// - This `Ctx` doesn't carry a flow key
+    ///   ([`Tick`](crate::protocol::event_typed::Tick) and
+    ///   `TrackerAnomaly` are the only such events).
+    ///
+    /// Lazy-creates `T::default()` on first access for a given
+    /// flow key; subsequent accesses return the same `&mut T`.
+    /// The slot's last-seen timestamp refreshes on every access.
+    /// Eviction happens via `FlowStateMap::feed(FlowEvent::Ended)`
+    /// — when `FlowEnded<P>` lands, the slot for that key is
+    /// freed.
+    ///
+    /// Typical use: aggregate per-flow stats inside a
+    /// `FlowStarted<P>` handler, read+emit in `FlowEnded<P>`:
+    ///
+    /// ```ignore
+    /// .on_ctx::<FlowStarted<Tcp>>(|_e, ctx| {
+    ///     let s = ctx.flow_state_mut::<MyState>().unwrap();
+    ///     s.bytes = 0;
+    ///     Ok(())
+    /// })
+    /// .on_ctx::<FlowEnded<Tcp>>(|e, ctx| {
+    ///     let s = ctx.flow_state_mut::<MyState>().unwrap();
+    ///     ctx.emit("FlowDone", Severity::Info)
+    ///         .with_metric("bytes", s.bytes as f64)
+    ///         .emit();
+    ///     Ok(())
+    /// })
+    /// ```
+    #[inline]
+    pub fn flow_state_mut<T>(&mut self) -> Option<&mut T>
+    where
+        T: Default + Send + 'static,
+    {
+        let key = self.flow?;
+        let ts = self.ts;
+        let map = self.flow_states.get_mut::<T>()?;
+        Some(map.get_or_default(&key, ts))
     }
 
     /// Shortcut: begin an anomaly emission keyed by `kind` + `severity`
@@ -215,6 +271,7 @@ mod tests {
         state: &'a mut StateMap,
         sink: &'a mut NoopSink,
         counters: &'a mut CounterRegistry,
+        flow_states: &'a mut FlowStateRegistry,
     ) -> Ctx<'a> {
         Ctx {
             flow: None,
@@ -224,6 +281,7 @@ mod tests {
             state_map: state,
             sink,
             counters,
+            flow_states,
         }
     }
 
@@ -232,7 +290,8 @@ mod tests {
         let mut state = StateMap::default();
         let mut counters = CounterRegistry::default();
         let mut sink = NoopSink;
-        let _ctx = make_ctx(&mut state, &mut sink, &mut counters);
+        let mut flow_states = FlowStateRegistry::default();
+        let _ctx = make_ctx(&mut state, &mut sink, &mut counters, &mut flow_states);
     }
 
     #[test]
@@ -240,7 +299,8 @@ mod tests {
         let mut state = StateMap::default();
         let mut counters = CounterRegistry::default();
         let mut sink = NoopSink;
-        let mut ctx = make_ctx(&mut state, &mut sink, &mut counters);
+        let mut flow_states = FlowStateRegistry::default();
+        let mut ctx = make_ctx(&mut state, &mut sink, &mut counters, &mut flow_states);
         ctx.state_mut::<DemoState>().n = 7;
         assert_eq!(ctx.state_mut::<DemoState>().n, 7);
     }
@@ -250,7 +310,8 @@ mod tests {
         let mut state = StateMap::default();
         let mut counters = CounterRegistry::default();
         let mut sink = NoopSink;
-        let mut ctx = make_ctx(&mut state, &mut sink, &mut counters);
+        let mut flow_states = FlowStateRegistry::default();
+        let mut ctx = make_ctx(&mut state, &mut sink, &mut counters, &mut flow_states);
         let _: &mut dyn crate::anomaly::sink::AnomalySink = ctx.sink_mut();
     }
 
@@ -264,7 +325,8 @@ mod tests {
             Duration::from_secs(1),
         ));
         let mut sink = NoopSink;
-        let mut ctx = make_ctx(&mut state, &mut sink, &mut counters);
+        let mut flow_states = FlowStateRegistry::default();
+        let mut ctx = make_ctx(&mut state, &mut sink, &mut counters, &mut flow_states);
         ctx.counter_mut::<u16>().bump(42u16, Timestamp::new(0, 0));
     }
 

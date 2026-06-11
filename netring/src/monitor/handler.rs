@@ -81,6 +81,7 @@ mod tests {
         state: &'a mut StateMap,
         sink: &'a mut NoopSink,
         counters: &'a mut CounterRegistry,
+        flow_states: &'a mut crate::ctx::FlowStateRegistry,
     ) -> Ctx<'a> {
         Ctx {
             flow: None,
@@ -90,6 +91,7 @@ mod tests {
             state_map: state,
             sink,
             counters,
+            flow_states,
         }
     }
 
@@ -117,7 +119,8 @@ mod tests {
         let mut s = StateMap::default();
         let mut k = NoopSink;
         let mut c = CounterRegistry::default();
-        let mut ctx = fresh_ctx(&mut s, &mut k, &mut c);
+        let mut fs = crate::ctx::FlowStateRegistry::default();
+        let mut ctx = fresh_ctx(&mut s, &mut k, &mut c, &mut fs);
         let evt = dummy_flow_started();
 
         let h = |_p: &FlowStarted<Tcp>| Ok(());
@@ -129,7 +132,8 @@ mod tests {
         let mut s = StateMap::default();
         let mut k = NoopSink;
         let mut c = CounterRegistry::default();
-        let mut ctx = fresh_ctx(&mut s, &mut k, &mut c);
+        let mut fs = crate::ctx::FlowStateRegistry::default();
+        let mut ctx = fresh_ctx(&mut s, &mut k, &mut c, &mut fs);
         let evt = dummy_flow_started();
 
         let h = |_p: &FlowStarted<Tcp>, ctx: &mut Ctx<'_>| {
@@ -150,7 +154,8 @@ mod tests {
             Duration::from_secs(60),
             Duration::from_secs(1),
         ));
-        let mut ctx = fresh_ctx(&mut s, &mut k, &mut c);
+        let mut fs = crate::ctx::FlowStateRegistry::default();
+        let mut ctx = fresh_ctx(&mut s, &mut k, &mut c, &mut fs);
         ctx.ts = Timestamp::new(7, 0);
         let evt = dummy_flow_started();
 

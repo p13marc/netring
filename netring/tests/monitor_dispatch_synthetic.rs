@@ -31,6 +31,7 @@ fn fresh_ctx<'a>(
     state: &'a mut StateMap,
     sink: &'a mut NoopSink,
     counters: &'a mut CounterRegistry,
+    flow_states: &'a mut netring::ctx::FlowStateRegistry,
 ) -> Ctx<'a> {
     Ctx::new(
         None,
@@ -39,6 +40,7 @@ fn fresh_ctx<'a>(
         state,
         sink,
         counters,
+        flow_states,
     )
 }
 
@@ -57,7 +59,8 @@ fn sync_dispatch_fires_handler_once_per_event() {
     let mut state = StateMap::default();
     let mut sink = NoopSink;
     let mut counters = CounterRegistry::default();
-    let mut ctx = fresh_ctx(&mut state, &mut sink, &mut counters);
+    let mut flow_states = netring::ctx::FlowStateRegistry::default();
+    let mut ctx = fresh_ctx(&mut state, &mut sink, &mut counters, &mut flow_states);
 
     for _ in 0..7 {
         disp.dispatch::<FlowStarted<Tcp>>(&dummy_flow_started(12345, 80), &mut ctx)
@@ -86,7 +89,8 @@ fn sync_two_handlers_same_event_fire_in_registration_order() {
     let mut state = StateMap::default();
     let mut sink = NoopSink;
     let mut counters = CounterRegistry::default();
-    let mut ctx = fresh_ctx(&mut state, &mut sink, &mut counters);
+    let mut flow_states = netring::ctx::FlowStateRegistry::default();
+    let mut ctx = fresh_ctx(&mut state, &mut sink, &mut counters, &mut flow_states);
 
     disp.dispatch::<FlowStarted<Tcp>>(&dummy_flow_started(12345, 80), &mut ctx)
         .unwrap();
@@ -111,7 +115,8 @@ fn sync_handler_error_short_circuits_remaining() {
     let mut state = StateMap::default();
     let mut sink = NoopSink;
     let mut counters = CounterRegistry::default();
-    let mut ctx = fresh_ctx(&mut state, &mut sink, &mut counters);
+    let mut flow_states = netring::ctx::FlowStateRegistry::default();
+    let mut ctx = fresh_ctx(&mut state, &mut sink, &mut counters, &mut flow_states);
 
     let res = disp.dispatch::<FlowStarted<Tcp>>(&dummy_flow_started(12345, 80), &mut ctx);
     assert!(res.is_err());
@@ -131,7 +136,8 @@ fn unknown_event_type_is_a_silent_noop() {
     let mut state = StateMap::default();
     let mut sink = NoopSink;
     let mut counters = CounterRegistry::default();
-    let mut ctx = fresh_ctx(&mut state, &mut sink, &mut counters);
+    let mut flow_states = netring::ctx::FlowStateRegistry::default();
+    let mut ctx = fresh_ctx(&mut state, &mut sink, &mut counters, &mut flow_states);
 
     // Dispatch a payload type that has no handlers — quiet success.
     let unrelated: u64 = 42;
@@ -186,7 +192,8 @@ async fn sync_and_async_handlers_for_same_event_both_fire() {
     let mut state = StateMap::default();
     let mut sink = NoopSink;
     let mut counters = CounterRegistry::default();
-    let mut ctx = fresh_ctx(&mut state, &mut sink, &mut counters);
+    let mut flow_states = netring::ctx::FlowStateRegistry::default();
+    let mut ctx = fresh_ctx(&mut state, &mut sink, &mut counters, &mut flow_states);
 
     let evt = dummy_flow_started(12345, 80);
     for _ in 0..5 {
@@ -218,7 +225,8 @@ fn dispatcher_routes_tick_payload_to_on_tick_handler() {
     let mut state = StateMap::default();
     let mut sink = NoopSink;
     let mut counters = CounterRegistry::default();
-    let mut ctx = fresh_ctx(&mut state, &mut sink, &mut counters);
+    let mut flow_states = netring::ctx::FlowStateRegistry::default();
+    let mut ctx = fresh_ctx(&mut state, &mut sink, &mut counters, &mut flow_states);
 
     // `Tick` is `#[non_exhaustive]` so external code can't use
     // field-init syntax; the `#[doc(hidden)] pub fn new` lets

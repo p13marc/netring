@@ -79,6 +79,7 @@ mod tests {
         let mut state = StateMap::default();
         let mut sink = NoopSink;
         let mut counters = CounterRegistry::default();
+        let mut flow_states = crate::ctx::FlowStateRegistry::default();
         let mut ctx = Ctx {
             flow: None,
             ts: Timestamp::new(0, 0),
@@ -87,6 +88,7 @@ mod tests {
             state_map: &mut state,
             sink: &mut sink,
             counters: &mut counters,
+            flow_states: &mut flow_states,
         };
 
         let tick = Tick {

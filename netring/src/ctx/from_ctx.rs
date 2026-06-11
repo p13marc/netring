@@ -79,6 +79,49 @@ impl StateMap {
     }
 }
 
+/// 0.21 I.7: type-keyed map of `flowscope::correlate::FlowStateMap<T,
+/// FiveTupleKey>` instances. Each `T: Default + Send + 'static`
+/// registered via `MonitorBuilder::flow_state::<T>(idle_timeout)`
+/// gets a slot keyed on `TypeId::of::<T>()`. The slot's
+/// `FlowStateMap` lazy-creates per-flow `T::default()` instances
+/// on first access.
+#[derive(Default)]
+pub struct FlowStateRegistry {
+    by_type: FxHashMap<TypeId, Box<dyn Any + Send>>,
+}
+
+impl FlowStateRegistry {
+    /// Register a flow-state slot for `T`. Replaces any prior
+    /// registration for the same `T`.
+    pub fn register<T>(&mut self, idle_timeout: std::time::Duration)
+    where
+        T: Default + Send + 'static,
+    {
+        let map: flowscope::correlate::FlowStateMap<T, flowscope::extract::FiveTupleKey> =
+            flowscope::correlate::FlowStateMap::new(idle_timeout);
+        self.by_type.insert(TypeId::of::<T>(), Box::new(map));
+    }
+
+    /// Borrow the `T`-typed `FlowStateMap` mutably. Returns
+    /// `None` if `T` was never registered (the user forgot
+    /// `MonitorBuilder::flow_state::<T>(...)`).
+    pub fn get_mut<T>(
+        &mut self,
+    ) -> Option<&mut flowscope::correlate::FlowStateMap<T, flowscope::extract::FiveTupleKey>>
+    where
+        T: Default + Send + 'static,
+    {
+        self.by_type
+            .get_mut(&TypeId::of::<T>())
+            .and_then(|b| b.downcast_mut())
+    }
+
+    /// `true` when any flow-state slot is registered.
+    pub fn is_empty(&self) -> bool {
+        self.by_type.is_empty()
+    }
+}
+
 /// Type-keyed counter registry. Each `K: Hash + Eq + Clone`
 /// registered via `MonitorBuilder::counter::<K>(window, bucket)`
 /// gets one preallocated [`TimeBucketedCounter<K>`].

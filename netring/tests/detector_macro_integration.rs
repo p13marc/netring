@@ -31,6 +31,7 @@ fn fresh_ctx<'a>(
     state: &'a mut StateMap,
     sink: &'a mut NoopSink,
     counters: &'a mut CounterRegistry,
+    flow_states: &'a mut netring::ctx::FlowStateRegistry,
 ) -> Ctx<'a> {
     Ctx::new(
         None,
@@ -39,6 +40,7 @@ fn fresh_ctx<'a>(
         state,
         sink,
         counters,
+        flow_states,
     )
 }
 
@@ -83,7 +85,8 @@ fn detector_macro_drives_dispatch_path() {
     let mut state = StateMap::default();
     let mut sink = NoopSink;
     let mut counters = CounterRegistry::default();
-    let mut ctx = fresh_ctx(&mut state, &mut sink, &mut counters);
+    let mut flow_states = netring::ctx::FlowStateRegistry::default();
+    let mut ctx = fresh_ctx(&mut state, &mut sink, &mut counters, &mut flow_states);
 
     let evt = dummy_flow_started();
     for _ in 0..6 {
@@ -115,7 +118,8 @@ fn detector_macro_guard_short_circuits_emit() {
     let mut state = StateMap::default();
     let mut sink = NoopSink;
     let mut counters = CounterRegistry::default();
-    let mut ctx = fresh_ctx(&mut state, &mut sink, &mut counters);
+    let mut flow_states = netring::ctx::FlowStateRegistry::default();
+    let mut ctx = fresh_ctx(&mut state, &mut sink, &mut counters, &mut flow_states);
 
     // dummy_flow_started uses port 22 → fires.
     disp.dispatch::<FlowStarted<Tcp>>(&dummy_flow_started(), &mut ctx)

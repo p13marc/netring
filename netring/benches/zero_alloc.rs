@@ -24,7 +24,7 @@ use netring::anomaly::Severity;
 use netring::anomaly::shipped_sinks::StdoutSink;
 use netring::anomaly::sink::AnomalySink;
 use netring::correlate::TimeBucketedCounter;
-use netring::ctx::{CounterRegistry, Ctx, StateMap};
+use netring::ctx::{CounterRegistry, Ctx, FlowStateRegistry, StateMap};
 use netring::monitor::{Dispatcher, HandlerRegistry};
 use netring::protocol::builtin::Tcp;
 use netring::protocol::event_typed::FlowStarted;
@@ -76,9 +76,10 @@ fn drive(
     state: &mut StateMap,
     sink: &mut dyn AnomalySink,
     counters: &mut CounterRegistry,
+    flow_states: &mut FlowStateRegistry,
     evt: &FlowStarted<Tcp>,
 ) {
-    let mut ctx = Ctx::new_for_bench(Timestamp::new(0, 0), state, sink, counters);
+    let mut ctx = Ctx::new_for_bench(Timestamp::new(0, 0), state, sink, counters, flow_states);
     dispatcher
         .dispatch::<FlowStarted<Tcp>>(evt, &mut ctx)
         .expect("dispatch");
@@ -99,6 +100,7 @@ fn main() {
         Duration::from_secs(1),
     ));
 
+    let mut flow_states = FlowStateRegistry::default();
     let evt = dummy_event();
 
     // Warm-up: let any one-time allocations settle (Vec growth,
@@ -106,12 +108,26 @@ fn main() {
     // first-iteration startup costs would dominate the steady-state
     // measurement.
     for _ in 0..10_000 {
-        drive(&mut dispatcher, &mut state, &mut sink, &mut counters, &evt);
+        drive(
+            &mut dispatcher,
+            &mut state,
+            &mut sink,
+            &mut counters,
+            &mut flow_states,
+            &evt,
+        );
     }
 
     let before = dhat::HeapStats::get();
     for _ in 0..100_000 {
-        drive(&mut dispatcher, &mut state, &mut sink, &mut counters, &evt);
+        drive(
+            &mut dispatcher,
+            &mut state,
+            &mut sink,
+            &mut counters,
+            &mut flow_states,
+            &evt,
+        );
     }
     let after = dhat::HeapStats::get();
 

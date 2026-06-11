@@ -44,7 +44,7 @@ use flowscope::extract::FiveTuple;
 
 use crate::anomaly::sink::{AnomalySink, NoopSink};
 use crate::correlate::TimeBucketedCounter;
-use crate::ctx::{CounterRegistry, StateMap};
+use crate::ctx::{CounterRegistry, FlowStateRegistry, StateMap};
 use crate::error::{BuildError, Result};
 use crate::layer::Layer;
 use crate::protocol::Protocol;
@@ -109,6 +109,11 @@ pub struct Monitor {
     /// [`Self::replay`] / [`Self::replay_with_config`].
     #[cfg(all(feature = "pcap", feature = "tokio"))]
     pub(crate) pcap_source_path: Option<std::path::PathBuf>,
+    /// 0.21 I.7: per-flow user-state slots registered via
+    /// [`MonitorBuilder::flow_state`]. Each entry's
+    /// `FlowStateMap` lazy-creates `T::default()` per-flow on
+    /// first `ctx.flow_state_mut::<T>()` access.
+    pub(crate) flow_states: FlowStateRegistry,
 }
 
 impl Monitor {
@@ -312,6 +317,8 @@ pub struct MonitorBuilder {
     /// can short-circuit `NoInterface`.
     #[cfg(all(feature = "pcap", feature = "tokio"))]
     pcap_source_path: Option<std::path::PathBuf>,
+    /// 0.21 I.7: per-flow state slot registry.
+    flow_states: FlowStateRegistry,
 }
 
 impl MonitorBuilder {
@@ -659,6 +666,39 @@ impl MonitorBuilder {
         self
     }
 
+    /// 0.21 I.7: register a per-flow state slot of type `T`.
+    ///
+    /// `idle_timeout` mirrors the underlying flow tracker's
+    /// idle-timeout for eviction cadence — a slot ages out of
+    /// the [`flowscope::correlate::FlowStateMap`] after this
+    /// many seconds of inactivity.
+    ///
+    /// `T: Default` because the slot lazily creates on first
+    /// `ctx.flow_state_mut::<T>()` access. For `T` types
+    /// without a `Default` impl, wrap with
+    /// `Default`-implementing newtype or pre-register
+    /// per-handler via [`Self::state_init`] (which is global
+    /// per-monitor, not per-flow).
+    ///
+    /// ```ignore
+    /// Monitor::builder()
+    ///     .interface("eth0")
+    ///     .flow_state::<MyPerFlowState>(Duration::from_secs(60))
+    ///     .protocol::<Tcp>()
+    ///     .on_ctx::<FlowStarted<Tcp>>(|_e, ctx| {
+    ///         let s = ctx.flow_state_mut::<MyPerFlowState>().unwrap();
+    ///         s.bytes = 0;
+    ///         Ok(())
+    ///     });
+    /// ```
+    pub fn flow_state<T>(mut self, idle_timeout: Duration) -> Self
+    where
+        T: Default + Send + 'static,
+    {
+        self.flow_states.register::<T>(idle_timeout);
+        self
+    }
+
     /// Register a [`TimeBucketedCounter<K>`] with the given
     /// sliding-window + per-bucket widths.
     pub fn counter<K>(mut self, window: Duration, bucket: Duration) -> Self
@@ -790,6 +830,7 @@ impl MonitorBuilder {
             broadcast_handles: self.broadcast_handles,
             #[cfg(all(feature = "pcap", feature = "tokio"))]
             pcap_source_path: self.pcap_source_path,
+            flow_states: self.flow_states,
         })
     }
 }

@@ -79,6 +79,7 @@ pub(crate) async fn run_loop(monitor: Monitor, stop: StopCondition) -> Result<()
         broadcast_handles: _,
         #[cfg(all(feature = "pcap", feature = "tokio"))]
             pcap_source_path: _,
+        mut flow_states,
     } = monitor;
     // Borrow the monitor name as `&str` for the run loop's
     // dispatch sites. The owned `Box<str>` lives in this stack
@@ -144,6 +145,7 @@ pub(crate) async fn run_loop(monitor: Monitor, stop: StopCondition) -> Result<()
                     &mut state_map,
                     &mut counters,
                     monitor_name_borrow,
+                    &mut flow_states,
                 )
                 .await?;
                 continue;
@@ -174,6 +176,7 @@ pub(crate) async fn run_loop(monitor: Monitor, stop: StopCondition) -> Result<()
                     evt.clone(),
                     source,
                     monitor_name_borrow,
+                    &mut flow_states,
                 )?;
                 dispatch_lifecycle_async(&mut dispatcher, evt).await?;
             }
@@ -187,6 +190,7 @@ pub(crate) async fn run_loop(monitor: Monitor, stop: StopCondition) -> Result<()
                     &mut state_map,
                     sink.as_mut(),
                     &mut counters,
+                    &mut flow_states,
                 );
                 // 0.21 D.4: stamp the monitor name on this ctx so
                 // typed-message handlers see it too. `Ctx::new`
@@ -215,6 +219,7 @@ pub(crate) async fn run_loop(monitor: Monitor, stop: StopCondition) -> Result<()
             &mut protocol_slots,
             monitor_name_borrow,
             deadline,
+            &mut flow_states,
         )
         .await?;
     }
@@ -254,6 +259,7 @@ pub(crate) async fn replay_loop(
         drain_timeout,
         broadcast_handles: _,
         pcap_source_path: _,
+        mut flow_states,
     } = monitor;
     let monitor_name_borrow: Option<&str> = monitor_name.as_deref();
 
@@ -285,6 +291,7 @@ pub(crate) async fn replay_loop(
                 evt.clone(),
                 SourceIdx(0),
                 monitor_name_borrow,
+                &mut flow_states,
             )?;
             dispatch_lifecycle_async(&mut dispatcher, evt).await?;
         }
@@ -297,6 +304,7 @@ pub(crate) async fn replay_loop(
                 &mut state_map,
                 sink.as_mut(),
                 &mut counters,
+                &mut flow_states,
             );
             ctx.monitor_name = monitor_name_borrow;
             slot.drain_and_dispatch(&mut dispatcher, &mut ctx)?;
@@ -317,6 +325,7 @@ pub(crate) async fn replay_loop(
             &mut protocol_slots,
             monitor_name_borrow,
             deadline,
+            &mut flow_states,
         )
         .await?;
     }
@@ -352,6 +361,7 @@ async fn drain_phase(
     protocol_slots: &mut [Box<dyn crate::monitor::ProtocolSlot>],
     monitor_name: Option<&str>,
     deadline: Instant,
+    flow_states: &mut crate::ctx::FlowStateRegistry,
 ) -> Result<()> {
     // Step 1: drain the central tracker.
     let mut leftover: Vec<FsEvent<FlowKey>> = Vec::new();
@@ -368,6 +378,7 @@ async fn drain_phase(
             evt.clone(),
             SourceIdx(0),
             monitor_name,
+            flow_states,
         )?;
         dispatch_lifecycle_async(dispatcher, evt).await?;
     }
@@ -382,7 +393,15 @@ async fn drain_phase(
         if Instant::now() >= deadline {
             return Ok(());
         }
-        let mut ctx = Ctx::new(None, ts, SourceIdx(0), state_map, sink, counters);
+        let mut ctx = Ctx::new(
+            None,
+            ts,
+            SourceIdx(0),
+            state_map,
+            sink,
+            counters,
+            flow_states,
+        );
         ctx.monitor_name = monitor_name;
         slot.drain_and_dispatch(dispatcher, &mut ctx)?;
     }
@@ -485,6 +504,7 @@ async fn next_tick(intervals: &mut [tokio::time::Interval]) -> usize {
 ///    the event.
 ///
 /// Both run in the order: closure first, then dispatcher.
+#[allow(clippy::too_many_arguments)]
 async fn fire_tick(
     tick_idx: usize,
     tick_handlers: &mut [crate::monitor::tick::TickRegistration],
@@ -493,6 +513,7 @@ async fn fire_tick(
     state_map: &mut StateMap,
     counters: &mut CounterRegistry,
     monitor_name: Option<&str>,
+    flow_states: &mut crate::ctx::FlowStateRegistry,
 ) -> Result<()> {
     let reg = &mut tick_handlers[tick_idx];
     let tick = Tick {
@@ -500,12 +521,28 @@ async fn fire_tick(
         period: reg.period,
     };
     {
-        let mut ctx = Ctx::new(None, tick.now, SourceIdx(0), state_map, sink, counters);
+        let mut ctx = Ctx::new(
+            None,
+            tick.now,
+            SourceIdx(0),
+            state_map,
+            sink,
+            counters,
+            flow_states,
+        );
         ctx.monitor_name = monitor_name;
         (reg.handler)(&tick, &mut ctx)?;
     }
     {
-        let mut ctx = Ctx::new(None, tick.now, SourceIdx(0), state_map, sink, counters);
+        let mut ctx = Ctx::new(
+            None,
+            tick.now,
+            SourceIdx(0),
+            state_map,
+            sink,
+            counters,
+            flow_states,
+        );
         ctx.monitor_name = monitor_name;
         dispatcher.dispatch::<Tick>(&tick, &mut ctx)?;
     }
@@ -726,6 +763,7 @@ async fn dispatch_lifecycle_async(
     Ok(())
 }
 
+#[allow(clippy::too_many_arguments)]
 fn dispatch_lifecycle(
     dispatcher: &mut Dispatcher,
     sink: &mut dyn AnomalySink,
@@ -734,6 +772,7 @@ fn dispatch_lifecycle(
     evt: FsEvent<FlowKey>,
     source: SourceIdx,
     monitor_name: Option<&str>,
+    flow_states: &mut crate::ctx::FlowStateRegistry,
 ) -> Result<()> {
     // Macro inlines the Ctx construction at each match arm so the
     // borrow checker can shorten each `&mut` borrow to the
@@ -749,6 +788,7 @@ fn dispatch_lifecycle(
                 state_map: &mut *state_map,
                 sink: &mut *sink,
                 counters: &mut *counters,
+                flow_states: &mut *flow_states,
             };
             dispatcher.dispatch::<$ty>(&$payload, &mut ctx)?;
         }};

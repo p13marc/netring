@@ -44,6 +44,7 @@ fn handler_sees_monitor_name_through_ctx() {
     let mut state = StateMap::default();
     let mut sink = NoopSink;
     let mut counters = CounterRegistry::default();
+    let mut flow_states = netring::ctx::FlowStateRegistry::default();
 
     // Production sites construct Ctx via struct literal so the
     // monitor name lands on the right field. This test mirrors
@@ -56,6 +57,7 @@ fn handler_sees_monitor_name_through_ctx() {
         &mut state,
         &mut sink,
         &mut counters,
+        &mut flow_states,
     );
     ctx.monitor_name = Some("ingest-east");
 

@@ -335,6 +335,7 @@ mod tests {
         state: &'a mut StateMap,
         sink: &'a mut NoopSink,
         counters: &'a mut CounterRegistry,
+        flow_states: &'a mut crate::ctx::FlowStateRegistry,
     ) -> Ctx<'a> {
         Ctx {
             flow: None,
@@ -344,6 +345,7 @@ mod tests {
             state_map: state,
             sink,
             counters,
+            flow_states,
         }
     }
 
@@ -375,7 +377,8 @@ mod tests {
         let mut s = StateMap::default();
         let mut k = NoopSink;
         let mut cr = CounterRegistry::default();
-        let mut ctx = fresh_ctx(&mut s, &mut k, &mut cr);
+        let mut fs = crate::ctx::FlowStateRegistry::default();
+        let mut ctx = fresh_ctx(&mut s, &mut k, &mut cr, &mut fs);
         let evt = dummy_flow_started();
         Handler::<FlowStarted<Tcp>, crate::monitor::PayloadCtx>::call(&det, &evt, &mut ctx)
             .unwrap();
@@ -400,7 +403,8 @@ mod tests {
         let mut s = StateMap::default();
         let mut k = NoopSink;
         let mut cr = CounterRegistry::default();
-        let mut ctx = fresh_ctx(&mut s, &mut k, &mut cr);
+        let mut fs = crate::ctx::FlowStateRegistry::default();
+        let mut ctx = fresh_ctx(&mut s, &mut k, &mut cr, &mut fs);
         // Event is L4=Tcp; matches says L4=Udp → fires zero times.
         let evt = dummy_flow_started();
         Handler::<FlowStarted<Tcp>, crate::monitor::PayloadCtx>::call(&det, &evt, &mut ctx)
@@ -452,7 +456,8 @@ mod tests {
         let mut s = StateMap::default();
         let mut k = NoopSink;
         let mut cr = CounterRegistry::default();
-        let mut ctx = fresh_ctx(&mut s, &mut k, &mut cr);
+        let mut fs = crate::ctx::FlowStateRegistry::default();
+        let mut ctx = fresh_ctx(&mut s, &mut k, &mut cr, &mut fs);
 
         disp.dispatch::<FlowStarted<Tcp>>(&dummy_flow_started(), &mut ctx)?;
         assert_eq!(counter.load(Ordering::Relaxed), 1);

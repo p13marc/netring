@@ -70,3 +70,8 @@ pub use builtin::FlowAnomalyRule;
 pub use key::{Key, KeyFields};
 pub use monitor::AnomalyMonitor;
 pub use rule::{Anomaly, AnomalyContext, AnomalyRule, Severity};
+
+/// 0.21 A.10 — canonical owned-anomaly value type is now upstream.
+/// Re-exported here so `crate::anomaly::OwnedAnomaly` works regardless
+/// of which sink consumed it.
+pub use flowscope::OwnedAnomaly;

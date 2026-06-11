@@ -235,43 +235,35 @@ impl AnomalySink for TracingSink {
 
 // ─── ChannelSink ────────────────────────────────────────────────
 
-/// One-line owned snapshot of an anomaly — what [`ChannelSink`]
-/// forwards through its channel. The only shipped sink that
-/// allocates per anomaly (intentional: it has to retain the
-/// payload past the dispatch frame).
-#[derive(Debug, Clone)]
-pub struct OwnedAnomaly {
-    /// Stable detector slug.
-    pub kind: &'static str,
-    /// Severity tier.
-    pub severity: Severity,
-    /// Event timestamp.
-    pub ts: Timestamp,
-    /// Formatted key, if any.
-    pub key: Option<String>,
-    /// `(label, value)` text observations.
-    pub observations: Vec<(&'static str, String)>,
-    /// `(label, value)` numeric metrics.
-    pub metrics: Vec<(&'static str, f64)>,
-}
-
-/// Forwards each anomaly to a tokio mpsc channel as an
-/// [`OwnedAnomaly`]. Use when a downstream task — exporter,
-/// alerter, archiver — needs to retain the anomaly past the
-/// dispatch frame.
+/// Forwards each anomaly to a tokio mpsc channel as a
+/// [`flowscope::OwnedAnomaly`]. Use when a downstream task —
+/// exporter, alerter, archiver — needs to retain the anomaly
+/// past the dispatch frame.
+///
+/// 0.21 A.10 — `OwnedAnomaly` is now the canonical upstream
+/// value type. Structured 5-tuple fields (`src_ip`, `src_port`,
+/// `dest_ip`, `dest_port`, `proto`) are populated when the
+/// caller's key downcasts to [`flowscope::extract::FiveTupleKey`]
+/// (the common path for flow-shape detectors); other key types
+/// (`IpAddr`, `u32`, etc.) leave the 5-tuple fields `None` —
+/// the consumer can still recover the human render via the
+/// `flowscope_kind` bridge or the originating handler context.
 pub struct ChannelSink {
-    tx: tokio::sync::mpsc::UnboundedSender<OwnedAnomaly>,
+    tx: tokio::sync::mpsc::UnboundedSender<flowscope::OwnedAnomaly>,
 }
 
 impl ChannelSink {
     /// Wrap an existing sender. The matching receiver typically
     /// lives in a spawned task that drains and re-emits.
-    pub fn new(tx: tokio::sync::mpsc::UnboundedSender<OwnedAnomaly>) -> Self {
+    pub fn new(tx: tokio::sync::mpsc::UnboundedSender<flowscope::OwnedAnomaly>) -> Self {
         Self { tx }
     }
 
     /// Convenience constructor — returns `(sink, receiver)`.
-    pub fn channel() -> (Self, tokio::sync::mpsc::UnboundedReceiver<OwnedAnomaly>) {
+    pub fn channel() -> (
+        Self,
+        tokio::sync::mpsc::UnboundedReceiver<flowscope::OwnedAnomaly>,
+    ) {
         let (tx, rx) = tokio::sync::mpsc::unbounded_channel();
         (Self::new(tx), rx)
     }
@@ -287,17 +279,22 @@ impl AnomalySink for ChannelSink {
         observations: &[(&'static str, Cow<'_, str>)],
         metrics: &[(&'static str, f64)],
     ) {
-        let owned = OwnedAnomaly {
-            kind,
-            severity,
-            ts,
-            key: key.map(|k| format!("{k:?}")),
-            observations: observations
-                .iter()
-                .map(|(l, v)| (*l, v.to_string()))
-                .collect(),
-            metrics: metrics.iter().map(|(l, v)| (*l, *v)).collect(),
-        };
+        let mut owned = flowscope::OwnedAnomaly::new(kind, severity.into(), ts);
+        if let Some(k) = key {
+            // Structured 5-tuple flatten via KeyFields downcast.
+            if let Some(fkey) = k
+                .as_any()
+                .downcast_ref::<flowscope::extract::FiveTupleKey>()
+            {
+                owned = owned.with_key(fkey);
+            }
+        }
+        for (label, value) in observations {
+            owned = owned.with_observation(label, value.to_string());
+        }
+        for (label, value) in metrics {
+            owned = owned.with_metric(label, *value);
+        }
         let _ = self.tx.send(owned);
     }
 }
@@ -360,10 +357,13 @@ mod tests {
             .with_metric("b", 3.0)
             .emit();
         let received = rx.recv().await.expect("channel did not deliver");
+        // 0.21 A.10: OwnedAnomaly now sourced from flowscope. `kind`
+        // is `Cow<'static, str>`; `severity` is flowscope's enum.
         assert_eq!(received.kind, "Forwarded");
-        assert_eq!(received.severity, Severity::Critical);
-        assert_eq!(received.observations, vec![("a", "x".to_string())]);
-        assert_eq!(received.metrics, vec![("b", 3.0)]);
+        assert_eq!(received.severity, flowscope::event::Severity::Critical);
+        assert_eq!(received.observations[0].0, "a");
+        assert_eq!(received.observations[0].1.as_ref(), "x");
+        assert_eq!(received.metrics[0], ("b", 3.0));
     }
 
     #[cfg(feature = "serde")]

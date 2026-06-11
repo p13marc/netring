@@ -201,6 +201,36 @@ impl<'sink> AnomalyWriter<'sink> {
         );
     }
 
+    /// Materialize as a [`flowscope::OwnedAnomaly`] instead of
+    /// firing the sink. The writer's accumulated state — kind,
+    /// severity, ts, observations, metrics — is folded into the
+    /// returned owned value. Structured 5-tuple fields (`src_ip`,
+    /// `dest_port`, …) are populated when the attached key
+    /// downcasts to [`flowscope::extract::FiveTupleKey`].
+    ///
+    /// Use when retaining the anomaly past the dispatch frame
+    /// (batch upload, cross-task channel, custom sink) without
+    /// involving an intermediate [`AnomalySink`]. The caller owns
+    /// what happens next; no sink callback is invoked.
+    pub fn emit_owned(self) -> flowscope::OwnedAnomaly {
+        let mut owned = flowscope::OwnedAnomaly::new(self.kind, self.severity.into(), self.ts);
+        if let Some(repr) = self.key_repr
+            && let Some(fkey) = repr
+                .key
+                .as_any()
+                .downcast_ref::<flowscope::extract::FiveTupleKey>()
+        {
+            owned = owned.with_key(fkey);
+        }
+        for (label, value) in self.obs {
+            owned = owned.with_observation(label, value.into_owned());
+        }
+        for (label, value) in self.metrics {
+            owned = owned.with_metric(label, value);
+        }
+        owned
+    }
+
     /// Number of observations queued. Useful for the saturation
     /// tests + diagnostics.
     pub fn observation_count(&self) -> usize {
@@ -345,6 +375,48 @@ mod tests {
         }
         w.emit();
         assert_eq!(calls.borrow()[0].metric_count, ANOMALY_INLINE_CAPACITY);
+    }
+
+    #[test]
+    fn writer_emit_owned_materializes_without_firing_sink() {
+        let mut sink = NoopSink;
+        let owned = sink
+            .begin("Materialize", Severity::Warning, Timestamp::new(7, 0))
+            .with("note", "captured")
+            .with_metric("rate", 4.5)
+            .emit_owned();
+        // Same `kind`, severity-mapped to flowscope's enum, ts intact.
+        assert_eq!(owned.kind, "Materialize");
+        assert_eq!(owned.severity, flowscope::event::Severity::Warning);
+        assert_eq!(owned.ts, Timestamp::new(7, 0));
+        // Observation + metric round-tripped.
+        assert_eq!(owned.observations.len(), 1);
+        assert_eq!(owned.observations[0].0, "note");
+        assert_eq!(owned.observations[0].1.as_ref(), "captured");
+        assert_eq!(owned.metrics[0], ("rate", 4.5));
+        // No key attached → 5-tuple fields default to None.
+        assert!(owned.src_ip.is_none() && owned.dest_ip.is_none());
+    }
+
+    #[test]
+    fn writer_emit_owned_with_five_tuple_key_populates_structured_fields() {
+        use std::net::{IpAddr, Ipv4Addr, SocketAddr};
+        let key = flowscope::extract::FiveTupleKey {
+            proto: flowscope::L4Proto::Tcp,
+            a: SocketAddr::new(IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1)), 12345),
+            b: SocketAddr::new(IpAddr::V4(Ipv4Addr::new(10, 0, 0, 2)), 443),
+        };
+        let mut sink = NoopSink;
+        let owned = sink
+            .begin("PortScan", Severity::Error, Timestamp::new(0, 0))
+            .with_key(&key)
+            .emit_owned();
+        // KeyFields downcast populated the 5-tuple fields.
+        assert_eq!(owned.src_ip, Some(IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1))));
+        assert_eq!(owned.src_port, Some(12345));
+        assert_eq!(owned.dest_ip, Some(IpAddr::V4(Ipv4Addr::new(10, 0, 0, 2))));
+        assert_eq!(owned.dest_port, Some(443));
+        assert_eq!(owned.proto, Some("TCP"));
     }
 
     #[test]

@@ -19,6 +19,20 @@ impl From<flowscope::event::Severity> for Severity {
     }
 }
 
+/// 0.21 A.10 — inverse direction lets netring's sink chain forward
+/// into `flowscope::OwnedAnomaly` (whose `new` constructor takes
+/// `flowscope::event::Severity`) without manual matching.
+impl From<Severity> for flowscope::event::Severity {
+    fn from(s: Severity) -> Self {
+        match s {
+            Severity::Info => flowscope::event::Severity::Info,
+            Severity::Warning => flowscope::event::Severity::Warning,
+            Severity::Error => flowscope::event::Severity::Error,
+            Severity::Critical => flowscope::event::Severity::Critical,
+        }
+    }
+}
+
 /// Severity tier carried on every [`Anomaly`].
 ///
 /// Rule authors pick the tier; the [`AnomalyMonitor`](super::AnomalyMonitor)

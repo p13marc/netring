@@ -37,10 +37,11 @@ pub use crate::protocol::event_typed::{
 pub use crate::ctx::{Ctx, SourceIdx};
 
 // ─── Anomaly emission ────────────────────────────────────────────
+pub use crate::anomaly::OwnedAnomaly;
 pub use crate::anomaly::Severity;
 #[cfg(feature = "serde")]
 pub use crate::anomaly::shipped_sinks::StdoutJsonSink;
-pub use crate::anomaly::shipped_sinks::{ChannelSink, OwnedAnomaly, StdoutSink, TracingSink};
+pub use crate::anomaly::shipped_sinks::{ChannelSink, StdoutSink, TracingSink};
 pub use crate::anomaly::sink::{AnomalySink, AnomalySinkExt, AnomalyWriter, NoopSink};
 
 // ─── Middleware (Phase D) ────────────────────────────────────────

@@ -465,6 +465,11 @@ name = "monitor_ech_adoption"
 path = "examples/monitor/ech_adoption.rs"
 required-features = ["tokio", "flow", "tls"]
 
+[[example]]
+name = "monitor_port_scan"
+path = "examples/monitor/port_scan.rs"
+required-features = ["tokio", "flow"]
+
 # util/ — helper companions for the demos
 [[example]]
 name = "synthetic_traffic"

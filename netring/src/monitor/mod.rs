@@ -66,6 +66,9 @@ pub use tick::TickRegistration;
 pub mod subscribe;
 pub use subscribe::EventStream;
 
+pub mod shard;
+pub use shard::ShardedRunner;
+
 /// The 0.20 top-level monitor — a fully-constructed graph of
 /// (driver, dispatcher, parser-slots, state) that runs to a
 /// stop condition.
@@ -114,6 +117,15 @@ pub struct Monitor {
     /// `FlowStateMap` lazy-creates `T::default()` per-flow on
     /// first `ctx.flow_state_mut::<T>()` access.
     pub(crate) flow_states: FlowStateRegistry,
+    /// 0.21 C: optional AF_PACKET fanout config. When set, the
+    /// run loop opens each `AsyncCapture` via `Capture::builder()
+    /// .fanout(mode, group_id)` instead of the plain
+    /// `AsyncCapture::open(iface)`. Used both by single-shard
+    /// monitors (just one ring tagged with a fanout group_id) and
+    /// by [`crate::monitor::shard::ShardedRunner`] (each shard
+    /// thread shares the same group_id, kernel hashes packets to
+    /// shards).
+    pub(crate) fanout: Option<(crate::config::FanoutMode, u16)>,
 }
 
 impl Monitor {
@@ -250,6 +262,24 @@ impl Monitor {
     pub fn detector_names(&self) -> impl Iterator<Item = &'static str> + '_ {
         self.detector_names.iter().copied()
     }
+
+    /// 0.21 C: how many shards this monitor represents.
+    ///
+    /// A regular [`Monitor`] returns `1` — it is a single shard.
+    /// Multi-shard execution lives in
+    /// [`crate::monitor::ShardedRunner`] which spawns N copies of
+    /// independent monitors. This accessor exists for symmetry
+    /// with `ShardedRunner::shard_count` so user code can
+    /// instrument without branching on the runner type.
+    pub fn shard_count(&self) -> usize {
+        1
+    }
+
+    /// 0.21 C: the AF_PACKET fanout config set via
+    /// [`MonitorBuilder::fanout`], or `None` if not configured.
+    pub fn fanout(&self) -> Option<(crate::config::FanoutMode, u16)> {
+        self.fanout
+    }
 }
 
 impl std::fmt::Debug for Monitor {
@@ -319,6 +349,9 @@ pub struct MonitorBuilder {
     pcap_source_path: Option<std::path::PathBuf>,
     /// 0.21 I.7: per-flow state slot registry.
     flow_states: FlowStateRegistry,
+    /// 0.21 C: optional AF_PACKET fanout config; see
+    /// [`Monitor::fanout`].
+    fanout: Option<(crate::config::FanoutMode, u16)>,
 }
 
 impl MonitorBuilder {
@@ -699,6 +732,29 @@ impl MonitorBuilder {
         self
     }
 
+    /// 0.21 C: tag this monitor's [`crate::AsyncCapture`] with an
+    /// AF_PACKET fanout group.
+    ///
+    /// Single-shard usage: lets the kernel distribute packets
+    /// across multiple `Capture`s sharing the same group_id (e.g.
+    /// one Capture per CPU, all calling this with the same id).
+    /// netring's `ShardedRunner` uses this internally to wire its
+    /// per-shard captures into one shared fanout group.
+    ///
+    /// `group_id` must be the same across all shards/captures
+    /// that should share traffic; the kernel hashes per the
+    /// `mode` (Cpu, Hash, EBPF, …) to select the destination
+    /// ring for each packet.
+    ///
+    /// Most users on a single shard don't need this — just
+    /// `.interface("eth0")` opens a normal ring. Set this only
+    /// when interoperating with other AF_PACKET consumers or
+    /// running [`crate::monitor::shard::ShardedRunner`].
+    pub fn fanout(mut self, mode: crate::config::FanoutMode, group_id: u16) -> Self {
+        self.fanout = Some((mode, group_id));
+        self
+    }
+
     /// Register a [`TimeBucketedCounter<K>`] with the given
     /// sliding-window + per-bucket widths.
     pub fn counter<K>(mut self, window: Duration, bucket: Duration) -> Self
@@ -831,6 +887,7 @@ impl MonitorBuilder {
             #[cfg(all(feature = "pcap", feature = "tokio"))]
             pcap_source_path: self.pcap_source_path,
             flow_states: self.flow_states,
+            fanout: self.fanout,
         })
     }
 }

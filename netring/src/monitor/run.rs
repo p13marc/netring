@@ -80,6 +80,7 @@ pub(crate) async fn run_loop(monitor: Monitor, stop: StopCondition) -> Result<()
         #[cfg(all(feature = "pcap", feature = "tokio"))]
             pcap_source_path: _,
         mut flow_states,
+        fanout,
     } = monitor;
     // Borrow the monitor name as `&str` for the run loop's
     // dispatch sites. The owned `Box<str>` lives in this stack
@@ -94,7 +95,20 @@ pub(crate) async fn run_loop(monitor: Monitor, stop: StopCondition) -> Result<()
     // same latency as the prior single-cap path.
     let mut streams: Vec<PacketStream<_>> = Vec::with_capacity(interfaces.len());
     for iface in &interfaces {
-        let cap = AsyncCapture::open(iface)?;
+        // 0.21 C: when the user set a fanout (single-shard or
+        // sharded via ShardedRunner), open each ring with the
+        // configured fanout group. Plain `.interface(iface)` with
+        // no fanout falls back to `AsyncCapture::open`.
+        let cap = match fanout {
+            Some((mode, group_id)) => {
+                let rx = crate::Capture::builder()
+                    .interface(iface)
+                    .fanout(mode, group_id)
+                    .build()?;
+                AsyncCapture::new(rx)?
+            }
+            None => AsyncCapture::open(iface)?,
+        };
         streams.push(cap.into_stream());
     }
 
@@ -260,6 +274,7 @@ pub(crate) async fn replay_loop(
         broadcast_handles: _,
         pcap_source_path: _,
         mut flow_states,
+        fanout: _,
     } = monitor;
     let monitor_name_borrow: Option<&str> = monitor_name.as_deref();
 

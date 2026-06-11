@@ -97,6 +97,10 @@ http = ["flow", "flowscope/http"]
 dns = ["flow", "flowscope/dns"]
 tls = ["flow", "flowscope/tls"]
 icmp = ["flow", "flowscope/icmp"]
+# 0.21 I.5 — pass-through for flowscope's `detect::file` module
+# (Sha256Sink / Md5Sink / FileType). No extra deps beyond
+# `sha2` (already pulled by `flowscope/file-hash`).
+file-hash = ["flowscope/file-hash"]
 # Umbrella for everything flowscope-side.
 all-parsers = ["http", "dns", "tls", "icmp"]
 
@@ -474,6 +478,21 @@ required-features = ["tokio", "flow"]
 name = "monitor_pcap_replay"
 path = "examples/monitor/pcap_replay.rs"
 required-features = ["tokio", "flow", "pcap"]
+
+[[example]]
+name = "monitor_beacon_detector"
+path = "examples/monitor/beacon_detector.rs"
+required-features = ["tokio", "flow"]
+
+[[example]]
+name = "monitor_dga_query"
+path = "examples/monitor/dga_query.rs"
+required-features = ["tokio", "flow", "dns"]
+
+[[example]]
+name = "monitor_file_hash_dfir"
+path = "examples/monitor/file_hash_dfir.rs"
+required-features = ["tokio", "flow", "http", "file-hash"]
 
 # util/ — helper companions for the demos
 [[example]]

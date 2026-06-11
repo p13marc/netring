@@ -58,6 +58,17 @@ pub struct Ctx<'a> {
     /// stamp a per-message key without lifetime gymnastics —
     /// borrowing through `Option<&'a FlowKey>` would require a
     /// place to anchor the borrow that outlives the `Ctx`.
+    ///
+    /// **Prefer `payload.key` over `ctx.flow` when the event
+    /// payload carries one.** For lifecycle events
+    /// (`FlowStarted/Ended/Established<P>`) and message events
+    /// (`HttpMessage`, `DnsMessage`, …), `payload.key` is the
+    /// typed value with no `Option` indirection. For non-flow
+    /// events (`Tick`) `ctx.flow` is `None`. The same key is
+    /// available through both paths for flow events; the field
+    /// is preserved as a stable accessor for cross-cutting
+    /// handlers (e.g. a tick handler that logs the most recent
+    /// flow, where the typed payload doesn't carry one).
     pub flow: Option<FlowKey>,
 
     /// Timestamp of the current event.

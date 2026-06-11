@@ -80,6 +80,11 @@ pub struct Monitor {
     pub(crate) counters: CounterRegistry,
     pub(crate) sink: Box<dyn AnomalySink>,
     pub(crate) tick_handlers: Vec<TickRegistration>,
+    /// 0.21 A.9: registration-order detector slugs from
+    /// `MonitorBuilder::detect(...)` and `on_named(...)`. Raw
+    /// `.on::<E>(closure)` registrations stay anonymous (not in
+    /// this list). Surfaces via [`Self::detector_names`].
+    pub(crate) detector_names: Vec<&'static str>,
 }
 
 impl Monitor {
@@ -102,6 +107,18 @@ impl Monitor {
     /// Run until Ctrl-C (SIGINT) / SIGTERM.
     pub async fn run_until_signal(self) -> Result<()> {
         run::run_loop(self, run::StopCondition::Signal).await
+    }
+
+    /// Registered detector slugs in builder-registration order.
+    /// 0.21 A.9: includes every name from `.detect(detector!{ name: "X", … })`
+    /// and `.on_named("X", handler)`. Anonymous `.on::<E>(closure)`
+    /// registrations are excluded (no metadata).
+    ///
+    /// Useful for diagnostics dashboards and audit logs that need
+    /// the runtime set of active detectors — mirrors the legacy
+    /// `AnomalyMonitor::rule_names` accessor for parity.
+    pub fn detector_names(&self) -> impl Iterator<Item = &'static str> + '_ {
+        self.detector_names.iter().copied()
     }
 }
 
@@ -131,6 +148,9 @@ pub struct MonitorBuilder {
     /// `.layer(X)` call wraps the final composed chain.
     layers: Vec<Box<dyn Layer>>,
     tick_handlers: Vec<TickRegistration>,
+    /// 0.21 A.9: detector-name slugs collected via `.detect(...)`
+    /// (macro-stamped name) and `.on_named(name, ...)`.
+    detector_names: Vec<&'static str>,
 }
 
 impl MonitorBuilder {
@@ -264,12 +284,27 @@ impl MonitorBuilder {
     ///
     /// For raw closures not produced by `detector!`, use
     /// [`Self::on`] / [`Self::on_ctx`] directly.
-    pub fn detect<E, F>(self, detector: crate::detector_macro::Detector<E, F>) -> Self
+    pub fn detect<E, F>(mut self, detector: crate::detector_macro::Detector<E, F>) -> Self
     where
         E: Event,
         F: Handler<E, crate::monitor::handler::PayloadCtx>,
     {
+        self.detector_names.push(detector.name);
         self.on_ctx::<E>(detector.handler)
+    }
+
+    /// Register a payload+ctx handler with an explicit detector name
+    /// slug. Like [`Self::on_ctx`] but the supplied `name` is
+    /// recorded in [`Monitor::detector_names`] for introspection /
+    /// diagnostics. 0.21 A.9: matches the legacy `AnomalyRule::name`
+    /// surface and pairs with the `detector!` macro's `name:` field.
+    pub fn on_named<E: Event>(
+        mut self,
+        name: &'static str,
+        handler: impl Handler<E, crate::monitor::handler::PayloadCtx>,
+    ) -> Self {
+        self.detector_names.push(name);
+        self.on_ctx::<E>(handler)
     }
 
     /// Register an async handler for event type `E`.
@@ -309,9 +344,26 @@ impl MonitorBuilder {
     }
 
     /// Pre-register `T` with a caller-supplied initial value.
-    /// Replaces any prior `T` in the slot.
-    pub fn state_with<T: Default + Send + 'static>(mut self, value: T) -> Self {
-        *self.state_map.get_or_init_mut::<T>() = value;
+    /// Replaces any prior `T` in the slot. 0.21 A.4: the `Default`
+    /// bound is dropped — any `T: Send + 'static` works now.
+    pub fn state_with<T: Send + 'static>(mut self, value: T) -> Self {
+        self.state_map.insert(value);
+        self
+    }
+
+    /// Pre-register `T` via a factory closure. Lets you populate the
+    /// state map with types that don't implement `Default` (e.g.
+    /// `Arc<DashMap>`, `Mutex<X>`, anything wrapping a non-default
+    /// handle). Closure runs once at build time; the resulting `T` is
+    /// inserted via [`StateMap::insert`]. Equivalent to
+    /// `state_with(factory())` but reads cleaner when the factory has
+    /// side effects (opening a file, allocating an arena, etc.).
+    pub fn state_init<T, F>(mut self, factory: F) -> Self
+    where
+        T: Send + 'static,
+        F: FnOnce() -> T,
+    {
+        self.state_map.insert(factory());
         self
     }
 
@@ -396,6 +448,7 @@ impl MonitorBuilder {
             driver,
             dispatcher,
             protocol_slots: self.protocol_slots,
+            detector_names: self.detector_names,
             state_map: self.state_map,
             counters: self.counters,
             sink,
@@ -421,6 +474,7 @@ impl std::fmt::Debug for MonitorBuilder {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::ctx::Ctx;
     use crate::protocol::builtin::Tcp;
     use crate::protocol::event_typed::FlowStarted;
 
@@ -431,6 +485,38 @@ mod tests {
             crate::error::Error::Build(BuildError::NoInterface) => {}
             other => panic!("expected NoInterface, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn detector_names_records_on_named_and_detect_in_order() {
+        let m = Monitor::builder()
+            .interface("lo")
+            .on_named::<FlowStarted<Tcp>>("Alpha", |_e: &FlowStarted<Tcp>, _c: &mut Ctx<'_>| Ok(()))
+            .on_named::<FlowStarted<Tcp>>("Beta", |_e: &FlowStarted<Tcp>, _c: &mut Ctx<'_>| Ok(()))
+            // Anonymous registrations do not show up in detector_names.
+            .on::<FlowStarted<Tcp>>(|_e: &FlowStarted<Tcp>| Ok(()))
+            .build()
+            .unwrap();
+        let names: Vec<&'static str> = m.detector_names().collect();
+        assert_eq!(names, vec!["Alpha", "Beta"]);
+    }
+
+    #[test]
+    fn state_init_accepts_non_default_type() {
+        struct Handle(u32);
+        impl Handle {
+            fn open() -> Self {
+                Self(42)
+            }
+        }
+        let mut m = Monitor::builder()
+            .interface("lo")
+            .state_init::<Handle, _>(Handle::open)
+            .build()
+            .unwrap();
+        // State map carries Handle even though it has no Default.
+        let h: &mut Handle = m.state_map.get_or_init_with::<Handle, _>(|| Handle(0));
+        assert_eq!(h.0, 42);
     }
 
     #[test]

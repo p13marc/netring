@@ -63,6 +63,7 @@ pub(crate) async fn run_loop(monitor: Monitor, stop: StopCondition) -> Result<()
         mut counters,
         mut sink,
         mut tick_handlers,
+        detector_names: _,
     } = monitor;
 
     // Phase F.1: open one AsyncCapture per interface. The order

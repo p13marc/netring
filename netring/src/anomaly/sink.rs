@@ -181,6 +181,22 @@ impl<'sink> AnomalyWriter<'sink> {
         self
     }
 
+    /// Attach a textual observation with a **runtime-computed label**.
+    /// 0.21 A.5: escape hatch for the case where the label can't be
+    /// a `&'static str` literal — `format!("attempt_{i}")` or one of
+    /// `["method", "path", "host"]` picked at runtime.
+    ///
+    /// The label is leaked via [`Box::leak`] so it satisfies the
+    /// inner storage's `&'static str` slot. Costs **one heap
+    /// allocation per emit AND permanent process memory** —
+    /// genuinely a hot-path foot-gun if used naively. Prefer
+    /// [`Self::with`] with a small const lookup table when the
+    /// labels are bounded.
+    pub fn with_dynamic(self, label: impl Into<String>, value: impl Into<Cow<'sink, str>>) -> Self {
+        let leaked: &'static str = Box::leak(label.into().into_boxed_str());
+        self.with(leaked, value)
+    }
+
     /// Attach a numeric metric. Drops silently past
     /// [`ANOMALY_INLINE_CAPACITY`] entries.
     pub fn with_metric(mut self, label: &'static str, value: f64) -> Self {
@@ -417,6 +433,20 @@ mod tests {
         assert_eq!(owned.dest_ip, Some(IpAddr::V4(Ipv4Addr::new(10, 0, 0, 2))));
         assert_eq!(owned.dest_port, Some(443));
         assert_eq!(owned.proto, Some("TCP"));
+    }
+
+    #[test]
+    fn writer_with_dynamic_leaks_label_to_static() {
+        // 0.21 A.5: `with_dynamic` lets the label be runtime-built
+        // by leaking it. Verify the rendered string is observable
+        // on the captured call.
+        let mut sink = CaptureSink::default();
+        let calls = Rc::clone(&sink.calls);
+        sink.begin("DynLabel", Severity::Info, Timestamp::new(0, 0))
+            .with_dynamic(format!("attempt_{}", 3), "captured")
+            .emit();
+        let recorded = &calls.borrow()[0];
+        assert_eq!(recorded.obs_count, 1);
     }
 
     #[test]

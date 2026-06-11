@@ -41,6 +41,33 @@ impl StateMap {
             .expect("StateMap invariant: TypeId keys to its own T")
     }
 
+    /// Borrow `T` mutably, calling `factory()` on absence. Drops the
+    /// `Default` requirement of [`Self::get_or_init_mut`]. 0.21 A.4:
+    /// lets the builder pre-register non-`Default` types via
+    /// `MonitorBuilder::state_init::<T>(factory)`.
+    ///
+    /// `factory` is not called if `T` is already present; the
+    /// existing instance is returned.
+    pub fn get_or_init_with<T, F>(&mut self, factory: F) -> &mut T
+    where
+        T: Send + 'static,
+        F: FnOnce() -> T,
+    {
+        let id = TypeId::of::<T>();
+        self.by_type
+            .entry(id)
+            .or_insert_with(|| Box::new(factory()))
+            .downcast_mut::<T>()
+            .expect("StateMap invariant: TypeId keys to its own T")
+    }
+
+    /// Insert `value` as the `T` slot, overwriting any prior value.
+    /// 0.21 A.4 sibling for `MonitorBuilder::state_with(...)` so
+    /// caller-supplied initial state replaces the default cleanly.
+    pub fn insert<T: Send + 'static>(&mut self, value: T) {
+        self.by_type.insert(TypeId::of::<T>(), Box::new(value));
+    }
+
     /// Number of distinct state slots currently registered.
     pub fn len(&self) -> usize {
         self.by_type.len()

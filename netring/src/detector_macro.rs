@@ -70,6 +70,13 @@ pub struct Detector<E, F> {
     /// The detector's handler closure (satisfies
     /// `Handler<E, PayloadCtx>`).
     pub handler: F,
+    /// 0.21 A.9: stable detector slug threaded from the macro's
+    /// `name:` field. Used by [`crate::monitor::Monitor::detector_names`]
+    /// for introspection (legacy `ProtocolMonitor` had
+    /// `rule_names()`; the new typed API matches it). Default is
+    /// `"unnamed"` for `Detector::new(...)` constructions that
+    /// don't go through the macro.
+    pub name: &'static str,
     /// Carries `E` at the type level so the builder can
     /// dispatch through it.
     pub _marker: ::std::marker::PhantomData<fn() -> E>,
@@ -81,8 +88,20 @@ impl<E, F> Detector<E, F> {
     pub fn new(handler: F) -> Self {
         Self {
             handler,
+            name: "unnamed",
             _marker: ::std::marker::PhantomData,
         }
+    }
+
+    /// Stamp a stable name slug onto a detector. Lets raw
+    /// `Detector::new(closure)` users participate in
+    /// [`crate::monitor::Monitor::detector_names`] introspection.
+    ///
+    /// Returns `self` for fluent chaining (the `detector!` macro
+    /// internally calls this with the macro's `name:` literal).
+    pub fn with_name(mut self, name: &'static str) -> Self {
+        self.name = name;
+        self
     }
 }
 
@@ -122,11 +141,7 @@ macro_rules! detector {
         $( matches: |$guard_pat:pat_param| $guard_expr:expr, )?
         emit: |$payload:pat_param, $ctx:pat_param| $emit_body:expr $(,)?
     ) => {{
-        // The slugs aren't threaded through the runtime yet —
-        // bind them so the compiler verifies `name:` is a literal
-        // and `severity:` is a real Severity variant; the binding
-        // ends up as compile-time dead code.
-        let _ = $name;
+        // Compile-time check that `severity:` is a real Severity variant.
         let _: $crate::anomaly::Severity = $crate::anomaly::Severity::$sev;
 
         let __handler = move |__payload: &<$ev as $crate::protocol::event_typed::Event>::Payload,
@@ -153,7 +168,9 @@ macro_rules! detector {
             (|| -> () { $emit_body })();
             ::std::result::Result::Ok(())
         };
-        $crate::detector_macro::Detector::<$ev, _>::new(__handler)
+        // 0.21 A.9: thread the `name:` literal into the Detector so
+        // `Monitor::detector_names()` can surface it for diagnostics.
+        $crate::detector_macro::Detector::<$ev, _>::new(__handler).with_name($name)
     }};
 }
 

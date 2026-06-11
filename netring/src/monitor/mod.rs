@@ -60,8 +60,11 @@ pub mod tick;
 pub use async_handler::{AsyncHandler, BoxFuture};
 pub use dispatcher::{Dispatcher, MAX_EVENT_TYPES};
 pub use handler::{Handler, PayloadCtx, PayloadOnly};
-pub use registry::{HandlerRegistry, ProtocolSlot, TypedProtocolSlot};
+pub use registry::{HandlerRegistry, ProtocolSlot, TypedBroadcastProtocolSlot, TypedProtocolSlot};
 pub use tick::TickRegistration;
+
+pub mod subscribe;
+pub use subscribe::EventStream;
 
 /// The 0.20 top-level monitor — a fully-constructed graph of
 /// (driver, dispatcher, parser-slots, state) that runs to a
@@ -95,6 +98,13 @@ pub struct Monitor {
     /// residual events after the stop condition fires. Default:
     /// 1 second. Tunable via [`MonitorBuilder::drain_timeout`].
     pub(crate) drain_timeout: Duration,
+    /// 0.21 F: per-protocol broadcast handles keyed by
+    /// `TypeId::of::<P>()`. Populated by
+    /// [`MonitorBuilder::with_broadcast`]; consulted at
+    /// [`Self::subscribe`] time to mint new subscribers via
+    /// `BroadcastSlotHandle::clone`.
+    pub(crate) broadcast_handles:
+        rustc_hash::FxHashMap<std::any::TypeId, Box<dyn std::any::Any + Send + Sync>>,
 }
 
 impl Monitor {
@@ -117,6 +127,44 @@ impl Monitor {
     /// Run until Ctrl-C (SIGINT) / SIGTERM.
     pub async fn run_until_signal(self) -> Result<()> {
         run::run_loop(self, run::StopCondition::Signal).await
+    }
+
+    /// 0.21 F: subscribe to broadcast messages for protocol `P`.
+    ///
+    /// Returns an [`EventStream`] over `P::Message` — each
+    /// subscriber has its own private queue and receives every
+    /// emitted message (until the queue overflows
+    /// [`crate::monitor::EventStream::pending`] caps, which is
+    /// caller-managed via `recv_many`'s `max`).
+    ///
+    /// Requires that `P` was registered via
+    /// [`MonitorBuilder::with_broadcast`], not the regular
+    /// [`MonitorBuilder::protocol`]. Returns
+    /// [`crate::error::BuildError::ProtocolNotBroadcast`] on the
+    /// mismatch — caught at first `subscribe()` call rather than
+    /// silently never firing.
+    ///
+    /// Takes `&self`: a monitor may have multiple subscribers
+    /// minted before being moved into `run_until` / `run_for` /
+    /// `run_until_signal`. The subscribers outlive the run loop.
+    pub fn subscribe<P: Protocol>(&self) -> Result<EventStream<P::Message>>
+    where
+        P::Message: Send + Sync + Clone + 'static,
+    {
+        let id = std::any::TypeId::of::<P>();
+        let not_broadcast = BuildError::ProtocolNotBroadcast {
+            protocol_name: P::NAME,
+        };
+        let handle = self.broadcast_handles.get(&id).ok_or(not_broadcast)?;
+        let handle = handle
+            .downcast_ref::<flowscope::driver::BroadcastSlotHandle<
+                P::Message,
+                flowscope::extract::FiveTupleKey,
+            >>()
+            .ok_or(BuildError::ProtocolNotBroadcast {
+                protocol_name: P::NAME,
+            })?;
+        Ok(EventStream::new(handle.clone()))
     }
 
     /// 0.21 E.2: run until `window` of inactivity.
@@ -203,6 +251,12 @@ pub struct MonitorBuilder {
     /// [`BuildError::HandlerForUnregisteredProtocol`] when a
     /// handler requires a slot that was never installed.
     declared_protocols: rustc_hash::FxHashMap<std::any::TypeId, &'static str>,
+    /// 0.21 F: per-protocol broadcast handles keyed by
+    /// `TypeId::of::<P>()`. Populated by [`Self::with_broadcast`],
+    /// passed through to [`Monitor::broadcast_handles`] at
+    /// `build()` time.
+    broadcast_handles:
+        rustc_hash::FxHashMap<std::any::TypeId, Box<dyn std::any::Any + Send + Sync>>,
 }
 
 impl MonitorBuilder {
@@ -297,6 +351,60 @@ impl MonitorBuilder {
         // 0.21 D.1's handler-protocol validation accepts handlers
         // typed on lifecycle markers when `.protocol::<Tcp>()` was
         // called for symmetry.
+        self.declared_protocols
+            .insert(std::any::TypeId::of::<P>(), P::NAME);
+        self
+    }
+
+    /// 0.21 F: register `P` for broadcast delivery.
+    ///
+    /// Calls [`Protocol::register_broadcast`] on the underlying
+    /// flowscope driver — only protocols that override the
+    /// default (currently [`crate::protocol::builtin::Http`])
+    /// accept this. The returned [`flowscope::driver::BroadcastSlotHandle`]
+    /// is cloned twice: one clone wraps a
+    /// [`TypedBroadcastProtocolSlot`] for the run loop's dispatch
+    /// drain; the other lives in the monitor's `broadcast_handles`
+    /// map so [`Monitor::subscribe`] can clone fresh subscribers.
+    ///
+    /// Mutually exclusive with [`Self::protocol::<P>`] — call ONE
+    /// or the other, not both. (Calling both would register two
+    /// slots for the same parser.)
+    ///
+    /// ```ignore
+    /// let monitor = Monitor::builder()
+    ///     .interface("eth0")
+    ///     .with_broadcast::<Http>()    // not `.protocol::<Http>()`
+    ///     .build()?;
+    /// let mut stream = monitor.subscribe::<Http>()?;
+    /// ```
+    pub fn with_broadcast<P: Protocol>(mut self) -> Self
+    where
+        P::Message: Send + Sync + Clone + 'static,
+    {
+        let builder = self
+            .driver_builder
+            .get_or_insert_with(|| Driver::builder(FiveTuple::bidirectional()));
+        match P::register_broadcast(builder) {
+            Ok(handle) => {
+                // Clone twice: one for the dispatcher slot drain,
+                // one stored for subscribe() to clone from.
+                let dispatcher_clone = handle.clone();
+                self.protocol_slots
+                    .push(Box::new(TypedBroadcastProtocolSlot::<P>::new(
+                        dispatcher_clone,
+                    )));
+                self.broadcast_handles
+                    .insert(std::any::TypeId::of::<P>(), Box::new(handle));
+            }
+            Err(_) => {
+                // The default `register_broadcast` returns Err for
+                // any Protocol that hasn't overridden it. Treat it
+                // as a quiet no-op here; the user will discover the
+                // mismatch when `monitor.subscribe::<P>()` fails
+                // with `BuildError::ProtocolNotBroadcast`.
+            }
+        }
         self.declared_protocols
             .insert(std::any::TypeId::of::<P>(), P::NAME);
         self
@@ -603,6 +711,7 @@ impl MonitorBuilder {
             tick_handlers: self.tick_handlers,
             monitor_name: self.monitor_name,
             drain_timeout: self.drain_timeout.unwrap_or(Duration::from_secs(1)),
+            broadcast_handles: self.broadcast_handles,
         })
     }
 }

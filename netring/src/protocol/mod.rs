@@ -136,6 +136,37 @@ pub trait Protocol: Send + Sync + 'static {
         flowscope::driver::SlotHandle<Self::Message, flowscope::extract::FiveTupleKey>,
         ProtocolInitError,
     >;
+
+    /// 0.21 F.1: register this protocol's parser as a *broadcast*
+    /// slot — every drain handle clone receives a copy of each
+    /// emitted message, enabling
+    /// [`crate::monitor::Monitor::subscribe`] for this protocol.
+    ///
+    /// Default returns `Err` — protocols that need broadcast must
+    /// override (e.g. via flowscope's
+    /// `DriverBuilder::session_on_ports_broadcast_each`). The
+    /// override imposes `Message: Send + Sync + Clone + 'static`
+    /// (per-subscriber clone semantics).
+    ///
+    /// Used by [`crate::monitor::MonitorBuilder::with_broadcast`]
+    /// — calling `register_broadcast` on the builder also adds the
+    /// returned handle to the monitor's slot drain (so registered
+    /// handlers still see every message, in addition to user
+    /// subscribers).
+    fn register_broadcast(
+        _builder: &mut flowscope::driver::DriverBuilder<flowscope::extract::FiveTuple>,
+    ) -> Result<
+        flowscope::driver::BroadcastSlotHandle<Self::Message, flowscope::extract::FiveTupleKey>,
+        ProtocolInitError,
+    >
+    where
+        Self::Message: Send + Sync + Clone + 'static,
+    {
+        Err(ProtocolInitError(format!(
+            "{} does not support broadcast (only session-shaped L7 protocols do today)",
+            Self::NAME
+        )))
+    }
 }
 
 /// How a protocol selects packets for its parser.

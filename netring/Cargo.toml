@@ -455,6 +455,11 @@ name = "monitor_async_handler"
 path = "examples/monitor/async_handler.rs"
 required-features = ["tokio", "flow"]
 
+[[example]]
+name = "monitor_stream_consumer"
+path = "examples/monitor/stream_consumer.rs"
+required-features = ["tokio", "flow", "http"]
+
 # util/ — helper companions for the demos
 [[example]]
 name = "synthetic_traffic"

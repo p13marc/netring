@@ -136,6 +136,18 @@ pub enum BuildError {
         /// `Protocol::NAME` of the missing protocol marker.
         protocol_name: &'static str,
     },
+
+    /// 0.21 F: [`crate::monitor::Monitor::subscribe`] called for a
+    /// protocol that wasn't opted into broadcast delivery via
+    /// [`crate::monitor::MonitorBuilder::with_broadcast`]. Without
+    /// the broadcast slot there's no per-subscriber queue to drain.
+    #[error(
+        "protocol `{protocol_name}` was not registered for broadcast; call `.with_broadcast::<{protocol_name}>()` instead of `.protocol::<{protocol_name}>()` to subscribe to its messages"
+    )]
+    ProtocolNotBroadcast {
+        /// `Protocol::NAME` of the missing broadcast registration.
+        protocol_name: &'static str,
+    },
 }
 
 #[cfg(test)]

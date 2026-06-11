@@ -15,7 +15,7 @@ use std::marker::PhantomData;
 use std::sync::Arc;
 
 use arrayvec::ArrayVec;
-use flowscope::driver::{SlotHandle, SlotMessage};
+use flowscope::driver::{BroadcastSlotHandle, SlotHandle, SlotMessage};
 use rustc_hash::FxHashMap;
 
 use crate::ctx::Ctx;
@@ -269,6 +269,63 @@ impl<P: Protocol> ProtocolSlot for TypedProtocolSlot<P> {
             // `FiveTupleKey` is `Copy` — stamp it on the ctx by
             // value so the borrow checker doesn't have to reason
             // about a borrow that aliases the drained message.
+            ctx.flow = Some(slot_msg.key);
+            ctx.ts = slot_msg.ts;
+            dispatcher.dispatch::<P::Message>(&slot_msg.message, ctx)?;
+        }
+
+        ctx.flow = saved_flow;
+        ctx.ts = saved_ts;
+        Ok(())
+    }
+}
+
+/// 0.21 F: broadcast variant of [`TypedProtocolSlot`]. Holds one
+/// clone of the [`BroadcastSlotHandle`] returned by
+/// [`crate::protocol::Protocol::register_broadcast`]; user
+/// subscribers via [`crate::monitor::Monitor::subscribe`] clone
+/// independently. Drains the dispatcher's queue per packet batch
+/// the same way the regular slot does.
+pub struct TypedBroadcastProtocolSlot<P: Protocol>
+where
+    P::Message: Send + Sync + Clone + 'static,
+{
+    handle: BroadcastSlotHandle<P::Message, flowscope::extract::FiveTupleKey>,
+    scratch: Vec<SlotMessage<P::Message, flowscope::extract::FiveTupleKey>>,
+    _marker: PhantomData<fn() -> P>,
+}
+
+impl<P: Protocol> TypedBroadcastProtocolSlot<P>
+where
+    P::Message: Send + Sync + Clone + 'static,
+{
+    /// Wrap a broadcast handle (typically the dispatcher's clone;
+    /// user-facing subscriber clones live in the monitor's
+    /// `broadcast_handles` map).
+    pub fn new(handle: BroadcastSlotHandle<P::Message, flowscope::extract::FiveTupleKey>) -> Self {
+        Self {
+            handle,
+            scratch: Vec::new(),
+            _marker: PhantomData,
+        }
+    }
+}
+
+impl<P: Protocol> ProtocolSlot for TypedBroadcastProtocolSlot<P>
+where
+    P::Message: Send + Sync + Clone + 'static,
+{
+    fn drain_and_dispatch(&mut self, dispatcher: &mut Dispatcher, ctx: &mut Ctx<'_>) -> Result<()> {
+        self.scratch.clear();
+        let n = self.handle.drain(&mut self.scratch);
+        if n == 0 {
+            return Ok(());
+        }
+
+        let saved_flow = ctx.flow;
+        let saved_ts = ctx.ts;
+
+        for slot_msg in self.scratch.drain(..) {
             ctx.flow = Some(slot_msg.key);
             ctx.ts = slot_msg.ts;
             dispatcher.dispatch::<P::Message>(&slot_msg.message, ctx)?;

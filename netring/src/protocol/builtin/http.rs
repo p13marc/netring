@@ -1,6 +1,6 @@
 //! HTTP/1.x protocol marker.
 
-use flowscope::driver::{DriverBuilder, SlotHandle};
+use flowscope::driver::{BroadcastSlotHandle, DriverBuilder, SlotHandle};
 use flowscope::extract::{FiveTuple, FiveTupleKey};
 
 use crate::protocol::{Dispatch, Protocol, ProtocolInitError};
@@ -29,6 +29,16 @@ impl Protocol for Http {
             _ => unreachable!("Http::dispatch is Dispatch::Tcp by construction"),
         };
         Ok(builder.session_on_ports(flowscope::http::HttpParser::default(), ports))
+    }
+
+    fn register_broadcast(
+        builder: &mut DriverBuilder<FiveTuple>,
+    ) -> Result<BroadcastSlotHandle<Self::Message, FiveTupleKey>, ProtocolInitError> {
+        let ports = match Self::dispatch() {
+            Dispatch::Tcp(p) => p,
+            _ => unreachable!("Http::dispatch is Dispatch::Tcp by construction"),
+        };
+        Ok(builder.session_on_ports_broadcast_each(flowscope::http::HttpParser::default(), ports))
     }
 }
 

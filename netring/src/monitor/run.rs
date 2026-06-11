@@ -76,6 +76,7 @@ pub(crate) async fn run_loop(monitor: Monitor, stop: StopCondition) -> Result<()
         detector_names: _,
         monitor_name,
         drain_timeout,
+        broadcast_handles: _,
     } = monitor;
     // Borrow the monitor name as `&str` for the run loop's
     // dispatch sites. The owned `Box<str>` lives in this stack

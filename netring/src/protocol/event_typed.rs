@@ -13,7 +13,7 @@
 
 use std::marker::PhantomData;
 
-use flowscope::{AnomalyKind, EndReason, FlowStats, L4Proto, Timestamp};
+use flowscope::{AnomalyKind, EndReason, FlowSide, FlowStats, L4Proto, TcpInfo, Timestamp};
 
 use crate::protocol::{FlowKey, Protocol};
 
@@ -113,8 +113,10 @@ pub struct FlowEnded<P: Protocol> {
 }
 
 impl<P: Protocol> FlowEnded<P> {
-    #[allow(dead_code)]
-    pub(crate) fn new(
+    /// Constructor exposed for integration tests / dispatch
+    /// translation. Not part of the documented public API.
+    #[doc(hidden)]
+    pub fn new(
         key: FlowKey,
         reason: EndReason,
         stats: FlowStats,
@@ -160,8 +162,10 @@ pub struct FlowEstablished<P: Protocol> {
 }
 
 impl<P: Protocol> FlowEstablished<P> {
-    #[allow(dead_code)]
-    pub(crate) fn new(key: FlowKey, ts: Timestamp) -> Self {
+    /// Constructor exposed for integration tests / dispatch
+    /// translation. Not part of the documented public API.
+    #[doc(hidden)]
+    pub fn new(key: FlowKey, ts: Timestamp) -> Self {
         Self {
             key,
             ts,
@@ -179,6 +183,163 @@ impl<P: Protocol> std::fmt::Debug for FlowEstablished<P> {
         f.debug_struct("FlowEstablished")
             .field("protocol", &P::NAME)
             .field("key", &self.key)
+            .field("ts", &self.ts)
+            .finish()
+    }
+}
+
+/// Emitted on every packet of an existing flow.
+///
+/// The `tcp` field is `Some(_)` only when the underlying flowscope
+/// driver was built with `emit_packet_details(true)` — off by
+/// default so per-packet handlers don't pay the TCP re-parse cost
+/// unless they ask for it. Read `None` as "details suppressed",
+/// not "no TCP details available."
+#[non_exhaustive]
+pub struct FlowPacket<P: Protocol> {
+    /// Flow key.
+    pub key: FlowKey,
+    /// Initiator vs responder for this packet.
+    pub side: FlowSide,
+    /// Packet length on the wire.
+    pub len: usize,
+    /// TCP-layer details when `emit_packet_details(true)` is set.
+    pub tcp: Option<TcpInfo>,
+    /// Timestamp of this packet.
+    pub ts: Timestamp,
+    _marker: PhantomData<fn() -> P>,
+}
+
+impl<P: Protocol> FlowPacket<P> {
+    /// Constructor exposed for integration tests / dispatch
+    /// translation. Not part of the documented public API.
+    #[doc(hidden)]
+    pub fn new(
+        key: FlowKey,
+        side: FlowSide,
+        len: usize,
+        tcp: Option<TcpInfo>,
+        ts: Timestamp,
+    ) -> Self {
+        Self {
+            key,
+            side,
+            len,
+            tcp,
+            ts,
+            _marker: PhantomData,
+        }
+    }
+}
+
+impl<P: Protocol> Event for FlowPacket<P> {
+    type Payload = FlowPacket<P>;
+}
+
+impl<P: Protocol> std::fmt::Debug for FlowPacket<P> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("FlowPacket")
+            .field("protocol", &P::NAME)
+            .field("key", &self.key)
+            .field("side", &self.side)
+            .field("len", &self.len)
+            .field("tcp", &self.tcp)
+            .field("ts", &self.ts)
+            .finish()
+    }
+}
+
+/// Periodic per-flow [`FlowStats`] snapshot. Only emitted when
+/// `FlowTrackerConfig::flow_tick_interval` is set on the underlying
+/// driver.
+#[non_exhaustive]
+pub struct FlowTick<P: Protocol> {
+    /// Flow key.
+    pub key: FlowKey,
+    /// Snapshot of accumulated flow stats.
+    pub stats: FlowStats,
+    /// Timestamp the snapshot was taken.
+    pub ts: Timestamp,
+    _marker: PhantomData<fn() -> P>,
+}
+
+impl<P: Protocol> FlowTick<P> {
+    /// Constructor exposed for integration tests / dispatch
+    /// translation. Not part of the documented public API.
+    #[doc(hidden)]
+    pub fn new(key: FlowKey, stats: FlowStats, ts: Timestamp) -> Self {
+        Self {
+            key,
+            stats,
+            ts,
+            _marker: PhantomData,
+        }
+    }
+}
+
+impl<P: Protocol> Event for FlowTick<P> {
+    type Payload = FlowTick<P>;
+}
+
+impl<P: Protocol> std::fmt::Debug for FlowTick<P> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("FlowTick")
+            .field("protocol", &P::NAME)
+            .field("key", &self.key)
+            .field("stats", &self.stats)
+            .field("ts", &self.ts)
+            .finish()
+    }
+}
+
+/// Parser-level close — a registered parser drained its
+/// `fin_*` accumulator or reported `is_done` / `is_poisoned`.
+///
+/// Distinct from [`FlowEnded`]: this fires per (parser, flow); the
+/// flow may still be alive. Handlers scoped to `ParserClosed<P>`
+/// observe only closes for the parser tied to `P`'s `parser_kind`
+/// when the relevant l4 + parser context is set; for non-parser
+/// protocols (`Tcp`, `Udp`, `Icmp`) the dispatch arm uses `l4` to
+/// pick the marker.
+#[non_exhaustive]
+pub struct ParserClosed<P: Protocol> {
+    /// Flow key.
+    pub key: FlowKey,
+    /// Parser kind tag (e.g. `"http"`, `"dns"`, `"tls"`).
+    pub parser_kind: &'static str,
+    /// Why the parser closed.
+    pub reason: EndReason,
+    /// Timestamp of the close.
+    pub ts: Timestamp,
+    _marker: PhantomData<fn() -> P>,
+}
+
+impl<P: Protocol> ParserClosed<P> {
+    /// Constructor exposed for integration tests / dispatch
+    /// translation. Not part of the documented public API.
+    #[doc(hidden)]
+    pub fn new(key: FlowKey, parser_kind: &'static str, reason: EndReason, ts: Timestamp) -> Self {
+        Self {
+            key,
+            parser_kind,
+            reason,
+            ts,
+            _marker: PhantomData,
+        }
+    }
+}
+
+impl<P: Protocol> Event for ParserClosed<P> {
+    type Payload = ParserClosed<P>;
+}
+
+impl<P: Protocol> std::fmt::Debug for ParserClosed<P> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("ParserClosed")
+            .field("protocol", &P::NAME)
+            .field("key", &self.key)
+            .field("parser_kind", &self.parser_kind)
+            .field("reason", &self.reason)
             .field("ts", &self.ts)
             .finish()
     }
@@ -236,9 +397,10 @@ impl Event for Tick {
 
 /// Side of the flow that produced this event/message.
 pub use flowscope::FlowSide as Side;
-/// TCP-layer details emitted on `FlowPacket` events when
-/// `emit_packet_details(true)` is set on the underlying driver.
-pub use flowscope::TcpInfo;
+// `TcpInfo` is re-exported under `crate::flow::TcpInfo` already (see
+// `lib.rs` `pub mod flow`). Handlers needing it should import from
+// there. The `use ... TcpInfo` at the top of this module pulls it
+// in for `FlowPacket<P>`'s field type; that's enough.
 
 #[cfg(test)]
 mod tests {

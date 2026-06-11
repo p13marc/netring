@@ -40,7 +40,10 @@ use crate::protocol::FlowKey;
 #[cfg(feature = "icmp")]
 use crate::protocol::builtin::Icmp;
 use crate::protocol::builtin::{Tcp, Udp};
-use crate::protocol::event_typed::{AnyFlowAnomaly, FlowEnded, FlowEstablished, FlowStarted, Tick};
+use crate::protocol::event_typed::{
+    AnyFlowAnomaly, FlowEnded, FlowEstablished, FlowPacket, FlowStarted, FlowTick, ParserClosed,
+    Tick,
+};
 use std::time::SystemTime;
 
 /// How long to keep the run loop alive.
@@ -405,6 +408,74 @@ async fn dispatch_lifecycle_async(
                 })
                 .await?;
         }
+        FsEvent::FlowPacket {
+            key,
+            side,
+            len,
+            ts,
+            tcp,
+        } => match key.proto {
+            L4Proto::Tcp => {
+                dispatcher
+                    .dispatch_async(&FlowPacket::<Tcp>::new(key, side, len, tcp, ts))
+                    .await?;
+            }
+            L4Proto::Udp => {
+                dispatcher
+                    .dispatch_async(&FlowPacket::<Udp>::new(key, side, len, tcp, ts))
+                    .await?;
+            }
+            #[cfg(feature = "icmp")]
+            L4Proto::Icmp | L4Proto::IcmpV6 => {
+                dispatcher
+                    .dispatch_async(&FlowPacket::<Icmp>::new(key, side, len, tcp, ts))
+                    .await?;
+            }
+            _ => {}
+        },
+        FsEvent::FlowTick { key, stats, ts } => match key.proto {
+            L4Proto::Tcp => {
+                dispatcher
+                    .dispatch_async(&FlowTick::<Tcp>::new(key, stats, ts))
+                    .await?;
+            }
+            L4Proto::Udp => {
+                dispatcher
+                    .dispatch_async(&FlowTick::<Udp>::new(key, stats, ts))
+                    .await?;
+            }
+            #[cfg(feature = "icmp")]
+            L4Proto::Icmp | L4Proto::IcmpV6 => {
+                dispatcher
+                    .dispatch_async(&FlowTick::<Icmp>::new(key, stats, ts))
+                    .await?;
+            }
+            _ => {}
+        },
+        FsEvent::ParserClosed {
+            key,
+            parser_kind,
+            reason,
+            ts,
+        } => match key.proto {
+            L4Proto::Tcp => {
+                dispatcher
+                    .dispatch_async(&ParserClosed::<Tcp>::new(key, parser_kind, reason, ts))
+                    .await?;
+            }
+            L4Proto::Udp => {
+                dispatcher
+                    .dispatch_async(&ParserClosed::<Udp>::new(key, parser_kind, reason, ts))
+                    .await?;
+            }
+            #[cfg(feature = "icmp")]
+            L4Proto::Icmp | L4Proto::IcmpV6 => {
+                dispatcher
+                    .dispatch_async(&ParserClosed::<Icmp>::new(key, parser_kind, reason, ts))
+                    .await?;
+            }
+            _ => {}
+        },
         _ => {}
     }
     Ok(())
@@ -534,7 +605,101 @@ fn dispatch_lifecycle(
                 ts
             );
         }
-        // FlowPacket / FlowTick / ParserClosed not surfaced in Phase B.
+        FsEvent::FlowPacket {
+            key,
+            side,
+            len,
+            ts,
+            tcp,
+        } => match key.proto {
+            L4Proto::Tcp => {
+                dispatch_one!(
+                    FlowPacket<Tcp>,
+                    FlowPacket::<Tcp>::new(key, side, len, tcp, ts),
+                    Some(key),
+                    ts
+                );
+            }
+            L4Proto::Udp => {
+                dispatch_one!(
+                    FlowPacket<Udp>,
+                    FlowPacket::<Udp>::new(key, side, len, tcp, ts),
+                    Some(key),
+                    ts
+                );
+            }
+            #[cfg(feature = "icmp")]
+            L4Proto::Icmp | L4Proto::IcmpV6 => {
+                dispatch_one!(
+                    FlowPacket<Icmp>,
+                    FlowPacket::<Icmp>::new(key, side, len, tcp, ts),
+                    Some(key),
+                    ts
+                );
+            }
+            _ => {}
+        },
+        FsEvent::FlowTick { key, stats, ts } => match key.proto {
+            L4Proto::Tcp => {
+                dispatch_one!(
+                    FlowTick<Tcp>,
+                    FlowTick::<Tcp>::new(key, stats, ts),
+                    Some(key),
+                    ts
+                );
+            }
+            L4Proto::Udp => {
+                dispatch_one!(
+                    FlowTick<Udp>,
+                    FlowTick::<Udp>::new(key, stats, ts),
+                    Some(key),
+                    ts
+                );
+            }
+            #[cfg(feature = "icmp")]
+            L4Proto::Icmp | L4Proto::IcmpV6 => {
+                dispatch_one!(
+                    FlowTick<Icmp>,
+                    FlowTick::<Icmp>::new(key, stats, ts),
+                    Some(key),
+                    ts
+                );
+            }
+            _ => {}
+        },
+        FsEvent::ParserClosed {
+            key,
+            parser_kind,
+            reason,
+            ts,
+        } => match key.proto {
+            L4Proto::Tcp => {
+                dispatch_one!(
+                    ParserClosed<Tcp>,
+                    ParserClosed::<Tcp>::new(key, parser_kind, reason, ts),
+                    Some(key),
+                    ts
+                );
+            }
+            L4Proto::Udp => {
+                dispatch_one!(
+                    ParserClosed<Udp>,
+                    ParserClosed::<Udp>::new(key, parser_kind, reason, ts),
+                    Some(key),
+                    ts
+                );
+            }
+            #[cfg(feature = "icmp")]
+            L4Proto::Icmp | L4Proto::IcmpV6 => {
+                dispatch_one!(
+                    ParserClosed<Icmp>,
+                    ParserClosed::<Icmp>::new(key, parser_kind, reason, ts),
+                    Some(key),
+                    ts
+                );
+            }
+            _ => {}
+        },
         _ => {}
     }
     Ok(())

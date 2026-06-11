@@ -49,7 +49,8 @@ pub mod event_typed;
 
 pub use event::{ProtocolEvent, ProtocolMessage};
 pub use event_typed::{
-    AnyFlowAnomaly, Event, FlowEnded, FlowEstablished, FlowStarted, Side, TcpInfo, Tick,
+    AnyFlowAnomaly, Event, FlowEnded, FlowEstablished, FlowPacket, FlowStarted, FlowTick,
+    ParserClosed, Side, Tick,
 };
 pub use monitor::{ProtocolMonitor, ProtocolMonitorBuilder};
 

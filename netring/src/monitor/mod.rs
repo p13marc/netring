@@ -91,6 +91,10 @@ pub struct Monitor {
     /// because the storage is write-once at build time and never
     /// reallocated — saves the 8-byte capacity overhead.
     pub(crate) monitor_name: Option<Box<str>>,
+    /// 0.21 D.2: maximum time the run loop spends draining
+    /// residual events after the stop condition fires. Default:
+    /// 1 second. Tunable via [`MonitorBuilder::drain_timeout`].
+    pub(crate) drain_timeout: Duration,
 }
 
 impl Monitor {
@@ -168,6 +172,10 @@ pub struct MonitorBuilder {
     /// [`Self::name`]. Propagates to [`Monitor::monitor_name`]
     /// and through to handler-visible [`crate::ctx::Ctx::monitor_name`].
     monitor_name: Option<Box<str>>,
+    /// 0.21 D.2: graceful-drain budget. `None` until
+    /// [`Self::drain_timeout`] is called; defaults to 1 second
+    /// at [`Self::build`] time.
+    drain_timeout: Option<Duration>,
 }
 
 impl MonitorBuilder {
@@ -219,6 +227,24 @@ impl MonitorBuilder {
     /// lifetime of the monitor; `&str` view at dispatch time.
     pub fn name(mut self, name: impl Into<Box<str>>) -> Self {
         self.monitor_name = Some(name.into());
+        self
+    }
+
+    /// 0.21 D.2: maximum time the run loop spends draining
+    /// residual events after the stop condition fires.
+    ///
+    /// On shutdown (SIGINT/SIGTERM or deadline reached), the run
+    /// loop calls `driver.finish()` to flush in-flight flows, then
+    /// drains each protocol slot's queued messages, then flushes
+    /// the anomaly sink. Each step is best-effort and bounded by
+    /// this budget; if the deadline expires, the remaining drain
+    /// steps are skipped to avoid hanging on a stuck sink.
+    ///
+    /// Default: 1 second. Pass `Duration::ZERO` to skip the drain
+    /// entirely (events queued at shutdown are dropped on the
+    /// floor — useful for fail-fast smoke tests).
+    pub fn drain_timeout(mut self, t: Duration) -> Self {
+        self.drain_timeout = Some(t);
         self
     }
 
@@ -530,6 +556,7 @@ impl MonitorBuilder {
             sink,
             tick_handlers: self.tick_handlers,
             monitor_name: self.monitor_name,
+            drain_timeout: self.drain_timeout.unwrap_or(Duration::from_secs(1)),
         })
     }
 }

@@ -26,6 +26,7 @@ use std::time::Instant;
 
 use flowscope::L4Proto;
 use flowscope::driver::Event as FsEvent;
+use flowscope::extract::FiveTuple;
 use futures_core::Stream;
 
 use crate::AsyncCapture;
@@ -68,6 +69,7 @@ pub(crate) async fn run_loop(monitor: Monitor, stop: StopCondition) -> Result<()
         mut tick_handlers,
         detector_names: _,
         monitor_name,
+        drain_timeout,
     } = monitor;
     // Borrow the monitor name as `&str` for the run loop's
     // dispatch sites. The owned `Box<str>` lives in this stack
@@ -173,6 +175,105 @@ pub(crate) async fn run_loop(monitor: Monitor, stop: StopCondition) -> Result<()
             }
         }
     }
+
+    // 0.21 D.2: graceful drain phase. After the stop condition
+    // fires, flush in-flight flows out of the central tracker,
+    // drain each protocol slot's queued messages, and flush the
+    // sink. Skipped entirely when `drain_timeout` is zero — useful
+    // for fail-fast smoke tests that don't care about residual
+    // events.
+    if !drain_timeout.is_zero() {
+        let deadline = Instant::now() + drain_timeout;
+        drain_phase(
+            &mut driver,
+            &mut dispatcher,
+            sink.as_mut(),
+            &mut state_map,
+            &mut counters,
+            &mut protocol_slots,
+            monitor_name_borrow,
+            deadline,
+        )
+        .await?;
+    }
+
+    Ok(())
+}
+
+/// 0.21 D.2: drain residual events after the run loop's stop
+/// condition fires.
+///
+/// Steps, each guarded by the `deadline`:
+///
+/// 1. `driver.finish()` — flush in-flight flows out of the central
+///    tracker (synthesizes `FlowEnded` events for anything still
+///    alive). Dispatches each through the same lifecycle path the
+///    run loop uses, so handlers see end-of-stream events the
+///    same way they see live ones.
+/// 2. For each protocol slot, drain queued typed messages.
+/// 3. `sink.flush()` — give a chance for buffered writes (eve-sink,
+///    json sink, etc.) to land on disk.
+///
+/// Best-effort: a slow handler can push past `deadline`. The
+/// deadline check sits between steps, not inside them. If
+/// step 1 already overran, steps 2 and 3 are skipped to bound
+/// total shutdown time.
+#[allow(clippy::too_many_arguments)]
+async fn drain_phase(
+    driver: &mut flowscope::driver::Driver<FiveTuple>,
+    dispatcher: &mut Dispatcher,
+    sink: &mut dyn AnomalySink,
+    state_map: &mut StateMap,
+    counters: &mut CounterRegistry,
+    protocol_slots: &mut [Box<dyn crate::monitor::ProtocolSlot>],
+    monitor_name: Option<&str>,
+    deadline: Instant,
+) -> Result<()> {
+    // Step 1: drain the central tracker.
+    let mut leftover: Vec<FsEvent<FlowKey>> = Vec::new();
+    driver.finish_into(&mut leftover);
+    for evt in leftover.drain(..) {
+        if Instant::now() >= deadline {
+            return Ok(());
+        }
+        dispatch_lifecycle(
+            dispatcher,
+            sink,
+            state_map,
+            counters,
+            evt.clone(),
+            SourceIdx(0),
+            monitor_name,
+        )?;
+        dispatch_lifecycle_async(dispatcher, evt).await?;
+    }
+
+    if Instant::now() >= deadline {
+        return Ok(());
+    }
+
+    // Step 2: drain each protocol slot's typed messages.
+    let ts = flowscope::Timestamp::from_system_time(SystemTime::now());
+    for slot in protocol_slots.iter_mut() {
+        if Instant::now() >= deadline {
+            return Ok(());
+        }
+        let mut ctx = Ctx::new(None, ts, SourceIdx(0), state_map, sink, counters);
+        ctx.monitor_name = monitor_name;
+        slot.drain_and_dispatch(dispatcher, &mut ctx)?;
+    }
+
+    if Instant::now() >= deadline {
+        return Ok(());
+    }
+
+    // Step 3: flush the sink. The `AnomalySink::flush` default is
+    // `Ok(())`; impls that buffer (eve-sink, json sink) actually
+    // do work here. Errors propagate as `io::Error`; the cast
+    // through netring's `Error` wraps them.
+    sink.flush().map_err(|e| {
+        crate::error::Error::Io(std::io::Error::new(e.kind(), format!("sink flush: {e}")))
+    })?;
 
     Ok(())
 }

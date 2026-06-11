@@ -153,6 +153,107 @@ where
     }
 }
 
+/// 0.21 I.1: declarative pattern-detector glue for flowscope's
+/// stateful detectors (`PortScanDetector`, `BeaconDetector`,
+/// `DgaScorer`, …) plus any third-party detector whose score
+/// implements [`flowscope::DetectorScore`].
+///
+/// Wraps the detector in `Arc<Mutex<D>>` (the macro expansion
+/// uses `std::sync::Mutex` so the resulting handler is
+/// `Send + Sync`). Each event takes the lock once: feed the
+/// detector, ask for a score, drop the lock, publish the score
+/// via [`crate::anomaly::sink::publish_owned`] if produced.
+///
+/// Grammar:
+///
+/// ```text
+/// pattern_detector! {
+///     name:     <string literal>,             // detector slug
+///     event:    <Event type>,                 // e.g. FlowStarted<Tcp>
+///     detector: <expr producing the detector>, // moved into the handler
+///     feed:     |payload, detector_mut| <stmt-list>, // mutate the detector
+///     verdict:  |payload, detector_ref| <Option<S: DetectorScore>>,
+/// }
+/// ```
+///
+/// Returns a [`Detector<E, F>`] — pair with
+/// [`crate::monitor::MonitorBuilder::detect`].
+///
+/// ## Mutex contention
+///
+/// One lock acquire per event per detector. Uncontended cost ≈
+/// 10ns. In Phase C (per-CPU sharding), each shard owns a
+/// distinct `Mutex<D>` instance so contention stays zero across
+/// shards as long as the detector expression is re-evaluated
+/// per shard (`Detector::factory(|| pattern_detector! { ... })`).
+///
+/// ## Example
+///
+/// ```ignore
+/// use flowscope::detect::patterns::PortScanDetector;
+/// use netring::prelude::*;
+///
+/// let scan = netring::pattern_detector! {
+///     name: "PortScanTRW",
+///     event: FlowStarted<Tcp>,
+///     detector: PortScanDetector::<flowscope::extract::FiveTupleKey>::default(),
+///     feed: |evt, det| {
+///         det.record(evt.key, /* outcome */ Default::default());
+///     },
+///     verdict: |evt, det| det.score_for(&evt.key.a.ip()),
+/// };
+///
+/// Monitor::builder()
+///     .interface("eth0")
+///     .protocol::<Tcp>()
+///     .detect(scan)
+///     .build()?;
+/// ```
+#[macro_export]
+macro_rules! pattern_detector {
+    (
+        name: $name:literal,
+        event: $ev:ty,
+        detector: $detector_expr:expr,
+        feed: |$evt_pat:pat_param, $det_pat:pat_param| $feed_body:expr,
+        verdict: |$evt_pat2:pat_param, $det_ref_pat:pat_param| $verdict_body:expr $(,)?
+    ) => {{
+        // `Arc<Mutex<D>>` so the resulting closure is `Send + Sync`
+        // (Phase A.1's `Arc<dyn Fn + Send + Sync>` storage requirement).
+        // `RefCell` would compile for single-shard mode but break under
+        // sharding.
+        let detector = ::std::sync::Arc::new(::std::sync::Mutex::new($detector_expr));
+        let __handler =
+            move |__payload: &<$ev as $crate::protocol::event_typed::Event>::Payload,
+                  __ctx: &mut $crate::ctx::Ctx<'_>|
+                  -> $crate::error::Result<()> {
+                // The macro body could panic on a poisoned mutex — that's a
+                // user-detector bug, not a netring bug. Surface clearly.
+                let mut guard = detector
+                    .lock()
+                    .expect("pattern_detector! mutex poisoned by a panicking detector body");
+                {
+                    let $evt_pat = __payload;
+                    let $det_pat = &mut *guard;
+                    $feed_body;
+                }
+                let score_opt = {
+                    let $evt_pat2 = __payload;
+                    let $det_ref_pat = &*guard;
+                    $verdict_body
+                };
+                drop(guard);
+                if let ::std::option::Option::Some(score) = score_opt {
+                    let owned =
+                        <_ as $crate::anomaly::DetectorScore>::into_anomaly(score, __ctx.ts);
+                    $crate::anomaly::sink::publish_owned(__ctx.sink_mut(), &owned);
+                }
+                ::std::result::Result::Ok(())
+            };
+        $crate::detector_macro::Detector::<$ev, _>::new(__handler).with_name($name)
+    }};
+}
+
 /// Build a stateless detector for the 0.20
 /// [`Monitor`](crate::monitor::Monitor) builder.
 ///

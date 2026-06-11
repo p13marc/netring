@@ -80,6 +80,13 @@ pub use rule::{Anomaly, AnomalyContext, AnomalyRule, Severity};
 /// of which sink consumed it.
 pub use flowscope::OwnedAnomaly;
 
+/// 0.21 I.1: flowscope's per-detector `DetectorScore` trait — used
+/// by `pattern_detector!` so detectors with heterogeneous input
+/// shapes (port-scan = `(K, ConnectionOutcome)`, beacon = `(K, ts,
+/// bytes)`, DGA = `&str`) all emit through one canonical
+/// `into_anomaly(ts) -> OwnedAnomaly` path.
+pub use flowscope::DetectorScore;
+
 #[cfg(feature = "eve-sink")]
 pub use eve_sink::EveSink;
 

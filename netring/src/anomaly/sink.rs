@@ -118,6 +118,55 @@ pub trait AnomalySinkExt: AnomalySink + Sized {
 
 impl<T: AnomalySink + Sized> AnomalySinkExt for T {}
 
+/// 0.21 I.1: publish a `flowscope::OwnedAnomaly` through any
+/// [`AnomalySink`] (including layered chains via
+/// `dyn AnomalySink`). Used by the `pattern_detector!` macro to
+/// route detector-emitted [`flowscope::DetectorScore::into_anomaly`]
+/// outputs into the sink chain.
+///
+/// Constraints:
+/// - `OwnedAnomaly::kind` must be `Cow::Borrowed(_)` because
+///   `AnomalySink::write` takes `&'static str`. Per the
+///   `flowscope::DetectorScore::name() -> &'static str` contract,
+///   detector-originated anomalies always satisfy this. Anomalies
+///   constructed with a runtime-built `String` slug will leak the
+///   string via `Box::leak` — once per unique slug, then memoized
+///   by the leak itself.
+/// - Observations and metrics are forwarded as borrowed slices —
+///   no copy beyond the `Cow::Borrowed` re-wrap.
+/// - The `key` parameter is `None`: OwnedAnomaly's 5-tuple fields
+///   land via the `observations` path on this best-effort
+///   translation. Users wanting structured key emission should
+///   `sink.begin(...).with_key(...)` directly.
+pub fn publish_owned(sink: &mut dyn AnomalySink, owned: &flowscope::OwnedAnomaly) {
+    // Translate the SmallVec<Cow<'static, str>> observations into the
+    // borrowed slice shape AnomalySink::write expects. The internal
+    // Cow stays borrowed so no clone happens here.
+    let observations: Vec<(&'static str, std::borrow::Cow<'_, str>)> = owned
+        .observations
+        .iter()
+        .map(|(k, v)| (*k, std::borrow::Cow::Borrowed(v.as_ref())))
+        .collect();
+    let metrics: Vec<(&'static str, f64)> = owned.metrics.iter().copied().collect();
+    let kind: &'static str = match &owned.kind {
+        std::borrow::Cow::Borrowed(s) => s,
+        // Per the doc, detector-originated anomalies always carry a
+        // Cow::Borrowed slug. The Owned case here is defensive — leak
+        // once so the resulting &'static str outlives the sink.write
+        // call. A hot loop hitting this path repeatedly would leak
+        // memory; document the gotcha rather than panic.
+        std::borrow::Cow::Owned(s) => Box::leak(s.clone().into_boxed_str()),
+    };
+    sink.write(
+        kind,
+        owned.severity.into(),
+        owned.ts,
+        None,
+        &observations,
+        &metrics,
+    );
+}
+
 /// Erased key borrow — lets [`AnomalyWriter`] stay non-generic in
 /// the key type so it can be returned from a `&mut dyn AnomalySink`.
 /// Stored as `&dyn Key` so sinks get both `KeyFields` (typed 5-tuple)

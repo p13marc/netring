@@ -85,6 +85,12 @@ impl StateMap {
 #[derive(Default)]
 pub struct CounterRegistry {
     by_type: FxHashMap<TypeId, Box<dyn Any + Send>>,
+    /// 0.21 A.6: parallel name index for build-time validation.
+    /// `MonitorBuilder::build()` consults this to spot detectors
+    /// declaring counter types that were never registered. Stored
+    /// as a `Vec<&'static str>` rather than a set because the
+    /// validation walk is one-off and N is tiny (≤ 16 in practice).
+    registered_type_names: Vec<&'static str>,
 }
 
 impl CounterRegistry {
@@ -95,7 +101,18 @@ impl CounterRegistry {
         K: std::hash::Hash + Eq + Clone + Send + 'static,
     {
         let id = TypeId::of::<K>();
+        let name = std::any::type_name::<K>();
+        if !self.registered_type_names.contains(&name) {
+            self.registered_type_names.push(name);
+        }
         self.by_type.insert(id, Box::new(counter));
+    }
+
+    /// 0.21 A.6: the slugs of every counter `K` registered, in
+    /// `std::any::type_name::<K>()` form. Used by
+    /// `MonitorBuilder::build()` to validate detector declarations.
+    pub fn registered_type_names(&self) -> &[&'static str] {
+        &self.registered_type_names
     }
 
     /// Borrow the `K`-keyed counter. Panics if the user didn't

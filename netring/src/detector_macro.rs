@@ -77,6 +77,22 @@ pub struct Detector<E, F> {
     /// `"unnamed"` for `Detector::new(...)` constructions that
     /// don't go through the macro.
     pub name: &'static str,
+    /// 0.21 A.6: counter key-type slugs this detector touches via
+    /// `ctx.counter_mut::<K>`. Stamped by the macro's optional
+    /// `counters: [K1, K2, ...]` clause via
+    /// `vec![type_name::<K1>(), …]`. Empty (`Vec::new()`) by
+    /// default — raw `Detector::new(...)` constructions opt out
+    /// of validation. `MonitorBuilder::build()` walks this list
+    /// against `CounterRegistry::registered_type_names()` and
+    /// returns `BuildError::CounterNotRegistered` on miss.
+    ///
+    /// Owned `Vec` (rather than `&'static [&'static str]`)
+    /// because `std::any::type_name` is not yet const-stable, so
+    /// the macro can't synthesise a `'static` slice at compile
+    /// time. The cost is one tiny allocation per detector at
+    /// builder time — well below the noise floor of the
+    /// `.protocol::<P>()` registration that follows.
+    pub declared_counters: Vec<&'static str>,
     /// Carries `E` at the type level so the builder can
     /// dispatch through it.
     pub _marker: ::std::marker::PhantomData<fn() -> E>,
@@ -89,6 +105,7 @@ impl<E, F> Detector<E, F> {
         Self {
             handler,
             name: "unnamed",
+            declared_counters: Vec::new(),
             _marker: ::std::marker::PhantomData,
         }
     }
@@ -101,6 +118,18 @@ impl<E, F> Detector<E, F> {
     /// internally calls this with the macro's `name:` literal).
     pub fn with_name(mut self, name: &'static str) -> Self {
         self.name = name;
+        self
+    }
+
+    /// 0.21 A.6: stamp the counter key-type slugs this detector
+    /// touches. `MonitorBuilder::build()` validates each slug
+    /// against the registered counters and rejects the build with
+    /// [`crate::error::BuildError::CounterNotRegistered`] on
+    /// mismatch. The slugs come from `std::any::type_name::<K>()`
+    /// — the `detector!` macro's `counters: [K1, K2]` clause
+    /// substitutes these automatically.
+    pub fn with_declared_counters(mut self, slugs: Vec<&'static str>) -> Self {
+        self.declared_counters = slugs;
         self
     }
 }
@@ -136,6 +165,7 @@ where
 macro_rules! detector {
     (
         name: $name:literal,
+        $( counters: [ $( $counter:ty ),+ $(,)? ], )?
         severity: $sev:ident,
         event: $ev:ty,
         $( matches: |$guard_pat:pat_param| $guard_expr:expr, )?
@@ -170,7 +200,18 @@ macro_rules! detector {
         };
         // 0.21 A.9: thread the `name:` literal into the Detector so
         // `Monitor::detector_names()` can surface it for diagnostics.
-        $crate::detector_macro::Detector::<$ev, _>::new(__handler).with_name($name)
+        // 0.21 A.6: when the `counters:` clause is present, stamp
+        // `std::any::type_name::<K>()` for each declared `K` into
+        // `declared_counters` so `MonitorBuilder::build()` can
+        // validate that `.counter::<K>(...)` was actually called.
+        let __det = $crate::detector_macro::Detector::<$ev, _>::new(__handler).with_name($name);
+        $(
+            let __declared_counters: ::std::vec::Vec<&'static str> = ::std::vec![
+                $( ::std::any::type_name::<$counter>() ),+
+            ];
+            let __det = __det.with_declared_counters(__declared_counters);
+        )?
+        __det
     }};
 }
 

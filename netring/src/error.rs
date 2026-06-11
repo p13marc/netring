@@ -102,6 +102,24 @@ pub enum BuildError {
     /// `Err` outside the lifecycle-only fast path).
     #[error("dispatch shape mismatch in Protocol impl: {0}")]
     ProtocolDispatchMismatch(String),
+
+    /// 0.21 A.6: A detector declared (via `detector! { counters: [K] }`)
+    /// that it needs a counter for key type `type_name`, but no
+    /// `.counter::<K>(window, bucket)` call registered it on the
+    /// builder. Without this check, the miss would surface as a
+    /// `ctx.counter_mut::<K>()` panic at the first dispatched
+    /// event — moving it to build-time turns a runtime explosion
+    /// into a clear configuration error.
+    #[error(
+        "detector `{detector}` references counter type `{type_name}` but no `.counter::<{type_name}>(window, bucket)` was registered on the builder"
+    )]
+    CounterNotRegistered {
+        /// The `detector!` macro's `name:` slug (or `"unnamed"`
+        /// for raw `Detector::new(...)`).
+        detector: &'static str,
+        /// `std::any::type_name::<K>()` of the missing counter type.
+        type_name: &'static str,
+    },
 }
 
 #[cfg(test)]

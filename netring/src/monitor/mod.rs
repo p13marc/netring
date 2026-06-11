@@ -151,6 +151,13 @@ pub struct MonitorBuilder {
     /// 0.21 A.9: detector-name slugs collected via `.detect(...)`
     /// (macro-stamped name) and `.on_named(name, ...)`.
     detector_names: Vec<&'static str>,
+    /// 0.21 A.6: per-detector counter declarations collected via
+    /// `.detect(...)`. Each entry pairs the detector's `name` slug
+    /// with the list of counter key-type slugs the detector
+    /// declared (via `detector! { counters: [K1, K2], … }`).
+    /// `Self::build` walks these and validates against
+    /// [`CounterRegistry::registered_type_names`].
+    declared_counters: Vec<(&'static str, Vec<&'static str>)>,
 }
 
 impl MonitorBuilder {
@@ -290,7 +297,19 @@ impl MonitorBuilder {
         F: Handler<E, crate::monitor::handler::PayloadCtx>,
     {
         self.detector_names.push(detector.name);
+        // 0.21 A.6: stash `(name, declared_counters)` so `build()`
+        // can validate. Empty `declared_counters` is fine — raw
+        // `Detector::new(...)` defaults to `&[]` and skips
+        // validation (documented limitation; macro use is the
+        // recommended path).
+        if !detector.declared_counters.is_empty() {
+            self.declared_counters
+                .push((detector.name, detector.declared_counters));
+        }
         self.on_ctx::<E>(detector.handler)
+        // Note: we move `detector.handler` last so the prior
+        // `.declared_counters` move + name push completed before
+        // `detector` is consumed.
     }
 
     /// Register a payload+ctx handler with an explicit detector name
@@ -432,6 +451,23 @@ impl MonitorBuilder {
     pub fn build(self) -> Result<Monitor> {
         if self.interfaces.is_empty() {
             return Err(BuildError::NoInterface.into());
+        }
+        // 0.21 A.6: build-time validation — every counter type
+        // a detector declared via `detector! { counters: [K] }`
+        // must have been registered via `.counter::<K>(...)` on
+        // this builder. Catches the typo `:: counter ::<Ipv4>`
+        // vs `IpAddr` before the first packet arrives.
+        let registered = self.counters.registered_type_names();
+        for (detector, slugs) in &self.declared_counters {
+            for slug in slugs {
+                if !registered.contains(slug) {
+                    return Err(BuildError::CounterNotRegistered {
+                        detector,
+                        type_name: slug,
+                    }
+                    .into());
+                }
+            }
         }
         let driver = self
             .driver_builder

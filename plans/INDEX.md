@@ -1,112 +1,100 @@
-# plans/ — backlog index
+# plans/ — netring 0.21 backlog
 
-This directory holds **forward-looking work items only** —
-concrete plans for features that haven't shipped yet.
+Forward-looking implementation plans only. Historical record lives in `CHANGELOG.md` + `git log`; reference material lives in `netring/docs/`. Convention: when a plan ships, **delete the plan file** in the same PR.
 
-Reference material (architecture, async guide, troubleshooting,
-the writing-detectors tutorial) lives in
-[`../netring/docs/`](../netring/docs/), which is published as
-part of the crates.io package.
-
-**Convention** (mirrors flowscope's): when an implementation
-plan ships, **delete the plan file** in the same PR series.
-`git log` is the historical record; `plans/` is the working
-backlog. Released work documented in `CHANGELOG.md`.
-
-> **Scope split.** Flow & session tracking lives in the separate
-> [`flowscope`](https://github.com/p13marc/flowscope) crate.
-> flowscope's `plans/` covers everything related to flow
-> extraction, tracking, reassembly, session / datagram parsing,
-> observability of flows, and L7 protocol parsers. This index
-> covers only netring-side plans (capture, dedup, async adapters,
-> protocol monitor + anomaly toolkit).
+> **Scope split.** Flow & session tracking lives in the separate [`flowscope`](https://github.com/p13marc/flowscope) crate. flowscope's `plans/` covers flow extraction, tracking, reassembly, session/datagram parsing, observability of flows, and L7 parsers. This index covers only netring-side plans (capture, monitor builder, anomaly toolkit, sinks, sharding).
 
 ---
 
-## Active backlog
+## netring 0.21 — phased plan
 
-### netring 0.20 — Monitor redesign (Protocol trait + Handler + Layer + macro + sharding)
-
-The 0.20 release replaces the closed `ProtocolMonitor` / `AnomalyMonitor` / `AnomalyRule` surface with a protocol-agnostic `Monitor::builder()` + `Handler<E, M>` blanket impls + tower-style middleware + `detector!` macro + per-CPU sharding. Driven by an in-session API review (June 2026) that concluded the 0.18 architecture is sound but the user-facing surface reads like 2022-era Rust; 0.20 brings it in line with 2026 axum/bevy/tower idioms.
-
-Execution split into 7 sequential phases. Each ships as 2–4 commits on a `0.20-dev` branch; the final phase tags + publishes.
+Each phase ships as 1–3 commits on a `0.21-dev` branch. The final phase tags + publishes.
 
 | Phase | Plan | Scope | Days |
 |---|---|---|---|
-| **A** | [`netring-0.20-phase-A-protocol-trait.md`](./netring-0.20-phase-A-protocol-trait.md) | `Protocol` trait + `Event` trait + 7 builtin marker types (`Tcp`/`Udp`/`Icmp`/`Http`/`Dns`/`Tls`/`TlsHandshake`) | 2–3 |
-| **B** | [`netring-0.20-phase-B-handler-trait.md`](./netring-0.20-phase-B-handler-trait.md) | `Handler<E, M>` trait + blanket impls for 0..8 extractors + `Ctx<'a>` + `FromCtx` + `Dispatcher` + `Monitor` builder skeleton | 4–6 |
-| **C** | [`netring-0.20-phase-C-perf-hardening.md`](./netring-0.20-phase-C-perf-hardening.md) | `AnomalyWriter` + shipped sinks + `Ctx::split_*` + dhat-gated CI bench (≤512 B / 100k events) | 2–3 |
-| **D** | [`netring-0.20-phase-D-middleware.md`](./netring-0.20-phase-D-middleware.md) | `AsyncHandler<E, M>` + `on_async` + 5 tower-style layers (Dedupe / RateLimit / MinSeverity / Sample / Tee) | 3–4 |
-| **E** | [`netring-0.20-phase-E-macro-prelude.md`](./netring-0.20-phase-E-macro-prelude.md) | `detector!` macro + `netring::prelude` + multi-interface via `AsyncMultiCapture` | 3–4 |
-| **F** | [`netring-0.20-phase-F-percpu-sharding.md`](./netring-0.20-phase-F-percpu-sharding.md) | `fanout_per_cpu` + `merge_state` + sharded run loop + per-CPU state merging | 3–4 |
-| **G** | [`netring-0.20-phase-G-migration-release.md`](./netring-0.20-phase-G-migration-release.md) | Rewrite 13 examples + ship `netring-compat` + migration docs + release | 4–5 |
+| **A** | [`netring-0.21-phase-A-ergonomics.md`](./netring-0.21-phase-A-ergonomics.md) | Ergonomics polish + R1–R6 regression fixes + `AnomalySink` key tightening (13 sub-items) | ~6.5 |
+| **B** | [`netring-0.21-phase-B-sinks-exports.md`](./netring-0.21-phase-B-sinks-exports.md) | `EveSink` adapter, `MetricsSink`, re-export `OwnedAnomaly`/`KeyFields`/`AnomalyFields`/`DetectorScore` | ~1.5 |
+| **C** | [`netring-0.21-phase-C-percpu-sharding.md`](./netring-0.21-phase-C-percpu-sharding.md) | Per-CPU sharding (`fanout_per_cpu`, `ShardedMonitor`, merge worker) | ~5 |
+| **D** | [`netring-0.21-phase-D-robustness.md`](./netring-0.21-phase-D-robustness.md) | Build validation, graceful drain, layer-chain integration test, builder name | ~3 |
+| **E** | [`netring-0.21-phase-E-pcap-source.md`](./netring-0.21-phase-E-pcap-source.md) | Pcap source via `DeferredDriverBuilder`, `with_speed_factor`, `run_until_idle` | ~1.5 |
+| **F** | [`netring-0.21-phase-F-subscribe.md`](./netring-0.21-phase-F-subscribe.md) | `monitor.subscribe::<E>` wrapping `BroadcastSlotHandle` | ~1 |
+| **G** | [`netring-0.21-phase-G-correlate-cleanup.md`](./netring-0.21-phase-G-correlate-cleanup.md) | Delete `netring::correlate`, re-export `flowscope::correlate` | ~1 |
+| **H** | [`netring-0.21-phase-H-release.md`](./netring-0.21-phase-H-release.md) | flowscope 0.13 dep bump, `Monitor: Send` sweep, deprecations, version bump | ~3 |
+| **I** | [`netring-0.21-phase-I-flowscope-bonus.md`](./netring-0.21-phase-I-flowscope-bonus.md) | Adopt `detect::patterns` (Port/Beacon/DGA), `detect::file`, ECH, `FlowStateMap`, `Event::tcp()` | ~2 |
 
-**Total: 21–29 working days.** Single breaking release as netring 0.20.0.
+**Total: ~24.5 working days.** Phases A, B, D, E, G, I are largely parallelizable. Phase C is the longest (sharding architecture) and depends on A.1 (the `Arc<dyn Fn>` handler-storage switch). Phase H is sequenced last.
 
-See [`netring-0.20-INDEX-2026-06-09.md`](./netring-0.20-INDEX-2026-06-09.md) for orchestration (sequencing, cross-phase invariants, dependency rules).
+### Cross-phase invariants
 
-### Recently shipped
+Enforced across every phase:
 
-| Crate | Plan | Status |
+1. `cargo nextest run -p netring --features tokio,channel,flow,parse,pcap,metrics,http,dns,tls,icmp,emit` passes.
+2. `cargo +stable clippy --workspace --all-targets --all-features -- -D warnings` clean.
+3. `cargo fmt --check` clean.
+4. `cargo test --doc` passes.
+5. `benches/zero_alloc.rs` reads **Δ 0 bytes / Δ 0 blocks** per 100k synthetic events. Any future regression past 512 B / 100 blocks blocks the merge.
+6. flowscope dependency floor: `>= 0.13.0`. Direct jump from 0.11.1 (skip 0.12).
+
+### Dependency chain
+
+- A.1 (`Arc<dyn Fn>` storage swap) → C (sharding needs cloneable handlers)
+- A.10 (`OwnedAnomaly` re-export) → B (`EveSink` adapter uses upstream type)
+- B (`EveSink`) → I (`pattern_detector!` macro emits through `EveSink`)
+- E (pcap source) → I (`pcap_replay.rs` adoption example)
+- G (correlate cleanup) → H (CHANGELOG entry)
+- All phases → H (release prep)
+
+### Backward compatibility
+
+The user explicitly authorized backward-compat breaks for this cycle. Concrete breaks shipping:
+
+| Break | Phase | Mitigation |
 |---|---|---|
-| netring **0.17** | absorbed flowscope 0.10 (mechanical bump + parser_kinds + DnsResolutionCache + serde feature) | ✅ shipped — see CHANGELOG.md |
-| netring **0.18** | unified-driver refactor + 3 new anomaly detectors + 4 flow demos + heuristic routing | ✅ shipped (Commits A/B/C/D, 7a147a4) |
-| netring **0.19** | flowscope 0.11.1 absorption: typed `Driver<E>` + `SlotHandle<M, K>` + scratch-buffer parsers + `Bytes`-based HTTP payloads. Stream loses `+ Send` bound (`SlotHandle` is `Rc/RefCell`-based, single-thread-by-design). | ✅ shipped at `daf8557` |
+| `AnomalySink::write` key: `&dyn Debug` → `&dyn Key` (KeyFields + Debug) | A.13 | Custom sink impls update one method signature; existing `with_key(&fivetuple)` users unaffected (FiveTupleKey already implements both) |
+| `AnomalyWriter::with_key<K>` bound: `K: Debug` → `K: Key` | A.13 | Same; blanket impl makes `Key` automatic for `KeyFields + Debug` types |
+| `Monitor: Send` propagates (was `!Send` in 0.20) | H.2 | `#[tokio::main(flavor = "current_thread")]` becomes `#[tokio::main]`; user code unaffected |
+| Legacy `ProtocolMonitor` / `AnomalyMonitor` / `AnomalyRule` gain `#[deprecated]` | H.3 | Removal in 0.22; one-cycle deprecation window |
+| netring's `correlate.rs` deleted; re-export from flowscope | G | `pub use flowscope::correlate::*` — call sites unchanged |
+| netring's `OwnedAnomaly` (in `shipped_sinks`) deleted; re-export from flowscope | A.10 | Path change only; struct fields/methods identical |
+| `Cargo.toml` features: `ja3 + ja4 → tls-fingerprints`, `tracing-messages` removed | H.1 | Rename in downstream `Cargo.toml`s |
+| `flowscope = "0.13"` from `0.11.1` (skip 0.12) | H.1 | Direct jump; flowscope 0.12 changes absorbed in one bump |
+
+Migration recipes documented in `docs/MIGRATING_0.20_TO_0.21.md` (Phase H.6).
 
 ---
 
-## Design docs
+## Live reference
 
-| File | Status |
-|------|--------|
-| [`api-review-2026-06-09.md`](./api-review-2026-06-09.md) | Live — the analytical "why" behind the 0.20 redesign. Companion to the phase plans. |
-| [`upstream-tracking.md`](./upstream-tracking.md) | Live — rustc / kernel / flowscope features being watched |
+- [`upstream-tracking.md`](./upstream-tracking.md) — rustc / kernel / flowscope features being watched.
 
----
+## Recently shipped (durable record in CHANGELOG)
 
-## Plan structure
+| Crate | Status |
+|---|---|
+| netring **0.20** | shipped at `8555929`. Monitor builder + Handler trait + 5 layers + detector! macro + multi-interface + tick handlers. F.1+F.2 shipped; F.3 deferred to 0.21 Phase C. |
+| netring **0.19** | flowscope 0.11.1 absorption (typed `Driver<E>` + `SlotHandle<M, K>`). |
+| netring **0.18** | unified-driver refactor + heuristic routing + 4 flow demos. |
+| netring **0.17** | flowscope 0.10 absorption (parser_kinds + DnsResolutionCache + serde feature). |
 
-Each `NN-*.md` plan has:
+## Companion flowscope wishlists — both shipped
 
-1. **Status** — Planned / In progress / Done (and which crate version)
-2. **Prerequisites** — which prior plans must be complete
-3. **At a glance** — work-item table with tier + break? marker
-4. **Per-item sections** — touch points, migration shape, side effects
-5. **Effort summary** — LoC delta, days, risk, commit boundaries
-6. **What success looks like** — acceptance criteria
-7. **Out of scope** — what this plan does NOT do
+- Round 1 → flowscope 0.12.0 (`781595f → 1ed1228`): plans 122–127 + bonus 143, 144, 146.
+- Round 2 → flowscope 0.13.0 (`2095f28 → 7735587`): plans 147–156. Headline: Plan 156 was a 1-line `+ Send` bound fix; `Driver<E>: Send + Sync` unconditional.
 
-Release roadmaps (`netring-X.Y-*.md`) follow this same shape;
-they're scoped to one crate version.
-
----
+Wishlist files deleted per convention (shipped → not forward-looking). Recipes preserved in this INDEX + flowscope's CHANGELOG.
 
 ## Deferred (recorded so a future ask doesn't get re-litigated)
 
-- **simple-nms N1.3 verbatim** (`flow_stream(...).with_bpf_filter(filter)`
-  chained builder) — declined in favor of the cleaner
-  `stream.set_filter(filter)` verb on `StreamSetFilter`. The
-  chained form has ambiguous timing semantics (apply-at-open
-  vs. apply-now); the explicit verb avoids the reader-trap.
-- **simple-nms N2.2** (`with_extractor_replace` for hot-reload)
-  — atomic mid-packet extractor swap is hard (consistency on
-  in-flight tracker state) and simple-nms has a working
-  `Arc<ArcSwap<...>>`-wrapped-extractor fallback. Revisit
-  only if a third consumer asks.
-- **simple-nms N2.3** (AF_XDP `Packet`-metadata parity with
-  `XdpPacket`) — already tracked in
-  [`upstream-tracking.md`](./upstream-tracking.md)
-  §"Unified `PacketBackend` trait".
-- **simple-nms N3.1** (in-crate XDP-prefilter shape library)
-  — speculative; revisit when v3 demands materialise.
-- **simple-nms N3.2** (per-fanout-worker drops histogram) —
-  `AsyncMultiCapture::per_source_capture_stats()` is the raw
-  shape; aggregation belongs in consumer-side dashboards.
-- **Suricata-compatible rule DSL** — declined. `AnomalyRule<K>`
-  gives the Rust-API shape; a text-DSL is Zeek/Suricata
-  territory.
-- **eBPF-side anomaly correlator** — declined for now.
-  Order-of-magnitude harder than the user-space version; worth
-  it for 10G+ workloads but not the netring sweet spot today.
-- **Encrypted-traffic ML detection** — out of scope. Compose
-  via a user-defined `AnomalyRule` that feeds a learned model.
+- **Bevy-style `MonitorParam`** — compile-time access validation. Deferred to 0.22; ctx.split_* covers most ergonomics.
+- **VRL embedded DSL** — wrong altitude; netring users write Rust `detector!`.
+- **`Send` Driver** — **RESOLVED upstream** in flowscope 0.13.0 (1-line fix).
+- **JA4+ family / IPFIX / HTTP/2 / QUIC** — flowscope's strategic deferrals; netring inherits.
+- **Per-flow `ctx.flow_state_mut::<T>()`** — **REACTIVATED** in Phase I.7 via flowscope's `FlowStateMap`.
+- **Suricata-compatible rule DSL** — declined; Zeek/Suricata territory.
+- **Encrypted-traffic ML detection** — out of scope; user-defined `Handler`s.
+
+---
+
+## Numbering
+
+Phases are letters (A–I). Sub-items are numbered (A.1, A.2, …). New phases for 0.22+ start at the next free letter (J).

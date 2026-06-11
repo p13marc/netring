@@ -470,6 +470,11 @@ name = "monitor_port_scan"
 path = "examples/monitor/port_scan.rs"
 required-features = ["tokio", "flow"]
 
+[[example]]
+name = "monitor_pcap_replay"
+path = "examples/monitor/pcap_replay.rs"
+required-features = ["tokio", "flow", "pcap"]
+
 # util/ — helper companions for the demos
 [[example]]
 name = "synthetic_traffic"

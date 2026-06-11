@@ -12,9 +12,9 @@ use std::net::{IpAddr, Ipv4Addr, SocketAddr};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU32, Ordering};
 
-use flowscope::extract::FiveTupleKey;
 use flowscope::Timestamp;
 use flowscope::event::Severity as FsSeverity;
+use flowscope::extract::FiveTupleKey;
 use netring::anomaly::DetectorScore;
 use netring::anomaly::sink::AnomalySink;
 use netring::ctx::{CounterRegistry, Ctx, SourceIdx, StateMap};

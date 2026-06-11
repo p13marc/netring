@@ -105,6 +105,10 @@ pub struct Monitor {
     /// `BroadcastSlotHandle::clone`.
     pub(crate) broadcast_handles:
         rustc_hash::FxHashMap<std::any::TypeId, Box<dyn std::any::Any + Send + Sync>>,
+    /// 0.21 E.1: declared pcap source path; consumed by
+    /// [`Self::replay`] / [`Self::replay_with_config`].
+    #[cfg(all(feature = "pcap", feature = "tokio"))]
+    pub(crate) pcap_source_path: Option<std::path::PathBuf>,
 }
 
 impl Monitor {
@@ -129,7 +133,50 @@ impl Monitor {
         run::run_loop(self, run::StopCondition::Signal).await
     }
 
-    /// 0.21 F: subscribe to broadcast messages for protocol `P`.
+    /// 0.21 E.1: drive the dispatcher from a pcap/pcapng file
+    /// instead of a live interface. Reads to EOF, runs the
+    /// graceful drain phase, then returns.
+    ///
+    /// Requires the `pcap` Cargo feature + that
+    /// [`MonitorBuilder::pcap_source`] was called.
+    ///
+    /// Single-source: pcap replay doesn't fan in across multiple
+    /// files (use a small driver loop yourself if you need that).
+    /// Tick handlers registered on the builder are NOT fired —
+    /// pcap timestamps drift from wall-clock, so scheduling
+    /// ticks against them is ambiguous. Use `.on::<Tick>(...)`
+    /// for capture-time-based aggregation in live mode; for
+    /// pcap, hook the lifecycle events directly.
+    ///
+    /// Returns
+    /// [`crate::error::BuildError::PcapSourceRequired`] when
+    /// `pcap_source` was not set on the builder.
+    #[cfg(all(feature = "pcap", feature = "tokio"))]
+    pub async fn replay(self) -> Result<()> {
+        let path = self
+            .pcap_source_path
+            .clone()
+            .ok_or(BuildError::PcapSourceRequired)?;
+        run::replay_loop(self, path, crate::pcap_source::AsyncPcapConfig::default()).await
+    }
+
+    /// 0.21 E.1: as [`Self::replay`] but with a caller-supplied
+    /// [`crate::pcap_source::AsyncPcapConfig`] — useful when
+    /// you need a tighter queue depth, packet-timestamp pacing,
+    /// or loop-at-EOF behavior.
+    #[cfg(all(feature = "pcap", feature = "tokio"))]
+    pub async fn replay_with_config(
+        self,
+        config: crate::pcap_source::AsyncPcapConfig,
+    ) -> Result<()> {
+        let path = self
+            .pcap_source_path
+            .clone()
+            .ok_or(BuildError::PcapSourceRequired)?;
+        run::replay_loop(self, path, config).await
+    }
+
+    /// 0.21 F: subscribe to broadcast messages for broadcast-registered protocol `P`.
     ///
     /// Returns an [`EventStream`] over `P::Message` — each
     /// subscriber has its own private queue and receives every
@@ -257,6 +304,14 @@ pub struct MonitorBuilder {
     /// `build()` time.
     broadcast_handles:
         rustc_hash::FxHashMap<std::any::TypeId, Box<dyn std::any::Any + Send + Sync>>,
+    /// 0.21 E.1: when `Some`, build() relaxes the [`Self::interface`]
+    /// requirement (replay mode doesn't open AF_PACKET rings).
+    /// The path itself is consumed by [`Monitor::replay`] /
+    /// [`Monitor::replay_with_config`]; storing it on the
+    /// builder rather than `Monitor` so replay-mode builders
+    /// can short-circuit `NoInterface`.
+    #[cfg(all(feature = "pcap", feature = "tokio"))]
+    pcap_source_path: Option<std::path::PathBuf>,
 }
 
 impl MonitorBuilder {
@@ -326,6 +381,20 @@ impl MonitorBuilder {
     /// floor — useful for fail-fast smoke tests).
     pub fn drain_timeout(mut self, t: Duration) -> Self {
         self.drain_timeout = Some(t);
+        self
+    }
+
+    /// 0.21 E.1: declare a pcap source. Setting this:
+    ///
+    /// - Skips the `BuildError::NoInterface` check in
+    ///   [`Self::build`] (replay mode doesn't open AF_PACKET).
+    /// - Records the path on the builder for
+    ///   [`Monitor::replay`] / [`Monitor::replay_with_config`].
+    ///
+    /// Requires the `pcap` Cargo feature.
+    #[cfg(all(feature = "pcap", feature = "tokio"))]
+    pub fn pcap_source(mut self, path: impl Into<std::path::PathBuf>) -> Self {
+        self.pcap_source_path = Some(path.into());
         self
     }
 
@@ -653,7 +722,14 @@ impl MonitorBuilder {
 
     /// Freeze the builder into a [`Monitor`].
     pub fn build(self) -> Result<Monitor> {
-        if self.interfaces.is_empty() {
+        // 0.21 E.1: when a pcap source is declared, the
+        // `NoInterface` check is relaxed — replay mode never
+        // opens AF_PACKET.
+        #[cfg(all(feature = "pcap", feature = "tokio"))]
+        let interface_required = self.pcap_source_path.is_none();
+        #[cfg(not(all(feature = "pcap", feature = "tokio")))]
+        let interface_required = true;
+        if interface_required && self.interfaces.is_empty() {
             return Err(BuildError::NoInterface.into());
         }
         // 0.21 A.6: build-time validation — every counter type
@@ -712,6 +788,8 @@ impl MonitorBuilder {
             monitor_name: self.monitor_name,
             drain_timeout: self.drain_timeout.unwrap_or(Duration::from_secs(1)),
             broadcast_handles: self.broadcast_handles,
+            #[cfg(all(feature = "pcap", feature = "tokio"))]
+            pcap_source_path: self.pcap_source_path,
         })
     }
 }

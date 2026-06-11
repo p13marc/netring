@@ -77,6 +77,8 @@ pub(crate) async fn run_loop(monitor: Monitor, stop: StopCondition) -> Result<()
         monitor_name,
         drain_timeout,
         broadcast_handles: _,
+        #[cfg(all(feature = "pcap", feature = "tokio"))]
+            pcap_source_path: _,
     } = monitor;
     // Borrow the monitor name as `&str` for the run loop's
     // dispatch sites. The owned `Box<str>` lives in this stack
@@ -202,6 +204,108 @@ pub(crate) async fn run_loop(monitor: Monitor, stop: StopCondition) -> Result<()
     // sink. Skipped entirely when `drain_timeout` is zero — useful
     // for fail-fast smoke tests that don't care about residual
     // events.
+    if !drain_timeout.is_zero() {
+        let deadline = Instant::now() + drain_timeout;
+        drain_phase(
+            &mut driver,
+            &mut dispatcher,
+            sink.as_mut(),
+            &mut state_map,
+            &mut counters,
+            &mut protocol_slots,
+            monitor_name_borrow,
+            deadline,
+        )
+        .await?;
+    }
+
+    Ok(())
+}
+
+/// 0.21 E.1: drive a monitor from an offline pcap file.
+///
+/// Single-source by design: pcap replay doesn't need
+/// multi-interface fan-in or tick handlers (pcap timestamps
+/// jitter relative to wall-clock; tick scheduling against them
+/// is ambiguous). Runs to EOF, then calls the shared drain phase
+/// so trailing flow ends + sink flushes still land.
+///
+/// On parse error from the pcap source, propagates the error
+/// up — no partial-replay recovery.
+#[cfg(all(feature = "pcap", feature = "tokio"))]
+pub(crate) async fn replay_loop(
+    monitor: Monitor,
+    path: std::path::PathBuf,
+    config: crate::pcap_source::AsyncPcapConfig,
+) -> Result<()> {
+    use futures_core::Stream;
+
+    let Monitor {
+        interfaces: _,
+        mut driver,
+        mut dispatcher,
+        mut protocol_slots,
+        mut state_map,
+        mut counters,
+        mut sink,
+        tick_handlers: _,
+        detector_names: _,
+        monitor_name,
+        drain_timeout,
+        broadcast_handles: _,
+        pcap_source_path: _,
+    } = monitor;
+    let monitor_name_borrow: Option<&str> = monitor_name.as_deref();
+
+    let mut source = crate::pcap_source::AsyncPcapSource::open_with_config(&path, config).await?;
+    let mut events: Vec<FsEvent<FlowKey>> = Vec::with_capacity(64);
+
+    loop {
+        // Pin the stream + poll the next packet. The source's
+        // `Stream` impl drives the underlying spawn_blocking
+        // reader task; `None` = EOF.
+        let next = std::future::poll_fn(|cx| Pin::new(&mut source).poll_next(cx)).await;
+        let pkt = match next {
+            Some(Ok(p)) => p,
+            Some(Err(e)) => return Err(e),
+            None => break,
+        };
+
+        let view = flowscope::PacketView::new(&pkt.data, pkt.timestamp);
+
+        events.clear();
+        driver.track_into(view, &mut events);
+
+        for evt in events.drain(..) {
+            dispatch_lifecycle(
+                &mut dispatcher,
+                sink.as_mut(),
+                &mut state_map,
+                &mut counters,
+                evt.clone(),
+                SourceIdx(0),
+                monitor_name_borrow,
+            )?;
+            dispatch_lifecycle_async(&mut dispatcher, evt).await?;
+        }
+
+        for slot in &mut protocol_slots {
+            let mut ctx = Ctx::new(
+                None,
+                pkt.timestamp,
+                SourceIdx(0),
+                &mut state_map,
+                sink.as_mut(),
+                &mut counters,
+            );
+            ctx.monitor_name = monitor_name_borrow;
+            slot.drain_and_dispatch(&mut dispatcher, &mut ctx)?;
+        }
+    }
+
+    // EOF reached. Run the drain phase to land any trailing
+    // events (flowscope's `finish()` synthesises FlowEnded
+    // events for in-flight flows).
     if !drain_timeout.is_zero() {
         let deadline = Instant::now() + drain_timeout;
         drain_phase(

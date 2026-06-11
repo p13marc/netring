@@ -148,6 +148,13 @@ pub enum BuildError {
         /// `Protocol::NAME` of the missing broadcast registration.
         protocol_name: &'static str,
     },
+
+    /// 0.21 E.1: [`crate::monitor::Monitor::replay`] or
+    /// [`crate::monitor::Monitor::replay_with_config`] called on a
+    /// monitor whose builder didn't have a
+    /// [`crate::monitor::MonitorBuilder::pcap_source`] declared.
+    #[error("Monitor::replay requires `MonitorBuilder::pcap_source(path)` to be set")]
+    PcapSourceRequired,
 }
 
 #[cfg(test)]

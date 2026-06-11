@@ -201,7 +201,7 @@ async fn sync_and_async_handlers_for_same_event_both_fire() {
 fn dispatcher_routes_tick_payload_to_on_tick_handler() {
     // Phase F.2: users may register tick handlers via either
     // `.tick(period, handler)` (boxed registration; run loop
-    // drives) OR `.on::<Tick, _, _>(handler)` (dispatcher slot).
+    // drives) OR `.on::<Tick>(handler)` (dispatcher slot).
     // The latter is what gets exercised here — verifies the run
     // loop's `dispatcher.dispatch::<Tick>` call hits the right
     // slot for a synthetic Tick payload.

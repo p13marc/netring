@@ -10,7 +10,7 @@
 //! Monitor::builder()
 //!     .interface("lo")
 //!     .protocol::<Http>()
-//!     .on::<Http, _, _>(|msg: &flowscope::http::HttpMessage| {
+//!     .on::<Http>(|msg: &flowscope::http::HttpMessage| {
 //!         println!("http: {msg:?}");
 //!         Ok(())
 //!     })
@@ -179,8 +179,65 @@ impl MonitorBuilder {
         self
     }
 
-    /// Register a handler for event type `E`.
-    pub fn on<E, H, M>(mut self, handler: H) -> Self
+    /// Register a payload-only handler for event type `E`.
+    ///
+    /// Closure shape: `Fn(&E::Payload) -> Result<()>`. The marker
+    /// type is fixed at `PayloadOnly`, so users name only `E`:
+    ///
+    /// ```ignore
+    /// Monitor::builder()
+    ///     .protocol::<Http>()
+    ///     .on::<Http>(|msg: &flowscope::http::HttpMessage| {
+    ///         println!("{msg:?}");
+    ///         Ok(())
+    ///     })
+    /// ```
+    ///
+    /// For handlers that also need `&mut Ctx<'_>`, use
+    /// [`Self::on_ctx`]. The 0.20 three-generic form
+    /// [`Self::on_with_marker`] is `#[deprecated]`.
+    pub fn on<E: Event>(
+        mut self,
+        handler: impl Handler<E, crate::monitor::handler::PayloadOnly>,
+    ) -> Self {
+        self.handlers
+            .register::<E, _, crate::monitor::handler::PayloadOnly>(handler);
+        self
+    }
+
+    /// Register a handler that also receives `&mut Ctx<'_>`.
+    ///
+    /// Closure shape: `Fn(&E::Payload, &mut Ctx<'_>) -> Result<()>`.
+    ///
+    /// ```ignore
+    /// Monitor::builder()
+    ///     .protocol::<Tcp>()
+    ///     .state::<MyState>()
+    ///     .on_ctx::<FlowStarted<Tcp>>(|evt, ctx| {
+    ///         ctx.state_mut::<MyState>().bump();
+    ///         Ok(())
+    ///     })
+    /// ```
+    pub fn on_ctx<E: Event>(
+        mut self,
+        handler: impl Handler<E, crate::monitor::handler::PayloadCtx>,
+    ) -> Self {
+        self.handlers
+            .register::<E, _, crate::monitor::handler::PayloadCtx>(handler);
+        self
+    }
+
+    /// Deprecated three-generic handler registration.
+    ///
+    /// Replaced by [`Self::on`] (payload-only) and [`Self::on_ctx`]
+    /// (payload + ctx); both take one generic each — the marker
+    /// type is fixed per method instead of `_, _`-inferred. Removed
+    /// in netring 0.22.
+    #[deprecated(
+        since = "0.21.0",
+        note = "use `.on::<E>(handler)` (payload-only) or `.on_ctx::<E>(handler)` (payload + ctx); the marker is fixed per method"
+    )]
+    pub fn on_with_marker<E, H, M>(mut self, handler: H) -> Self
     where
         E: Event,
         H: Handler<E, M>,
@@ -205,14 +262,14 @@ impl MonitorBuilder {
     ///     .build()?
     /// ```
     ///
-    /// For closures *not* produced by `detector!`, use [`Self::on`]
-    /// directly — `.on::<E, _, _>(handler)`.
+    /// For raw closures not produced by `detector!`, use
+    /// [`Self::on`] / [`Self::on_ctx`] directly.
     pub fn detect<E, F>(self, detector: crate::detector_macro::Detector<E, F>) -> Self
     where
         E: Event,
         F: Handler<E, crate::monitor::handler::PayloadCtx>,
     {
-        self.on::<E, F, crate::monitor::handler::PayloadCtx>(detector.handler)
+        self.on_ctx::<E>(detector.handler)
     }
 
     /// Register an async handler for event type `E`.
@@ -303,7 +360,7 @@ impl MonitorBuilder {
     /// On each fire, the framework runs:
     /// 1. The closure passed here (the "ergonomic" registration),
     /// 2. The dispatcher's typed `Tick` slot — so any
-    ///    `.on::<Tick, _, _>(handler)` registrations also fire.
+    ///    `.on::<Tick>(handler)` registrations also fire.
     ///
     /// Both paths receive the same [`Tick`] payload + `&mut Ctx`.
     pub fn tick<H, M>(mut self, period: Duration, handler: H) -> Self
@@ -383,7 +440,7 @@ mod tests {
         // so two interfaces succeed at build even without root.
         let m = Monitor::builder()
             .interfaces(["lo", "eth0"])
-            .on::<FlowStarted<Tcp>, _, _>(|_evt: &FlowStarted<Tcp>| Ok(()))
+            .on::<FlowStarted<Tcp>>(|_evt: &FlowStarted<Tcp>| Ok(()))
             .build()
             .unwrap();
         assert_eq!(m.interfaces, vec!["lo".to_string(), "eth0".to_string()]);
@@ -391,15 +448,27 @@ mod tests {
 
     #[test]
     fn build_with_single_interface_succeeds() {
-        // Type-inference papercut: `.on` has three generics (E, H, M);
-        // only E is named explicitly, so users supply `_, _` for the
-        // others. Documented in the module rustdoc.
+        // 0.21 A.2: `.on::<E>` takes one generic (E), marker fixed
+        // to `PayloadOnly`. The `, _` is for the closure's H type
+        // inferred by the compiler.
         let m = Monitor::builder()
             .interface("lo")
-            .on::<FlowStarted<Tcp>, _, _>(|_evt: &FlowStarted<Tcp>| Ok(()))
+            .on::<FlowStarted<Tcp>>(|_evt: &FlowStarted<Tcp>| Ok(()))
             .build()
             .unwrap();
         assert_eq!(m.interfaces, vec!["lo".to_string()]);
+    }
+
+    #[test]
+    #[allow(deprecated)]
+    fn build_with_legacy_on_with_marker_still_compiles() {
+        // 0.21 A.2 deprecation gate: confirm the 0.20 three-generic
+        // form still compiles for one cycle. Removed in 0.22.
+        let _ = Monitor::builder()
+            .interface("lo")
+            .on_with_marker::<FlowStarted<Tcp>, _, _>(|_evt: &FlowStarted<Tcp>| Ok(()))
+            .build()
+            .unwrap();
     }
 
     #[test]

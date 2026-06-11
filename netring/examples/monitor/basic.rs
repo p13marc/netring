@@ -39,23 +39,21 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .interface(&iface)
         .protocol::<Tcp>() // FlowStarted/Ended<Tcp> lifecycle events
         .state::<FlowCounters>()
-        .on::<FlowStarted<Tcp>, _, _>(|_evt: &FlowStarted<Tcp>, ctx: &mut Ctx<'_>| {
-            // Scope the state borrow tightly so the subsequent
-            // `ctx.ts` read and `ctx.sink_mut()` call don't
-            // conflict with the previous mutable borrow.
-            let started_total = {
-                let counters = ctx.state_mut::<FlowCounters>();
-                counters.started += 1;
-                counters.started
-            };
-            let now = ctx.ts;
-            ctx.sink_mut()
-                .begin("FlowStartedTcp", Severity::Info, now)
-                .with_metric("started_total", started_total as f64)
+        .on_ctx::<FlowStarted<Tcp>>(|_evt: &FlowStarted<Tcp>, ctx: &mut Ctx<'_>| {
+            // 0.21 A.3: `split_state_sink::<T>()` projects two
+            // disjoint borrows in one step — no manual borrow-
+            // shortening scope needed. 0.21 A.2: `ctx.emit(kind,
+            // sev)` is the one-line shortcut for the begin chain;
+            // it captures `ctx.ts` automatically.
+            let ts = ctx.ts;
+            let (counters, sink) = ctx.split_state_sink::<FlowCounters>();
+            counters.started += 1;
+            sink.begin("FlowStartedTcp", Severity::Info, ts)
+                .with_metric("started_total", counters.started as f64)
                 .emit();
             Ok(())
         })
-        .on::<FlowEnded<Tcp>, _, _>(|_evt: &FlowEnded<Tcp>, ctx: &mut Ctx<'_>| {
+        .on_ctx::<FlowEnded<Tcp>>(|_evt: &FlowEnded<Tcp>, ctx: &mut Ctx<'_>| {
             ctx.state_mut::<FlowCounters>().ended += 1;
             Ok(())
         })

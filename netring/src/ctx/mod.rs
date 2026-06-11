@@ -145,12 +145,34 @@ impl<'a> Ctx<'a> {
         self.counters.get_mut::<K>()
     }
 
-    /// Borrow the anomaly sink mutably. The trait body lands in
-    /// Phase C — the Phase B sink is a no-op marker for the
-    /// dispatch machinery.
+    /// Borrow the anomaly sink mutably.
     #[inline]
     pub fn sink_mut(&mut self) -> &mut dyn crate::anomaly::sink::AnomalySink {
         self.sink
+    }
+
+    /// Shortcut: begin an anomaly emission keyed by `kind` + `severity`
+    /// using `self.ts` as the timestamp. Equivalent to
+    /// `self.sink_mut().begin(kind, severity, self.ts)` but reads
+    /// cleaner:
+    ///
+    /// ```ignore
+    /// ctx.emit("FlowStartedTcp", Severity::Info)
+    ///     .with_key(&evt.key)
+    ///     .with_metric("count", n as f64)
+    ///     .emit();
+    /// ```
+    ///
+    /// The returned [`AnomalyWriter`] borrows the sink for its lifetime;
+    /// no temporaries needed.
+    #[inline]
+    pub fn emit(
+        &mut self,
+        kind: &'static str,
+        severity: crate::anomaly::Severity,
+    ) -> crate::anomaly::sink::AnomalyWriter<'_> {
+        let ts = self.ts;
+        self.sink.begin(kind, severity, ts)
     }
 }
 

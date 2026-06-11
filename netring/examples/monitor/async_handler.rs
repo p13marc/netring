@@ -61,7 +61,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let monitor = Monitor::builder()
         .interface(&iface)
         .protocol::<Tcp>()
-        .on::<FlowStarted<Tcp>, _, _>(move |_evt: &FlowStarted<Tcp>| {
+        .on::<FlowStarted<Tcp>>(move |_evt: &FlowStarted<Tcp>| {
             sync_count_h.fetch_add(1, Ordering::Relaxed);
             Ok(())
         })

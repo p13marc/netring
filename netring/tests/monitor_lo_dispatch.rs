@@ -64,7 +64,7 @@ async fn monitor_lo_fires_on_synthetic_traffic() {
     let monitor_result = Monitor::builder()
         .interface("lo")
         .protocol::<Tcp>()
-        .on::<FlowStarted<Tcp>, _, _>(move |_evt: &FlowStarted<Tcp>| {
+        .on::<FlowStarted<Tcp>>(move |_evt: &FlowStarted<Tcp>| {
             s.fetch_add(1, Ordering::Relaxed);
             Ok(())
         })
@@ -182,7 +182,7 @@ async fn monitor_lo_with_two_interfaces_tags_source() {
     let monitor_result = Monitor::builder()
         .interfaces(["lo", "lo"])
         .protocol::<Tcp>()
-        .on::<FlowStarted<Tcp>, _, _>(move |_evt: &FlowStarted<Tcp>, ctx: &mut Ctx<'_>| {
+        .on_ctx::<FlowStarted<Tcp>>(move |_evt: &FlowStarted<Tcp>, ctx: &mut Ctx<'_>| {
             let idx = ctx.source.0 as usize;
             if idx < 2 {
                 s.lock().unwrap()[idx] += 1;
@@ -217,7 +217,7 @@ async fn monitor_lo_with_layers_and_sink_chain() {
     let monitor_result = Monitor::builder()
         .interface("lo")
         .protocol::<Tcp>()
-        .on::<FlowStarted<Tcp>, _, _>(|evt: &FlowStarted<Tcp>, ctx: &mut Ctx<'_>| {
+        .on_ctx::<FlowStarted<Tcp>>(|evt: &FlowStarted<Tcp>, ctx: &mut Ctx<'_>| {
             let now = ctx.ts;
             let key = evt.key;
             ctx.sink_mut()

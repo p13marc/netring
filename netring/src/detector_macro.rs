@@ -4,7 +4,7 @@
 //! The macro expands to a closure that satisfies the sync
 //! [`crate::monitor::Handler`] trait for the configured event
 //! type, ready to register via
-//! `Monitor::builder().on::<E, _, _>(detector!{...})` or its
+//! `Monitor::builder().on_ctx::<E>(detector!{...})` or its
 //! sugar alias `.detect(...)`.
 //!
 //! Grammar:

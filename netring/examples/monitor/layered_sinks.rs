@@ -43,7 +43,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     Monitor::builder()
         .interface(&iface)
         .protocol::<Tcp>()
-        .on::<FlowStarted<Tcp>, _, _>(|evt: &FlowStarted<Tcp>, ctx: &mut Ctx<'_>| {
+        .on_ctx::<FlowStarted<Tcp>>(|evt: &FlowStarted<Tcp>, ctx: &mut Ctx<'_>| {
             let now = ctx.ts;
             let key = evt.key;
             // Fire one Info per flow start — will be dropped by

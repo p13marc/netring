@@ -22,7 +22,7 @@ async fn builder_accepts_async_handler_with_arc_capture() {
     let monitor = Monitor::builder()
         .interface("lo")
         .protocol::<Tcp>()
-        .on::<FlowStarted<Tcp>, _, _>(|_evt: &FlowStarted<Tcp>| Ok(()))
+        .on::<FlowStarted<Tcp>>(|_evt: &FlowStarted<Tcp>| Ok(()))
         .on_async::<FlowStarted<Tcp>, _>(
             // (E, H) — H inferred
             move |_evt: &FlowStarted<Tcp>| {

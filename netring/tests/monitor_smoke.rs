@@ -27,7 +27,7 @@ async fn monitor_builds_and_runs_to_deadline_without_traffic() {
     let monitor = match Monitor::builder()
         .interface("lo")
         .protocol::<Tcp>() // lifecycle-only — no parser slot
-        .on::<FlowStarted<Tcp>, _, _>(move |_evt: &FlowStarted<Tcp>| {
+        .on::<FlowStarted<Tcp>>(move |_evt: &FlowStarted<Tcp>| {
             c.fetch_add(1, Ordering::Relaxed);
             Ok(())
         })

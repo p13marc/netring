@@ -548,6 +548,7 @@ dependencies = [
  "httparse",
  "lru",
  "serde",
+ "serde_json",
  "simple-dns",
  "smallvec",
  "tls-parser",

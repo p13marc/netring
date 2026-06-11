@@ -59,6 +59,8 @@
 //! ```
 
 mod builtin;
+#[cfg(feature = "eve-sink")]
+pub mod eve_sink;
 pub mod key;
 mod monitor;
 mod rule;
@@ -75,3 +77,6 @@ pub use rule::{Anomaly, AnomalyContext, AnomalyRule, Severity};
 /// Re-exported here so `crate::anomaly::OwnedAnomaly` works regardless
 /// of which sink consumed it.
 pub use flowscope::OwnedAnomaly;
+
+#[cfg(feature = "eve-sink")]
+pub use eve_sink::EveSink;

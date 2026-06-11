@@ -121,6 +121,11 @@ serde = ["dep:serde", "dep:serde_json", "flowscope/serde"]
 # CSV writers). Pulls no extra deps. Used by
 # `examples/flow/zeek_export.rs`.
 emit = ["flow", "flowscope/emit"]
+# 0.21 Phase B.2 — Suricata EVE JSON sink. Adapter over
+# `flowscope::emit::EveJsonWriter` exposed at
+# `netring::anomaly::EveSink`. Pulls flowscope's `emit-eve`
+# (which pulls `serde_json`).
+eve-sink = ["emit", "dep:serde_json", "flowscope/emit-eve"]
 # Opt-in: drives the dhat-based allocation regression test in
 # `benches/zero_alloc.rs`. Pulls `flow + tokio + parse` because
 # the dispatcher + builtin Protocol markers + Ctx surface live

@@ -44,19 +44,20 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .interface(&iface)
         .protocol::<Tcp>()
         .on_ctx::<FlowStarted<Tcp>>(|evt: &FlowStarted<Tcp>, ctx: &mut Ctx<'_>| {
-            let now = ctx.ts;
             let key = evt.key;
+            // 0.21 A.2: `ctx.emit(kind, severity)` captures
+            // `ctx.ts` automatically — replaces the
+            // `let now = ctx.ts; ctx.sink_mut().begin(...)` dance.
+            //
             // Fire one Info per flow start — will be dropped by
             // MinSeverity::warning().
-            ctx.sink_mut()
-                .begin("FlowInfo", Severity::Info, now)
+            ctx.emit("FlowInfo", Severity::Info)
                 .with_key(&key)
                 .emit();
             // Fire one Warning per flow start — passes MinSeverity
             // but gets deduped by (kind="FlowWarn", key=evt.key)
             // within 60s. Different flows still fire.
-            ctx.sink_mut()
-                .begin("FlowWarn", Severity::Warning, now)
+            ctx.emit("FlowWarn", Severity::Warning)
                 .with_key(&key)
                 .emit();
             Ok(())

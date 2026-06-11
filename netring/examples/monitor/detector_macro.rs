@@ -32,15 +32,16 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     eprintln!("monitor_detector_macro: capturing on {iface} for {dur_secs}s");
 
+    // 0.21 A.12: every emit uses `ctx.emit(kind, severity)` —
+    // the A.2 shortcut that wraps `let now = ctx.ts;
+    // ctx.sink_mut().begin(kind, severity, now)` into one call.
     let ssh_attempt = netring::detector! {
         name:     "SshAttempt",
         severity: Info,
         event:    FlowStarted<Tcp>,
         matches:  |evt| evt.key.either_port(22),
         emit:     |evt, ctx| {
-            let now = ctx.ts;
-            ctx.sink_mut()
-                .begin("SshAttempt", Severity::Info, now)
+            ctx.emit("SshAttempt", Severity::Info)
                 .with_key(&evt.key)
                 .emit();
         },
@@ -53,11 +54,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         matches:  |msg| matches!(msg, flowscope::http::HttpMessage::Request(_)),
         emit:     |msg, ctx| {
             let flowscope::http::HttpMessage::Request(req) = msg else { return };
-            let now = ctx.ts;
             let method = std::str::from_utf8(&req.method).unwrap_or("?");
             let path = std::str::from_utf8(&req.path).unwrap_or("?");
-            ctx.sink_mut()
-                .begin("HttpRequest", Severity::Info, now)
+            ctx.emit("HttpRequest", Severity::Info)
                 .with("method", method.to_string())
                 .with("path", path.to_string())
                 .emit();
@@ -71,8 +70,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         matches:  |msg| matches!(msg, flowscope::dns::DnsMessage::Query(_)),
         emit:     |msg, ctx| {
             let flowscope::dns::DnsMessage::Query(q) = msg else { return };
-            let now = ctx.ts;
-            let mut writer = ctx.sink_mut().begin("DnsQuery", Severity::Info, now);
+            let mut writer = ctx.emit("DnsQuery", Severity::Info);
             if let Some(question) = q.questions.first() {
                 writer = writer.with("qname", question.name.to_string());
             }

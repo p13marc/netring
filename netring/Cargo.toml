@@ -114,6 +114,17 @@ monitor = [
     "emit", "serde",
 ]
 
+# 0.21 H.4: maximal umbrella that pulls every 0.21 sink + detector
+# + flowscope bonus feature. Suitable for "full-stack" app builds
+# that want everything netring + flowscope-0.13 can offer; lean
+# embedded builds should still wire `tokio + flow` (or the
+# narrower `monitor`) directly.
+monitor-quickstart = [
+    "tokio", "channel", "flow", "parse", "pcap", "metrics",
+    "http", "dns", "tls", "icmp",
+    "emit", "eve-sink", "file-hash", "serde",
+]
+
 # Opt-in serde derives on `Anomaly<K>` / `AnomalyContext` /
 # `Severity`. Composes with `flowscope/serde` (0.8+) so users
 # can ship `Anomaly`s carrying full parsed `ProtocolMessage`

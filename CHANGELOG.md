@@ -1,5 +1,220 @@
 # Changelog
 
+## 0.21.0 — Send Monitor + sharding + streaming subscribers + pcap replay
+
+The 0.21 cycle polishes the 0.20 Monitor API into a Send, multi-thread
+runtime; adds per-CPU sharding, a streaming-subscriber API, offline
+pcap replay, a graceful drain phase, and a wide pattern-detector
+catalogue adopted from flowscope 0.13's `detect::patterns` /
+`detect::file` modules. Legacy `ProtocolMonitor` / `AnomalyMonitor` /
+`AnomalyRule` types are marked `#[deprecated(since = "0.21.0")]`;
+removal scheduled for 0.22.0.
+
+### Highlights
+
+- **Monitor is now `Send`.** flowscope 0.13's `Driver<E>: Send + Sync`
+  cleared the last `!Send` field; `Monitor`, `MonitorBuilder`,
+  `ShardedRunner`, `EventStream<M>` all carry compile-time `Send`
+  asserts (`tests/monitor_send.rs`). All monitor examples drop
+  `#[tokio::main(flavor = "current_thread")]` for plain
+  `#[tokio::main]`.
+- **Per-CPU sharding** via `ShardedRunner::new(iface, mode, group_id,
+  num_shards, build_shard)`. AF_PACKET fanout distributes packets
+  by `FanoutMode::Cpu` / `Hash` / `EBPF`. Each shard runs on its
+  own OS thread + tokio runtime.
+- **Streaming subscribers** via `MonitorBuilder::with_broadcast::<P>()` +
+  `Monitor::subscribe::<P>() -> EventStream<P::Message>`. `EventStream`
+  implements `futures_core::Stream` for plug-in with
+  `StreamExt::next()` / `tokio::select!`.
+- **Offline pcap replay** via `MonitorBuilder::pcap_source(path) +
+  Monitor::replay()`. Optional `pcap_speed_factor(f)` for paced
+  replay. Skips the `NoInterface` check at build time.
+- **`run_until_idle(window)`** stop condition — exits after `window`
+  of inactivity (tick fires + packets reset the timer). Pairs
+  cleanly with pcap replay.
+- **Graceful drain** — `MonitorBuilder::drain_timeout(dur)` (default
+  1s) flushes in-flight flow ends + protocol-slot drains + sink
+  flush before returning. Bounded; skipped at `Duration::ZERO`.
+- **Per-flow state** via `MonitorBuilder::flow_state::<T>(idle_timeout)`
+  + `ctx.flow_state_mut::<T>() -> Option<&mut T>`. Backed by
+  flowscope's `FlowStateMap`. Lazy-creates per flow, evicts on
+  `FlowEnded`.
+
+### Added — Monitor builder API
+
+- **`MonitorBuilder::name(name)`** + `Ctx::monitor_name: Option<&str>`
+  propagation. Multi-monitor processes can disambiguate per
+  emission. `Box<str>` storage on `Monitor`, borrowed at dispatch
+  time.
+- **`MonitorBuilder::fanout(FanoutMode, group_id)`** AF_PACKET
+  fanout setter for single-shard interop or sharded mode wiring.
+- **Split `.on::<E>()` (PayloadOnly) and `.on_ctx::<E>()` (PayloadCtx)**
+  handler registrations. `on::<E, _, _>()` deprecated.
+- **`MonitorBuilder::state_init::<T, F>(factory)`** for non-`Default`
+  state types; **`.state_with::<T>(value)`** for caller-supplied
+  initial state.
+- **`MonitorBuilder::flow_state::<T>(idle_timeout)`** + the
+  matching `ctx.flow_state_mut::<T>()` accessor.
+- **`MonitorBuilder::counter::<K>(window, bucket)`** unchanged but
+  now uses `TimeBucketedCounter::new_unbounded` upstream.
+- **`MonitorBuilder::with_broadcast::<P>()`** opts the protocol into
+  broadcast delivery so `Monitor::subscribe::<P>()` works for it.
+- **`MonitorBuilder::pcap_source(path)`** + **`pcap_speed_factor(f)`** +
+  `Monitor::replay()` / `replay_with_config(cfg)`. Relaxes the
+  `NoInterface` check when set.
+- **`MonitorBuilder::drain_timeout(dur)`** — graceful drain budget;
+  default 1s.
+
+### Added — handler/event surface
+
+- **`FlowPacket<P>`, `FlowTick<P>`, `ParserClosed<P>`** typed
+  events — `dispatch_lifecycle` arms for both sync and async
+  paths.
+- **`Event::protocol_marker()` + `Event::protocol_name()`** trait
+  methods feed the new build-time validation
+  (`BuildError::HandlerForUnregisteredProtocol`).
+- **`Ctx::emit(kind, severity)`** shortcut anchors an
+  `AnomalyWriter` to `ctx.ts` in one expression.
+- **`Ctx::split_state_sink<T>` + `_counter` + `_sink_counter` +
+  `_state_sink_counter`** disjoint-borrow helpers via audited
+  `unsafe`.
+- **`AnomalyWriter::with_dynamic(label, value)`** runtime-label
+  escape hatch (one `Box::leak` per call — documented).
+- **`AnomalyWriter::emit_owned() -> OwnedAnomaly`** materializes
+  without firing the sink — useful for log lines + downstream
+  collectors.
+
+### Added — sinks + layers
+
+- **`EveSink`** (feature `eve-sink`) — Suricata EVE JSON adapter
+  over `flowscope::emit::EveJsonWriter`. Downcast 5-tuples land
+  in structured JSON fields; non-FiveTupleKey events stay
+  loggable.
+- **`MetricsSink`** (feature `metrics`) — metrics-rs facade
+  emitting `netring_anomaly_total` counter + `netring_anomaly_metric`
+  histogram. Cardinality contract: only `kind` + `severity`
+  labels.
+- **`Tee::factory(|| sink)`** closure-based secondary-sink ctor.
+  Each `Layer::wrap` invocation mints a fresh secondary; pairs
+  with `ShardedRunner` for per-shard JSON logs without `S: Clone`.
+- **`crate::anomaly::sink::publish_owned(&mut dyn AnomalySink, &OwnedAnomaly)`**
+  publishes an `OwnedAnomaly` through any layer chain; used by
+  `pattern_detector!`.
+
+### Added — detection patterns
+
+- **`pattern_detector! { name, event, detector, feed, verdict }`**
+  macro wrapping any detector implementing
+  `flowscope::DetectorScore` in `Arc<Mutex<D>>`. Used by:
+  - `examples/monitor/port_scan.rs` — TRW port-scan detection
+  - `examples/monitor/beacon_detector.rs` — C2 beacon detection
+  - `examples/monitor/dga_query.rs` — DGA domain scoring on DNS
+    queries
+- **`examples/monitor/file_hash_dfir.rs`** — Sha256Sink + FileType
+  flagging PE/ELF/Mach-O over plain HTTP. Gated on new `file-hash`
+  Cargo feature.
+- **`examples/monitor/ech_adoption.rs`** — ECH outcome surveillance
+  using flowscope's `TlsHandshake::ech_outcome`.
+
+### Added — release/quickstart features
+
+- **Cargo feature `monitor-quickstart`** — pulls every 0.21 sink +
+  detector + flowscope-bonus feature: `tokio + channel + flow +
+  parse + pcap + metrics + http + dns + tls + icmp + emit +
+  eve-sink + file-hash + serde`. Lean embedded builds still
+  cherry-pick the granular flags directly.
+- **Cargo feature `file-hash`** — pass-through for
+  `flowscope/file-hash`. Pulls `sha2` only when enabled.
+- **Cargo feature `eve-sink`** — pass-through for
+  `flowscope/emit-eve`.
+- **`netring::prelude`** now re-exports `AnomalyFields`,
+  `DetectorScore`, `Key`, `KeyFields` alongside the existing
+  monitor surface.
+
+### Added — build-time validation
+
+- **`BuildError::HandlerForUnregisteredProtocol { protocol_name }`** —
+  fires when a handler for an L7 message event is registered
+  without `.protocol::<P>()`. Lifecycle events
+  (`FlowStarted<Tcp>` etc.), `Tick`, `AnyFlowAnomaly` are exempt.
+- **`BuildError::CounterNotRegistered { detector, type_name }`** —
+  fires when `detector! { counters: [K] }` is declared without
+  a matching `.counter::<K>(...)`.
+- **`BuildError::ProtocolNotBroadcast { protocol_name }`** —
+  fires when `Monitor::subscribe::<P>()` is called for a
+  non-broadcast-opted protocol.
+- **`BuildError::PcapSourceRequired`** — fires when
+  `Monitor::replay()` is called without `pcap_source` set.
+
+### Changed
+
+- **Legacy types `#[deprecated(since = "0.21.0")]`:**
+  `ProtocolMonitor`, `ProtocolMonitorBuilder`, `AnomalyMonitor`,
+  `AnomalyRule`. Note message points at
+  `docs/MIGRATING_0.20_TO_0.21.md`. Removal scheduled for 0.22.0.
+- **`AnomalySink::write` key parameter** is `Option<&dyn Key>`
+  (was `Option<&dyn Debug>` in 0.20). The new `Key` super-trait
+  inherits `KeyFields + Debug + Send + Sync` so sinks can
+  downcast for structured emission (e.g. EveSink → 5-tuple JSON
+  fields).
+- **`netring::correlate::TimeBucketedCounter`** dropped from
+  netring; re-exported from `flowscope::correlate` (along with
+  `BurstDetector`, `Ewma`, `FlowStateMap`, `KeylessSequencePattern`,
+  `SequencePattern`, `TimeBucketedSet`, `TopK`). All in-tree call
+  sites switched to `::new_unbounded(window, bucket)`.
+  `KeyIndexed` stays netring-side because flowscope's version
+  lacks the `drain_expired(now) -> impl Iterator<Item = (K, V)>`
+  semantics netring's "expected B-after-A didn't happen"
+  detectors need.
+- **`flowscope` dep bumped 0.11.1 → 0.13.0.** Pickups:
+  `BroadcastSlotHandle`, `DetectorScore`, `OwnedAnomaly`,
+  `AnomalyFields`, `FlowStateMap`, `Sha256Sink + FileType`,
+  ECH outcomes on `TlsHandshake`, `pattern_detector` upstream
+  helpers.
+- **`BoxedHandler`** storage swapped from `Box<dyn FnMut + Send>`
+  to `Arc<dyn Fn + Send + Sync>` (private API but enables the
+  `Dispatcher::clone_for_shard` cheap-refcount path used by
+  Phase C sharding).
+- **`Protocol::register_broadcast(builder)`** companion trait
+  method — defaults to `Err`, overridden on `Http` (others gain
+  the override case-by-case when their `Message` types are
+  `Clone`).
+- **`ProtocolSlot: Send`** supertrait. Required to make
+  `Monitor: Send`.
+
+### Internal
+
+- ~25 commits on `0.21-dev` branch under the per-phase plans
+  (`plans/netring-0.21-phase-{A..I}-*.md`). Each plan file is
+  deleted in this release per the "delete on ship" convention.
+- New `netring::monitor::shard` module containing
+  `ShardedRunner` + per-shard thread spawn machinery.
+- New `netring::monitor::subscribe` module with `EventStream<M>`
+  + `Stream` impl.
+- Updated dhat zero-alloc bench still measures Δ 0 bytes / Δ 0
+  blocks over 100k synthetic dispatches with the new fields
+  threaded through `Ctx::new`.
+
+### Migration
+
+A dedicated guide lives at `docs/MIGRATING_0.20_TO_0.21.md`. The
+legacy API surface continues to compile; mechanical migration
+recipes are mostly opt-in (the bump itself is API-additive). The
+notable breaks:
+
+- `AnomalySink::write` key type — `Option<&dyn Debug>` →
+  `Option<&dyn Key>`. Custom sink impls need to update.
+- `Protocol` trait grows `register_broadcast` — default impl
+  returns `Err`, so existing `Protocol` impls compile unchanged
+  unless they want broadcast.
+- `Event` trait grows `protocol_marker()` + `protocol_name()` —
+  defaults to `None` / `"unknown"`, so existing `Event` impls
+  compile unchanged.
+- `TimeBucketedCounter::new(window, bucket)` →
+  `TimeBucketedCounter::new_unbounded(window, bucket)`. Or
+  pull flowscope's 3-arg `new(window, bucket, capacity)`
+  directly when you want the cap.
+
 ## 0.20.0 — declarative Monitor API (Protocol trait + Handler + Layer + macro)
 
 The biggest API redesign since 0.13. Brings a single fluent

@@ -25,6 +25,37 @@ use crate::protocol::{FlowKey, Protocol};
 pub trait Event: Send + Sync + 'static {
     /// The handler-visible payload type.
     type Payload: Send + Sync + 'static;
+
+    /// 0.21 D.1: returns the [`std::any::TypeId`] of the
+    /// [`Protocol`] marker this event REQUIRES on the builder's
+    /// `.protocol::<P>()` list (because the event payload comes
+    /// off a parser slot that wouldn't otherwise be registered),
+    /// or `None` if no registration is needed.
+    ///
+    /// - Raw protocol message events (the blanket impl on
+    ///   `P: Protocol`) return `Some(TypeId::of::<P>())` — the
+    ///   handler can't fire unless the parser slot exists.
+    /// - Lifecycle events (`FlowStarted<P>`, etc.), `Tick`,
+    ///   `AnyFlowAnomaly` return `None` — they're driven by the
+    ///   central tracker regardless of which protocols are
+    ///   registered.
+    ///
+    /// `MonitorBuilder::build` walks the handler registry against
+    /// the declared protocol set and surfaces a
+    /// `BuildError::HandlerForUnregisteredProtocol` when this
+    /// returns `Some(p)` and `p` isn't in the declared set.
+    fn protocol_marker() -> Option<std::any::TypeId> {
+        None
+    }
+
+    /// 0.21 D.1: stable slug for the protocol marker, used only
+    /// for diagnostic messages on
+    /// [`crate::error::BuildError::HandlerForUnregisteredProtocol`].
+    /// Defaults to `"unknown"` for events without a protocol
+    /// marker; the blanket `P: Protocol` impl returns `P::NAME`.
+    fn protocol_name() -> &'static str {
+        "unknown"
+    }
 }
 
 // ─── Raw protocol message events ────────────────────────────────
@@ -35,6 +66,14 @@ pub trait Event: Send + Sync + 'static {
 
 impl<P: Protocol> Event for P {
     type Payload = P::Message;
+
+    fn protocol_marker() -> Option<std::any::TypeId> {
+        Some(std::any::TypeId::of::<P>())
+    }
+
+    fn protocol_name() -> &'static str {
+        P::NAME
+    }
 }
 
 // ─── Flow lifecycle events, generic over the protocol marker ────

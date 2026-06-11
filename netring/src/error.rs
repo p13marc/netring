@@ -120,6 +120,22 @@ pub enum BuildError {
         /// `std::any::type_name::<K>()` of the missing counter type.
         type_name: &'static str,
     },
+
+    /// 0.21 D.1: A handler is registered against a typed message
+    /// event (e.g. `on::<Http>(|msg|…)`) for an L7 protocol `P`,
+    /// but `.protocol::<P>()` was never called on the builder.
+    /// Without the slot the parser never runs, so the handler
+    /// would silently never fire — moving it to build time
+    /// surfaces the misconfiguration. Lifecycle-only typed
+    /// events (`FlowStarted<Tcp>`, `Tick`, etc.) are exempt;
+    /// they're driven by the central tracker regardless.
+    #[error(
+        "handler for typed message event of protocol `{protocol_name}` requires `.protocol::<{protocol_name}>()` to be called on the builder"
+    )]
+    HandlerForUnregisteredProtocol {
+        /// `Protocol::NAME` of the missing protocol marker.
+        protocol_name: &'static str,
+    },
 }
 
 #[cfg(test)]

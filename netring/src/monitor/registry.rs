@@ -35,6 +35,16 @@ use crate::protocol::event_typed::Event;
 pub struct HandlerRegistry {
     by_type: FxHashMap<TypeId, Vec<BoxedHandler>>,
     async_by_type: FxHashMap<TypeId, Vec<BoxedAsyncHandler>>,
+    /// 0.21 D.1: for each registered event-payload TypeId, the
+    /// `Protocol` marker TypeId + stable name that the event
+    /// REQUIRES on the builder's `.protocol::<P>()` list — gathered
+    /// at register time via [`crate::protocol::event_typed::Event::protocol_marker`].
+    /// Events that don't need a slot (`Tick`, lifecycle events,
+    /// `AnyFlowAnomaly`) are absent from the map.
+    /// `MonitorBuilder::build` consults this map alongside its
+    /// declared-protocol set to surface
+    /// `BuildError::HandlerForUnregisteredProtocol`.
+    required_protocols: FxHashMap<TypeId, (TypeId, &'static str)>,
 }
 
 impl HandlerRegistry {
@@ -64,6 +74,11 @@ impl HandlerRegistry {
             .entry(TypeId::of::<E::Payload>())
             .or_default()
             .push(boxed);
+        if let Some(p_id) = E::protocol_marker() {
+            self.required_protocols
+                .entry(TypeId::of::<E::Payload>())
+                .or_insert((p_id, E::protocol_name()));
+        }
     }
 
     /// Add an async handler `H` for event type `E`.
@@ -81,6 +96,20 @@ impl HandlerRegistry {
             .entry(TypeId::of::<E::Payload>())
             .or_default()
             .push(boxed);
+        if let Some(p_id) = E::protocol_marker() {
+            self.required_protocols
+                .entry(TypeId::of::<E::Payload>())
+                .or_insert((p_id, E::protocol_name()));
+        }
+    }
+
+    /// 0.21 D.1: returns an iterator over `(protocol_TypeId, protocol_name)`
+    /// pairs that handlers required during registration. Each unique
+    /// (event_type → marker) pair appears once. Consumed by
+    /// `MonitorBuilder::build` to validate against the declared
+    /// protocol set.
+    pub fn required_protocols(&self) -> impl Iterator<Item = (TypeId, &'static str)> + '_ {
+        self.required_protocols.values().copied()
     }
 
     /// Number of distinct event types registered (sync + async

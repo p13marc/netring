@@ -196,6 +196,13 @@ pub struct MonitorBuilder {
     /// [`Self::drain_timeout`] is called; defaults to 1 second
     /// at [`Self::build`] time.
     drain_timeout: Option<Duration>,
+    /// 0.21 D.1: TypeIds of protocol markers registered via
+    /// `.protocol::<P>()`, paired with each marker's stable
+    /// `Protocol::NAME` slug. Consulted at `build()` time against
+    /// [`HandlerRegistry::required_protocols`] to surface
+    /// [`BuildError::HandlerForUnregisteredProtocol`] when a
+    /// handler requires a slot that was never installed.
+    declared_protocols: rustc_hash::FxHashMap<std::any::TypeId, &'static str>,
 }
 
 impl MonitorBuilder {
@@ -285,7 +292,13 @@ impl MonitorBuilder {
             self.protocol_slots
                 .push(Box::new(TypedProtocolSlot::<P>::new(handle)));
         }
-        // Err(_) = lifecycle-only; nothing to register.
+        // Err(_) = lifecycle-only; nothing to register on the driver
+        // side. Still record the marker in `declared_protocols` so
+        // 0.21 D.1's handler-protocol validation accepts handlers
+        // typed on lifecycle markers when `.protocol::<Tcp>()` was
+        // called for symmetry.
+        self.declared_protocols
+            .insert(std::any::TypeId::of::<P>(), P::NAME);
         self
     }
 
@@ -550,6 +563,19 @@ impl MonitorBuilder {
                     }
                     .into());
                 }
+            }
+        }
+        // 0.21 D.1: every handler whose Event::protocol_marker
+        // returns Some(p) must have `.protocol::<p>()` on the
+        // builder. Catches handlers for L7 parser-emitted message
+        // types where the user forgot to register the parser slot
+        // — without this, the handler silently never fires.
+        for (marker, name) in self.handlers.required_protocols() {
+            if !self.declared_protocols.contains_key(&marker) {
+                return Err(BuildError::HandlerForUnregisteredProtocol {
+                    protocol_name: name,
+                }
+                .into());
             }
         }
         let driver = self

@@ -129,7 +129,10 @@ struct DnsBurstRule {
 impl DnsBurstRule {
     fn new(threshold: u64) -> Self {
         Self {
-            counts: TimeBucketedCounter::new(Duration::from_secs(10), Duration::from_secs(1)),
+            counts: TimeBucketedCounter::new_unbounded(
+                Duration::from_secs(10),
+                Duration::from_secs(1),
+            ),
             threshold,
             alerted: HashSet::new(),
         }
@@ -322,7 +325,7 @@ fn bench_time_bucketed_counter_bump(c: &mut Criterion) {
 
     group.bench_function("bump_same_key", |b| {
         let mut counter: TimeBucketedCounter<u32> =
-            TimeBucketedCounter::new(Duration::from_secs(10), Duration::from_secs(1));
+            TimeBucketedCounter::new_unbounded(Duration::from_secs(10), Duration::from_secs(1));
         let key = 42u32;
         let ts = Timestamp::new(100, 0);
         b.iter(|| {
@@ -332,7 +335,7 @@ fn bench_time_bucketed_counter_bump(c: &mut Criterion) {
 
     group.bench_function("count_same_key", |b| {
         let mut counter: TimeBucketedCounter<u32> =
-            TimeBucketedCounter::new(Duration::from_secs(10), Duration::from_secs(1));
+            TimeBucketedCounter::new_unbounded(Duration::from_secs(10), Duration::from_secs(1));
         let key = 42u32;
         let ts = Timestamp::new(100, 0);
         for _ in 0..100 {

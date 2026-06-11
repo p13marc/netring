@@ -175,7 +175,7 @@ mod tests {
         let mut state = StateMap::default();
         let mut sink = NoopSink;
         let mut counters = CounterRegistry::default();
-        counters.register::<u32>(TimeBucketedCounter::<u32>::new(
+        counters.register::<u32>(TimeBucketedCounter::<u32>::new_unbounded(
             Duration::from_secs(10),
             Duration::from_secs(1),
         ));
@@ -192,7 +192,7 @@ mod tests {
         let mut state = StateMap::default();
         let mut sink = NoopSink;
         let mut counters = CounterRegistry::default();
-        counters.register::<u16>(TimeBucketedCounter::<u16>::new(
+        counters.register::<u16>(TimeBucketedCounter::<u16>::new_unbounded(
             Duration::from_secs(10),
             Duration::from_secs(1),
         ));
@@ -208,7 +208,7 @@ mod tests {
         let mut state = StateMap::default();
         let mut sink = NoopSink;
         let mut counters = CounterRegistry::default();
-        counters.register::<u64>(TimeBucketedCounter::<u64>::new(
+        counters.register::<u64>(TimeBucketedCounter::<u64>::new_unbounded(
             Duration::from_secs(10),
             Duration::from_secs(1),
         ));

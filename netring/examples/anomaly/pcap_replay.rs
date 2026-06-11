@@ -101,7 +101,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     }
 
     let mut rules = AnomalyMonitor::<FiveTupleKey>::new().with_rule(DnsBurstRule {
-        counts: TimeBucketedCounter::new(Duration::from_secs(window_s), Duration::from_secs(1)),
+        counts: TimeBucketedCounter::new_unbounded(
+            Duration::from_secs(window_s),
+            Duration::from_secs(1),
+        ),
         threshold,
         alerted: HashSet::new(),
     });

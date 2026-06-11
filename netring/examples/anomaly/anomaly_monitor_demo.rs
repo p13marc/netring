@@ -74,7 +74,7 @@ struct DnsBurstRule {
 impl DnsBurstRule {
     fn new(threshold: u64, window: Duration) -> Self {
         Self {
-            counts: TimeBucketedCounter::new(window, Duration::from_secs(1)),
+            counts: TimeBucketedCounter::new_unbounded(window, Duration::from_secs(1)),
             threshold,
             alerted: HashSet::new(),
         }

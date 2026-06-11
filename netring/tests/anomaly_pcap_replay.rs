@@ -159,7 +159,7 @@ async fn pcap_replay_fires_dns_burst() {
     let pcap = write_pcap(&frames);
 
     let mut rules = AnomalyMonitor::<FiveTupleKey>::new().with_rule(DnsBurstRule {
-        counts: TimeBucketedCounter::new(Duration::from_secs(10), Duration::from_secs(1)),
+        counts: TimeBucketedCounter::new_unbounded(Duration::from_secs(10), Duration::from_secs(1)),
         threshold: 10,
         alerted: HashSet::new(),
     });
@@ -213,7 +213,7 @@ async fn pcap_replay_quiet_traffic_no_alerts() {
     let pcap = write_pcap(&frames);
 
     let mut rules = AnomalyMonitor::<FiveTupleKey>::new().with_rule(DnsBurstRule {
-        counts: TimeBucketedCounter::new(Duration::from_secs(10), Duration::from_secs(1)),
+        counts: TimeBucketedCounter::new_unbounded(Duration::from_secs(10), Duration::from_secs(1)),
         threshold: 10,
         alerted: HashSet::new(),
     });

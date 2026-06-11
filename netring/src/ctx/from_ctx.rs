@@ -167,7 +167,7 @@ mod tests {
     #[test]
     fn counter_registry_returns_registered() {
         let mut r = CounterRegistry::default();
-        r.register::<u32>(TimeBucketedCounter::<u32>::new(
+        r.register::<u32>(TimeBucketedCounter::<u32>::new_unbounded(
             Duration::from_secs(10),
             Duration::from_secs(1),
         ));

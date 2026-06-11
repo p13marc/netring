@@ -145,7 +145,7 @@ mod tests {
         let mut s = StateMap::default();
         let mut k = NoopSink;
         let mut c = CounterRegistry::default();
-        c.register::<u16>(TimeBucketedCounter::<u16>::new(
+        c.register::<u16>(TimeBucketedCounter::<u16>::new_unbounded(
             Duration::from_secs(60),
             Duration::from_secs(1),
         ));

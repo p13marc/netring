@@ -67,8 +67,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .datagram_stream(DnsUdpParser::new());
 
     // The anomaly primitive: 10-second window in 1-second buckets.
-    let mut burst =
-        TimeBucketedCounter::<IpAddr>::new(Duration::from_secs(10), Duration::from_secs(1));
+    let mut burst = TimeBucketedCounter::<IpAddr>::new_unbounded(
+        Duration::from_secs(10),
+        Duration::from_secs(1),
+    );
 
     // Avoid spamming the same host's alert every query above threshold.
     // Re-arm once the host falls back below the threshold for a tick.

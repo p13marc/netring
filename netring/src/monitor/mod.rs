@@ -373,8 +373,11 @@ impl MonitorBuilder {
     where
         K: std::hash::Hash + Eq + Clone + Send + 'static,
     {
+        // 0.21 G: flowscope's `TimeBucketedCounter::new` grew a 3rd
+        // capacity arg; use `new_unbounded` to preserve the 2-arg
+        // builder shape.
         self.counters
-            .register::<K>(TimeBucketedCounter::new(window, bucket));
+            .register::<K>(TimeBucketedCounter::new_unbounded(window, bucket));
         self
     }
 

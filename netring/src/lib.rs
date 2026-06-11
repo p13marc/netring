@@ -9,6 +9,12 @@ pub mod anomaly;
 pub mod async_adapters;
 pub mod bridge;
 pub mod config;
+/// 0.21 G: netring's `TimeBucketedCounter` is now re-exported from
+/// flowscope (the `new_unbounded` ctor lands the 2-arg shape). Three
+/// extra primitives (`BurstDetector`, `Ewma`, `TopK`, `TimeBucketedSet`,
+/// `SequencePattern`, `KeylessSequencePattern`, `FlowStateMap`) join
+/// the module for free. `KeyIndexed` stays netring-side until flowscope
+/// adds a `drain_expired`-style iterator method (see module docstring).
 #[cfg(feature = "flow")]
 pub mod correlate;
 #[cfg(all(feature = "flow", feature = "tokio"))]

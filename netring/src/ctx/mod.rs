@@ -244,7 +244,7 @@ mod tests {
         use std::time::Duration;
         let mut state = StateMap::default();
         let mut counters = CounterRegistry::default();
-        counters.register::<u16>(TimeBucketedCounter::<u16>::new(
+        counters.register::<u16>(TimeBucketedCounter::<u16>::new_unbounded(
             Duration::from_secs(60),
             Duration::from_secs(1),
         ));

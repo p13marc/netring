@@ -94,7 +94,7 @@ fn main() {
     let mut state = StateMap::default();
     let mut sink = StdoutSink::with_capacity(4096);
     let mut counters = CounterRegistry::default();
-    counters.register::<u32>(TimeBucketedCounter::<u32>::new(
+    counters.register::<u32>(TimeBucketedCounter::<u32>::new_unbounded(
         Duration::from_secs(60),
         Duration::from_secs(1),
     ));

@@ -51,9 +51,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             //
             // Fire one Info per flow start — will be dropped by
             // MinSeverity::warning().
-            ctx.emit("FlowInfo", Severity::Info)
-                .with_key(&key)
-                .emit();
+            ctx.emit("FlowInfo", Severity::Info).with_key(&key).emit();
             // Fire one Warning per flow start — passes MinSeverity
             // but gets deduped by (kind="FlowWarn", key=evt.key)
             // within 60s. Different flows still fire.

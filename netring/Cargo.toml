@@ -460,6 +460,11 @@ name = "monitor_stream_consumer"
 path = "examples/monitor/stream_consumer.rs"
 required-features = ["tokio", "flow", "http"]
 
+[[example]]
+name = "monitor_ech_adoption"
+path = "examples/monitor/ech_adoption.rs"
+required-features = ["tokio", "flow", "tls"]
+
 # util/ — helper companions for the demos
 [[example]]
 name = "synthetic_traffic"

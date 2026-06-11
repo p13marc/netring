@@ -12,7 +12,6 @@
 //! | [`ChannelSink`]   | 1 ([`OwnedAnomaly`])    | tokio mpsc; lets consumers retain anomalies |
 
 use std::borrow::Cow;
-use std::fmt::Debug;
 use std::io::Write;
 
 use flowscope::Timestamp;
@@ -57,7 +56,7 @@ impl AnomalySink for StdoutSink {
         kind: &'static str,
         severity: Severity,
         ts: Timestamp,
-        key: Option<&dyn Debug>,
+        key: Option<&dyn crate::anomaly::Key>,
         observations: &[(&'static str, Cow<'_, str>)],
         metrics: &[(&'static str, f64)],
     ) {
@@ -116,7 +115,7 @@ impl AnomalySink for StdoutJsonSink {
         kind: &'static str,
         severity: Severity,
         ts: Timestamp,
-        key: Option<&dyn Debug>,
+        key: Option<&dyn crate::anomaly::Key>,
         observations: &[(&'static str, Cow<'_, str>)],
         metrics: &[(&'static str, f64)],
     ) {
@@ -199,7 +198,7 @@ impl AnomalySink for TracingSink {
         kind: &'static str,
         severity: Severity,
         ts: Timestamp,
-        key: Option<&dyn Debug>,
+        key: Option<&dyn crate::anomaly::Key>,
         observations: &[(&'static str, Cow<'_, str>)],
         metrics: &[(&'static str, f64)],
     ) {
@@ -284,7 +283,7 @@ impl AnomalySink for ChannelSink {
         kind: &'static str,
         severity: Severity,
         ts: Timestamp,
-        key: Option<&dyn Debug>,
+        key: Option<&dyn crate::anomaly::Key>,
         observations: &[(&'static str, Cow<'_, str>)],
         metrics: &[(&'static str, f64)],
     ) {

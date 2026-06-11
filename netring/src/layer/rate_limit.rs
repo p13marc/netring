@@ -1,7 +1,6 @@
 //! Per-kind token-bucket rate limiter.
 
 use std::borrow::Cow;
-use std::fmt::Debug;
 use std::time::{Duration, Instant};
 
 use flowscope::Timestamp;
@@ -64,7 +63,7 @@ impl AnomalySink for RateLimitAnomaliesLayered {
         kind: &'static str,
         severity: Severity,
         ts: Timestamp,
-        key: Option<&dyn Debug>,
+        key: Option<&dyn crate::anomaly::Key>,
         observations: &[(&'static str, Cow<'_, str>)],
         metrics: &[(&'static str, f64)],
     ) {
@@ -124,7 +123,7 @@ mod tests {
             _: &'static str,
             _: Severity,
             _: Timestamp,
-            _: Option<&dyn Debug>,
+            _: Option<&dyn crate::anomaly::Key>,
             _: &[(&'static str, Cow<'_, str>)],
             _: &[(&'static str, f64)],
         ) {

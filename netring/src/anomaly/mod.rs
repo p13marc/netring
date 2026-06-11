@@ -59,6 +59,7 @@
 //! ```
 
 mod builtin;
+pub mod key;
 mod monitor;
 mod rule;
 
@@ -66,5 +67,6 @@ pub mod shipped_sinks;
 pub mod sink;
 
 pub use builtin::FlowAnomalyRule;
+pub use key::{Key, KeyFields};
 pub use monitor::AnomalyMonitor;
 pub use rule::{Anomaly, AnomalyContext, AnomalyRule, Severity};

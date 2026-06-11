@@ -6,7 +6,6 @@
 #![cfg(all(feature = "tokio", feature = "flow"))]
 
 use std::borrow::Cow;
-use std::fmt::Debug;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
@@ -34,7 +33,7 @@ impl AnomalySink for CaptureSink {
         kind: &'static str,
         severity: Severity,
         _ts: Timestamp,
-        _key: Option<&dyn Debug>,
+        _key: Option<&dyn netring::anomaly::Key>,
         _observations: &[(&'static str, Cow<'_, str>)],
         _metrics: &[(&'static str, f64)],
     ) {

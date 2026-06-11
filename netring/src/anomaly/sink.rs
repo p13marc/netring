@@ -38,12 +38,12 @@
 //! body.
 
 use std::borrow::Cow;
-use std::fmt::Debug;
 
 use arrayvec::ArrayVec;
 use flowscope::Timestamp;
 
 use crate::anomaly::Severity;
+use crate::anomaly::key::Key;
 
 /// Maximum observations / metrics inline per [`AnomalyWriter`].
 /// Values beyond this are silently dropped; the [`AnomalyWriter`]
@@ -65,12 +65,19 @@ pub const ANOMALY_INLINE_CAPACITY: usize = 8;
 pub trait AnomalySink: Send {
     /// Render the anomaly. Called by [`AnomalyWriter::emit`]; sinks
     /// own this — that's the one method every impl provides.
+    ///
+    /// `key` is `&dyn Key` (0.21 A.13 — `Key: KeyFields + Debug +
+    /// Send + Sync`). Sinks needing the typed 5-tuple call
+    /// `key.src_ip()` / `key.dest_port()` etc.; sinks needing a
+    /// human-readable slug use `format!("{key:?}")` via the `Debug`
+    /// super-bound. `FiveTupleKey` and `IpAddr`-style keys both
+    /// satisfy the bounds out of the box.
     fn write(
         &mut self,
         kind: &'static str,
         severity: Severity,
         ts: Timestamp,
-        key: Option<&dyn Debug>,
+        key: Option<&dyn Key>,
         observations: &[(&'static str, Cow<'_, str>)],
         metrics: &[(&'static str, f64)],
     );
@@ -113,8 +120,10 @@ impl<T: AnomalySink + Sized> AnomalySinkExt for T {}
 
 /// Erased key borrow — lets [`AnomalyWriter`] stay non-generic in
 /// the key type so it can be returned from a `&mut dyn AnomalySink`.
+/// Stored as `&dyn Key` so sinks get both `KeyFields` (typed 5-tuple)
+/// and `Debug` (human render) on the read side.
 struct KeyRepr<'a> {
-    debug: &'a dyn Debug,
+    key: &'a dyn Key,
 }
 
 /// Stack-only builder for a single anomaly. Each `with_*` method
@@ -152,10 +161,13 @@ impl<'sink> AnomalyWriter<'sink> {
         }
     }
 
-    /// Attach a `Debug`-able key (typically a flow key or IP).
-    /// Held as `&dyn Debug` so the writer stays key-erased.
-    pub fn with_key<K: Debug>(mut self, key: &'sink K) -> Self {
-        self.key_repr = Some(KeyRepr { debug: key });
+    /// Attach a key — typically a flow key (`FiveTupleKey`) or a
+    /// host (`IpAddr`). Held as `&dyn Key` so the writer stays
+    /// key-erased while sinks see both typed-field accessors
+    /// ([`flowscope::KeyFields`]) and `Debug` rendering.
+    pub fn with_key<K: Key>(mut self, key: &'sink K) -> Self {
+        let erased: &dyn Key = key;
+        self.key_repr = Some(KeyRepr { key: erased });
         self
     }
 
@@ -178,12 +190,12 @@ impl<'sink> AnomalyWriter<'sink> {
 
     /// Finalize and ship to the underlying sink.
     pub fn emit(self) {
-        let key_dbg: Option<&dyn Debug> = self.key_repr.as_ref().map(|k| k.debug);
+        let key: Option<&dyn Key> = self.key_repr.as_ref().map(|k| k.key);
         self.sink.write(
             self.kind,
             self.severity,
             self.ts,
-            key_dbg,
+            key,
             &self.obs,
             &self.metrics,
         );
@@ -211,7 +223,7 @@ impl AnomalySink for NoopSink {
         _kind: &'static str,
         _severity: Severity,
         _ts: Timestamp,
-        _key: Option<&dyn Debug>,
+        _key: Option<&dyn Key>,
         _observations: &[(&'static str, Cow<'_, str>)],
         _metrics: &[(&'static str, f64)],
     ) {
@@ -253,7 +265,7 @@ mod tests {
             kind: &'static str,
             severity: Severity,
             _ts: Timestamp,
-            key: Option<&dyn Debug>,
+            key: Option<&dyn Key>,
             observations: &[(&'static str, Cow<'_, str>)],
             metrics: &[(&'static str, f64)],
         ) {

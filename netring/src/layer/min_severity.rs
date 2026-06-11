@@ -1,7 +1,6 @@
 //! Drop anomalies below a configured severity tier.
 
 use std::borrow::Cow;
-use std::fmt::Debug;
 
 use flowscope::Timestamp;
 
@@ -55,7 +54,7 @@ impl AnomalySink for MinSeverityLayered {
         kind: &'static str,
         severity: Severity,
         ts: Timestamp,
-        key: Option<&dyn Debug>,
+        key: Option<&dyn crate::anomaly::Key>,
         observations: &[(&'static str, Cow<'_, str>)],
         metrics: &[(&'static str, f64)],
     ) {
@@ -92,7 +91,7 @@ mod tests {
             kind: &'static str,
             severity: Severity,
             _ts: Timestamp,
-            _key: Option<&dyn Debug>,
+            _key: Option<&dyn crate::anomaly::Key>,
             _observations: &[(&'static str, Cow<'_, str>)],
             _metrics: &[(&'static str, f64)],
         ) {

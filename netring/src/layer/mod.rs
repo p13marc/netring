@@ -57,7 +57,6 @@ mod tests {
     //! layer's submodule via re-export.
 
     use std::borrow::Cow;
-    use std::fmt::Debug;
     use std::sync::{Arc, Mutex};
     use std::time::Duration;
 
@@ -84,7 +83,7 @@ mod tests {
             kind: &'static str,
             severity: Severity,
             _ts: Timestamp,
-            _key: Option<&dyn Debug>,
+            _key: Option<&dyn crate::anomaly::Key>,
             _observations: &[(&'static str, Cow<'_, str>)],
             _metrics: &[(&'static str, f64)],
         ) {

@@ -197,6 +197,83 @@ receive-only, or accept the default `RxTx` 50/50 split.
 Requires: Linux 5.4+, XDP-capable NIC driver, external XDP BPF program
 for RX (TX-only mode skips the BPF requirement entirely).
 
+## Monitor (feature: `monitor`)
+
+The declarative `Monitor::builder()` API layers on top of the
+async types. It's a typed dispatcher fed by one or more
+`AsyncCapture` instances, with broadcast subscribers for
+streaming consumers and `PACKET_FANOUT`-based per-CPU sharding.
+
+```
+┌────────────────────────────────────────────────────────┐
+│  User handlers (Fn / async Fn / detector! / pattern!)  │
+├────────────────────────────────────────────────────────┤
+│  Monitor                                               │
+│  ├─ Dispatcher (TypeId-keyed slot table, ≤ 16 events)  │
+│  ├─ Subscribers (broadcast<Item> per protocol)         │
+│  ├─ Sink chain (Layer → Layer → AnomalySink)           │
+│  └─ Ctx (state map + per-flow state + counters)        │
+├────────────────────────────────────────────────────────┤
+│  flowscope Driver<E> (Send + Sync since 0.13)          │
+│  ├─ FlowTracker (5-tuple flows, TCP state)             │
+│  └─ Per-protocol Parser (Http / Dns / Tls / ICMP / …)  │
+├────────────────────────────────────────────────────────┤
+│  AsyncCapture(s) — one per interface                   │
+└────────────────────────────────────────────────────────┘
+```
+
+**Send Monitor (since 0.21).** The `Monitor` value itself is
+`Send` — `ProtocolSlot: Send` supertrait + flowscope 0.13's
+unconditional `Driver<E>: Send + Sync` make the dispatcher's
+slot table `Send`. Plain `#[tokio::main]` (multi-thread)
+works without ceremony. The *future* returned by
+`run_for` / `run_until_signal` is still `!Send` because the
+underlying `AsyncCapture<S>` borrows the `!Sync` mmap ring
+across awaits — so the run-loop future must stay on the main
+task. Use `tokio::select!` to multiplex with subscribers /
+shutdown sources; ship anomalies to a spawned worker via
+`ChannelSink` when work needs to cross task boundaries.
+
+**`EventStream<M>` subscribers.**
+`MonitorBuilder::with_broadcast::<P>()` enrols a
+`tokio::sync::broadcast::Sender<P::Message>` on the protocol's
+slot. `Monitor::subscribe::<P>()` returns
+`EventStream<P::Message>` which implements
+`futures_core::Stream + Unpin`. The dispatcher publishes to
+both the sync handler chain AND the broadcast channel in the
+same lifecycle step — subscribers can't drift relative to
+handlers within one event.
+
+**Per-CPU sharding via `ShardedRunner`.** Instead of one
+`Monitor` over one `AsyncCapture`, `ShardedRunner::new(iface,
+mode, group_id, n, build_shard)` spawns N monitors each bound
+to the same `PACKET_FANOUT(group_id, mode)`. The kernel
+work-steals between them per `FanoutMode::Cpu` /
+`Hash` / `Lb` / `QM`. The `build_shard: Arc<dyn Fn(MonitorBuilder)
+-> MonitorBuilder>` closure runs once per shard so each
+dispatcher owns its own state map — no cross-shard locking.
+Global aggregation is a 0.22 follow-up (`ShardedRunner::merge_state`);
+today users pipe per-shard `OwnedAnomaly`s through a
+`Tee + ChannelSink` to a single collator task.
+
+**Graceful drain.** `MonitorBuilder::drain_timeout(d)` budgets
+a final-events sweep after the shutdown signal: any in-flight
+flow emits its `FlowEnded` (or `ParserClosed`) lifecycle event
+before the runtime exits. Without `drain_timeout`, shutdown
+returns as soon as the signal arrives.
+
+**Pcap replay.** `MonitorBuilder::pcap_source(path)` swaps the
+live AF_PACKET source for an `AsyncPcapSource`. `Monitor::replay()`
+is the run-mode counterpart to `run_until_signal()`.
+`pcap_speed_factor(f32)` paces via `tokio::time::sleep`.
+
+**Zero-allocation hot path.** `Dispatcher::dispatch::<P>` is a
+typed call: no `Box<dyn>` per event, no `HashMap` lookup.
+`AnomalyWriter<'sink>` is stack-only (`ArrayVec` for
+observations + metrics). The `benches/zero_alloc.rs` dhat
+profiler asserts `Δ 0 bytes / 0 blocks` per 100k synthetic
+dispatches.
+
 ## EINTR-safe syscalls
 
 `src/syscall.rs` wraps `nix::poll::poll` and `libc::sendto` with

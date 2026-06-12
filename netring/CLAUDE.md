@@ -20,9 +20,124 @@ built on AF_PACKET with TPACKET_V3 (block-based mmap ring buffers) and AF_XDP.
 
 ## Implementation Status
 
-**Active.** netring 0.20.0 prepared (this branch); 0.19.0 last
-published. ~399 tests + zero warnings + dhat zero-alloc bench
-(`Δ 0 bytes / 0 blocks` over 100k synthetic dispatches).
+**Active.** netring 0.21.0 prepared on `0.21-dev` (this branch,
+29 commits past `master`); 0.20.0 was the last `master` cut;
+0.19.0 last published. ~540 tests + zero warnings + dhat
+zero-alloc bench (`Δ 0 bytes / 0 blocks` over 100k synthetic
+dispatches). Cargo version bump + git tag + `cargo publish`
+held pending explicit user trigger (see
+`plans/netring-0.21-release-gates.md`).
+
+### Recent additions (netring 0.21 — Send Monitor + sharding + streaming subscribers + pcap replay)
+
+Driven by 9 phase plans (A–I) plus an audit-fix batch (all
+deleted on ship per convention). Full retrospective lives in
+`plans/INDEX.md`. CHANGELOG entry headed
+`## 0.21.0 — Send Monitor + sharding + streaming subscribers + pcap replay`.
+
+**Phase A — ergonomics polish:** split `.on::<E, _, _>()` into
+`.on(handler)` (payload-only) + `.on_ctx(handler)` (payload +
+`&mut Ctx`); `ctx.emit::<P>(event)` for re-injecting typed
+events; `ctx.split_*` helpers for borrowing disjoint sub-fields
+of the `Ctx`; `state_init::<T>(initial)` constructor next to
+the existing `state::<T>()`; new typed lifecycle events
+`FlowPacket<P>`, `FlowTick<P>`, `ParserClosed<P>`.
+
+**Phase B — production sinks:** `EveSink` (feature `eve-sink`)
+writes Suricata-compatible EVE JSON lines; `MetricsSink`
+(feature `metrics`) exposes a Prometheus-style counter facade;
+`AnomalyKey` trait (re-exported from flowscope as `Key` +
+`KeyFields`) narrows the `&dyn Debug` key type. **Breaking**:
+`AnomalySink::write` key parameter `&dyn Debug → &dyn Key`.
+
+**Phase C — per-CPU sharding via `ShardedRunner`:** `MonitorBuilder::fanout(mode, group_id)`
+plus the top-level `ShardedRunner::new(iface, mode, group_id,
+num_shards, build_shard)` closure-builder. Each shard owns its
+own dispatcher + state map; `PACKET_FANOUT_CPU` / `…_HASH`
+selectable. Merge worker + `LayerSpec` trait deferred to 0.22
+(`plans/netring-0.22-roadmap.md` §C.5/C.6). Today, users
+needing global aggregation route per-shard anomalies through a
+`Tee + ChannelSink` to a single collator task.
+
+**Phase D — build-time validation + graceful drain:** new
+`BuildError` variants `HandlerForUnregisteredProtocol`,
+`CounterNotRegistered`, `ProtocolNotBroadcast`,
+`PcapSourceRequired`. `MonitorBuilder::drain_timeout(Duration)`
+gates a drain phase after the run loop receives shutdown —
+in-flight flows get a final `FlowEnded` dispatch before the
+monitor exits.
+
+**Phase E — pcap source + idle stop:**
+`MonitorBuilder::pcap_source(path)` + `pcap_speed_factor(f32)`
++ `Monitor::replay()` for offline pcap dispatch. Speed factor
+> 1 accelerates replay (interval-based pacing). New
+`Monitor::run_until_idle(window)` — exit when no event has
+fired for `window`. Composes with `drain_timeout`.
+
+**Phase F — streaming consumer:**
+`MonitorBuilder::with_broadcast::<P>()` + `Monitor::subscribe::<P>() -> EventStream<P::Message>`.
+`EventStream<M>` implements `futures_core::Stream + Unpin`,
+backed by a `tokio::sync::broadcast` channel. Users plug the
+monitor into any `Stream` consumer (graphs, websockets, custom
+collators) without owning a `Handler`. `ProtocolNotBroadcast`
+build-time error if `.subscribe::<P>()` is called without a
+matching `.with_broadcast::<P>()`.
+
+**Phase G — drop netring's correlate.rs:** `TimeBucketedCounter`
+and `KeyIndexed` were maintained in netring; the former now
+re-exports from `flowscope::correlate` (call site signature:
+`new(window, bucket) → new_unbounded(window, bucket)`). The
+latter stays netring-side until flowscope ships
+`drain_expired(now) -> impl Iterator<Item = (K, V)>` upstream
+(tracked in `plans/netring-0.22-roadmap.md` §G).
+
+**Phase H — Send Monitor + deprecation + migration guide:**
+- H.1 flowscope `0.11.1 → 0.13.0` (skipping 0.12; the 0.12
+  Send-bound work absorbed in one bump). Headline:
+  `Driver<E>: Send + Sync` unconditional.
+- H.2 **Send sweep**: `ProtocolSlot: Send` supertrait added;
+  every shipped monitor example drops
+  `flavor = "current_thread"` from `#[tokio::main]`. Monitor
+  itself is `Send` (`tests/monitor_send.rs` is a compile-time
+  assertion). Caveat: the *future* returned by
+  `Monitor::run_for` / `run_until_signal` stays `!Send` because
+  the underlying `AsyncCapture<S>` borrows the `!Sync` mmap
+  ring across awaits — the run-loop future therefore must
+  remain on the main task (use `tokio::select!`) and cannot be
+  `tokio::spawn`'d. End-user code that needs Send across spawn
+  boundaries ships anomalies through `ChannelSink`.
+- H.3 `#[deprecated(since = "0.21.0")]` on `ProtocolMonitor`,
+  `ProtocolMonitorBuilder`, `AnomalyMonitor`, `AnomalyRule`,
+  `FlowAnomalyRule`. Removal targeted for 0.22.0.
+- H.4 new umbrella feature `monitor-quickstart` (pulls 14 flags
+  for app-side users; lean embedded builds should opt out).
+- H.6 `docs/MIGRATING_0.20_TO_0.21.md` — 7 recipe-style
+  migration sections.
+- H.7 `CHANGELOG.md` 0.21.0 entry covering every phase.
+
+**Phase I — adopt flowscope detect::patterns + ::file + ECH:**
+- `pattern_detector!` macro — wraps `Arc<Mutex<D: DetectorScore>>`,
+  emits `Anomaly` when `D::verdict()` clears a threshold.
+  Reference detectors:
+  - `examples/monitor/port_scan.rs` — TRW-style port scan
+    (I.2).
+  - `examples/monitor/beacon_detector.rs` — periodic
+    beacon timing variance (I.3).
+  - `examples/monitor/dga_query.rs` — DGA bigram scoring on
+    DNS (I.4).
+- `flowscope::detect::file::Sha256Sink` + `FileType` — wired
+  through `examples/monitor/file_hash_dfir.rs` (I.5).
+- ECH downgrade detection via flowscope's `EchOutcome` →
+  `examples/monitor/ech_adoption.rs` (I.8).
+
+**Audit-fix batch (commit `d51e763`):** the 0.21 sub-agent
+plan audit surfaced four gaps that the phase plans had
+specified but hadn't landed:
+- B.1 `AnomalyFields` re-export at `netring::anomaly::AnomalyFields`.
+- B.4 `Tee::factory(|| sink)` constructor for per-shard
+  secondary-sink minting.
+- E `pcap_speed_factor` field on `MonitorBuilder`.
+- F `futures_core::Stream` impl on `EventStream<M>`.
 
 ### Recent additions (netring 0.20 — declarative Monitor API)
 
@@ -568,6 +683,55 @@ just ci-full         # setcap + full test suite
   (`pcap + tokio + flow`)
 - `docs/scaling.md` — fanout decision matrix + anti-patterns (plan 22)
 
+### 0.21 Monitor API additions (gated `flow + tokio`)
+
+- `src/monitor/shard.rs` — `ShardedRunner::new(iface, mode,
+  group_id, num_shards, build_shard)` with `Arc<dyn Fn(MonitorBuilder)
+  -> MonitorBuilder>` closure storage. `shard_count()`,
+  `interface()`, `fanout()` accessors. Each shard binds a
+  separate `AsyncCapture` to the kernel `PACKET_FANOUT` group;
+  the kernel distributes packets per `FanoutMode` (Cpu / Hash /
+  Lb / QM / EBPF). Run with `run_for(Duration)` /
+  `run_until_signal()` /  `run_until_idle(window)`.
+- `src/monitor/subscribe.rs` — `EventStream<M>` (`futures_core::Stream`
+  via tokio `broadcast::Receiver`) + `Monitor::subscribe::<P>()`.
+  `MonitorBuilder::with_broadcast::<P>()` enrolls the broadcast
+  slot. `Unpin` impl handroled to satisfy the `Stream::poll_next`
+  `Pin<&mut Self>` shape.
+- `src/monitor/mod.rs` additions:
+  - `MonitorBuilder::fanout(FanoutMode, group_id)` /
+    `pcap_source(path)` / `pcap_speed_factor(f32)` /
+    `drain_timeout(Duration)` / `flow_state::<T>(idle_timeout)` /
+    `with_broadcast::<P>()` setters.
+  - `Monitor::replay()` (drives the pcap source through the run
+    loop) / `run_until_idle(window)` / `subscribe::<P>()` /
+    `shard_count()`.
+  - `name(impl Into<String>)` stamps a builder/monitor label
+    surfaced through `Ctx::monitor_name`.
+- `src/ctx/flow_state.rs` — `FlowStateMap` (lazy-create,
+  TypeId-keyed) + `ctx.flow_state_mut::<T>()`. Backed by
+  flowscope's `FlowStateMap`; evicts on `FlowEnded` lifecycle.
+- `src/protocol/pattern.rs` — `pattern_detector!` macro_rules!
+  wrapping `Arc<Mutex<D: DetectorScore>>`. Emits `Anomaly`
+  scaffolded with `verdict.into()` mapping to `Severity`.
+- `src/layer/tee.rs` — `Tee::factory<F>(F)` constructor with
+  `TeeSecondary::{Owned, Factory}` enum for per-shard minting.
+- `src/anomaly/eve_sink.rs` (`feature = "eve-sink"`) —
+  Suricata EVE JSON sink.
+- `src/anomaly/metrics_sink.rs` (`feature = "metrics"`) —
+  Prometheus facade.
+- `src/anomaly/mod.rs` — `pub use flowscope::{OwnedAnomaly,
+  DetectorScore, AnomalyFields}` re-exports.
+- `src/prelude.rs` — `AnomalyFields`, `DetectorScore`, `Key`,
+  `KeyFields` added.
+
+Cargo features unique to 0.21:
+- `monitor-quickstart` (umbrella, app-tier) — pulls
+  `monitor + eve-sink + metrics + file-hash + serde + ...`
+- `eve-sink` — EveSink only
+- `metrics` — MetricsSink only
+- `file-hash` — flowscope `Sha256Sink + FileType`
+
 ### 0.20 Monitor API (gated `flow + tokio`)
 
 - `src/protocol/` — Protocol plugin layer
@@ -639,10 +803,14 @@ just ci-full         # setcap + full test suite
 - XDP loader (when `xdp-loader` enabled): `_xdp_attachment: Option<XdpAttachment>`
   in `XdpSocket` drops before the rings + fd, so the program detaches from
   the interface before AF_XDP shuts down
-- `flowscope` is a non-optional dep with `default-features = false` (just
-  `bitflags` + `thiserror`); `Timestamp` and `PacketView` are unconditionally
-  re-exported from it. The `parse` / `flow` features add flowscope's heavier
-  modules (extractors, tracker, reassembler, session)
+- `flowscope` is a non-optional dep (currently `>= 0.13.0`) with
+  `default-features = false` (just `bitflags` + `thiserror`);
+  `Timestamp` and `PacketView` are unconditionally re-exported
+  from it. The `parse` / `flow` features add flowscope's
+  heavier modules (extractors, tracker, reassembler, session).
+  Since flowscope 0.13, `Driver<E>: Send + Sync` is unconditional;
+  this lets `Monitor: Send` and unlocks the default `#[tokio::main]`
+  multi-thread runtime path.
 
 ## Design Constraints
 
@@ -661,17 +829,23 @@ just ci-full         # setcap + full test suite
 
 ## Pre-publish checklist
 
-For the next `cargo publish` of netring:
+For the next `cargo publish` of netring (currently 0.21.0
+held — see `plans/netring-0.21-release-gates.md`):
 
-1. Ensure `flowscope` is published to crates.io at the version netring
-   needs (currently `0.4`).
+1. Ensure `flowscope` is published to crates.io at the version
+   netring needs (currently `>= 0.13.0`).
 2. Verify `netring/Cargo.toml`'s `flowscope` version dep matches
    (default features false; same feature selectors as today).
 3. Bump `netring/Cargo.toml` `version` if more changes have landed
    beyond what's in this CHANGELOG.
-4. `cargo publish -p netring --dry-run` to verify the package
+4. Refresh `0.21.0` CHANGELOG entry date header (`## 0.21.0 —
+   YYYY-MM-DD — ...`) on tag day.
+5. `cargo publish -p netring --dry-run` to verify the package
    contents.
-5. `cargo publish -p netring`.
+6. `cargo publish -p netring`.
+7. `git tag 0.21.0` (no `v` prefix, per the user's convention).
+
+Also applies to any `0.21.x` patch release.
 
 **Known operator gotcha**: on at least one dev machine
 `~/.cargo/credentials.toml` is an empty root-owned directory (likely

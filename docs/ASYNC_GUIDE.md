@@ -25,7 +25,7 @@ state, and the next call re-arms via the reactor.
 
 ```toml
 [dependencies]
-netring = { version = "0.14", features = ["tokio"] }
+netring = { version = "0.21", features = ["tokio"] }
 ```
 
 ```rust,no_run
@@ -222,7 +222,7 @@ combinators:
 
 ```toml
 [dependencies]
-netring = { version = "0.14", features = ["tokio"] }
+netring = { version = "0.21", features = ["tokio"] }
 futures = "0.3"
 ```
 
@@ -322,6 +322,52 @@ Pair with `metrics-exporter-prometheus` and the counters surface as
 | `examples/async_bridge.rs` | `Bridge::run_async` + Ctrl-C |
 | `examples/async_xdp.rs` | `AsyncXdpSocket` (feature: `af-xdp`) |
 | `examples/async_metrics.rs` | `tokio::time::interval` + metrics |
+
+## Declarative Monitor (0.21+)
+
+The high-level `Monitor::builder()` API composes the async types
+above (one `AsyncCapture` per interface, plus internally
+generated owned-batch futures) behind a typed handler graph.
+Key async facts:
+
+- **Monitor is `Send`.** Since 0.21 + flowscope 0.13
+  (`Driver<E>: Send + Sync` unconditional), `Monitor: Send`
+  unconditionally and plain `#[tokio::main]` (multi-thread)
+  works without ceremony. Caveat: the *future* returned by
+  `run_for` / `run_until_signal` is still `!Send` because the
+  underlying `AsyncCapture` borrows the `!Sync` mmap ring
+  across awaits — so the run-loop future must stay on the main
+  task (use `tokio::select!`) and can't be `tokio::spawn`'d.
+  Ship anomalies to a spawned consumer task via `ChannelSink`
+  instead.
+- **Subscribers are `Stream`s.**
+  `Monitor::subscribe::<P>() -> EventStream<P::Message>` returns
+  a `futures_core::Stream + Unpin` backed by
+  `tokio::sync::broadcast`. Plug into any `StreamExt`
+  combinator. `Lagged(n)` arrives when a consumer falls behind.
+- **Run modes** —
+  - `run_until_signal()` — SIGINT/SIGTERM via
+    `tokio::signal::unix`.
+  - `run_for(d)` / `run_until(deadline)` — bounded.
+  - `run_until_idle(window)` — exit after `window` of no event.
+  - `replay()` — drive a `pcap_source(...)` configuration
+    instead of live capture; `pcap_speed_factor(f)` paces
+    via `tokio::time::sleep`.
+- **Graceful drain.** `MonitorBuilder::drain_timeout(d)`
+  schedules a final `FlowEnded` sweep on shutdown — handlers
+  see the last batch of in-flight flows before the runtime
+  exits.
+- **Per-CPU sharding.**
+  `ShardedRunner::new(iface, FanoutMode::Cpu, group_id, n,
+  build_shard)` spawns N independent `Monitor` instances bound
+  to the same `PACKET_FANOUT` group. Each shard owns its own
+  state map + dispatcher; the kernel does the work-stealing.
+  The closure-builder pattern (`Arc<dyn Fn(MonitorBuilder)
+  -> MonitorBuilder>`) means user code stays declarative.
+
+See `examples/monitor/` for full demos and
+[`MIGRATING_0.20_TO_0.21.md`](MIGRATING_0.20_TO_0.21.md) for
+the Send-sweep recipe in detail.
 
 [`AsyncFd`]: https://docs.rs/tokio/latest/tokio/io/unix/struct.AsyncFd.html
 [`futures_core::Stream`]: https://docs.rs/futures-core/latest/futures_core/stream/trait.Stream.html

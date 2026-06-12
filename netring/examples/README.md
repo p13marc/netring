@@ -110,28 +110,45 @@ production-style "watch this interface for everything" recipe.
 | `async_pcap_replay` | `AsyncPcapSource::open(...).flow_events(ext)` for flow-level replay |
 | `async_pcap_sessions` | `AsyncPcapSource::open(...).sessions(ext, parser)` one-liner |
 
-## monitor/ — declarative Monitor API (0.20+)
+## monitor/ — declarative Monitor API (0.21+)
 
-The 0.20 `Monitor::builder()` API. Each example targets a single
-aspect of the surface; compose them as needed for your own code.
+The `Monitor::builder()` API. Each example targets a single
+aspect of the 0.21 surface; compose them as needed for your own
+code. All examples use plain `#[tokio::main]` (multi-thread
+runtime) — `Monitor` is `Send` since 0.21.
 
 | Example | What it shows |
 |---|---|
 | `monitor_basic` | `Monitor::builder()` + `.on::<FlowStarted<Tcp>>(...)` + StdoutSink |
 | `monitor_detector_macro` | `detector!` macro for 3 stateless detectors (SshAttempt / HttpRequest / DnsQuery) |
-| `monitor_layered_sinks` | `MinSeverity` + `DedupeAnomalies` + `RateLimitAnomalies` over `StdoutSink` |
+| `monitor_layered_sinks` | `MinSeverity` + `DedupeAnomalies` + `RateLimitAnomalies` + `Tee::factory` over `StdoutSink` |
 | `monitor_async_handler` | `on_async::<E>(...)` with `Arc<Pool>` capture for simulated I/O |
+| `monitor_stream_consumer` | `with_broadcast::<Http>()` + `subscribe::<Http>()` → `EventStream` consumer |
+| `monitor_pcap_replay` | `pcap_source(path) + pcap_speed_factor(f) + replay()` offline pipeline |
+| `monitor_sharded_runner` | `ShardedRunner::new(iface, FanoutMode::Cpu, group, N, build)` per-CPU sharding |
+| `monitor_eve_to_filebeat` | `EveSink` (feature `eve-sink`) writing Suricata-format EVE JSON for Filebeat ingest |
+| `monitor_metrics_export` | `MetricsSink` (feature `metrics`) Prometheus counter facade |
+| `monitor_port_scan` | `pattern_detector!` over `PortScanDetector` (TRW scoring) |
+| `monitor_beacon_detector` | `pattern_detector!` over `BeaconDetector` (period variance) |
+| `monitor_dga_query` | `pattern_detector!` over `DgaScorer` (bigram entropy on DNS) |
+| `monitor_file_hash_dfir` | `Sha256Sink + FileType` (feature `file-hash`) DFIR file hashing |
+| `monitor_ech_adoption` | ECH downgrade detection via `EchOutcome` |
 
-All four take an `<iface>` argument (default `lo`) and an
-optional `<seconds>` deadline. Pair with `synthetic_traffic` for
-self-demoable runs.
+All take an `<iface>` argument (default `lo`) and an optional
+`<seconds>` deadline. Pair with `synthetic_traffic` for
+self-demoable runs without root.
 
 ```sh
-cargo run --features "tokio,flow" --example monitor_basic -- lo 10
+cargo run --features "monitor-quickstart" --example monitor_basic -- lo 10
+cargo run --features "monitor-quickstart" --example monitor_stream_consumer -- lo 10
+cargo run --features "monitor-quickstart" --example monitor_sharded_runner -- lo 4 10
 ```
 
-See [`docs/migration-0.19-to-0.20.md`](../docs/migration-0.19-to-0.20.md)
-for the legacy → 0.20 transition guide.
+See [`docs/MIGRATING_0.20_TO_0.21.md`](../docs/MIGRATING_0.20_TO_0.21.md)
+for the 0.20 → 0.21 transition guide (Send sweep, key narrowing,
+broadcast subscribers, sharded runner, `pattern_detector!`),
+and [`docs/migration-0.19-to-0.20.md`](../docs/migration-0.19-to-0.20.md)
+for the older legacy → 0.20 path.
 
 ## anomaly/ — multi-protocol anomaly correlators
 

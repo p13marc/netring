@@ -259,6 +259,128 @@ See [`docs/scaling.md`](../netring/docs/scaling.md) for the recipe +
 Format (PCAP vs PCAPNG) is auto-detected at `open`. EOF flush via
 `Timestamp::MAX` so every still-open flow emits its terminal event.
 
+## Declarative Monitor (0.21+)
+
+The high-level entry point for "watch this interface and react
+to typed events". Built on top of the flow / session / parser
+machinery above; same kernel and async plumbing.
+
+```rust,ignore
+use netring::prelude::*;
+
+#[tokio::main]
+async fn main() -> Result<(), Box<dyn std::error::Error>> {
+    Monitor::builder()
+        .interface("eth0")
+        .protocol::<Tcp>()
+        .protocol::<Http>()
+        .on(|msg: &HttpMessage| {
+            println!("{} {}", msg.method, msg.path);
+            Ok(())
+        })
+        .layer(MinSeverity::warning())
+        .sink(StdoutJsonSink::default())
+        .run_until_signal()
+        .await?;
+    Ok(())
+}
+```
+
+### Builder surface
+
+| Method | Purpose |
+|---|---|
+| `.interface(s)` / `.interfaces([...])` | One or more capture interfaces |
+| `.name(s)` | Label surfaced through `Ctx::monitor_name` |
+| `.protocol::<P>()` | Enroll a `Protocol` impl (parser + dispatch) |
+| `.on(handler)` | Payload-only handler: `Fn(&E::Payload)` |
+| `.on_ctx(handler)` | Payload + `&mut Ctx<'_>` handler |
+| `.on_async::<E>(handler)` | Boxed-future async handler |
+| `.detect(detector_macro)` | Sugar over `.on_ctx(...)` for `detector!` / `pattern_detector!` |
+| `.with_broadcast::<P>()` | Enrol a broadcast slot for `subscribe::<P>()` |
+| `.state::<T>()` / `.state_init::<T>(initial)` | Register a per-handler `T` state slot |
+| `.flow_state::<T>(idle)` | Register a per-flow `T` state map; access via `ctx.flow_state_mut::<T>()` |
+| `.counter::<K>(window, bucket)` | Register a `TimeBucketedCounter<K>` slot |
+| `.sink(s)` | Anomaly sink (innermost in layer chain) |
+| `.layer(L)` | Tower-style middleware wrapping the sink |
+| `.tick(period, handler)` | Periodic non-event handler |
+| `.fanout(mode, group_id)` | Bind to a `PACKET_FANOUT` group (use with `ShardedRunner`) |
+| `.pcap_source(path)` | Source from offline pcap instead of live capture |
+| `.pcap_speed_factor(f)` | Replay pacing multiplier (1.0 = wire, `f32::INFINITY` = as-fast) |
+| `.drain_timeout(d)` | Graceful drain phase after shutdown signal |
+| `.build()` | Validate + freeze into a `Monitor` |
+
+### Run modes
+
+| Method | Behaviour |
+|---|---|
+| `monitor.run_until_signal()` | Loop until SIGINT/SIGTERM (then drain) |
+| `monitor.run_for(Duration)` | Bounded wall-clock window |
+| `monitor.run_until(Instant)` | Until a deadline |
+| `monitor.run_until_idle(window)` | Exit when no event has fired for `window` |
+| `monitor.replay()` | Drain a `pcap_source(...)` configuration |
+| `monitor.subscribe::<P>()` | Mint an `EventStream<P::Message>` (`futures_core::Stream`) |
+
+### Per-CPU sharding
+
+```rust,ignore
+use std::sync::Arc;
+use netring::prelude::*;
+use netring::monitor::ShardedRunner;
+
+let runner = ShardedRunner::new(
+    "eth0",
+    FanoutMode::Cpu,
+    0xC001,
+    num_cpus::get(),
+    Arc::new(|b: MonitorBuilder| {
+        b.protocol::<Tcp>().sink(StdoutJsonSink::default())
+    }),
+)?;
+runner.run_until_signal().await?;
+```
+
+### Build-time validation
+
+`BuildError` rejects misconfigurations at `.build()`:
+
+| Variant | Trigger |
+|---|---|
+| `HandlerForUnregisteredProtocol { event }` | `.on::<E>(...)` without `.protocol::<E>()` |
+| `CounterNotRegistered { key_type }` | `ctx.counter_mut::<K>()` for un-registered `K` |
+| `ProtocolNotBroadcast { protocol }` | `subscribe::<P>()` without `.with_broadcast::<P>()` |
+| `PcapSourceRequired` | `monitor.replay()` without `.pcap_source(...)` |
+| `MultiInterfaceWithFanout` | `fanout` + N > 1 interfaces (forbidden by the shard model) |
+| `TooManyEventTypes` | > 16 distinct typed-event slots |
+
+### Anomaly sinks
+
+| Sink | Feature | Output |
+|---|---|---|
+| `StdoutSink` | core | One-line human-readable text |
+| `StdoutJsonSink` | `serde` | One-line JSON (RFC 8259) |
+| `TracingSink` | core | `tracing::event!` at matching `Level` |
+| `ChannelSink` | core | tokio mpsc of `OwnedAnomaly` |
+| `EveSink` | `eve-sink` | Suricata-compatible EVE JSON |
+| `MetricsSink` | `metrics` | Prometheus-style counter facade |
+
+### Middleware layers
+
+`MinSeverity`, `DedupeAnomalies`, `RateLimitAnomalies`,
+`Sample` (inline xorshift64*), `Tee` (`into(secondary)` /
+`factory(|| sink)` per-shard minting).
+
+### Cargo features (Monitor)
+
+| Feature | Pulls |
+|---|---|
+| `monitor` | `tokio + channel + flow + parse + http + dns + tls + icmp + emit + serde + metrics` |
+| `monitor-quickstart` | `monitor + eve-sink + file-hash` (app-tier umbrella) |
+| `eve-sink` | EveSink only |
+| `metrics` | MetricsSink only |
+| `file-hash` | flowscope `Sha256Sink + FileType` |
+| `serde` | Anomaly + sink JSON output |
+
 ## Configuration reference
 
 ### CaptureBuilder
@@ -343,6 +465,14 @@ cap.detach_filter()?;
 Per-release breaking changes and migration recipes live in
 [`CHANGELOG.md`](../CHANGELOG.md). The current canonical entries:
 
+- **0.21.0** — `Monitor` becomes `Send` (flowscope 0.13);
+  `AnomalySink::write` key narrowed from `&dyn Debug` to
+  `&dyn Key`; legacy `ProtocolMonitor` / `AnomalyMonitor` /
+  `AnomalyRule` carry `#[deprecated]`. Full recipes in
+  [`MIGRATING_0.20_TO_0.21.md`](./MIGRATING_0.20_TO_0.21.md).
+- **0.20.0** — declarative `Monitor::builder()` API replaces
+  the legacy `ProtocolMonitor`. Both APIs coexist in 0.20–0.21;
+  legacy removed in 0.22.
 - **0.14.0** — flowscope 0.4: `SessionParser` / `DatagramParser`
   data methods gain a `ts: Timestamp` parameter; driver `S` type
   parameter removed.

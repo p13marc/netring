@@ -1,10 +1,10 @@
-//! Basic 0.20 Monitor example — single-protocol flow lifecycle.
+//! Basic Monitor example — single-protocol flow lifecycle.
 //!
 //! Counts TCP flows started + ended on the given interface. Emits
 //! one anomaly per flow start to stdout via `StdoutSink`.
 //!
-//! Run (single-thread tokio runtime is required; the Monitor is
-//! `!Send`):
+//! Runs on the default multi-thread tokio runtime — `Monitor` is
+//! `Send` as of 0.21 (flowscope 0.13's `Driver<E>: Send + Sync`):
 //!
 //! ```sh
 //! cargo run --example monitor_basic --features "tokio,flow" -- eth0

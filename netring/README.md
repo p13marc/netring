@@ -11,7 +11,7 @@ mostly used as the underlying source for the async wrappers.
 
 ```toml
 [dependencies]
-netring = { version = "0.20", features = ["tokio"] }
+netring = { version = "0.21", features = ["tokio"] }
 ```
 
 ```rust,no_run
@@ -72,7 +72,7 @@ considerations.
 
 ```toml
 [dependencies]
-netring = { version = "0.20", features = ["tokio", "flow"] }
+netring = { version = "0.21", features = ["tokio", "flow"] }
 futures = "0.3"
 ```
 
@@ -110,18 +110,33 @@ works on any source of `&[u8]` frames.
 parser + correlator), `icmp` (ICMPv4 + ICMPv6 with `IcmpInner`
 cross-protocol correlation), and `pcap` (offline replay).
 
-## Declarative Monitor (0.20+, recommended)
+## Declarative Monitor (0.21+, recommended)
 
-The 0.20 `Monitor::builder()` API replaces hand-rolled `tokio::select!`
+The `Monitor::builder()` API replaces hand-rolled `tokio::select!`
 loops + custom `AnomalyRule` impls with a single fluent surface:
 typed event handlers, a tower-style middleware chain over the
-anomaly sink, an opt-in async escape hatch, and a `detector!`
-macro for stateless detectors.
+anomaly sink, an opt-in async escape hatch, `detector!` and
+`pattern_detector!` macros, streaming subscribers, per-CPU
+sharding, and offline pcap replay.
 
 ```toml
 [dependencies]
-netring = { version = "0.20", features = ["monitor"] }   # umbrella for the full experience
+# Full app-tier experience (Monitor + all sinks + parsers):
+netring = { version = "0.21", features = ["monitor-quickstart"] }
+
+# Lean embedded build — pick what you need:
+netring = { version = "0.21", features = ["monitor", "eve-sink", "metrics"] }
 ```
+
+**Monitor is `Send`** as of 0.21 — plain `#[tokio::main]` (the
+multi-thread runtime) works without ceremony. The
+`Monitor::run_for` / `run_until_signal` *futures* stay `!Send`
+because the underlying `AsyncCapture<S>` borrows from the
+`!Sync` mmap ring across awaits — `tokio::spawn(monitor.run_for(d))`
+won't compile. Keep the run-loop future on the main task and
+use `tokio::select!` (or `ChannelSink` to ship anomalies to a
+spawned consumer task). flowscope's `Driver<E>: Send + Sync`
+is unconditional upstream as of 0.13.
 
 ```rust,ignore
 use std::time::Duration;
@@ -203,14 +218,81 @@ receive payload only; capture `Arc<Pool>` in the closure or
 pair with `ChannelSink` to ship anomalies to an async I/O
 task.
 
+**0.21 builder additions** — same `Monitor::builder()` plus:
+`.with_broadcast::<P>()` (enrolls a broadcast slot for
+`Monitor::subscribe::<P>()`); `.fanout(FanoutMode::Cpu, group_id)`
+(per-CPU sharding via `ShardedRunner`); `.pcap_source(path)` +
+`.pcap_speed_factor(f)` (offline pcap replay); `.drain_timeout(d)`
+(graceful drain phase after shutdown); `.flow_state::<T>(idle)`
+(per-flow state map, `ctx.flow_state_mut::<T>()`);
+`.name(s)` (label surfaced through `ctx.monitor_name`).
+
+**Streaming subscribers** — pull events out of the dispatcher
+as a `futures_core::Stream` instead of registering a handler:
+
+```rust,ignore
+use futures::StreamExt;
+use netring::prelude::*;
+
+let monitor = Monitor::builder()
+    .interface("eth0")
+    .protocol::<Http>()
+    .with_broadcast::<Http>()      // enrol the broadcast slot
+    .build()?;
+
+let mut stream = monitor.subscribe::<Http>();
+tokio::spawn(monitor.run_until_signal());
+
+while let Some(msg) = stream.next().await {
+    println!("HTTP {} {}", msg.method, msg.path);
+}
+```
+
+**Per-CPU sharding** — fan one capture across N AF_PACKET
+sockets via `PACKET_FANOUT_CPU`:
+
+```rust,ignore
+use std::sync::Arc;
+use netring::prelude::*;
+use netring::monitor::ShardedRunner;
+
+let runner = ShardedRunner::new(
+    "eth0",
+    FanoutMode::Cpu,
+    0xC001,                         // fanout group id
+    num_cpus::get(),                // shard count
+    Arc::new(|b: MonitorBuilder| {
+        b.protocol::<Tcp>()
+         .sink(StdoutJsonSink::default())
+    }),
+)?;
+runner.run_until_signal().await?;
+```
+
+**Pcap replay** — same handler graph, offline:
+
+```rust,ignore
+Monitor::builder()
+    .pcap_source("trace.pcap")
+    .pcap_speed_factor(10.0)         // 10× wire speed
+    .protocol::<Http>()
+    .on(|msg| { println!("{:?}", msg); Ok(()) })
+    .build()?
+    .replay()
+    .await?;
+```
+
+See [`docs/MIGRATING_0.20_TO_0.21.md`](docs/MIGRATING_0.20_TO_0.21.md)
+for the 0.20 → 0.21 recipes (Send Monitor, key-type narrowing,
+broadcast subscribers, sharded runner, `pattern_detector!`).
 See [`docs/migration-0.19-to-0.20.md`](docs/migration-0.19-to-0.20.md)
-for the legacy → 0.20 recipes, and `examples/monitor/` for
+for the older 0.19 → 0.20 path, and `examples/monitor/` for
 runnable demos.
 
-The legacy `ProtocolMonitor` + `AnomalyMonitor` API continues
-to work in 0.20.0 — both APIs coexist. A future 0.21.x will
-add `#[deprecated]` attributes; 0.22.0 will remove the legacy
-surface.
+The legacy `ProtocolMonitor` + `AnomalyMonitor` + `AnomalyRule`
+API still compiles in 0.21.0 but carries
+`#[deprecated(since = "0.21.0")]`. Removal is targeted for
+0.22.0.
 
 ## Legacy monitor + anomaly correlation (0.19, still supported)
 
@@ -637,6 +719,18 @@ cargo run --example multi_protocol_monitor --features "tokio,flow,parse"  -- eth
 cargo run --example http_session           --features "tokio,http"        -- eth0 60
 cargo run --example dns_lookups            --features "tokio,dns"         -- eth0 60
 cargo run --example full_monitor           --features "tokio,http,dns"    -- eth0 60
+# 0.21 — declarative Monitor (subscribe / pcap replay / pattern detectors):
+cargo run --example monitor_basic            --features "monitor-quickstart"  -- eth0
+cargo run --example monitor_stream_consumer  --features "monitor-quickstart"  -- eth0
+cargo run --example monitor_pcap_replay      --features "monitor-quickstart"  -- trace.pcap
+cargo run --example monitor_sharded_runner   --features "monitor-quickstart"  -- eth0 4
+cargo run --example monitor_eve_to_filebeat  --features "monitor-quickstart"  -- eth0 eve.json
+cargo run --example monitor_metrics_export   --features "monitor-quickstart"  -- eth0
+cargo run --example monitor_port_scan        --features "monitor-quickstart"  -- eth0
+cargo run --example monitor_beacon_detector  --features "monitor-quickstart"  -- eth0
+cargo run --example monitor_dga_query        --features "monitor-quickstart"  -- eth0
+cargo run --example monitor_file_hash_dfir   --features "monitor-quickstart"  -- eth0
+cargo run --example monitor_ech_adoption     --features "monitor-quickstart"  -- eth0
 ```
 
 Examples are organized by topic under
@@ -651,6 +745,10 @@ index with the right `--features` flags.
   decision matrix, multi-worker recipe, anti-patterns (added 0.13.0)
 - [Architecture](docs/ARCHITECTURE.md) — system design, lifetime model, ring layout
 - [API Overview](docs/API_OVERVIEW.md) — all types, methods, and configuration
+- [Async / tokio guide](docs/ASYNC_GUIDE.md) — async patterns, Send rules, Monitor on multi-thread
+- [Writing detectors](docs/WRITING_DETECTORS.md) — detector! / pattern_detector! tutorial
+- [Migrating 0.20 → 0.21](docs/MIGRATING_0.20_TO_0.21.md) — Send Monitor, key narrowing, subscribers, sharding
+- [Migrating 0.19 → 0.20](docs/migration-0.19-to-0.20.md) — legacy → declarative Monitor
 - [Tuning Guide](docs/TUNING_GUIDE.md) — performance profiles, system tuning, monitoring
 - [Troubleshooting](docs/TROUBLESHOOTING.md) — common errors and fixes
 

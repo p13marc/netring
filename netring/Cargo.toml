@@ -491,6 +491,21 @@ path = "examples/monitor/pcap_replay.rs"
 required-features = ["tokio", "flow", "pcap"]
 
 [[example]]
+name = "monitor_sharded_runner"
+path = "examples/monitor/sharded_runner.rs"
+required-features = ["tokio", "flow"]
+
+[[example]]
+name = "monitor_eve_to_filebeat"
+path = "examples/monitor/eve_to_filebeat.rs"
+required-features = ["tokio", "flow", "eve-sink"]
+
+[[example]]
+name = "monitor_metrics_export"
+path = "examples/monitor/metrics_export.rs"
+required-features = ["tokio", "flow", "metrics"]
+
+[[example]]
 name = "monitor_beacon_detector"
 path = "examples/monitor/beacon_detector.rs"
 required-features = ["tokio", "flow"]

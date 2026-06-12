@@ -2,7 +2,7 @@
 
 ## 1. Summary
 
-Three classes of work for the next cycle:
+Four classes of work for the next cycle:
 
 1. **Legacy API deletion.** The 0.19 trio
    (`ProtocolMonitor`, `ProtocolMonitorBuilder`, `AnomalyMonitor`,
@@ -18,6 +18,13 @@ Three classes of work for the next cycle:
    (K, V)>` upstream. Either re-export when that lands, or
    formally adopt the netring version as the canonical
    implementation and write it back into flowscope.
+4. **0.21 sweep follow-ups.** Items surfaced by the
+   `0.21-doc-sweep-issues.md` retrospective: tiny API polish
+   (`MinSeverity::info()`), the deferred `multi_thread_default`
+   example reframed honestly as a Send-caveat demo, a research
+   item on whether `Monitor::run_for`'s future can be made
+   `Send`, and CI hygiene for clippy doc lints. None are
+   blockers; bundled here so they don't drift.
 
 ## 2. Status
 
@@ -130,17 +137,100 @@ documented the specific signature gap.
 
 Until then, leave `netring::correlate::KeyIndexed` local.
 
-### 0.22-quality — `Phase H.5 multi_thread_default.rs example`
+### 0.22-quality — `multi_thread_default.rs` Send-caveat demo
 
 The 0.21 Phase H plan called for a dedicated
 `examples/monitor/multi_thread_default.rs` showing the Send
-sweep payoff explicitly. The 0.21 sweep dropped
-`flavor = "current_thread"` from every monitor example, so
-this is essentially "any monitor example already demonstrates
-the multi-thread default" — but a brief, focused example
-(maybe 30 LoC) that emphasizes the `#[tokio::main]` no-ceremony
-pattern still has value. Carry it as a low-priority polish
-item.
+sweep payoff explicitly. The retrospective in
+`0.21-doc-sweep-issues.md` revised the framing: `Monitor: Send`
+is real (`tests/monitor_send.rs` asserts it) but the *future*
+returned by `Monitor::run_for` / `run_until_signal` stays
+`!Send` because the run loop borrows the `!Sync` mmap ring
+across awaits.
+
+The example should therefore demonstrate *both* halves:
+- Plain `#[tokio::main]` works — no `flavor = "current_thread"`
+  ceremony needed (the Send-value payoff).
+- `tokio::spawn(monitor.run_for(...))` does NOT compile —
+  the example calls it out with a `compile_fail` doctest block
+  or a commented-out variant, then shows the working pattern
+  (`tokio::select!` to multiplex the run loop with shutdown
+  sources / subscribers, plus `ChannelSink` for cross-task
+  anomaly delivery).
+
+~50 LoC, three blocks: (1) the no-ceremony case, (2) the
+`!Send` foot-gun, (3) the `tokio::select!` + `ChannelSink`
+recovery. Higher priority than the original 0.21 H.5 spec
+because it documents a real surprise users will otherwise hit.
+
+### 0.22-quality — `MinSeverity::info()` constant
+
+One-line API addition: `pub const fn MinSeverity::info() -> Self`
+aliasing `Self::at_least(Severity::Info)`. The
+`warning()` / `error()` constructors already exist; `info()`
+was omitted because Info-floor is a no-op for the common case,
+but the asymmetric surface is a foot-gun (caught in the
+0.21 sweep — see `0.21-doc-sweep-issues.md` §2a). Add it +
+update the rustdoc note on `at_least` to point at all three.
+
+### 0.22-S — Send-future investigation (research)
+
+`tests/monitor_send.rs` asserts `Monitor: Send`,
+`MonitorBuilder: Send`, `ShardedRunner: Send`,
+`EventStream<M>: Send`. The retrospective flagged that the
+future returned by `Monitor::run_for(d).await` is **not**
+`Send`, because `AsyncCapture<S>` borrows the `!Sync` mmap
+ring across awaits. This means `tokio::spawn(monitor.run_for(d))`
+fails to compile — a surprise relative to the "Send Monitor"
+headline.
+
+Investigation scope:
+- Identify whether `dispatch_lifecycle` / `next_batch` /
+  `try_recv_batch` can be reshaped so the run-loop future
+  doesn't borrow the `!Sync` ring across await points.
+- Likely options:
+  1. **Owned-batch run path** — switch the live capture path
+     to `AsyncCapture::recv()` (`Vec<OwnedPacket>`, `Send`)
+     instead of the borrowed `try_recv_batch()`. Costs one
+     copy per packet per batch — measure against the
+     `benches/zero_alloc.rs` dhat regression gate.
+  2. **`tokio::task::spawn_local` adapter** — ship a
+     `Monitor::spawn_local()` helper that wraps the run loop
+     in a `LocalSet`, documenting the constraint explicitly
+     instead of trying to lift it.
+  3. **Status quo + better docs** — accept the constraint as
+     structural, sharpen the `MIGRATING_0.20_TO_0.21.md` /
+     `ASYNC_GUIDE.md` story (commit `761b6d4` already started
+     this), and ship the H.5 demo above to make the pattern
+     concrete.
+
+Output: a written recommendation in
+`plans/netring-0.22-send-future-decision.md` before any
+implementation. Likely lands as option 3 (the perf trade-off
+in option 1 is real) plus the H.5 example, but the analysis
+is worth doing.
+
+### 0.22-quality — clippy doc-lint CI gate
+
+clippy 1.95's `doc_lazy_continuation` lint fires on rustdoc
+that re-exports README.md (via `#![doc = include_str!("../README.md")]`
+or similar). Bug fixed in commit `761b6d4`, but the lint will
+trip again as the README evolves and the existing CI matrix
+doesn't surface it before merge. Add a `cargo clippy -p
+netring --features monitor-quickstart --all-targets -- -D
+warnings` row that builds the rustdoc, not just the binary,
+so README-driven doc lints surface in PR review instead of
+post-merge.
+
+### 0.22-docs — `MIGRATING_0.20_TO_0.21.md` Send caveat
+
+Not strictly 0.22 (could land in the 0.21 release-gates
+sweep), but listed here in case 0.21.0 ships before this
+note lands. The migration guide tells users to drop
+`flavor = "current_thread"` without the asterisk that the
+run-loop future is still `!Send`. Add a paragraph mirroring
+the README + ASYNC_GUIDE edits from commit `761b6d4`. ~10
+lines.
 
 ## 5. Non-goals
 
@@ -163,6 +253,12 @@ item.
   the same way `Tee::factory` works. Two construction shapes
   on the same trait, mirrors the `Tee::into` / `Tee::factory`
   split.
+- 0.22-S: is the per-packet copy cost of an owned-batch run
+  path acceptable? `benches/zero_alloc.rs` currently asserts
+  Δ 0 bytes / 0 blocks on dispatch — switching from borrowed
+  batches to `Vec<OwnedPacket>` breaks that invariant. The
+  research item should quantify the regression before any
+  code change.
 
 ## 7. Provenance
 
@@ -172,6 +268,8 @@ item.
   `KeyIndexed` once flowscope adds `drain_expired`).
 - 0.21 Phase H plan, §H.5 (multi_thread_default example).
 - 0.21 deprecation notes on the legacy 0.19 API surface.
+- `0.21-doc-sweep-issues.md` retrospective (recommendations
+  §2a, §4, §5, plus the framing revision for H.5).
 
 ## 8. Effort
 
@@ -181,7 +279,16 @@ item.
 - 0.22-C.6 (LayerSpec): ~1 day. Glue + tests.
 - 0.22-G: blocked on flowscope; ~30 min once the upstream
   change lands.
-- 0.22-H.5 example: ~1 hour.
+- 0.22-quality `multi_thread_default` example: ~2 hours
+  (3 blocks + `compile_fail` doctest).
+- 0.22-quality `MinSeverity::info()`: ~15 minutes (one const
+  + rustdoc cross-link).
+- 0.22-S Send-future investigation: ~1 day analysis + write-up.
+  Implementation effort depends on which option lands.
+- 0.22-quality clippy doc-lint CI row: ~30 min.
+- 0.22-docs migration guide Send caveat: ~30 min (may land in
+  0.21 release gates instead).
 
-Total: about a week of focused work plus flowscope-side
-coordination.
+Total: still about a week of focused work plus flowscope-side
+coordination. The new items are mostly polish; only 0.22-S
+could grow if option 1 (owned-batch run path) is chosen.

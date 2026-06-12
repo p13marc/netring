@@ -20,13 +20,13 @@ built on AF_PACKET with TPACKET_V3 (block-based mmap ring buffers) and AF_XDP.
 
 ## Implementation Status
 
-**Active.** netring 0.21.0 prepared on `0.21-dev` (this branch,
-29 commits past `master`); 0.20.0 was the last `master` cut;
-0.19.0 last published. ~540 tests + zero warnings + dhat
-zero-alloc bench (`Δ 0 bytes / 0 blocks` over 100k synthetic
-dispatches). Cargo version bump + git tag + `cargo publish`
-held pending explicit user trigger (see
-`plans/netring-0.21-release-gates.md`).
+**Active.** netring 0.21.0 released (tagged on `master`; cycle
+shipped after 30 commits on `0.21-dev`). 0.19.0 was the
+previous published version — 0.20 stayed CHANGELOG-only and
+was bundled into the 0.21 release. ~540 tests + zero warnings
++ dhat zero-alloc bench (`Δ 0 bytes / 0 blocks` over 100k
+synthetic dispatches). Next cycle items live in
+`plans/netring-0.22-roadmap.md`.
 
 ### Recent additions (netring 0.21 — Send Monitor + sharding + streaming subscribers + pcap replay)
 

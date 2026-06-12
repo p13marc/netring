@@ -9,7 +9,7 @@
 //! | [`StdoutSink`]    | 0 (buf reused)          | One greppable line of text to stdout       |
 //! | [`StdoutJsonSink`]| 1 (serde_json::Map)     | One JSON line to stdout (feature `serde`)  |
 //! | [`TracingSink`]   | 0 (tracing event!)      | `tracing::event!` at the matching Level    |
-//! | [`ChannelSink`]   | 1 ([`OwnedAnomaly`])    | tokio mpsc; lets consumers retain anomalies |
+//! | [`ChannelSink`]   | 1 ([`OwnedAnomaly`](crate::anomaly::OwnedAnomaly))    | tokio mpsc; lets consumers retain anomalies |
 
 use std::borrow::Cow;
 use std::io::Write;

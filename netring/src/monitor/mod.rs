@@ -398,8 +398,10 @@ impl MonitorBuilder {
 
     /// 0.21 D.4: tag this monitor with a human-readable name.
     ///
-    /// The name surfaces on every dispatched [`Ctx`] as
-    /// [`Ctx::monitor_name`] (`Option<&'a str>`); user handlers
+    /// The name surfaces on every dispatched
+    /// [`Ctx`](crate::ctx::Ctx) as
+    /// [`Ctx::monitor_name`](crate::ctx::Ctx::monitor_name)
+    /// (`Option<&'a str>`); user handlers
     /// running under multiple monitors in the same process can
     /// branch on it to disambiguate.
     ///
@@ -465,10 +467,10 @@ impl MonitorBuilder {
     /// Linux has ~1–10 ms granularity; sub-millisecond timing
     /// stretches are best-effort.
     ///
-    /// Equivalent to constructing an [`AsyncPcapConfig`] with
-    /// `replay_speed = factor` and calling
-    /// [`Self::replay_with_config`], but more ergonomic for the
-    /// common "just slow it down to wire-speed" case.
+    /// Equivalent to setting `replay_speed = factor` on an
+    /// [`AsyncPcapConfig`](crate::pcap_source::AsyncPcapConfig)
+    /// directly, but more ergonomic for the common "just slow
+    /// it down to wire-speed" case.
     ///
     /// Requires the `pcap` Cargo feature.
     #[cfg(all(feature = "pcap", feature = "tokio"))]

@@ -1,4 +1,5 @@
-//! 0.21 F: streaming consumer over a [`Protocol`]'s broadcast slot.
+//! 0.21 F: streaming consumer over a
+//! [`Protocol`](crate::protocol::Protocol)'s broadcast slot.
 //!
 //! Returned by [`super::Monitor::subscribe`]. Each `EventStream`
 //! is its own subscriber on the underlying flowscope

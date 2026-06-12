@@ -1,7 +1,7 @@
 //! 0.21 B.3: `MetricsSink` — bridge anomalies to the `metrics` crate
 //! facade. Drops one Prometheus / OpenTelemetry-style counter per
 //! anomaly emission and one histogram observation per numeric
-//! `metric` carried on the [`AnomalyWriter`].
+//! `metric` carried on the [`AnomalyWriter`](crate::anomaly::sink::AnomalyWriter).
 //!
 //! Gated on the existing `metrics` Cargo feature, which already pulls
 //! the `metrics` crate (the facade — concrete exporters like
@@ -31,7 +31,8 @@ use crate::anomaly::sink::AnomalySink;
 
 /// Sink adapter over the [`metrics`] crate facade. Increments a
 /// counter per anomaly emission and records a histogram value
-/// per numeric metric carried on the [`AnomalyWriter`].
+/// per numeric metric carried on the
+/// [`AnomalyWriter`](crate::anomaly::sink::AnomalyWriter).
 ///
 /// Wire to a real exporter downstream (Prometheus, OTLP, statsd,
 /// …) via the standard `metrics`-rs pattern — netring stays

@@ -82,7 +82,8 @@ pub struct Ctx<'a> {
     /// Handlers running under multiple monitors in the same
     /// process can branch on this to disambiguate (e.g. log
     /// `target = monitor_name` or stamp `with("monitor", name)`
-    /// on emitted anomalies). Borrowed from the [`Monitor`]'s
+    /// on emitted anomalies). Borrowed from the
+    /// [`Monitor`](crate::monitor::Monitor)'s
     /// owned `Box<str>` storage at dispatch time; `None` when
     /// `.name(...)` was not called.
     pub monitor_name: Option<&'a str>,
@@ -244,8 +245,8 @@ impl<'a> Ctx<'a> {
     ///     .emit();
     /// ```
     ///
-    /// The returned [`AnomalyWriter`] borrows the sink for its lifetime;
-    /// no temporaries needed.
+    /// The returned [`AnomalyWriter`](crate::anomaly::sink::AnomalyWriter)
+    /// borrows the sink for its lifetime; no temporaries needed.
     #[inline]
     pub fn emit(
         &mut self,

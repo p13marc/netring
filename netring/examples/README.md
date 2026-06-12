@@ -133,6 +133,7 @@ runtime) — `Monitor` is `Send` since 0.21.
 | `monitor_dga_query` | `pattern_detector!` over `DgaScorer` (bigram entropy on DNS) |
 | `monitor_file_hash_dfir` | `Sha256Sink + FileType` (feature `file-hash`) DFIR file hashing |
 | `monitor_ech_adoption` | ECH downgrade detection via `EchOutcome` |
+| `monitor_net_diagnostic` | **3 signals in one Monitor**: ICMP Destination Unreachable (host/port/network/prohibited split), TCP `FlowEnded` RST alerts, per-application bandwidth via `FlowPacket<Tcp>/<Udp>` + tick reporter. Real-life "what's happening on this NIC?" demo. |
 
 All take an `<iface>` argument (default `lo`) and an optional
 `<seconds>` deadline. Pair with `synthetic_traffic` for

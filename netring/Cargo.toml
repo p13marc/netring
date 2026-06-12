@@ -506,6 +506,11 @@ path = "examples/monitor/metrics_export.rs"
 required-features = ["tokio", "flow", "metrics"]
 
 [[example]]
+name = "monitor_net_diagnostic"
+path = "examples/monitor/net_diagnostic.rs"
+required-features = ["tokio", "flow", "icmp"]
+
+[[example]]
 name = "monitor_beacon_detector"
 path = "examples/monitor/beacon_detector.rs"
 required-features = ["tokio", "flow"]

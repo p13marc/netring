@@ -8,6 +8,7 @@ All netring documentation lives in this one tree (`netring/docs/`). The repo roo
 - [FEATURES.md](FEATURES.md) — the Cargo feature graph (axes, recipes, couplings).
 - [CRATE_BOUNDARY.md](CRATE_BOUNDARY.md) — the netring ↔ flowscope contract.
 - [ARCHITECTURE.md](ARCHITECTURE.md) — system design, lifetime model, ring layout.
+- [BACKENDS.md](BACKENDS.md) — the `AnyBackend` capture-backend design (AF_PACKET / AF_XDP / pcap / io_uring seam).
 - [API_OVERVIEW.md](API_OVERVIEW.md) — types, methods, configuration.
 - [ASYNC_GUIDE.md](ASYNC_GUIDE.md) — tokio patterns, Send rules, Monitor on multi-thread.
 - [WRITING_DETECTORS.md](WRITING_DETECTORS.md) — `detector!` / `pattern_detector!` tutorial.

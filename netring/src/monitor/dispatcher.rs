@@ -128,6 +128,23 @@ impl Dispatcher {
     ///
     /// Each async handler boxes its future; that allocation is
     /// the documented cost of `MonitorBuilder::on_async`.
+    ///
+    /// # `Send` run loop
+    ///
+    /// The type-erased payload pointer (`*const ()`) is `!Send`, so
+    /// it must **never be held across an `.await`** — otherwise the
+    /// enclosing run-loop future becomes `!Send` and
+    /// `Monitor::run_for(..)` could not be `tokio::spawn`'d. Each
+    /// handler future is therefore constructed *before* any await,
+    /// inside a block that confines the pointer; the resulting boxed
+    /// futures are `'static + Send` (see [`AsyncHandler`]) and don't
+    /// borrow the payload, so they are safe to await afterwards.
+    ///
+    /// [`AsyncHandler`]: crate::monitor::AsyncHandler
+    ///
+    /// The 0- and 1-handler cases (the overwhelming majority) take
+    /// allocation-free fast paths, preserving the dhat Δ0 invariant
+    /// for monitors without async handlers.
     pub async fn dispatch_async<P: 'static>(&mut self, payload: &P) -> Result<()> {
         let target = TypeId::of::<P>();
         let Some((_, slot_idx)) = self
@@ -139,11 +156,40 @@ impl Dispatcher {
             return Ok(());
         };
 
-        let ptr = payload as *const P as *const ();
-        for slot in self.async_slots[slot_idx as usize].iter() {
-            slot.handler.call(ptr).await?;
+        let slots = &self.async_slots[slot_idx as usize];
+        match slots.len() {
+            // No async handlers for this type: nothing to await, no
+            // allocation. This is the hot path for the common case
+            // where a type has only sync handlers.
+            0 => Ok(()),
+            // Exactly one handler: build its future in a block that
+            // drops the `*const ()` before the await, then await.
+            // Exact one-at-a-time semantics, zero allocation.
+            1 => {
+                let fut = {
+                    let ptr = payload as *const P as *const ();
+                    slots[0].handler.call(ptr)
+                };
+                fut.await
+            }
+            // Two or more handlers (rare): construct every future up
+            // front while the pointer is in scope, then await each in
+            // order. The `Vec` is the only allocation and only occurs
+            // on this uncommon multi-async-handler path.
+            _ => {
+                let mut futures: Vec<BoxFuture<Result<()>>> = Vec::with_capacity(slots.len());
+                {
+                    let ptr = payload as *const P as *const ();
+                    for slot in slots.iter() {
+                        futures.push(slot.handler.call(ptr));
+                    }
+                }
+                for fut in futures {
+                    fut.await?;
+                }
+                Ok(())
+            }
         }
-        Ok(())
     }
 
     /// Clone this dispatcher for use in a per-CPU shard (Phase C).

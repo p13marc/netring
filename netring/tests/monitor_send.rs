@@ -10,6 +10,7 @@
 #![cfg(all(feature = "tokio", feature = "flow", feature = "http"))]
 
 use netring::monitor::{EventStream, Monitor, MonitorBuilder, ShardedRunner};
+use netring::protocol::builtin::Tcp;
 
 fn assert_send<T: Send>() {}
 
@@ -31,4 +32,29 @@ fn sharded_runner_is_send() {
 #[test]
 fn event_stream_is_send() {
     assert_send::<EventStream<flowscope::http::HttpMessage>>();
+}
+
+/// 0.23: the *future* returned by `run_for` / `run_until` /
+/// `run_until_signal` / `run_until_idle` is `Send + 'static`, so the
+/// run loop can be `tokio::spawn`'d onto a multi-thread runtime.
+///
+/// Before 0.23 it was `!Send`: the async-dispatch path held a
+/// type-erased `*const ()` and a non-`Send` boxed future across
+/// `.await`. The fix (`BoxFuture: + Send` + lexically scoping the
+/// pointer in `Dispatcher::dispatch_async`) removed both. This is a
+/// compile-time assertion — the body is type-checked but never run.
+#[allow(dead_code)]
+fn run_loop_future_is_spawnable() {
+    fn assert_spawnable<F: std::future::Future + Send + 'static>(_: F) {}
+    let build = || {
+        Monitor::builder()
+            .interface("lo")
+            .protocol::<Tcp>()
+            .build()
+            .unwrap()
+    };
+    assert_spawnable(build().run_for(std::time::Duration::ZERO));
+    assert_spawnable(build().run_until(std::time::Instant::now()));
+    assert_spawnable(build().run_until_signal());
+    assert_spawnable(build().run_until_idle(std::time::Duration::ZERO));
 }

@@ -37,26 +37,38 @@ use std::pin::Pin;
 use crate::error::Result;
 use crate::protocol::event_typed::Event;
 
-/// Boxed future returned by async handler calls. `'static`
-/// because the user-supplied closure receives `&payload` for a
-/// dispatch-bounded lifetime and is expected to do its own
+/// Boxed future returned by async handler calls.
+///
+/// `'static` because the user-supplied closure receives `&payload`
+/// for a dispatch-bounded lifetime and is expected to do its own
 /// borrowing/ownership inside the future body.
-pub type BoxFuture<T> = Pin<Box<dyn Future<Output = T>>>;
+///
+/// `+ Send` (since 0.23) so the boxed future can be held across an
+/// `.await` in a `Send` run-loop future — this is what lets
+/// `Monitor::run_for(..)` be `tokio::spawn`'d. The bound mirrors
+/// `tokio::spawn`'s own requirement: anything you `.await` inside an
+/// `on_async` handler must be `Send`. Handlers that capture
+/// `Arc<…>` and do network/disk I/O (the canonical case) already
+/// satisfy this; the rare handler holding a non-`Send` guard across
+/// its own `.await` must move that work behind a `ChannelSink` or an
+/// `Arc<Mutex<…>>` instead.
+pub type BoxFuture<T> = Pin<Box<dyn Future<Output = T> + Send>>;
 
 /// Async counterpart of [`super::Handler`]. Only one arity:
-/// `Fn(&E::Payload) -> impl Future<Output = Result<()>>`.
+/// `Fn(&E::Payload) -> impl Future<Output = Result<()>> + Send`.
 pub trait AsyncHandler<E: Event>: Send + Sync + 'static {
     /// Invoke the handler. The boxed future is awaited to
     /// completion before the run loop moves on.
     fn call(&self, payload: &E::Payload) -> BoxFuture<Result<()>>;
 }
 
-/// Blanket impl for async closures.
+/// Blanket impl for async closures. `Fut: Send` (since 0.23) keeps
+/// the run-loop future `Send`; see [`BoxFuture`].
 impl<E, F, Fut> AsyncHandler<E> for F
 where
     E: Event,
     F: Fn(&E::Payload) -> Fut + Send + Sync + 'static,
-    Fut: Future<Output = Result<()>> + 'static,
+    Fut: Future<Output = Result<()>> + Send + 'static,
 {
     #[inline]
     fn call(&self, p: &E::Payload) -> BoxFuture<Result<()>> {

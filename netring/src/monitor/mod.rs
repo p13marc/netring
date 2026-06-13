@@ -44,7 +44,7 @@ use flowscope::extract::FiveTuple;
 
 use crate::anomaly::sink::{AnomalySink, NoopSink};
 use crate::correlate::TimeBucketedCounter;
-use crate::ctx::{CounterRegistry, FlowStateRegistry, StateMap};
+use crate::ctx::{Ctx, CounterRegistry, FlowStateRegistry, StateMap};
 use crate::error::{BuildError, Result};
 use crate::layer::Layer;
 use crate::protocol::Protocol;
@@ -68,6 +68,11 @@ pub use subscribe::EventStream;
 
 pub mod shard;
 pub use shard::ShardedRunner;
+
+// 0.22 §2.3: bandwidth-by-app primitive (gated with the rest of the
+// monitor API on `flow + tokio`).
+pub mod bandwidth;
+pub use bandwidth::BandwidthReport;
 
 /// The 0.20 top-level monitor — a fully-constructed graph of
 /// (driver, dispatcher, parser-slots, state) that runs to a
@@ -381,6 +386,11 @@ pub struct MonitorBuilder {
     /// [`Self::label_table`]; moved into [`Monitor::label_table`] at
     /// build.
     label_table: Option<flowscope::well_known::LabelTable>,
+    /// 0.22 §2.3: set once `bandwidth_by_app` / `bandwidth_windowed` /
+    /// `on_bandwidth` has installed the recorder, so repeated calls
+    /// (e.g. `on_bandwidth` after an explicit `bandwidth_windowed`)
+    /// don't double-register the per-packet handler and double-count.
+    bandwidth_registered: bool,
 }
 
 impl MonitorBuilder {
@@ -603,6 +613,78 @@ impl MonitorBuilder {
                 handler,
             );
         s
+    }
+
+    /// 0.22 §2.3: register a per-app rolling byte-rate keyed by the
+    /// flow's well-known app label (`"http"`, `"https"`, `"dns"`,
+    /// site-custom labels from a [`Self::label_table`]).
+    ///
+    /// Implicitly declares `Tcp` + `Udp` and installs one internal
+    /// per-packet recorder. Read the rate back via
+    /// [`Ctx::bandwidth`](crate::ctx::Ctx::bandwidth) or, more
+    /// ergonomically, [`Self::on_bandwidth`]. Idempotent — calling it
+    /// more than once (or alongside `on_bandwidth`) registers the
+    /// recorder exactly once. Default window/bucket are 10s/1s; use
+    /// [`Self::bandwidth_windowed`] to override.
+    pub fn bandwidth_by_app(self) -> Self {
+        self.bandwidth_windowed(bandwidth::BW_WINDOW, bandwidth::BW_BUCKET)
+    }
+
+    /// 0.22 §2.3: as [`Self::bandwidth_by_app`], with an explicit
+    /// rolling `window` and `bucket` width (e.g. a wider window for a
+    /// low-rate link). The first bandwidth registration on a builder
+    /// wins; later ones are no-ops.
+    pub fn bandwidth_windowed(mut self, window: Duration, bucket: Duration) -> Self {
+        if self.bandwidth_registered {
+            return self;
+        }
+        self.bandwidth_registered = true;
+        self.protocol::<crate::protocol::builtin::Tcp>()
+            .protocol::<crate::protocol::builtin::Udp>()
+            .state_init::<bandwidth::BandwidthState, _>(move || {
+                bandwidth::BandwidthState::new(window, bucket)
+            })
+            .on_ctx::<crate::protocol::event_typed::FlowPacket>(
+                |evt: &crate::protocol::event_typed::FlowPacket, ctx: &mut Ctx<'_>| {
+                    // app_label_with is always-some (&'static str); the
+                    // label borrow ends at the statement, then we take a
+                    // disjoint &mut on the state slot.
+                    let label = evt.key.app_label_with(ctx.label_table());
+                    let ts = ctx.ts;
+                    ctx.state_mut::<bandwidth::BandwidthState>()
+                        .0
+                        .record(label, evt.len as u64, ts);
+                    Ok(())
+                },
+            )
+    }
+
+    /// 0.22 §2.3: the high-level fused bandwidth monitor. Registers
+    /// `bandwidth_by_app()` (if not already) **and** a periodic report;
+    /// the closure receives a ready [`BandwidthReport`] every `period`.
+    ///
+    /// ```ignore
+    /// Monitor::builder()
+    ///     .interface(iface)
+    ///     .on_bandwidth(Duration::from_secs(5), |bw| {
+    ///         for (app, bps) in bw.top(10) { println!("{app}: {bps:>10.0} B/s"); }
+    ///         Ok(())
+    ///     })
+    ///     .run_until_signal().await?;
+    /// ```
+    pub fn on_bandwidth<F>(self, period: Duration, f: F) -> Self
+    where
+        F: Fn(&BandwidthReport<'_>) -> Result<()> + Send + Sync + 'static,
+    {
+        self.bandwidth_by_app().tick(
+            period,
+            move |_tick: &crate::protocol::event_typed::Tick, ctx: &mut Ctx<'_>| {
+                if let Some(report) = ctx.bandwidth() {
+                    f(&report)?;
+                }
+                Ok(())
+            },
+        )
     }
 
     /// 0.21 F: register `P` for broadcast delivery.

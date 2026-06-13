@@ -33,6 +33,6 @@ pub use key_indexed::KeyIndexed;
 // shape.
 #[cfg(feature = "flow")]
 pub use flowscope::correlate::{
-    BurstDetector, BurstHit, Ewma, FlowStateMap, KeylessSequencePattern, SequencePattern,
-    TimeBucketedCounter, TimeBucketedSet, TopK,
+    BurstDetector, BurstHit, Ewma, FlowStateMap, KeylessSequencePattern, RateValue, RollingRate,
+    SequencePattern, TimeBucketedCounter, TimeBucketedSet, TopK,
 };

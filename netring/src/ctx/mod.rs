@@ -228,6 +228,21 @@ impl<'a> Ctx<'a> {
         self.label_table
     }
 
+    /// 0.22 §2.3: a [`BandwidthReport`](crate::monitor::BandwidthReport)
+    /// snapshot of the bandwidth slot, if
+    /// [`bandwidth_by_app`](crate::monitor::MonitorBuilder::bandwidth_by_app)
+    /// / [`on_bandwidth`](crate::monitor::MonitorBuilder::on_bandwidth)
+    /// registered it; `None` otherwise. The report captures `self.ts`
+    /// as its instant, so callers never handle a raw `Timestamp`.
+    #[inline]
+    pub fn bandwidth(&self) -> Option<crate::monitor::BandwidthReport<'_>> {
+        let state = self.state::<crate::monitor::bandwidth::BandwidthState>()?;
+        Some(crate::monitor::BandwidthReport {
+            rate: &state.0,
+            now: self.ts,
+        })
+    }
+
     /// 0.22: join an ICMP error's embedded inner 5-tuple back to a
     /// live flow + its stats.
     ///

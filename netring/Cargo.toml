@@ -454,6 +454,11 @@ path = "examples/monitor/net_diagnostic.rs"
 required-features = ["tokio", "flow", "icmp"]
 
 [[example]]
+name = "monitor_multi_thread_default"
+path = "examples/monitor/multi_thread_default.rs"
+required-features = ["tokio", "flow", "channel"]
+
+[[example]]
 name = "monitor_beacon_detector"
 path = "examples/monitor/beacon_detector.rs"
 required-features = ["tokio", "flow"]

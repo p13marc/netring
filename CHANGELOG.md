@@ -2,7 +2,7 @@
 
 ## 0.22.0 — operations toolkit + typed protocol model (breaking)
 
-> **Unreleased / in progress on `0.22-dev`.** A large, deliberately
+> **Released 2026-06-13.** A large, deliberately
 > infrequent **breaking** release: it reshapes the type model so the
 > next cycles build on a cleaner foundation, absorbs flowscope 0.14,
 > ships a high-level operations toolkit (bandwidth-by-app, ICMP-error

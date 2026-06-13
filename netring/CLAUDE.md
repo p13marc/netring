@@ -20,11 +20,11 @@ built on AF_PACKET with TPACKET_V3 (block-based mmap ring buffers) and AF_XDP.
 
 ## Implementation Status
 
-**0.22 in progress on `0.22-dev`** (a large breaking release; not yet
-tagged/published). 0.21.0 is the last published version. ~330 lib +
-integration tests, zero warnings, `clippy --all-features -D warnings`
-clean, `rustdoc -D warnings` clean, dhat `Δ 0 / 0`. Plan +
-status table: `plans/netring-0.22-plan.md`.
+**0.22.0 — released** (a large breaking release). Depends on flowscope
+`0.14.1`. ~330 lib + integration tests, zero warnings, `cargo fmt --check`
+clean, `clippy --all-features -D warnings` clean, `rustdoc -D warnings`
+clean, dhat `Δ 0 / 0`. Plan + status table: `plans/netring-0.22-plan.md`
+(deleted on ship per convention).
 
 ### Recent additions (netring 0.22 — operations toolkit + typed protocol model, BREAKING)
 

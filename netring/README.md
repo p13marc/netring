@@ -726,6 +726,7 @@ index with the right `--features` flags.
 - [API Overview](docs/API_OVERVIEW.md) — all types, methods, and configuration
 - [Async / tokio guide](docs/ASYNC_GUIDE.md) — async patterns, Send rules, Monitor on multi-thread
 - [Writing detectors](docs/WRITING_DETECTORS.md) — detector! / pattern_detector! tutorial
+- [Migrating 0.21 → 0.22](docs/MIGRATING_0.21_TO_0.22.md) — **breaking**: typed protocol roles, flat `FlowPacket`, ops toolkit, report stream, legacy 0.19 API removed
 - [Migrating 0.20 → 0.21](docs/MIGRATING_0.20_TO_0.21.md) — Send Monitor, key narrowing, subscribers, sharding
 - [Migrating 0.19 → 0.20](docs/migration-0.19-to-0.20.md) — legacy → declarative Monitor
 - [Tuning Guide](docs/TUNING_GUIDE.md) — performance profiles, system tuning, monitoring

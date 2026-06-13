@@ -104,8 +104,23 @@ The type system enforces which events a protocol can produce:
 - `ctx.emit(kind, severity).with(k, v).with_metric(k, f).with_key(&key).emit()`.
 - Sinks: `StdoutSink`, `StdoutJsonSink` (serde), `TracingSink`,
   `ChannelSink`, `EveSink` (eve-sink), `MetricsSink` (metrics).
-- Layers: `MinSeverity`, `DedupeAnomalies`, `RateLimitAnomalies`,
-  `Sample`, `Tee` — stack via `.layer(…)` (first = outermost).
+- Layers: `MinSeverity` (`info()`/`warning()`/`error()`, all `const`),
+  `DedupeAnomalies`, `RateLimitAnomalies`, `Sample`, `Tee` — stack via
+  `.layer(…)` (first = outermost).
+
+## Periodic reports (0.22 §3)
+
+A third output stream beside per-event anomalies and broadcast streams:
+periodic typed snapshots of derived state (the Suricata `stats.log` /
+Zeek `conn.log` shape).
+
+- `.report(period, |snap| …)` — ad-hoc closure; `snap` exposes
+  `bandwidth()` / `state::<T>()` / `counter::<K>()` / `emit(…)` / `now()`.
+- `.report_to(period, |snap| R, sink)` — ship a typed `Report` to a
+  `ReportSink`. Shipped sinks: `StdoutReportSink`, `JsonReportSink`
+  (serde, newline-JSON). `BandwidthSnapshot` is the reference `Report`
+  (`bw.to_snapshot(n)`).
+- Example: `examples/monitor/report_stream.rs`.
 
 ## Stream consumers
 
@@ -117,3 +132,10 @@ The type system enforces which events a protocol can produce:
 
 - `ShardedRunner::new(iface, mode, group_id, n, build_shard)` — per-CPU
   AF_PACKET fanout, one Monitor per shard.
+- **Cross-shard aggregation (0.22 §5.1):** `.merge_state(period, fold)` /
+  `.state_auto_merge::<T: AddAssign>(period)` fold each shard's `T` slot
+  into a global total; observe it with `.on_merge(|total| …)`. Per-shard
+  state stays local (no hot-path locking); a merge-worker thread probes.
+- **Per-shard layers:** `.layer(spec)` where `spec: LayerSpec` —
+  cloneable config layers pass directly; non-`Clone` layers (`Tee`) via
+  `LayerFactory(|| …)`. Example: `examples/monitor/sharded_runner.rs`.

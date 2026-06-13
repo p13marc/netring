@@ -270,6 +270,29 @@ ethtool -L eth0 combined 8
 
 Match worker count to queue count for `FanoutMode::Cpu`.
 
+## Cross-shard state aggregation (0.22)
+
+Each shard's `Monitor` owns private state — no cross-shard locking on
+the hot path. For a **global** view, register a merge on the runner:
+
+```rust
+ShardedRunner::new("eth0", FanoutMode::Cpu, 42, num_cpus, build_shard)
+    .state_auto_merge::<ConnCount>(Duration::from_secs(1))  // T: AddAssign
+    .on_merge::<ConnCount, _>(|total| println!("global: {}", total.0));
+```
+
+A merge-worker thread probes each shard on the cadence, `mem::take`s its
+`T` slot (the shard re-creates `T::default()` lazily, so each interval
+folds the delta), and folds into a persistent primary — the running
+grand total handed to `on_merge`. Use `.merge_state(period, |p, t| …)`
+for a custom fold. This replaces the older "route per-shard anomalies
+through `Tee + ChannelSink` to a single collator task" workaround.
+
+Per-shard secondary sink layers: `.layer(spec)` mints one independent
+layer instance per shard (a `DedupeAnomalies` table / `Sample` RNG isn't
+shared) — cloneable config layers pass directly, `Tee` via
+`LayerFactory(|| …)`. See `examples/monitor/sharded_runner.rs`.
+
 ## Cross-references
 
 - [`packet(7)`](https://man7.org/linux/man-pages/man7/packet.7.html)

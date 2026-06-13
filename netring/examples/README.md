@@ -133,6 +133,9 @@ runtime) — `Monitor` is `Send` since 0.21.
 | `monitor_file_hash_dfir` | `Sha256Sink + FileType` (feature `file-hash`) DFIR file hashing |
 | `monitor_ech_adoption` | ECH downgrade detection via `EchOutcome` |
 | `monitor_net_diagnostic` | **3 signals in one Monitor** (0.22 high-level API): unified ICMP errors via `on_icmp_error` (flow-joined), TCP resets via `on_tcp_reset`, per-app bandwidth via `on_bandwidth` + typed `BandwidthReport`. The 0.22 headline — 306 LoC of hand-rolled classifiers/HashMap/tick collapsed to ~70. |
+| `monitor_multi_thread_default` | plain `#[tokio::main]` (multi-thread runtime) — `Monitor` is `Send` since 0.21, no `current_thread` / `LocalSet` needed |
+| `monitor_report_stream` | `report_to(period, build, sink)` + `JsonReportSink` (0.22 §3) shipping a typed `BandwidthSnapshot` report — the third output stream beside anomalies and broadcast |
+| `monitor_label_table` | `LabelTable::new().set(...)` + `MonitorBuilder::label_table` — custom well-known port → app-label map feeding `on_bandwidth` |
 
 All take an `<iface>` argument (default `lo`) and an optional
 `<seconds>` deadline. Pair with `synthetic_traffic` for
@@ -144,11 +147,11 @@ cargo run --features "monitor-quickstart" --example monitor_stream_consumer -- l
 cargo run --features "monitor-quickstart" --example monitor_sharded_runner -- lo 4 10
 ```
 
-See [`docs/MIGRATING_0.20_TO_0.21.md`](../docs/MIGRATING_0.20_TO_0.21.md)
-for the 0.20 → 0.21 transition guide (Send sweep, key narrowing,
-broadcast subscribers, sharded runner, `pattern_detector!`),
-and [`docs/migration-0.19-to-0.20.md`](../docs/migration-0.19-to-0.20.md)
-for the older legacy → 0.20 path.
+See [`docs/MIGRATING_0.21_TO_0.22.md`](../docs/MIGRATING_0.21_TO_0.22.md)
+for the 0.21 → 0.22 transition guide (typed protocol roles, flat
+`FlowPacket`, the operations toolkit `on_bandwidth` / `on_icmp_error` /
+`on_tcp_reset`, the report stream, cross-shard merge, and the legacy
+0.19 API removal).
 
 ## anomaly/ — multi-protocol anomaly correlators
 

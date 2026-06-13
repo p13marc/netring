@@ -72,7 +72,7 @@ pub use shard::ShardedRunner;
 // 0.22 §2.3: bandwidth-by-app primitive (gated with the rest of the
 // monitor API on `flow + tokio`).
 pub mod bandwidth;
-pub use bandwidth::BandwidthReport;
+pub use bandwidth::{BandwidthEntry, BandwidthReport, BandwidthSnapshot};
 
 /// The 0.20 top-level monitor — a fully-constructed graph of
 /// (driver, dispatcher, parser-slots, state) that runs to a
@@ -1071,6 +1071,57 @@ impl MonitorBuilder {
         handler: impl Handler<Tick, crate::monitor::handler::CtxOnly>,
     ) -> Self {
         self.tick(period, handler)
+    }
+
+    /// 0.22 §3: periodic report — every `period`, call `f` with a typed
+    /// [`ReportSnapshot`](crate::report::ReportSnapshot) of the
+    /// monitor's registered primitives (bandwidth, counters, state).
+    /// The ad-hoc / println form; see [`Self::report_to`] for a typed
+    /// `Report` shipped to a [`ReportSink`](crate::report::ReportSink).
+    pub fn report<F>(self, period: Duration, f: F) -> Self
+    where
+        F: Fn(crate::report::ReportSnapshot<'_, '_>) -> Result<()> + Send + Sync + 'static,
+    {
+        self.tick(period, move |tick: &Tick, ctx: &mut Ctx<'_>| {
+            f(crate::report::ReportSnapshot {
+                ctx,
+                now: tick.now,
+            })
+        })
+    }
+
+    /// 0.22 §3: ship a typed [`Report`](crate::report::Report) to a
+    /// [`ReportSink`](crate::report::ReportSink) every `period`.
+    /// `build` constructs the `R` from a
+    /// [`ReportSnapshot`](crate::report::ReportSnapshot); the framework
+    /// drives the cadence.
+    ///
+    /// ```ignore
+    /// .bandwidth_by_app()
+    /// .report_to(Duration::from_secs(5),
+    ///     |snap| snap.bandwidth().unwrap().to_snapshot(10),
+    ///     JsonReportSink)
+    /// ```
+    pub fn report_to<R, B, S>(self, period: Duration, build: B, sink: S) -> Self
+    where
+        R: crate::report::Report,
+        B: Fn(crate::report::ReportSnapshot<'_, '_>) -> R + Send + Sync + 'static,
+        S: crate::report::ReportSink<R> + 'static,
+    {
+        // Tick handlers are stored behind `Arc<dyn Fn + Send + Sync>`, so
+        // the sink needs interior mutability. The lock is taken once per
+        // cadence tick (seconds), never on the packet path.
+        let sink = std::sync::Mutex::new(sink);
+        self.tick(period, move |tick: &Tick, ctx: &mut Ctx<'_>| {
+            let report = build(crate::report::ReportSnapshot {
+                ctx,
+                now: tick.now,
+            });
+            if let Ok(mut s) = sink.lock() {
+                s.record(&report);
+            }
+            Ok(())
+        })
     }
 
     /// Freeze the builder into a [`Monitor`].

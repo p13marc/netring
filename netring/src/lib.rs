@@ -44,6 +44,11 @@ pub mod pcap_tap;
 pub mod prelude;
 #[cfg(all(feature = "flow", feature = "tokio"))]
 pub mod protocol;
+/// 0.22 §3: periodic structured reports (`Report` / `ReportSink` /
+/// `ReportSnapshot`) — the third output stream beside anomalies and
+/// broadcast event streams.
+#[cfg(all(feature = "flow", feature = "tokio"))]
+pub mod report;
 pub mod stats;
 pub mod traits;
 

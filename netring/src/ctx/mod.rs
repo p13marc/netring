@@ -228,6 +228,17 @@ impl<'a> Ctx<'a> {
         self.label_table
     }
 
+    /// 0.22 §3: immutable, non-panicking read of the `K`-keyed
+    /// sliding-window counter. `None` if unregistered (sibling to the
+    /// panicking [`Self::counter_mut`]). Used by report snapshots.
+    #[inline]
+    pub fn counter<K>(&self) -> Option<&TimeBucketedCounter<K>>
+    where
+        K: std::hash::Hash + Eq + Clone + Send + 'static,
+    {
+        self.counters.get::<K>()
+    }
+
     /// 0.22 §2.3: a [`BandwidthReport`](crate::monitor::BandwidthReport)
     /// snapshot of the bandwidth slot, if
     /// [`bandwidth_by_app`](crate::monitor::MonitorBuilder::bandwidth_by_app)

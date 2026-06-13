@@ -78,6 +78,45 @@ impl BandwidthReport<'_> {
     pub fn app_count(&self) -> usize {
         self.rate.len(self.now)
     }
+
+    /// 0.22 §3: owned top-`n` snapshot for a
+    /// [`ReportSink`](crate::report::ReportSink). Implements
+    /// [`Report`](crate::report::Report) (+ `Serialize` under `serde`),
+    /// so it ships through `report_to(..)`.
+    pub fn to_snapshot(&self, n: usize) -> BandwidthSnapshot {
+        BandwidthSnapshot {
+            apps: self
+                .top(n)
+                .into_iter()
+                .map(|(app, bytes_per_sec)| BandwidthEntry { app, bytes_per_sec })
+                .collect(),
+        }
+    }
+}
+
+/// One app's bytes/sec in a [`BandwidthSnapshot`].
+#[derive(Debug, Clone)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize))]
+pub struct BandwidthEntry {
+    /// App label (`"http"`, site-custom, …).
+    pub app: &'static str,
+    /// Bytes per second over the rolling window.
+    pub bytes_per_sec: f64,
+}
+
+/// 0.22 §3: an owned, top-N bandwidth snapshot — the reference
+/// [`Report`](crate::report::Report). `report_to(period, |snap|
+/// snap.bandwidth().unwrap().to_snapshot(10), JsonReportSink)` ships it
+/// as newline-JSON.
+#[derive(Debug, Clone)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize))]
+pub struct BandwidthSnapshot {
+    /// Top apps by bytes/sec, descending.
+    pub apps: Vec<BandwidthEntry>,
+}
+
+impl crate::report::Report for BandwidthSnapshot {
+    const NAME: &'static str = "bandwidth";
 }
 
 #[cfg(test)]

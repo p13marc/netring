@@ -43,7 +43,7 @@ use crate::protocol::builtin::Icmp;
 use crate::protocol::builtin::{Tcp, Udp};
 use crate::protocol::event_typed::{
     AnyFlowAnomaly, FlowEnded, FlowEstablished, FlowPacket, FlowStarted, FlowTick, ParserClosed,
-    Tick,
+    TcpRst, Tick,
 };
 use std::time::SystemTime;
 
@@ -687,9 +687,16 @@ async fn dispatch_lifecycle_async(
             ..
         } => match l4 {
             Some(L4Proto::Tcp) => {
+                // 0.22 §2.6: async TcpRst synthesis mirrors the sync arm.
+                let is_rst = reason == flowscope::EndReason::Rst;
                 dispatcher
-                    .dispatch_async(&FlowEnded::<Tcp>::new(key, reason, stats, l4, ts))
+                    .dispatch_async(&FlowEnded::<Tcp>::new(key, reason, stats.clone(), l4, ts))
                     .await?;
+                if is_rst {
+                    dispatcher
+                        .dispatch_async(&TcpRst::new(key, stats, ts))
+                        .await?;
+                }
             }
             Some(L4Proto::Udp) => {
                 dispatcher
@@ -862,12 +869,20 @@ fn dispatch_lifecycle(
             ..
         } => match l4 {
             Some(L4Proto::Tcp) => {
+                // 0.22 §2.6: synthesise a TcpRst alongside FlowEnded<Tcp>
+                // when the close reason is RST. Cheap — the struct is
+                // built only on real RSTs; dispatch is a no-op when no
+                // TcpRst handler is registered.
+                let is_rst = reason == flowscope::EndReason::Rst;
                 dispatch_one!(
                     FlowEnded<Tcp>,
-                    FlowEnded::<Tcp>::new(key, reason, stats, l4, ts),
+                    FlowEnded::<Tcp>::new(key, reason, stats.clone(), l4, ts),
                     Some(key),
                     ts
                 );
+                if is_rst {
+                    dispatch_one!(TcpRst, TcpRst::new(key, stats, ts), Some(key), ts);
+                }
             }
             Some(L4Proto::Udp) => {
                 dispatch_one!(

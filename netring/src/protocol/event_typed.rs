@@ -294,6 +294,47 @@ impl Event for FlowPacket {
     type Payload = FlowPacket;
 }
 
+/// 0.22 §2.6: synthesised when a TCP flow ends with a RST — i.e. a
+/// `FlowEnded<Tcp>` whose `reason == EndReason::Rst`. The
+/// operationally-important close; clean FIN / idle eviction do **not**
+/// synthesise one. Register via
+/// [`MonitorBuilder::on_tcp_reset`](crate::monitor::MonitorBuilder::on_tcp_reset)
+/// (or `on::<TcpRst>`). No flowscope dependency — purely netring
+/// dispatch translation.
+#[non_exhaustive]
+#[derive(Debug, Clone)]
+pub struct TcpRst {
+    /// Flow key of the reset connection.
+    pub key: FlowKey,
+    /// Final stats snapshot at reset.
+    pub stats: FlowStats,
+    /// Timestamp of the reset.
+    pub ts: Timestamp,
+    /// `true` when the RST landed before any payload moved
+    /// (`stats.total_bytes() == 0`) — typically "connection refused"
+    /// at the application layer rather than a mid-transfer abort.
+    pub zero_payload: bool,
+}
+
+impl TcpRst {
+    /// Constructor exposed for integration tests / dispatch
+    /// translation. Not part of the documented public API.
+    #[doc(hidden)]
+    pub fn new(key: FlowKey, stats: FlowStats, ts: Timestamp) -> Self {
+        let zero_payload = stats.total_bytes() == 0;
+        Self {
+            key,
+            stats,
+            ts,
+            zero_payload,
+        }
+    }
+}
+
+impl Event for TcpRst {
+    type Payload = TcpRst;
+}
+
 /// Periodic per-flow [`FlowStats`] snapshot. Only emitted when
 /// `FlowTrackerConfig::flow_tick_interval` is set on the underlying
 /// driver.

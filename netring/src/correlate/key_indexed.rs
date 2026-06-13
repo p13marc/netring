@@ -139,6 +139,35 @@ impl<K: Hash + Eq, V> KeyIndexed<K, V> {
             .collect()
     }
 
+    /// 0.22 §2.1: allocation-friendly sibling of [`Self::drain_expired`].
+    /// Appends every entry older than `now - ttl` into `out` and returns
+    /// the count drained. Lets hot "expected-B-after-A" sweeps reuse one
+    /// `Vec` across ticks instead of allocating a fresh one each call.
+    /// Mirrors `flowscope::correlate::KeyIndexed::drain_expired_into`.
+    pub fn drain_expired_into(&mut self, now: Timestamp, out: &mut Vec<(K, V)>) -> usize
+    where
+        K: Clone,
+    {
+        let ttl = self.ttl;
+        let expired: Vec<K> = self
+            .entries
+            .iter()
+            .filter_map(|(k, (_, inserted))| {
+                if now.saturating_sub(*inserted) > ttl {
+                    Some(k.clone())
+                } else {
+                    None
+                }
+            })
+            .collect();
+        let n = expired.len();
+        for k in expired {
+            let (v, _) = self.entries.remove(&k).expect("just observed");
+            out.push((k, v));
+        }
+        n
+    }
+
     /// Number of entries (fresh + stale; stale aren't proactively removed).
     pub fn len(&self) -> usize {
         self.entries.len()
@@ -252,6 +281,21 @@ mod tests {
         let drained = c.drain_expired(Timestamp::new(105, 0));
         assert!(drained.is_empty());
         assert_eq!(c.len(), 1);
+    }
+
+    #[test]
+    fn drain_expired_into_appends_and_counts() {
+        // 0.22 §2.1: allocation-free variant reuses the caller's Vec.
+        let mut c = KeyIndexed::<&'static str, u32>::new(Duration::from_secs(10));
+        c.insert("stale_a", 1, Timestamp::new(50, 0));
+        c.insert("stale_b", 2, Timestamp::new(60, 0));
+        c.insert("fresh", 3, Timestamp::new(100, 0));
+        let mut buf: Vec<(&'static str, u32)> = vec![("preexisting", 0)];
+        let n = c.drain_expired_into(Timestamp::new(105, 0), &mut buf);
+        assert_eq!(n, 2);
+        buf[1..].sort_by_key(|(k, _)| *k);
+        assert_eq!(buf, vec![("preexisting", 0), ("stale_a", 1), ("stale_b", 2)]);
+        assert_eq!(c.len(), 1); // only "fresh" remains
     }
 
     #[test]

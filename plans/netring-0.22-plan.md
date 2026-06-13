@@ -213,14 +213,17 @@ Update `examples/monitor/net_diagnostic.rs` (handled by §2.9), `tests/typed_flo
 
 Built on the §1 type model. `examples/monitor/net_diagnostic.rs`: 306 → ~60 LoC.
 
-### 2.1 Re-export `KeyIndexed`; delete the netring copy
+### 2.1 ~~Re-export `KeyIndexed`; delete the netring copy~~ — REVISED: keep it
 
-flowscope 0.14 shipped `KeyIndexed::drain_expired(now) -> Vec<(K,V)>` +
-`drain_expired_into(now, &mut buf) -> usize` (`indexed.rs:178,192`) — the only
-methods that kept the local copy alive. Delete `src/correlate/key_indexed.rs`
-+ tests; add `KeyIndexed` to the `#[cfg(feature="flow")]` flowscope re-export
-block in `correlate/mod.rs`; move the prelude re-export under `flow`. Only call
-site: `examples/anomaly/dns_resolved_no_connection.rs`. LoC ~−300.
+**Finding during impl:** flowscope 0.14's `KeyIndexed` and netring's local one
+diverged into *different data structures*. flowscope's is an **LRU cache**
+(`get(&mut self, …)` bumps recency, `new(ttl, capacity)`); netring's is a
+**TTL map** (`get(&self, …)`, single-arg `new(ttl)`) with `iter_fresh` /
+`contains_fresh` / `get_with_ts` that flowscope lacks. A re-export would force
+`&mut` reads, drop those helpers, and break every correlation detector. So the
+netring copy **stays**; we added `drain_expired_into` (the one flowscope-only
+method) for parity. Filed on the 0.15 wishlist: reconcile upstream. Net: no
+deletion, +1 method + a unit test for `drain_expired_into`.
 
 ### 2.2 `label_table()` custom-port labelling
 

@@ -540,6 +540,71 @@ impl MonitorBuilder {
         self
     }
 
+    /// 0.22 §2.7: register every L4 protocol in one call —
+    /// `Tcp` + `Udp` + `Icmp` (the ICMP arm is present only with the
+    /// `icmp` feature). Removes the "registered Tcp + Udp but forgot
+    /// Icmp, why aren't my unreachables firing?" foot-gun.
+    pub fn all_l4(self) -> Self {
+        let s = self
+            .protocol::<crate::protocol::builtin::Tcp>()
+            .protocol::<crate::protocol::builtin::Udp>();
+        #[cfg(feature = "icmp")]
+        let s = s.protocol::<crate::protocol::builtin::Icmp>();
+        s
+    }
+
+    /// 0.22 §2.7: register every available L7 parser — `Http`, `Dns`,
+    /// `Tls`, and `TlsHandshake`, each gated on its Cargo feature. On
+    /// a build with none of `http`/`dns`/`tls`, this method is absent.
+    #[cfg(any(feature = "http", feature = "dns", feature = "tls"))]
+    pub fn all_l7(self) -> Self {
+        let s = self;
+        #[cfg(feature = "http")]
+        let s = s.protocol::<crate::protocol::builtin::Http>();
+        #[cfg(feature = "dns")]
+        let s = s.protocol::<crate::protocol::builtin::Dns>();
+        #[cfg(feature = "tls")]
+        let s = s
+            .protocol::<crate::protocol::builtin::Tls>()
+            .protocol::<crate::protocol::builtin::TlsHandshake>();
+        s
+    }
+
+    /// 0.22 §2.6: handle TCP connection resets.
+    ///
+    /// The handler fires for each
+    /// [`TcpRst`](crate::protocol::event_typed::TcpRst) synthesised
+    /// from a `FlowEnded<Tcp>` whose `reason == EndReason::Rst` —
+    /// clean FIN / idle eviction don't fire it. The handler receives
+    /// the reset plus `&mut Ctx` (so it can emit). Implicitly declares
+    /// `Tcp`. (Fixed `PayloadCtx` shape — like `on_ctx` — so untyped
+    /// closures infer cleanly; for payload-only, ignore the `ctx` arg.)
+    ///
+    /// ```ignore
+    /// Monitor::builder()
+    ///     .interface("eth0")
+    ///     .on_tcp_reset(|rst, ctx| {
+    ///         ctx.emit("TcpReset", if rst.zero_payload { Severity::Info } else { Severity::Warning })
+    ///             .with_key(&rst.key)
+    ///             .emit();
+    ///         Ok(())
+    ///     })
+    /// ```
+    pub fn on_tcp_reset(
+        self,
+        handler: impl Handler<
+            crate::protocol::event_typed::TcpRst,
+            crate::monitor::handler::PayloadCtx,
+        >,
+    ) -> Self {
+        let mut s = self.protocol::<crate::protocol::builtin::Tcp>();
+        s.handlers
+            .register::<crate::protocol::event_typed::TcpRst, _, crate::monitor::handler::PayloadCtx>(
+                handler,
+            );
+        s
+    }
+
     /// 0.21 F: register `P` for broadcast delivery.
     ///
     /// Calls [`Protocol::register_broadcast`] on the underlying

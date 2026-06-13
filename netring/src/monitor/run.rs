@@ -195,45 +195,33 @@ pub(crate) async fn run_loop(monitor: Monitor, stop: StopCondition) -> Result<()
             // (1) Lifecycle events from the central tracker.
             events.clear();
             driver.track_into(view, &mut events);
-
-            for evt in events.drain(..) {
-                dispatch_lifecycle(
-                    &mut dispatcher,
-                    sink.as_mut(),
-                    &mut state_map,
-                    &mut counters,
-                    evt.clone(),
-                    source,
-                    monitor_name_borrow,
-                    &mut flow_states,
-                    &label_table,
-                )?;
-                dispatch_lifecycle_async(&mut dispatcher, evt).await?;
-            }
+            dispatch_tracked_events(
+                &mut dispatcher,
+                sink.as_mut(),
+                &mut state_map,
+                &mut counters,
+                &mut events,
+                source,
+                monitor_name_borrow,
+                &mut flow_states,
+                &label_table,
+            )
+            .await?;
 
             // (2) Typed messages from each registered slot.
-            for slot in &mut protocol_slots {
-                let mut ctx = Ctx::new(
-                    None,
-                    pkt.timestamp,
-                    source,
-                    &mut state_map,
-                    sink.as_mut(),
-                    &mut counters,
-                    &mut flow_states,
-                );
-                // 0.21 D.4: stamp the monitor name on this ctx so
-                // typed-message handlers see it too. `Ctx::new`
-                // defaults `monitor_name` to `None`; set it
-                // explicitly after construction.
-                ctx.monitor_name = monitor_name_borrow;
-                // 0.22: thread the label table + a read-only flow
-                // tracker so ICMP synthesis can join inner 5-tuples
-                // and app-label lookups use the monitor's table.
-                ctx.label_table = &label_table;
-                ctx.tracker = Some(driver.tracker());
-                slot.drain_and_dispatch(&mut dispatcher, &mut ctx)?;
-            }
+            drain_protocol_slots(
+                &mut dispatcher,
+                &mut protocol_slots,
+                &driver,
+                sink.as_mut(),
+                &mut state_map,
+                &mut counters,
+                &mut flow_states,
+                pkt.timestamp,
+                source,
+                monitor_name_borrow,
+                &label_table,
+            )?;
         }
     }
 
@@ -321,37 +309,32 @@ pub(crate) async fn replay_loop(
 
         events.clear();
         driver.track_into(view, &mut events);
+        dispatch_tracked_events(
+            &mut dispatcher,
+            sink.as_mut(),
+            &mut state_map,
+            &mut counters,
+            &mut events,
+            SourceIdx(0),
+            monitor_name_borrow,
+            &mut flow_states,
+            &label_table,
+        )
+        .await?;
 
-        for evt in events.drain(..) {
-            dispatch_lifecycle(
-                &mut dispatcher,
-                sink.as_mut(),
-                &mut state_map,
-                &mut counters,
-                evt.clone(),
-                SourceIdx(0),
-                monitor_name_borrow,
-                &mut flow_states,
-                &label_table,
-            )?;
-            dispatch_lifecycle_async(&mut dispatcher, evt).await?;
-        }
-
-        for slot in &mut protocol_slots {
-            let mut ctx = Ctx::new(
-                None,
-                pkt.timestamp,
-                SourceIdx(0),
-                &mut state_map,
-                sink.as_mut(),
-                &mut counters,
-                &mut flow_states,
-            );
-            ctx.monitor_name = monitor_name_borrow;
-            ctx.label_table = &label_table;
-            ctx.tracker = Some(driver.tracker());
-            slot.drain_and_dispatch(&mut dispatcher, &mut ctx)?;
-        }
+        drain_protocol_slots(
+            &mut dispatcher,
+            &mut protocol_slots,
+            &driver,
+            sink.as_mut(),
+            &mut state_map,
+            &mut counters,
+            &mut flow_states,
+            pkt.timestamp,
+            SourceIdx(0),
+            monitor_name_borrow,
+            &label_table,
+        )?;
     }
 
     // EOF reached. Run the drain phase to land any trailing
@@ -550,6 +533,72 @@ async fn recv_merge(
         Some(r) => r.recv().await,
         None => std::future::pending().await,
     }
+}
+
+/// Dispatch the lifecycle events drained from the central tracker — sync
+/// handlers first, then async — and clear the buffer. The events are owned
+/// (they don't borrow the capture ring), so this is safe to call **after** a
+/// borrowed batch has been dropped, which is what keeps the borrowed run loop's
+/// future `Send` (no `!Sync` ring borrow is held across the async `.await`).
+///
+/// Shared by the live run loop and the pcap replay loop so the dispatch
+/// semantics stay identical (and are exercised by the cap-free
+/// `monitor_replay` tests).
+#[allow(clippy::too_many_arguments)]
+async fn dispatch_tracked_events(
+    dispatcher: &mut Dispatcher,
+    sink: &mut dyn AnomalySink,
+    state_map: &mut StateMap,
+    counters: &mut CounterRegistry,
+    events: &mut Vec<FsEvent<FlowKey>>,
+    source: SourceIdx,
+    monitor_name: Option<&str>,
+    flow_states: &mut crate::ctx::FlowStateRegistry,
+    label_table: &flowscope::well_known::LabelTable,
+) -> Result<()> {
+    for evt in events.drain(..) {
+        dispatch_lifecycle(
+            dispatcher,
+            sink,
+            state_map,
+            counters,
+            evt.clone(),
+            source,
+            monitor_name,
+            flow_states,
+            label_table,
+        )?;
+        dispatch_lifecycle_async(dispatcher, evt).await?;
+    }
+    Ok(())
+}
+
+/// Drain each protocol slot's queued typed messages (e.g. parsed HTTP/DNS/TLS)
+/// and dispatch them. The parsers were already fed by `driver.track_into`
+/// (in-borrow); the messages they produced are owned, so this needs only a
+/// shared `&driver` for the flow-tracker join — no capture-ring borrow.
+#[allow(clippy::too_many_arguments)]
+fn drain_protocol_slots(
+    dispatcher: &mut Dispatcher,
+    protocol_slots: &mut [Box<dyn crate::monitor::ProtocolSlot>],
+    driver: &flowscope::driver::Driver<FiveTuple>,
+    sink: &mut dyn AnomalySink,
+    state_map: &mut StateMap,
+    counters: &mut CounterRegistry,
+    flow_states: &mut crate::ctx::FlowStateRegistry,
+    ts: flowscope::Timestamp,
+    source: SourceIdx,
+    monitor_name: Option<&str>,
+    label_table: &flowscope::well_known::LabelTable,
+) -> Result<()> {
+    for slot in protocol_slots.iter_mut() {
+        let mut ctx = Ctx::new(None, ts, source, state_map, sink, counters, flow_states);
+        ctx.monitor_name = monitor_name;
+        ctx.label_table = label_table;
+        ctx.tracker = Some(driver.tracker());
+        slot.drain_and_dispatch(dispatcher, &mut ctx)?;
+    }
+    Ok(())
 }
 
 /// Fire the tick handler at `tick_idx`.

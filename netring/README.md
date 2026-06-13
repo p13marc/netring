@@ -110,23 +110,29 @@ works on any source of `&[u8]` frames.
 parser + correlator), `icmp` (ICMPv4 + ICMPv6 with `IcmpInner`
 cross-protocol correlation), and `pcap` (offline replay).
 
-## Declarative Monitor (0.21+, recommended)
+## Declarative Monitor (recommended)
 
-The `Monitor::builder()` API replaces hand-rolled `tokio::select!`
-loops + custom `AnomalyRule` impls with a single fluent surface:
-typed event handlers, a tower-style middleware chain over the
-anomaly sink, an opt-in async escape hatch, `detector!` and
-`pattern_detector!` macros, streaming subscribers, per-CPU
-sharding, and offline pcap replay.
+The `Monitor::builder()` API is a single fluent surface: typed event
+handlers, a tower-style middleware chain over the anomaly sink, an
+opt-in async escape hatch, `detector!` and `pattern_detector!` macros,
+streaming subscribers, per-CPU sharding, offline pcap replay, and (0.22)
+a high-level operations toolkit — bandwidth-by-app, ICMP-error
+correlation, TCP-reset alerts, custom port labels, and a report stream.
 
 ```toml
 [dependencies]
 # Full app-tier experience (Monitor + all sinks + parsers):
-netring = { version = "0.21", features = ["monitor-quickstart"] }
+netring = { version = "0.22", features = ["monitor-quickstart"] }
 
 # Lean embedded build — pick what you need:
-netring = { version = "0.21", features = ["monitor", "eve-sink", "metrics"] }
+netring = { version = "0.22", features = ["monitor", "eve-sink", "metrics"] }
 ```
+
+> **0.22 is a breaking release.** Typed protocol roles make `on::<Tcp>`
+> and `FlowStarted<Http>` compile errors; `FlowPacket` is now flat
+> (`FlowPacket { proto, … }`); the legacy 0.19 `ProtocolMonitor` /
+> `AnomalyMonitor` / `AnomalyRule` API is removed. See
+> [docs/MIGRATING_0.21_TO_0.22.md](docs/MIGRATING_0.21_TO_0.22.md).
 
 **Monitor is `Send`** as of 0.21 — plain `#[tokio::main]` (the
 multi-thread runtime) works without ceremony. The
@@ -165,7 +171,7 @@ Monitor::builder()
     .protocol::<Http>()            // HttpMessage events from flowscope's HttpParser
     .protocol::<TlsHandshake>()    // one synthesised event per completed TLS handshake
     .state::<HttpStats>()
-    .on::<Http, _, _>(|_msg, ctx| {
+    .on_ctx::<Http>(|_msg, ctx| {        // payload + &mut Ctx
         ctx.state_mut::<HttpStats>().requests += 1;
         Ok(())
     })
@@ -178,13 +184,23 @@ Monitor::builder()
 ```
 
 **Builder surface** — `.interface(s)` / `.protocol::<P>()` /
-`.on::<E, _, _>(handler)` / `.on_async::<E, _>(handler)` /
-`.state::<T>()` / `.counter::<K>(window, bucket)` /
-`.sink(s)` / `.layer(L)` / `.tick(period, handler)` /
+`.all_l4()` / `.all_l7()` / `.on::<E>(handler)` (payload only) /
+`.on_ctx::<E>(handler)` (payload + `&mut Ctx`) / `.on_async::<E>(handler)` /
+`.state::<T>()` / `.counter::<K>(window, bucket)` / `.sink(s)` /
+`.layer(L)` / `.tick(period, handler)` / `.tick_ctx(period, |ctx| …)` /
 `.detect(handler)` / `.build()`.
 
+**0.22 high-level toolkit** — one-call operational signals:
+`.on_bandwidth(period, |bw| …)` (per-app bytes/sec → a typed
+`BandwidthReport`), `.on_icmp_error(|err, ctx| …)` (unified v4/v6 ICMP
+errors with the originating flow joined), `.on_tcp_reset(|rst, ctx| …)`,
+`.label_table(table)` (custom port labels), and `.report(period, …)` /
+`.report_to(period, build, sink)` (periodic typed snapshots → a
+`ReportSink`). The `examples/monitor/net_diagnostic.rs` example uses the
+first three.
+
 **Run modes** — `run_until(Instant)`, `run_for(Duration)`,
-`run_until_signal()` (SIGINT/SIGTERM).
+`run_until_signal()` (SIGINT/SIGTERM), `run_until_idle(window)`.
 
 **`Ctx` accessors** — handlers receive `&mut Ctx<'_>`:
 `ctx.state_mut::<T>()`, `ctx.counter_mut::<K>()`,
@@ -282,89 +298,52 @@ Monitor::builder()
     .await?;
 ```
 
-See [`docs/MIGRATING_0.20_TO_0.21.md`](docs/MIGRATING_0.20_TO_0.21.md)
-for the 0.20 → 0.21 recipes (Send Monitor, key-type narrowing,
-broadcast subscribers, sharded runner, `pattern_detector!`).
-See [`docs/migration-0.19-to-0.20.md`](docs/migration-0.19-to-0.20.md)
-for the older 0.19 → 0.20 path, and `examples/monitor/` for
-runnable demos.
+See [docs/MIGRATING_0.21_TO_0.22.md](docs/MIGRATING_0.21_TO_0.22.md) for
+the breaking-change recipes (typed protocol roles, flat `FlowPacket`,
+the removed 0.19 API), and `examples/monitor/` for runnable demos.
 
-The legacy `ProtocolMonitor` + `AnomalyMonitor` + `AnomalyRule`
-API still compiles in 0.21.0 but carries
-`#[deprecated(since = "0.21.0")]`. Removal is targeted for
-0.22.0.
+## Multi-protocol monitoring + anomaly correlation
 
-## Legacy monitor + anomaly correlation (0.19, still supported)
+> The 0.19 `ProtocolMonitor` / `AnomalyMonitor` / `AnomalyRule`
+> correlation API was **removed in 0.22**.
 
-For the common case of watching one interface for several
-protocols simultaneously, `ProtocolMonitorBuilder` collapses the
-hand-rolled `tokio::select!` choreography to a single declarative
-call:
+Watch one interface for several protocols and correlate across them on
+the declarative `Monitor::builder()` API — register protocols with
+`.all_l4()` / `.all_l7()` / `.protocol::<P>()`, handle events with
+`.on::<E>` / `.on_ctx::<E>` / `detector!` / `pattern_detector!`, share
+state across handlers with `.state::<T>()` + `ctx.state_mut::<T>()`, and
+emit findings via `ctx.emit(kind, severity)` into the layered sink chain:
 
 ```rust,ignore
-use futures::StreamExt;
-use netring::flow::extract::FiveTuple;
-use netring::protocol::{ProtocolEvent, ProtocolMessage, ProtocolMonitorBuilder};
-
-let mut monitor = ProtocolMonitorBuilder::new()
-    .interface("eth0")
-    .flow()        // ICMP/TCP/UDP lifecycle
-    .http()        // TCP/80,8080 → HttpParser
-    .dns()         // UDP/53 → DnsUdpParser::with_correlation()
-    .tls()         // TCP/443,8443 → TlsParser
-    .icmp()        // ICMPv4 + ICMPv6 → IcmpParser
-    .build(FiveTuple::bidirectional())?;
-
-while let Some(evt) = monitor.next().await {
-    match evt? {
-        ProtocolEvent::Flow(_) => {}
-        ProtocolEvent::Message { message: ProtocolMessage::Http(_), .. } => {}
-        ProtocolEvent::Message { message: ProtocolMessage::Dns(_), .. } => {}
-        _ => {}
-    }
-}
-```
-
-The monitor opens one filtered `AsyncCapture` per enabled
-protocol (each with a narrow kernel-side BPF filter) and
-round-robin polls them into a unified `Stream<Item =
-Result<ProtocolEvent<K>, Error>>` — one chatty protocol won't
-starve the others.
-
-**Anomaly correlation** sits on top of `ProtocolEvent` as a
-small typed-rule harness. Each detector is an `impl AnomalyRule<K>`
-of ~30 LoC; `AnomalyMonitor` fans every event through every rule:
-
-```rust,ignore
-use netring::anomaly::{Anomaly, AnomalyMonitor, AnomalyRule, FlowAnomalyRule, Severity};
-use netring::correlate::TimeBucketedCounter;
-use netring::flow::extract::FiveTupleKey;
-use netring::protocol::{ProtocolEvent, ProtocolMessage};
-use flowscope::dns::DnsMessage;
 use std::net::IpAddr;
 use std::time::Duration;
+use netring::prelude::*;
+use flowscope::dns::DnsMessage;
 
-struct DnsBurstRule {
-    counts: TimeBucketedCounter<IpAddr>,
-    threshold: u64,
-}
-impl AnomalyRule<FiveTupleKey> for DnsBurstRule {
-    fn name(&self) -> &'static str { "DnsBurst" }
-    fn observe(&mut self, evt: &ProtocolEvent<FiveTupleKey>, emit: &mut Vec<Anomaly<FiveTupleKey>>) {
-        let ProtocolEvent::Message { message: ProtocolMessage::Dns(DnsMessage::Query(_)), key, ts, .. } = evt
-        else { return };
-        self.counts.bump(key.a.ip(), *ts);
-        if self.counts.count(&key.a.ip(), *ts) > self.threshold {
-            emit.push(Anomaly::new(self.name(), Severity::Warning, *ts).with_key(*key));
+Monitor::builder()
+    .interface("eth0")
+    .all_l4()                          // Tcp + Udp + Icmp
+    .protocol::<Dns>()                 // + the DNS parser
+    .counter::<IpAddr>(Duration::from_secs(10), Duration::from_secs(1))
+    .on_ctx::<Dns>(|msg: &DnsMessage, ctx| {
+        if let DnsMessage::Query(q) = msg {
+            let ip = ctx.flow.map(|k| k.a.ip()).unwrap_or(IpAddr::from([0, 0, 0, 0]));
+            let (counter, sink) = ctx.split_sink_counter::<IpAddr>();
+            counter.bump(ip, /* ts */ flowscope::Timestamp::default());
+            let _ = (q, sink);
         }
-    }
-}
-
-let mut rules = AnomalyMonitor::<FiveTupleKey>::new()
-    .with_rule(DnsBurstRule { counts: TimeBucketedCounter::new(Duration::from_secs(10), Duration::from_secs(1)), threshold: 50 })
-    .with_rule(FlowAnomalyRule::default());  // lifts flowscope's own anomalies in too
-// monitor.next().await → rules.observe(&evt) → Vec<Anomaly<FiveTupleKey>>
+        Ok(())
+    })
+    .layer(MinSeverity::warning())
+    .sink(StdoutJsonSink::default())
+    .run_until_signal()
+    .await?;
 ```
+
+The cross-protocol correlation primitives (`TimeBucketedCounter`,
+`KeyIndexed`, `RollingRate`, `BurstDetector`, `Ewma`, `TopK`) live in
+`netring::correlate`; `examples/monitor/` ships reference detectors
+(`port_scan`, `beacon_detector`, `dga_query`, `net_diagnostic`).
 
 `Anomaly<K>` impls `Display` for one-line greppable output and
 `to_json_line()` for production-pipeline JSON (no `serde` dep —
@@ -377,10 +356,6 @@ API (`port_scan`, `beacon_detector`, `dga_query`, `net_diagnostic`,
 `examples/anomaly/` (`dns_query_burst`, `dns_resolved_no_connection`).
 Pair with `cargo run --example synthetic_traffic` to demo on `lo`
 without `CAP_NET_RAW`.
-
-> **0.22:** the legacy `AnomalyMonitor` / `AnomalyRule` harness was
-> removed; the detectors that used it now ship on the
-> `Monitor::builder()` + `detector!` / `pattern_detector!` API.
 
 See [docs/WRITING_DETECTORS.md](docs/WRITING_DETECTORS.md) for
 the full tutorial — anatomy of an `AnomalyRule`, state-primitive

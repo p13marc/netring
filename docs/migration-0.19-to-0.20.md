@@ -1,5 +1,11 @@
 # Migrating from netring 0.19 → 0.20
 
+> ⚠️ **Historical.** This guide covers 0.19 → 0.20 and describes the
+> legacy `ProtocolMonitor` / `AnomalyMonitor` / `AnomalyRule` API as
+> still-present. That API was **removed in 0.22** — go straight to the
+> declarative `Monitor::builder()` (see
+> [netring/docs/MIGRATING_0.21_TO_0.22.md](../netring/docs/MIGRATING_0.21_TO_0.22.md)).
+
 netring 0.20 adds a new declarative `Monitor` builder alongside
 the 0.19 `ProtocolMonitor` / `AnomalyMonitor` surface. The legacy
 API still works in 0.20.0 — you can migrate one detector at a

@@ -465,6 +465,16 @@ cap.detach_filter()?;
 Per-release breaking changes and migration recipes live in
 [`CHANGELOG.md`](../CHANGELOG.md). The current canonical entries:
 
+- **0.22.0 (breaking)** — typed protocol roles (`FlowProtocol` /
+  `MessageProtocol` — `on::<Tcp>` and `FlowStarted<Http>` are compile
+  errors); flat `FlowPacket { proto, … }` (was `FlowPacket<P>`); the
+  legacy `ProtocolMonitor` / `AnomalyMonitor` / `AnomalyRule` /
+  `ProtocolEvent` API is **removed**. New high-level toolkit:
+  `on_bandwidth` / `BandwidthReport`, `on_icmp_error` / `IcmpError`,
+  `on_tcp_reset` / `TcpRst`, `label_table`, `all_l4`/`all_l7`, the
+  report stream (`report` / `report_to` / `ReportSink`), cross-shard
+  `merge_state` + `LayerSpec`. Recipes in
+  [`netring/docs/MIGRATING_0.21_TO_0.22.md`](../netring/docs/MIGRATING_0.21_TO_0.22.md).
 - **0.21.0** — `Monitor` becomes `Send` (flowscope 0.13);
   `AnomalySink::write` key narrowed from `&dyn Debug` to
   `&dyn Key`; legacy `ProtocolMonitor` / `AnomalyMonitor` /

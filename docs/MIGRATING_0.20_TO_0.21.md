@@ -1,5 +1,10 @@
 # Migrating from netring 0.20 to 0.21
 
+> ⚠️ **Historical.** This guide covers 0.20 → 0.21. The legacy
+> `ProtocolMonitor` / `AnomalyMonitor` / `AnomalyRule` API it references
+> was **removed in 0.22** — see
+> [netring/docs/MIGRATING_0.21_TO_0.22.md](../netring/docs/MIGRATING_0.21_TO_0.22.md).
+
 netring 0.21 is API-additive over 0.20 — your existing 0.20
 monitor code keeps compiling. The notable changes are:
 

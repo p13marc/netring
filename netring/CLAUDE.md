@@ -20,13 +20,65 @@ built on AF_PACKET with TPACKET_V3 (block-based mmap ring buffers) and AF_XDP.
 
 ## Implementation Status
 
-**Active.** netring 0.21.0 released (tagged on `master`; cycle
-shipped after 30 commits on `0.21-dev`). 0.19.0 was the
-previous published version — 0.20 stayed CHANGELOG-only and
-was bundled into the 0.21 release. ~540 tests + zero warnings
-+ dhat zero-alloc bench (`Δ 0 bytes / 0 blocks` over 100k
-synthetic dispatches). Next cycle items live in
-`plans/netring-0.22-plan.md`.
+**0.22 in progress on `0.22-dev`** (a large breaking release; not yet
+tagged/published). 0.21.0 is the last published version. ~330 lib +
+integration tests, zero warnings, `clippy --all-features -D warnings`
+clean, `rustdoc -D warnings` clean, dhat `Δ 0 / 0`. Plan +
+status table: `plans/netring-0.22-plan.md`.
+
+### Recent additions (netring 0.22 — operations toolkit + typed protocol model, BREAKING)
+
+Driven by `plans/netring-0.22-plan.md` (deleted on ship per convention).
+CHANGELOG `## 0.22.0`. **Breaking.** Migration:
+`docs/MIGRATING_0.21_TO_0.22.md`.
+
+**Typed protocol roles (R1).** `FlowProtocol` / `MessageProtocol` marker
+traits (`src/protocol/mod.rs`). `Tcp`/`Udp` flow-only, `Http`/`Dns`/`Tls`/
+`TlsHandshake` message-only, `Icmp` both. The `Event` impls are bounded
+so `on::<Tcp>` and `FlowStarted<Http>` are **compile errors**.
+`with_broadcast`/`subscribe` bounded on `MessageProtocol`.
+
+**Flat `FlowPacket` (R2).** `FlowPacket { proto, key, side, len, tcp,
+ts }` replaces `FlowPacket<P>` (`src/protocol/event_typed.rs`); one
+handler branches on `evt.proto`. Lifecycle events stay parameterised.
+
+**flowscope 0.14 absorption (headline).** `src/monitor/bandwidth.rs`
+(`BandwidthState`/`BandwidthReport`/`BandwidthSnapshot`); `MonitorBuilder::
+{bandwidth_by_app, bandwidth_windowed, on_bandwidth, on_icmp_error,
+on_tcp_reset, label_table, all_l4, all_l7}` (`src/monitor/mod.rs`).
+`IcmpError`/`IcmpErrorKind` + `IcmpSlot` (routed via a new
+`Protocol::make_slot` hook; `src/monitor/registry.rs`); `TcpRst`
+(synthesised in the run loop). `Ctx` gained `label_table`/`tracker`
+fields + `state()`/`label_table()`/`lookup_icmp_flow()`/`bandwidth()`/
+`counter()` accessors (`src/ctx/`). `net_diagnostic.rs` 306 → ~70 LoC.
+
+**Report stream (R3).** `src/report/mod.rs` — `Report`/`ReportSink<R>`/
+`ReportSnapshot` + `StdoutReportSink`/`JsonReportSink`; `MonitorBuilder::
+{report, report_to}`. The third output shape beside anomalies + broadcast.
+
+**Sharding completion.** `src/monitor/merge.rs` — cross-shard
+`ShardedRunner::{merge_state, state_auto_merge, on_merge}` merge-worker
+thread (tokio-mpsc request + std-mpsc reply; a gated run-loop `select!`
+branch; `StateMap::take_dyn`). `LayerSpec` + `LayerFactory`
+(`src/layer/mod.rs`) + `ShardedRunner::layer` + `Monitor::wrap_sink`.
+(Replaces the old "Tee + ChannelSink collator" workaround.)
+
+**Legacy 0.19 API removed (~−5400 LoC).** `ProtocolMonitor`/
+`AnomalyMonitor`/`AnomalyRule`/`FlowAnomalyRule`/`ProtocolEvent`/
+`ProtocolMessage`/`on_with_marker` gone; `src/protocol/{monitor,event}.rs`,
+`src/anomaly/{monitor,builtin}.rs` deleted; `Anomaly`/`AnomalyContext`/
+`Severity` value types kept.
+
+**Polish.** `MinSeverity::{at_least,info,warning,error}` const fn;
+`CtxOnly` marker + `tick_ctx`. New examples: `monitor/{net_diagnostic,
+multi_thread_default, report_stream, label_table}.rs`. Root-gated live
+tests: `tests/{monitor_lo_0_22, sharded_lo_merge}.rs`.
+
+**Dependency.** flowscope `0.14.1` (its ICMP datagram-routing fix is
+required for `on_icmp_error`); netring patches to the local checkout
+(`[patch.crates-io]` in the workspace `Cargo.toml`) until 0.14.1 is
+published. **eBPF bandwidth backend (R6)** is designed only
+(`docs/EBPF_BANDWIDTH.md`) — a hardware-measured spike, not shipped.
 
 ### Recent additions (netring 0.21 — Send Monitor + sharding + streaming subscribers + pcap replay)
 
@@ -829,23 +881,25 @@ Cargo features unique to 0.21:
 
 ## Pre-publish checklist
 
-For the next `cargo publish` of netring (currently 0.21.0
-held — see `plans/netring-0.21-release-gates.md`):
+For the `0.22.0` `cargo publish` (in progress on `0.22-dev`):
 
-1. Ensure `flowscope` is published to crates.io at the version
-   netring needs (currently `>= 0.13.0`).
-2. Verify `netring/Cargo.toml`'s `flowscope` version dep matches
+1. **Publish flowscope `0.14.1` to crates.io first** (the ICMP
+   datagram-routing fix `on_icmp_error` needs), then **remove the
+   `[patch.crates-io] flowscope = { path = "../flowscope" }`** from the
+   workspace `Cargo.toml` and confirm `flowscope = "0.14.1"` resolves
+   from the registry.
+2. Verify `netring/Cargo.toml`'s `flowscope` dep is `0.14.1`
    (default features false; same feature selectors as today).
-3. Bump `netring/Cargo.toml` `version` if more changes have landed
-   beyond what's in this CHANGELOG.
-4. Refresh `0.21.0` CHANGELOG entry date header (`## 0.21.0 —
-   YYYY-MM-DD — ...`) on tag day.
-5. `cargo publish -p netring --dry-run` to verify the package
-   contents.
+3. Bump `netring/Cargo.toml` `version` `0.21.0` → `0.22.0`.
+4. Refresh the `## 0.22.0` CHANGELOG entry date header on tag day; flip
+   the "Implementation Status" above to "released".
+5. `cargo publish -p netring --dry-run` to verify the package contents.
 6. `cargo publish -p netring`.
-7. `git tag 0.21.0` (no `v` prefix, per the user's convention).
+7. `git tag 0.22.0` (no `v` prefix, per the user's convention).
+8. Delete `plans/netring-0.22-plan.md` (delete-on-ship convention).
 
-Also applies to any `0.21.x` patch release.
+Run `just doc` (now `RUSTDOCFLAGS="-D warnings"`) + `just ci` before
+publish — the CI doc job fails on broken intra-doc links.
 
 **Known operator gotcha**: on at least one dev machine
 `~/.cargo/credentials.toml` is an empty root-owned directory (likely

@@ -11,7 +11,7 @@ Forward-looking implementation plans only. Historical record lives in `CHANGELOG
 | Plan | Scope | Status |
 |---|---|---|
 | [`netring-0.21-release-gates.md`](./netring-0.21-release-gates.md) | Version bump + `netring/CLAUDE.md` refresh + tag + publish. The four release-gate items the user explicitly held back. | Held pending user trigger |
-| [`netring-0.22-roadmap.md`](./netring-0.22-roadmap.md) | Legacy 0.19 API deletion + Phase C deferrals (merge worker, `LayerSpec`) + Phase G follow-up (re-export `KeyIndexed` once flowscope ships `drain_expired`) | Pending 0.21.0 tag |
+| [`netring-0.22-plan.md`](./netring-0.22-plan.md) | **Consolidated authoritative 0.22 plan.** Large breaking release (~5–6 weeks). Foundations: typed protocol roles (`FlowProtocol`/`MessageProtocol`, R1), flat `FlowPacket` (R2), `Ctx` infra. flowscope 0.14 absorption (`on_bandwidth()`+typed `BandwidthReport`, `IcmpError`/`on_icmp_error`, `label_table()`, `KeyIndexed`, `TcpRst`, `all_l4/all_l7`). First-class report stream (`Report`/`ReportSink`, R3). Legacy 0.19 deletion. Sharding completion (`merge_state`+`LayerSpec`). Spike-gated eBPF bandwidth backend (R4/R6). Send-future decision + polish. Folds every N-/R-class item from the design input; nothing deferred except kernel-side RST/ICMP eBPF (→0.23). | Pending 0.21.0 tag |
 | [`upstream-tracking.md`](./upstream-tracking.md) | rustc / kernel / flowscope features being watched | Live |
 
 ## Recently shipped (durable record in CHANGELOG)
@@ -76,7 +76,7 @@ Full migration recipes: `docs/MIGRATING_0.20_TO_0.21.md`.
 - **Suricata-compatible rule DSL** — declined; Zeek/Suricata territory.
 - **Encrypted-traffic ML detection** — out of scope; user-defined `Handler`s.
 
-Active 0.22 items live in [`netring-0.22-roadmap.md`](./netring-0.22-roadmap.md).
+Active 0.22 items live in [`netring-0.22-plan.md`](./netring-0.22-plan.md).
 
 ---
 

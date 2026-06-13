@@ -26,7 +26,7 @@ previous published version — 0.20 stayed CHANGELOG-only and
 was bundled into the 0.21 release. ~540 tests + zero warnings
 + dhat zero-alloc bench (`Δ 0 bytes / 0 blocks` over 100k
 synthetic dispatches). Next cycle items live in
-`plans/netring-0.22-roadmap.md`.
+`plans/netring-0.22-plan.md`.
 
 ### Recent additions (netring 0.21 — Send Monitor + sharding + streaming subscribers + pcap replay)
 
@@ -55,7 +55,7 @@ plus the top-level `ShardedRunner::new(iface, mode, group_id,
 num_shards, build_shard)` closure-builder. Each shard owns its
 own dispatcher + state map; `PACKET_FANOUT_CPU` / `…_HASH`
 selectable. Merge worker + `LayerSpec` trait deferred to 0.22
-(`plans/netring-0.22-roadmap.md` §C.5/C.6). Today, users
+(`plans/netring-0.22-plan.md` §5). Today, users
 needing global aggregation route per-shard anomalies through a
 `Tee + ChannelSink` to a single collator task.
 
@@ -89,7 +89,7 @@ re-exports from `flowscope::correlate` (call site signature:
 `new(window, bucket) → new_unbounded(window, bucket)`). The
 latter stays netring-side until flowscope ships
 `drain_expired(now) -> impl Iterator<Item = (K, V)>` upstream
-(tracked in `plans/netring-0.22-roadmap.md` §G).
+(tracked in `plans/netring-0.22-plan.md` §2.1).
 
 **Phase H — Send Monitor + deprecation + migration guide:**
 - H.1 flowscope `0.11.1 → 0.13.0` (skipping 0.12; the 0.12

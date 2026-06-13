@@ -1,5 +1,110 @@
 # Changelog
 
+## 0.22.0 — operations toolkit + typed protocol model (breaking)
+
+> **Unreleased / in progress on `0.22-dev`.** A large, deliberately
+> infrequent **breaking** release: it reshapes the type model so the
+> next cycles build on a cleaner foundation, absorbs flowscope 0.14,
+> ships a high-level operations toolkit (bandwidth-by-app, ICMP-error
+> correlation, custom labels, a report stream), completes sharding, and
+> removes the legacy 0.19 surface. Migration:
+> [`docs/MIGRATING_0.21_TO_0.22.md`](netring/docs/MIGRATING_0.21_TO_0.22.md).
+>
+> **flowscope floor: `>= 0.14.1`** (the ICMP datagram-routing fix that
+> makes `on_icmp_error` work — see below).
+
+### Headline — the `net_diagnostic` example: 306 → ~70 LoC
+
+The real-life "what's on this NIC?" monitor (ICMP errors + TCP resets +
+bandwidth-by-app) collapses from 306 lines of hand-rolled classifiers, a
+bandwidth HashMap, and a multi-slot tick reporter to ~70 lines on the new
+high-level API: `on_icmp_error` + `on_tcp_reset` + `on_bandwidth`.
+
+### Breaking changes
+
+- **Legacy 0.19 API removed** (~−5400 LoC): `ProtocolMonitor` /
+  `ProtocolMonitorBuilder`, `AnomalyMonitor`, `AnomalyRule`,
+  `FlowAnomalyRule`, the `ProtocolEvent` / `ProtocolMessage` sum-type,
+  and the deprecated `on_with_marker`. The `Anomaly` / `AnomalyContext`
+  / `Severity` value types stay. Use `Monitor::builder()` +
+  `detect(detector!{…})` / `pattern_detector!{…}`.
+- **Typed protocol roles** (`FlowProtocol` / `MessageProtocol`). The
+  type system now rejects nonsensical combinations: `on::<Tcp>` and
+  `FlowStarted<Http>` are **compile errors** (Tcp has no message; HTTP
+  rides a TCP flow). `Tcp`/`Udp` are flow-only, `Http`/`Dns`/`Tls`
+  message-only, `Icmp` both. `subscribe`/`with_broadcast` are bounded to
+  `MessageProtocol`.
+- **`FlowPacket` is flat** — `FlowPacket { proto, key, side, len, tcp,
+  ts }` replaces `FlowPacket<P>`. One handler branches on `evt.proto`
+  instead of two. (Lifecycle events `FlowStarted`/`Ended`/`Established`/
+  `FlowTick<P>` stay parameterised.)
+- `KeyIndexed` is now `flow`-gated (it already lived behind `flow`).
+
+### Added — flowscope 0.14 absorption (the operations toolkit)
+
+- **Bandwidth by app.** `MonitorBuilder::on_bandwidth(period, |bw| …)` —
+  a one-liner that auto-registers a per-app rolling byte-rate and a
+  periodic report; the closure gets a typed `BandwidthReport`
+  (`top(n)` / `rate(app)` / `total()` / `app_count()` — no `Timestamp`/
+  `Option`/`RollingRate` at the call site). Also `bandwidth_by_app()` /
+  `bandwidth_windowed()` + `ctx.bandwidth()`. Per-packet path stays
+  zero-alloc.
+- **ICMP-error correlation.** `MonitorBuilder::on_icmp_error(|err, ctx| …)`
+  + the `IcmpError` typed event — unified v4/v6, pre-classified
+  (`IcmpErrorKind`: `DestUnreachable`/`TimeExceeded`/`ParameterProblem`/
+  `MtuSignal`), with the originating flow joined (`correlated_flow` via
+  `from_inner_canonical`, `stats` via `FlowTracker::stats_for_inner`).
+- **TCP resets.** `on_tcp_reset(|rst, ctx| …)` + `TcpRst { key, stats,
+  ts, zero_payload }`, synthesised from `FlowEnded<Tcp>` with `reason ==
+  Rst`.
+- **Custom port labels.** `MonitorBuilder::label_table(table)` +
+  `ctx.label_table()` + `netring::well_known::LabelTable`.
+- **`all_l4()` / `all_l7()`** protocol umbrellas.
+- **Report stream** (a third output beside anomalies + broadcast):
+  `Report` / `ReportSink` traits + `report(period, |snap| …)` /
+  `report_to(period, build, sink)` + `ReportSnapshot`; `StdoutReportSink`
+  / `JsonReportSink`; `BandwidthSnapshot` as the reference report.
+- **`Ctx` accessors:** `state::<T>()` (immutable), `counter::<K>()`,
+  `label_table()`, `lookup_icmp_flow()`. Prelude gains ~15 names; new
+  `docs/discoverability.md` (primitives-by-use-case tour).
+- `KeyIndexed::drain_expired_into(now, &mut buf)` (allocation-free
+  variant; kept netring-side — flowscope's 0.14 `KeyIndexed` diverged
+  into an LRU shape).
+
+### Added — sharding completion
+
+- **Cross-shard state merging.** `ShardedRunner::merge_state` /
+  `state_auto_merge` / `on_merge` — a merge-worker thread folds each
+  shard's `T` into a global total (no more `Tee + ChannelSink` collator
+  workaround). No hot-path locking; per-shard state stays local.
+- **`LayerSpec`** + `LayerFactory` — per-shard layer minting
+  (`ShardedRunner::layer(spec)`); cloneable config layers pass directly,
+  non-`Clone` layers (`Tee`) via `LayerFactory`.
+
+### Added — polish
+
+- `MinSeverity::{at_least,info,warning,error}` are now `const fn`;
+  `info()` added.
+- `MonitorBuilder::tick_ctx(period, |ctx| …)` — payload-eliding tick.
+- `docs/MIGRATING_0.21_TO_0.22.md`, `plans/netring-0.22-send-future-decision.md`,
+  `examples/monitor/multi_thread_default.rs`.
+
+### Fixed (flowscope 0.14.1, shipped this cycle)
+
+- **ICMP datagram routing.** `datagram_broadcast(IcmpParser)` never
+  delivered ICMP messages — the datagram driver extracted only UDP
+  payloads, so `on_icmp_error` (and the 0.21 ICMP examples) were silently
+  broken. flowscope 0.14.1 also returns the ICMP message for
+  `TransportSlice::Icmpv4`/`Icmpv6`.
+
+### Deferred
+
+- **eBPF-accelerated bandwidth** (R6) — designed in
+  `netring/docs/EBPF_BANDWIDTH.md` (per-CPU BPF-map accounting, Cilium/aya
+  shape); the XDP backend's payoff needs measurement on a real multi-Gbps
+  NIC, so it's gated on that (0.23 or a hardware session).
+- Kernel-side TCP-RST / ICMP correlation eBPF — 0.23.
+
 ## 0.21.0 — Send Monitor + sharding + streaming subscribers + pcap replay
 
 The 0.21 cycle polishes the 0.20 Monitor API into a Send, multi-thread

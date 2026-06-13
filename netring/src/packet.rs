@@ -632,7 +632,9 @@ mod tests {
     impl std::ops::DerefMut for AlignedBlock {
         fn deref_mut(&mut self) -> &mut [u8] {
             // SAFETY: as `deref`, with unique access.
-            unsafe { std::slice::from_raw_parts_mut(self.words.as_mut_ptr().cast::<u8>(), self.len) }
+            unsafe {
+                std::slice::from_raw_parts_mut(self.words.as_mut_ptr().cast::<u8>(), self.len)
+            }
         }
     }
 

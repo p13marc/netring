@@ -71,9 +71,9 @@ pub use crate::correlate::{
 
 // ─── Bandwidth + reports + well-known labels (0.22) ──────────────
 pub use crate::monitor::{BandwidthReport, BandwidthSnapshot};
-pub use crate::report::{Report, ReportSink, ReportSnapshot, StdoutReportSink};
 #[cfg(feature = "serde")]
 pub use crate::report::JsonReportSink;
+pub use crate::report::{Report, ReportSink, ReportSnapshot, StdoutReportSink};
 pub use crate::well_known::LabelTable;
 #[cfg(feature = "icmp")]
 pub use flowscope::icmp::{DestUnreachableKind, MtuSignalKind};

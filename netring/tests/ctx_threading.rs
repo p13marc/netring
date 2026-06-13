@@ -8,7 +8,7 @@
 
 #![cfg(all(feature = "flow", feature = "tokio"))]
 
-use netring::ctx::{Ctx, CounterRegistry, FlowStateRegistry, StateMap};
+use netring::ctx::{CounterRegistry, Ctx, FlowStateRegistry, StateMap};
 
 #[derive(Default)]
 struct Demo {
@@ -58,5 +58,8 @@ fn label_table_defaults_to_builtin_and_resolves_well_known_ports() {
     // The default table inherits flowscope's built-in well-known
     // ports, so a TCP/80 flow labels as "http".
     let table = ctx.label_table();
-    assert_eq!(table.lookup(flowscope::L4Proto::Tcp, 12345, 80), Some("http"));
+    assert_eq!(
+        table.lookup(flowscope::L4Proto::Tcp, 12345, 80),
+        Some("http")
+    );
 }

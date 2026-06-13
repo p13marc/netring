@@ -133,8 +133,7 @@ pub struct Ctx<'a> {
     /// dispatch path (the run loop borrows `driver.tracker()` here);
     /// `None` on synthetic / tick / drain `Ctx`s that have no live
     /// capture behind them.
-    pub(crate) tracker:
-        Option<&'a flowscope::FlowTracker<flowscope::extract::FiveTuple, ()>>,
+    pub(crate) tracker: Option<&'a flowscope::FlowTracker<flowscope::extract::FiveTuple, ()>>,
 }
 
 impl<'a> Ctx<'a> {

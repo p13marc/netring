@@ -408,9 +408,7 @@ impl Event for IcmpError {
 /// Order matters: MTU signals are a sub-case of v4 Dest-Unreachable,
 /// so check `mtu_signal()` before `dest_unreachable_kind()`.
 #[cfg(feature = "icmp")]
-pub(crate) fn classify_icmp_error(
-    msg: &flowscope::icmp::IcmpMessage,
-) -> Option<IcmpErrorKind> {
+pub(crate) fn classify_icmp_error(msg: &flowscope::icmp::IcmpMessage) -> Option<IcmpErrorKind> {
     if !msg.is_error() {
         return None;
     }
@@ -616,8 +614,8 @@ mod tests {
 
         // Inner 5-tuple joins to a canonical flow key.
         let (_, inner) = msg.error_inner().expect("has inner");
-        let key = flowscope::extract::FiveTupleKey::from_inner_canonical(inner)
-            .expect("builds a key");
+        let key =
+            flowscope::extract::FiveTupleKey::from_inner_canonical(inner).expect("builds a key");
         assert_eq!(key.proto, flowscope::L4Proto::Tcp);
 
         // Non-error ICMP (echo request, type=8) classifies as None.

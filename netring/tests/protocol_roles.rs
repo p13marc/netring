@@ -11,9 +11,9 @@
 
 #![cfg(all(feature = "tokio", feature = "flow"))]
 
+use netring::protocol::builtin::{Tcp, Udp};
 use netring::protocol::event_typed::{Event, FlowEnded, FlowEstablished, FlowStarted, FlowTick};
 use netring::protocol::{FlowProtocol, MessageProtocol};
-use netring::protocol::builtin::{Tcp, Udp};
 
 fn assert_event<E: Event>() {}
 fn assert_flow_protocol<P: FlowProtocol>() {}

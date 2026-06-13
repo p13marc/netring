@@ -23,8 +23,8 @@
 
 use crate::anomaly::Severity;
 use crate::anomaly::sink::AnomalyWriter;
-use crate::ctx::Ctx;
 use crate::correlate::TimeBucketedCounter;
+use crate::ctx::Ctx;
 
 /// A periodic, structured snapshot a monitor emits. Implementors are
 /// plain data structs built from monitor state each cadence tick.

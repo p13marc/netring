@@ -14,7 +14,12 @@
 //!     -E 'binary(monitor_lo_0_22)'
 //! ```
 
-#![cfg(all(feature = "tokio", feature = "flow", feature = "icmp", feature = "integration-tests"))]
+#![cfg(all(
+    feature = "tokio",
+    feature = "flow",
+    feature = "icmp",
+    feature = "integration-tests"
+))]
 
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU32, Ordering};
@@ -28,7 +33,9 @@ async fn drive_lo_traffic(udp_port: u16, tcp_closed_port: u16, dur: Duration) {
     let udp = tokio::net::UdpSocket::bind("127.0.0.1:0").await.ok();
     while tokio::time::Instant::now() < deadline {
         if let Some(s) = &udp {
-            let _ = s.send_to(b"netring-0.22-probe", ("127.0.0.1", udp_port)).await;
+            let _ = s
+                .send_to(b"netring-0.22-probe", ("127.0.0.1", udp_port))
+                .await;
         }
         // Connect to a closed TCP port → RST (and the SYN is captured).
         let _ = tokio::time::timeout(
@@ -58,12 +65,15 @@ async fn on_bandwidth_sees_lo_traffic() {
     let monitor = match Monitor::builder()
         .interface("lo")
         .all_l4()
-        .on_bandwidth(Duration::from_millis(200), move |bw: &BandwidthReport<'_>| {
-            if bw.total() > 0.0 {
-                flag.fetch_add(1, Ordering::Relaxed);
-            }
-            Ok(())
-        })
+        .on_bandwidth(
+            Duration::from_millis(200),
+            move |bw: &BandwidthReport<'_>| {
+                if bw.total() > 0.0 {
+                    flag.fetch_add(1, Ordering::Relaxed);
+                }
+                Ok(())
+            },
+        )
         .build()
     {
         Ok(m) => m,

@@ -5,7 +5,6 @@
 
 use flowscope::Timestamp;
 
-
 impl From<flowscope::event::Severity> for Severity {
     fn from(s: flowscope::event::Severity) -> Self {
         // 1:1 variant mapping; the enums were intentionally designed

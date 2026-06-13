@@ -180,10 +180,12 @@ mod tests {
         let delta: u64 = 5;
 
         let observed = Arc::new(AtomicU64::new(0));
-        let mut spec =
-            MergeSpec::new::<Counter, _>(Duration::from_millis(20), |p: &mut Counter, t: Counter| {
+        let mut spec = MergeSpec::new::<Counter, _>(
+            Duration::from_millis(20),
+            |p: &mut Counter, t: Counter| {
                 p.0 += t.0;
-            });
+            },
+        );
         {
             let observed = Arc::clone(&observed);
             spec.set_observe::<Counter, _>(move |c: &Counter| {

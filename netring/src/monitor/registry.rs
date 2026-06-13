@@ -657,8 +657,14 @@ mod tests {
         let mut icmp = vec![3u8, 3, 0, 0, 0, 0, 0, 0]; // type/code/csum/unused
         icmp.extend_from_slice(&inner);
 
-        let ip = Ipv4Header::new(icmp.len() as u16, 64, IpNumber::ICMP, [192, 0, 2, 1], [192, 0, 2, 2])
-            .unwrap();
+        let ip = Ipv4Header::new(
+            icmp.len() as u16,
+            64,
+            IpNumber::ICMP,
+            [192, 0, 2, 1],
+            [192, 0, 2, 2],
+        )
+        .unwrap();
         let eth = Ethernet2Header {
             destination: [2u8; 6],
             source: [1u8; 6],

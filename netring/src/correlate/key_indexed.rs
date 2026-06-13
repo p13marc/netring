@@ -294,7 +294,10 @@ mod tests {
         let n = c.drain_expired_into(Timestamp::new(105, 0), &mut buf);
         assert_eq!(n, 2);
         buf[1..].sort_by_key(|(k, _)| *k);
-        assert_eq!(buf, vec![("preexisting", 0), ("stale_a", 1), ("stale_b", 2)]);
+        assert_eq!(
+            buf,
+            vec![("preexisting", 0), ("stale_a", 1), ("stale_b", 2)]
+        );
         assert_eq!(c.len(), 1); // only "fresh" remains
     }
 

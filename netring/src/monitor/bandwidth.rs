@@ -186,7 +186,14 @@ mod tests {
                 &mut counters,
                 &mut flow_states,
             );
-            let pkt = FlowPacket::new(proto, key(proto, dport), FlowSide::Initiator, len, None, now);
+            let pkt = FlowPacket::new(
+                proto,
+                key(proto, dport),
+                FlowSide::Initiator,
+                len,
+                None,
+                now,
+            );
             dispatcher.dispatch::<FlowPacket>(&pkt, &mut ctx).unwrap();
         };
         for _ in 0..3 {

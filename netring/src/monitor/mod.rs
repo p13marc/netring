@@ -44,7 +44,7 @@ use flowscope::extract::FiveTuple;
 
 use crate::anomaly::sink::{AnomalySink, NoopSink};
 use crate::correlate::TimeBucketedCounter;
-use crate::ctx::{Ctx, CounterRegistry, FlowStateRegistry, StateMap};
+use crate::ctx::{CounterRegistry, Ctx, FlowStateRegistry, StateMap};
 use crate::error::{BuildError, Result};
 use crate::layer::Layer;
 use crate::protocol::Protocol;
@@ -149,8 +149,7 @@ pub struct Monitor {
     /// (non-merged) monitors — the run-loop branch is then disabled at
     /// zero cost. Injected by `ShardedRunner::run_inner` via
     /// [`Self::set_merge_rx`].
-    pub(crate) merge_rx:
-        Option<tokio::sync::mpsc::UnboundedReceiver<merge::MergeRequest>>,
+    pub(crate) merge_rx: Option<tokio::sync::mpsc::UnboundedReceiver<merge::MergeRequest>>,
 }
 
 impl Monitor {
@@ -243,9 +242,7 @@ impl Monitor {
     /// Takes `&self`: a monitor may have multiple subscribers
     /// minted before being moved into `run_until` / `run_for` /
     /// `run_until_signal`. The subscribers outlive the run loop.
-    pub fn subscribe<P: crate::protocol::MessageProtocol>(
-        &self,
-    ) -> Result<EventStream<P::Message>>
+    pub fn subscribe<P: crate::protocol::MessageProtocol>(&self) -> Result<EventStream<P::Message>>
     where
         P::Message: Send + Sync + Clone + 'static,
     {
@@ -322,10 +319,7 @@ impl Monitor {
     /// ones (so a runner spec runs first). The layer wraps the current
     /// composed sink and becomes the new outermost sink.
     pub(crate) fn wrap_sink(&mut self, layer: Box<dyn crate::layer::Layer>) {
-        let inner = std::mem::replace(
-            &mut self.sink,
-            Box::new(crate::anomaly::sink::NoopSink),
-        );
+        let inner = std::mem::replace(&mut self.sink, Box::new(crate::anomaly::sink::NoopSink));
         self.sink = layer.wrap(inner);
     }
 
@@ -638,10 +632,7 @@ impl MonitorBuilder {
     /// ```
     pub fn on_tcp_reset(
         self,
-        handler: impl Handler<
-            crate::protocol::event_typed::TcpRst,
-            crate::monitor::handler::PayloadCtx,
-        >,
+        handler: impl Handler<crate::protocol::event_typed::TcpRst, crate::monitor::handler::PayloadCtx>,
     ) -> Self {
         let mut s = self.protocol::<crate::protocol::builtin::Tcp>();
         s.handlers
@@ -687,9 +678,11 @@ impl MonitorBuilder {
                     // disjoint &mut on the state slot.
                     let label = evt.key.app_label_with(ctx.label_table());
                     let ts = ctx.ts;
-                    ctx.state_mut::<bandwidth::BandwidthState>()
-                        .0
-                        .record(label, evt.len as u64, ts);
+                    ctx.state_mut::<bandwidth::BandwidthState>().0.record(
+                        label,
+                        evt.len as u64,
+                        ts,
+                    );
                     Ok(())
                 },
             )
@@ -1117,10 +1110,7 @@ impl MonitorBuilder {
         F: Fn(crate::report::ReportSnapshot<'_, '_>) -> Result<()> + Send + Sync + 'static,
     {
         self.tick(period, move |tick: &Tick, ctx: &mut Ctx<'_>| {
-            f(crate::report::ReportSnapshot {
-                ctx,
-                now: tick.now,
-            })
+            f(crate::report::ReportSnapshot { ctx, now: tick.now })
         })
     }
 
@@ -1147,10 +1137,7 @@ impl MonitorBuilder {
         // cadence tick (seconds), never on the packet path.
         let sink = std::sync::Mutex::new(sink);
         self.tick(period, move |tick: &Tick, ctx: &mut Ctx<'_>| {
-            let report = build(crate::report::ReportSnapshot {
-                ctx,
-                now: tick.now,
-            });
+            let report = build(crate::report::ReportSnapshot { ctx, now: tick.now });
             if let Ok(mut s) = sink.lock() {
                 s.record(&report);
             }
@@ -1335,7 +1322,6 @@ mod tests {
             .unwrap();
         assert_eq!(m.interfaces, vec!["lo".to_string()]);
     }
-
 
     #[test]
     fn builder_state_pre_registration_visible_at_build() {

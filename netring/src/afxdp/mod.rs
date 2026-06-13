@@ -397,6 +397,9 @@ impl XdpSocketBuilder {
     /// - [`Error::Socket`], [`Error::SockOpt`], [`Error::Mmap`], [`Error::Bind`]
     ///   for the respective syscall failures
     #[cfg(feature = "af-xdp")]
+    // `self` is only mutated on the `xdp-loader` path (program attach); without
+    // that feature the binding below is genuinely immutable.
+    #[cfg_attr(not(feature = "xdp-loader"), allow(unused_mut))]
     pub fn build(mut self) -> Result<XdpSocket, Error> {
         let iface = self.validate()?;
         let ifindex = crate::afpacket::socket::resolve_interface(iface)? as u32;

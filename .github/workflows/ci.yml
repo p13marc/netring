@@ -24,8 +24,9 @@ jobs:
       - name: clippy
         run: cargo clippy --workspace --all-targets --all-features -- --deny warnings
       # Feature-combination matrix beyond --all-features: catch broken gating
-      # (e.g. a module that only compiles with a feature it forgot to declare).
-      - name: cargo check (feature combos)
+      # and feature-specific lints (e.g. an unused `mut` only on a path that a
+      # different feature activates). clippy -D warnings, not just check.
+      - name: clippy (feature combos)
         run: |
           for f in \
             "--no-default-features" \
@@ -33,8 +34,8 @@ jobs:
             "--features af-xdp" \
             "--features monitor-lite" \
             "--features tokio,flow,dns,http"; do
-            echo "::group::cargo check -p netring $f"
-            cargo check -p netring $f
+            echo "::group::clippy -p netring $f"
+            cargo clippy -p netring $f -- -D warnings
             echo "::endgroup::"
           done
 
@@ -86,11 +87,11 @@ jobs:
       - uses: Swatinem/rust-cache@v2
 
       - name: Build test binaries
-        run: cargo test -p netring --features "integration-tests,tokio,channel,af-xdp" --no-run
+        run: cargo test -p netring --features "integration-tests,af-xdp,monitor-quickstart" --no-run
 
       - name: Grant CAP_NET_RAW to test binaries
         run: |
-          for bin in $(cargo test -p netring --features "integration-tests,tokio,channel,af-xdp" \
+          for bin in $(cargo test -p netring --features "integration-tests,af-xdp,monitor-quickstart" \
               --no-run --message-format=json 2>/dev/null \
               | jq -r 'select(.executable != null) | .executable'); do
             if [ -f "$bin" ]; then
@@ -100,7 +101,7 @@ jobs:
           done
 
       - name: Run integration tests
-        run: cargo test -p netring --features "integration-tests,tokio,channel,af-xdp" -- --test-threads=1
+        run: cargo test -p netring --features "integration-tests,af-xdp,monitor-quickstart" -- --test-threads=1
 
   # ── Benchmarks compile ────────────────────────────────────────────────────
   bench:

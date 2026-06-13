@@ -148,9 +148,11 @@ fmt:
 
 # ── Docs ────────────────────────────────────────────────────────────────────
 
-# Build documentation
+# Build documentation. `-D warnings` matches the CI `Documentation` job:
+# it fails on broken intra-doc links / invalid code blocks (which plain
+# `cargo doc` only warns about). Run before publish.
 doc:
-    cargo doc --workspace --all-features --no-deps
+    RUSTDOCFLAGS="-D warnings" cargo doc --workspace --all-features --no-deps
 
 # Build and open documentation in browser
 doc-open:

@@ -17,6 +17,21 @@ Side effect: shipped **flowscope 0.14.1** (ICMP datagram-routing fix —
 `datagram_broadcast(IcmpParser)` had never delivered ICMP messages;
 netring patches to the local checkout until 0.14.1 is published).
 
+**Post-implementation audit** (two independent plan-vs-code cross-checks
++ a deletion-completeness sweep) confirmed every phase is correctly
+*wired* (not just defined) — including the two highest-risk integration
+points: all live-path `Ctx` sites set `label_table`, both protocol-slot
+drains set `tracker`, and `IcmpSlot` is genuinely installed via
+`Protocol::make_slot`. The audit also caught **CI-breaking rustdoc
+regressions** the §4 deletion left behind (dangling intra-doc links to
+removed symbols) plus a few I introduced (report module-doc links, a
+U+2026 in a code block, redundant link targets) — the GitHub CI doc job
+runs `RUSTDOCFLAGS="-D warnings"`, so these would have failed it.
+**Correction to the §7 record:** the doc-lint gate existed in *GitHub*
+CI but the local `just doc` recipe lacked `-D warnings` (the exact
+local-workflow gap §7.5 flagged) — now fixed. All fixed in commit
+`36db082`; `rustdoc --workspace --all-features -D warnings` = 0.
+
 Every shipped commit holds the cross-phase invariants: `clippy
 --all-features --all-targets -D warnings` clean, 326 lib + integration
 tests + doctests pass, dhat **Δ 0 / 0**.

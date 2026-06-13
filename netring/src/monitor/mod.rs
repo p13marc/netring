@@ -59,7 +59,7 @@ pub mod tick;
 
 pub use async_handler::{AsyncHandler, BoxFuture};
 pub use dispatcher::{Dispatcher, MAX_EVENT_TYPES};
-pub use handler::{Handler, PayloadCtx, PayloadOnly};
+pub use handler::{CtxOnly, Handler, PayloadCtx, PayloadOnly};
 pub use registry::{HandlerRegistry, ProtocolSlot, TypedBroadcastProtocolSlot, TypedProtocolSlot};
 pub use tick::TickRegistration;
 
@@ -1055,6 +1055,22 @@ impl MonitorBuilder {
         self.tick_handlers
             .push(TickRegistration::new(period, handler));
         self
+    }
+
+    /// 0.22 §7.4: periodic handler that ignores the `Tick` payload —
+    /// `.tick_ctx(period, |ctx| { … })`.
+    ///
+    /// The same as [`Self::tick`] but with the
+    /// [`CtxOnly`](crate::monitor::CtxOnly) marker fixed, so an untyped
+    /// `|ctx|` closure isn't ambiguous between "payload only" and "ctx
+    /// only" (both are arity-1). Most tick handlers never read the
+    /// `Tick` fields, so this is the common case.
+    pub fn tick_ctx(
+        self,
+        period: Duration,
+        handler: impl Handler<Tick, crate::monitor::handler::CtxOnly>,
+    ) -> Self {
+        self.tick(period, handler)
     }
 
     /// Freeze the builder into a [`Monitor`].

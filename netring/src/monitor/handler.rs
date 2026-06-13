@@ -34,6 +34,10 @@ pub trait Handler<E: Event, Marker>: Send + Sync + 'static {
 pub struct PayloadOnly;
 /// Marker for handlers that take a typed payload + `&mut Ctx`.
 pub struct PayloadCtx;
+/// Marker for handlers that take only `&mut Ctx`, ignoring the payload
+/// (0.22 §7.4). Lets `.tick(period, |ctx| { … })` skip the rarely-used
+/// `&Tick` — and any handler whose body only touches the ctx.
+pub struct CtxOnly;
 
 // 0-arg ctx: closure shape is `Fn(&E::Payload) -> Result<()>`.
 impl<E, F> Handler<E, PayloadOnly> for F
@@ -56,6 +60,21 @@ where
     #[inline]
     fn call(&self, p: &E::Payload, ctx: &mut Ctx<'_>) -> Result<()> {
         self(p, ctx)
+    }
+}
+
+// Ctx-only (0.22 §7.4): closure shape is `Fn(&mut Ctx<'_>) -> Result<()>`;
+// the payload is ignored. Distinguished from the other two impls by the
+// `CtxOnly` marker + closure arity, so a given closure satisfies exactly
+// one.
+impl<E, F> Handler<E, CtxOnly> for F
+where
+    E: Event,
+    F: for<'a> Fn(&'a mut Ctx<'_>) -> Result<()> + Send + Sync + 'static,
+{
+    #[inline]
+    fn call(&self, _p: &E::Payload, ctx: &mut Ctx<'_>) -> Result<()> {
+        self(ctx)
     }
 }
 

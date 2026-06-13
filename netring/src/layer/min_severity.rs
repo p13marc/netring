@@ -10,25 +10,33 @@ use crate::layer::Layer;
 
 /// Drops anomalies whose [`Severity`] is below `floor`.
 ///
-/// Constructed via [`Self::at_least`] / [`Self::warning`] /
-/// [`Self::error`].
+/// Constructed via [`Self::at_least`] / [`Self::info`] /
+/// [`Self::warning`] / [`Self::error`] — all `const`.
+#[derive(Debug, Clone, Copy)]
 pub struct MinSeverity {
     floor: Severity,
 }
 
 impl MinSeverity {
     /// Drop anomalies below `floor`.
-    pub fn at_least(floor: Severity) -> Self {
+    pub const fn at_least(floor: Severity) -> Self {
         Self { floor }
     }
 
+    /// Convenience for `at_least(Severity::Info)` — passes everything
+    /// (Info is the lowest tier). 0.22 §7.3: spelled out so the floor
+    /// is explicit rather than an `at_least(Info)` foot-gun.
+    pub const fn info() -> Self {
+        Self::at_least(Severity::Info)
+    }
+
     /// Convenience for `at_least(Severity::Warning)`.
-    pub fn warning() -> Self {
+    pub const fn warning() -> Self {
         Self::at_least(Severity::Warning)
     }
 
     /// Convenience for `at_least(Severity::Error)`.
-    pub fn error() -> Self {
+    pub const fn error() -> Self {
         Self::at_least(Severity::Error)
     }
 }

@@ -1,5 +1,42 @@
 # Changelog
 
+## 0.23.0 — spawnable run loop (breaking)
+
+> **Unreleased / in progress on `0.23-dev`.** A small, focused
+> **breaking** release: the `Monitor` run-loop future is now
+> `Send + 'static`. Migration:
+> [`netring/docs/MIGRATING_0.22_TO_0.23.md`](netring/docs/MIGRATING_0.22_TO_0.23.md).
+
+### `Monitor::run_for(..)` and friends return a `Send` future
+
+The future returned by `run_for` / `run_until` / `run_until_signal` /
+`run_until_idle` is now **`Send + 'static`**, so the run loop can be
+`tokio::spawn`'d onto its own worker task instead of being pinned to
+the task that owns it (the 0.22 `!Send` caveat is resolved). Keeping it
+on the main task with `tokio::select!` still works — spawning is now an
+additional option.
+
+Two `!Send` sources on the async-dispatch path were removed; the
+capture mmap ring was already `Send`, so **no per-packet copy was
+needed** and the dhat zero-alloc steady state is unchanged
+(`Δ 0 bytes / 0 blocks`).
+
+- `BoxFuture<T>` is now `Pin<Box<dyn Future<Output = T> + Send>>`.
+- `Dispatcher::dispatch_async` constructs each handler future before
+  any `.await`, inside a block that confines the type-erased payload
+  pointer (zero-alloc fast paths for the 0- and 1-handler cases).
+
+**Breaking.** `on_async` handlers must now return `Send` futures — the
+same requirement `tokio::spawn` imposes. Handlers that capture `Arc<…>`
+and perform network/disk I/O (the canonical case) already satisfy it; a
+handler holding a non-`Send` guard across its own `.await` must move
+that work behind a `ChannelSink` or `Arc<Mutex<…>>`.
+
+- `examples/monitor/multi_thread_default.rs` now demonstrates
+  `tokio::spawn(monitor.run_for(..))`.
+- `tests/monitor_send.rs` gains a compile-time assertion that all four
+  run-mode futures are `Send + 'static`.
+
 ## 0.22.0 — operations toolkit + typed protocol model (breaking)
 
 > **Released 2026-06-13.** A large, deliberately

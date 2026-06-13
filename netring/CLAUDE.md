@@ -20,11 +20,19 @@ built on AF_PACKET with TPACKET_V3 (block-based mmap ring buffers) and AF_XDP.
 
 ## Implementation Status
 
+**0.23.0 — in progress on `0.23-dev`** (small breaking release; not yet
+tagged/published). Headline: the `Monitor` run-loop future
+(`run_for`/`run_until`/`run_until_signal`/`run_until_idle`) is now
+`Send + 'static`, so it can be `tokio::spawn`'d. Breaking: `on_async`
+handlers must return `Send` futures. Zero runtime cost (the mmap ring was
+already `Send`; only the async-dispatch path needed fixing — `BoxFuture:
++ Send` + lexically-scoped `*const ()` in `dispatch_async`); dhat stays
+`Δ 0 / 0`. Migration: `docs/MIGRATING_0.22_TO_0.23.md`.
+
 **0.22.0 — released** (a large breaking release). Depends on flowscope
 `0.14.1`. ~330 lib + integration tests, zero warnings, `cargo fmt --check`
 clean, `clippy --all-features -D warnings` clean, `rustdoc -D warnings`
-clean, dhat `Δ 0 / 0`. Plan + status table: `plans/netring-0.22-plan.md`
-(deleted on ship per convention).
+clean, dhat `Δ 0 / 0`.
 
 ### Recent additions (netring 0.22 — operations toolkit + typed protocol model, BREAKING)
 

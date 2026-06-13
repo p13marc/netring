@@ -1,5 +1,16 @@
 # 0.22 Send-future investigation — decision
 
+> **✅ RESOLVED in 0.23.** Implemented as **Option A alone** — and
+> Option A turned out to be *sufficient*: a fresh rustc probe showed
+> the capture mmap ring is already `Send` (`unsafe impl Send for
+> MmapRing`), so only the two async-dispatch sources remained. Option B
+> (the owned-batch copy) was **not** needed; the dhat `Δ0` invariant is
+> unchanged. `BoxFuture` gained `+ Send`, `AsyncHandler` bounds
+> `Fut: Send`, and `dispatch_async` lexically scopes the `*const ()`.
+> `run_for`/`run_until`/`run_until_signal`/`run_until_idle` futures are
+> now `Send + 'static`. See CHANGELOG `## 0.23.0` +
+> `netring/docs/MIGRATING_0.22_TO_0.23.md`. (Delete-on-ship with 0.23.)
+
 **Question:** can the future returned by `Monitor::run_for(d).await` be
 made `Send` (so it can be `tokio::spawn`'d)?
 

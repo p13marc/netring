@@ -133,7 +133,7 @@ runtime) — `Monitor` is `Send` since 0.21.
 | `monitor_file_hash_dfir` | `Sha256Sink + FileType` (feature `file-hash`) DFIR file hashing |
 | `monitor_ech_adoption` | ECH downgrade detection via `EchOutcome` |
 | `monitor_net_diagnostic` | **3 signals in one Monitor** (0.22 high-level API): unified ICMP errors via `on_icmp_error` (flow-joined), TCP resets via `on_tcp_reset`, per-app bandwidth via `on_bandwidth` + typed `BandwidthReport`. The 0.22 headline — 306 LoC of hand-rolled classifiers/HashMap/tick collapsed to ~70. |
-| `monitor_multi_thread_default` | plain `#[tokio::main]` (multi-thread runtime) — `Monitor` is `Send` since 0.21, no `current_thread` / `LocalSet` needed |
+| `monitor_multi_thread_default` | plain `#[tokio::main]` (multi-thread) — `Monitor` is `Send` (0.21) and **the run-loop future is `Send + 'static` (0.23)**, demonstrated via `tokio::spawn(monitor.run_for(..))` |
 | `monitor_report_stream` | `report_to(period, build, sink)` + `JsonReportSink` (0.22 §3) shipping a typed `BandwidthSnapshot` report — the third output stream beside anomalies and broadcast |
 | `monitor_label_table` | `LabelTable::new().set(...)` + `MonitorBuilder::label_table` — custom well-known port → app-label map feeding `on_bandwidth` |
 

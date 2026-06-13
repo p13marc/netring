@@ -333,13 +333,18 @@ Key async facts:
 - **Monitor is `Send`.** Since 0.21 + flowscope 0.13
   (`Driver<E>: Send + Sync` unconditional), `Monitor: Send`
   unconditionally and plain `#[tokio::main]` (multi-thread)
-  works without ceremony. Caveat: the *future* returned by
-  `run_for` / `run_until_signal` is still `!Send` because the
-  underlying `AsyncCapture` borrows the `!Sync` mmap ring
-  across awaits — so the run-loop future must stay on the main
-  task (use `tokio::select!`) and can't be `tokio::spawn`'d.
-  Ship anomalies to a spawned consumer task via `ChannelSink`
-  instead.
+  works without ceremony.
+- **The run-loop future is `Send + 'static` (since 0.23).** The
+  future returned by `run_for` / `run_until` / `run_until_signal`
+  / `run_until_idle` can be `tokio::spawn`'d onto its own worker
+  task — you no longer have to keep it on the main task with
+  `tokio::select!` (that still works; spawning is now also an
+  option). The capture's owned-batch run path is `Send` and the
+  async-dispatch path no longer holds a raw pointer across
+  `.await`. The one tradeoff: `on_async` handlers must return
+  `Send` futures (the same rule `tokio::spawn` imposes) — handlers
+  that capture `Arc<…>` and do I/O already satisfy it. See
+  `examples/monitor/multi_thread_default.rs`.
 - **Subscribers are `Stream`s.**
   `Monitor::subscribe::<P>() -> EventStream<P::Message>` returns
   a `futures_core::Stream + Unpin` backed by

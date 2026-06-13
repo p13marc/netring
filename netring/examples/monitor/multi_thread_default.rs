@@ -1,18 +1,18 @@
-//! The Send story, demonstrated (0.22 §7).
+//! The Send story, demonstrated (0.23).
 //!
-//! Two facts that look contradictory but aren't:
+//! Two facts, both true since 0.23:
 //!
-//! 1. **`Monitor` is `Send`.** Plain `#[tokio::main]` (multi-thread)
-//!    works — no `flavor = "current_thread"` ceremony needed.
-//! 2. **The *future* `Monitor::run_for(..).await` is `!Send`.** It
-//!    borrows the `!Sync` capture ring (and the async-dispatch path
-//!    holds a raw pointer) across awaits, so it can't be
-//!    `tokio::spawn`'d — it must stay on the task that owns it.
+//! 1. **`Monitor` is `Send`** (since 0.21). Plain `#[tokio::main]`
+//!    (multi-thread) works — no `flavor = "current_thread"` ceremony.
+//! 2. **The *future* `Monitor::run_for(..)` is also `Send + 'static`**
+//!    (since 0.23). It can be `tokio::spawn`'d onto its own worker
+//!    task instead of being pinned to the task that owns it. The
+//!    capture mmap ring is `Send`, and the async-dispatch path no
+//!    longer holds a raw pointer across `.await`.
 //!
-//! The working pattern for "do other async work alongside the
-//! monitor" is `tokio::select!` on the main task (the run loop never
-//! leaves it), with anomalies fanned out to spawned tasks via a
-//! `ChannelSink` (which *is* `Send`).
+//! The one constraint that comes with #2: `on_async` handlers must
+//! now return `Send` futures (the same rule `tokio::spawn` imposes).
+//! Handlers that capture `Arc<…>` and do I/O already satisfy it.
 //!
 //! Run: `cargo run --example monitor_multi_thread_default --features monitor`
 
@@ -27,8 +27,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     // A ChannelSink is Send: anomalies cross the spawn boundary here.
     let (sink, mut rx) = ChannelSink::channel();
 
-    // Consumer task — runs on a *different* worker thread. This is how
-    // you get work off the capture task without spawning the run loop.
+    // Consumer task — runs on a worker thread, draining anomalies.
     let consumer = tokio::spawn(async move {
         while let Some(anomaly) = rx.recv().await {
             println!("[consumer thread] {anomaly:?}");
@@ -47,19 +46,20 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .sink(sink)
         .build()?;
 
-    // ✅ Works: the run-loop future stays on *this* task. Drive it with
-    // `tokio::select!` if you need to interleave other async work.
-    tokio::select! {
-        r = monitor.run_for(Duration::from_secs(10)) => { r?; }
-        // … other branches (timers, control channels, …) go here.
-    }
+    // ✅ 0.23: the run-loop future is `Send + 'static`, so it can run
+    // on its own spawned task. `tokio::spawn` returns a `JoinHandle`
+    // you can await, abort, or just detach.
+    let run = tokio::spawn(monitor.run_for(Duration::from_secs(10)));
 
-    // ❌ Does NOT compile — the run-loop future is `!Send`:
-    //
-    //     tokio::spawn(monitor.run_for(Duration::from_secs(10)));
-    //
-    // (see docs/MIGRATING_0.21_TO_0.22.md §8 +
-    //  plans/netring-0.22-send-future-decision.md)
+    // … your main task is now free to do other async work here while
+    // the capture loop runs on a different worker thread …
+
+    run.await??; // outer `?`: JoinError; inner `?`: the run loop's Result
+
+    // (Still valid: if you'd rather keep the loop on *this* task and
+    // interleave with other branches, `tokio::select!` on
+    // `monitor.run_for(..)` works exactly as before — spawning is now
+    // an option, not a requirement.)
 
     drop(consumer); // detach; it ends when the sink is dropped.
     Ok(())

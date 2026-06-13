@@ -30,7 +30,10 @@
 //! borrow, and the compiler tracks disjoint field accesses
 //! (`state_map`, `counters`, `sink`) correctly.
 
+use std::sync::LazyLock;
+
 use flowscope::Timestamp;
+use flowscope::well_known::LabelTable;
 
 mod from_ctx;
 mod split;
@@ -39,6 +42,19 @@ pub use from_ctx::{CounterRegistry, FlowStateRegistry, StateMap};
 
 use crate::correlate::TimeBucketedCounter;
 use crate::protocol::FlowKey;
+
+/// Process-wide default well-known label table (inherits flowscope's
+/// built-in port map). Used as the fallback for any [`Ctx`] built
+/// without a monitor-supplied table — synthetic test/bench `Ctx`s and
+/// the lifecycle/tick paths before a custom `.label_table(...)` lands.
+static DEFAULT_LABEL_TABLE: LazyLock<LabelTable> = LazyLock::new(LabelTable::new);
+
+/// `&'static` borrow of [`DEFAULT_LABEL_TABLE`]. The `LazyLock`
+/// deref-coerces to `&LabelTable`; the static lives forever so the
+/// borrow is `'static` and fits any `Ctx<'a>`.
+pub(crate) fn default_label_table() -> &'static LabelTable {
+    &DEFAULT_LABEL_TABLE
+}
 
 /// Tag for which capture source this event came from.
 /// `SourceIdx(0)` for single-interface monitors; multi-interface
@@ -104,6 +120,21 @@ pub struct Ctx<'a> {
     /// [`Self::flow_state_mut::<T>`] access. Backed by
     /// [`flowscope::correlate::FlowStateMap`].
     pub(crate) flow_states: &'a mut FlowStateRegistry,
+
+    /// 0.22: active well-known label table for app/protocol-label
+    /// lookups (`FiveTupleKey::app_label_with`). Defaults to
+    /// flowscope's built-in table; overridden per-monitor via
+    /// [`crate::monitor::MonitorBuilder::label_table`]. Read through
+    /// [`Self::label_table`].
+    pub(crate) label_table: &'a LabelTable,
+
+    /// 0.22: read-only flow tracker for ICMP→flow correlation
+    /// ([`Self::lookup_icmp_flow`]). `Some` on the live per-packet
+    /// dispatch path (the run loop borrows `driver.tracker()` here);
+    /// `None` on synthetic / tick / drain `Ctx`s that have no live
+    /// capture behind them.
+    pub(crate) tracker:
+        Option<&'a flowscope::FlowTracker<flowscope::extract::FiveTuple, ()>>,
 }
 
 impl<'a> Ctx<'a> {
@@ -128,14 +159,18 @@ impl<'a> Ctx<'a> {
             sink,
             counters,
             flow_states,
+            label_table: default_label_table(),
+            tracker: None,
         }
     }
 
     /// Constructor exposed for integration tests that need to
     /// drive the dispatcher with a custom `Ctx`. Not part of the
     /// documented public API (`#[doc(hidden)]`). `monitor_name`
-    /// defaults to `None`; production callers in the run loop
-    /// set it via the [`Ctx`] struct literal directly.
+    /// defaults to `None`; the `label_table` defaults to the
+    /// built-in table and `tracker` to `None`; production callers
+    /// in the run loop set those via the [`Ctx`] struct literal
+    /// directly.
     #[doc(hidden)]
     pub fn new(
         flow: Option<FlowKey>,
@@ -155,6 +190,8 @@ impl<'a> Ctx<'a> {
             sink,
             counters,
             flow_states,
+            label_table: default_label_table(),
+            tracker: None,
         }
     }
 
@@ -166,6 +203,45 @@ impl<'a> Ctx<'a> {
     #[inline]
     pub fn state_mut<T: Default + Send + 'static>(&mut self) -> &mut T {
         self.state_map.get_or_init_mut::<T>()
+    }
+
+    /// 0.22: immutable, non-creating read of per-monitor state `T`.
+    ///
+    /// Sibling to [`Self::state_mut`] that neither requires `Default`
+    /// nor lazy-creates: returns `None` if `T` was never registered
+    /// or touched. Used by read-only views (`bandwidth()`, report
+    /// snapshots) that must not mutate state behind a shared borrow.
+    #[inline]
+    pub fn state<T: 'static>(&self) -> Option<&T> {
+        self.state_map.get::<T>()
+    }
+
+    /// 0.22: the active well-known label table for this monitor.
+    ///
+    /// Always returns something — the default is flowscope's built-in
+    /// table; a custom one is installed via
+    /// [`crate::monitor::MonitorBuilder::label_table`]. Pair with
+    /// [`flowscope::extract::FiveTupleKey::app_label_with`] /
+    /// `protocol_label_with` for site-custom port labelling.
+    #[inline]
+    pub fn label_table(&self) -> &LabelTable {
+        self.label_table
+    }
+
+    /// 0.22: join an ICMP error's embedded inner 5-tuple back to a
+    /// live flow + its stats.
+    ///
+    /// Returns `None` when no tracker is wired onto this `Ctx`
+    /// (synthetic / tick / drain contexts) or no live flow matches
+    /// the inner tuple (already evicted / never tracked). Backs the
+    /// `IcmpError.stats` join in the ICMP synthesis slot.
+    #[cfg(feature = "icmp")]
+    #[inline]
+    pub fn lookup_icmp_flow(
+        &self,
+        inner: &flowscope::icmp::IcmpInner,
+    ) -> Option<(FlowKey, flowscope::FlowStats)> {
+        self.tracker?.stats_for_inner(inner)
     }
 
     /// Borrow the `K`-keyed sliding-window counter mutably.
@@ -283,6 +359,8 @@ mod tests {
             sink,
             counters,
             flow_states,
+            label_table: default_label_table(),
+            tracker: None,
         }
     }
 

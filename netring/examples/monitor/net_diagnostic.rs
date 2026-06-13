@@ -263,17 +263,19 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 .emit();
             Ok(())
         })
-        // ── Per-packet bandwidth (TCP) ──────────────────────
-        .on_ctx::<FlowPacket<Tcp>>(|evt: &FlowPacket<Tcp>, ctx: &mut Ctx<'_>| {
-            let _ = evt.side; // initiator vs responder bucketing left as exercise
+        // ── Per-packet bandwidth (TCP + UDP) ────────────────
+        // 0.22 R2: one flat FlowPacket handler branches on
+        // `evt.proto` instead of two `FlowPacket<Tcp>` / `<Udp>`
+        // handlers. (§2.9 replaces all of this with
+        // `.on_bandwidth(...)`.)
+        .on_ctx::<FlowPacket>(|evt: &FlowPacket, ctx: &mut Ctx<'_>| {
+            let is_tcp = match evt.proto {
+                L4Proto::Tcp => true,
+                L4Proto::Udp => false,
+                _ => return Ok(()), // ignore ICMP / other here
+            };
             let stats = ctx.state_mut::<AppBandwidth>();
-            bandwidth_bucket(stats, &evt.key, true).add(evt.len);
-            Ok(())
-        })
-        // ── Per-packet bandwidth (UDP) ──────────────────────
-        .on_ctx::<FlowPacket<Udp>>(|evt: &FlowPacket<Udp>, ctx: &mut Ctx<'_>| {
-            let stats = ctx.state_mut::<AppBandwidth>();
-            bandwidth_bucket(stats, &evt.key, false).add(evt.len);
+            bandwidth_bucket(stats, &evt.key, is_tcp).add(evt.len);
             Ok(())
         })
         // ── Periodic report ─────────────────────────────────

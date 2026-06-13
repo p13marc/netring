@@ -15,7 +15,7 @@ use std::marker::PhantomData;
 
 use flowscope::{AnomalyKind, EndReason, FlowSide, FlowStats, L4Proto, TcpInfo, Timestamp};
 
-use crate::protocol::{FlowKey, Protocol};
+use crate::protocol::{FlowKey, FlowProtocol, MessageProtocol, Protocol};
 
 /// Marker for types that handlers can subscribe to.
 ///
@@ -64,7 +64,11 @@ pub trait Event: Send + Sync + 'static {
 // whenever Http's parser emits an HttpMessage. The blanket impl
 // below makes every `Protocol` marker an `Event` in its own right.
 
-impl<P: Protocol> Event for P {
+// 0.22 R1: only `MessageProtocol`s are directly listenable as
+// `on::<P>` (their parser emits `P::Message`). Lifecycle-only markers
+// (`Tcp`/`Udp`, whose `Message = ()`) are NOT `Event`s — `on::<Tcp>`
+// is a type error; use `on::<FlowStarted<Tcp>>` instead.
+impl<P: MessageProtocol> Event for P {
     type Payload = P::Message;
 
     fn protocol_marker() -> Option<std::any::TypeId> {
@@ -120,7 +124,10 @@ impl<P: Protocol> FlowStarted<P> {
     }
 }
 
-impl<P: Protocol> Event for FlowStarted<P> {
+// 0.22 R1: lifecycle events apply only to flow-tracked protocols.
+// `FlowStarted<Http>` is a type error — HTTP rides a TCP flow, so use
+// `FlowStarted<Tcp>` and scope by parser with `on::<Http>`.
+impl<P: FlowProtocol> Event for FlowStarted<P> {
     type Payload = FlowStarted<P>;
 }
 
@@ -173,7 +180,7 @@ impl<P: Protocol> FlowEnded<P> {
     }
 }
 
-impl<P: Protocol> Event for FlowEnded<P> {
+impl<P: FlowProtocol> Event for FlowEnded<P> {
     type Payload = FlowEnded<P>;
 }
 
@@ -213,7 +220,7 @@ impl<P: Protocol> FlowEstablished<P> {
     }
 }
 
-impl<P: Protocol> Event for FlowEstablished<P> {
+impl<P: FlowProtocol> Event for FlowEstablished<P> {
     type Payload = FlowEstablished<P>;
 }
 
@@ -229,13 +236,25 @@ impl<P: Protocol> std::fmt::Debug for FlowEstablished<P> {
 
 /// Emitted on every packet of an existing flow.
 ///
+/// 0.22 R2: **not parameterised by protocol.** Per-packet handlers
+/// always end up branching on `evt.proto` anyway, so the type-level
+/// `<P>` was vestigial; the flat shape collapses the two
+/// `FlowPacket<Tcp>` + `FlowPacket<Udp>` handlers every L4 monitor
+/// wrote into one `on::<FlowPacket>(|e| match e.proto { … })`. The
+/// parametric form survives only for lifecycle events
+/// ([`FlowStarted`] / [`FlowEnded`] / [`FlowTick`]) where the
+/// type guarantee earns its keep.
+///
 /// The `tcp` field is `Some(_)` only when the underlying flowscope
 /// driver was built with `emit_packet_details(true)` — off by
 /// default so per-packet handlers don't pay the TCP re-parse cost
 /// unless they ask for it. Read `None` as "details suppressed",
 /// not "no TCP details available."
 #[non_exhaustive]
-pub struct FlowPacket<P: Protocol> {
+#[derive(Debug, Clone)]
+pub struct FlowPacket {
+    /// L4 protocol of this packet's flow (`Tcp` / `Udp` / `Icmp` / …).
+    pub proto: L4Proto,
     /// Flow key.
     pub key: FlowKey,
     /// Initiator vs responder for this packet.
@@ -246,14 +265,14 @@ pub struct FlowPacket<P: Protocol> {
     pub tcp: Option<TcpInfo>,
     /// Timestamp of this packet.
     pub ts: Timestamp,
-    _marker: PhantomData<fn() -> P>,
 }
 
-impl<P: Protocol> FlowPacket<P> {
+impl FlowPacket {
     /// Constructor exposed for integration tests / dispatch
     /// translation. Not part of the documented public API.
     #[doc(hidden)]
     pub fn new(
+        proto: L4Proto,
         key: FlowKey,
         side: FlowSide,
         len: usize,
@@ -261,31 +280,18 @@ impl<P: Protocol> FlowPacket<P> {
         ts: Timestamp,
     ) -> Self {
         Self {
+            proto,
             key,
             side,
             len,
             tcp,
             ts,
-            _marker: PhantomData,
         }
     }
 }
 
-impl<P: Protocol> Event for FlowPacket<P> {
-    type Payload = FlowPacket<P>;
-}
-
-impl<P: Protocol> std::fmt::Debug for FlowPacket<P> {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("FlowPacket")
-            .field("protocol", &P::NAME)
-            .field("key", &self.key)
-            .field("side", &self.side)
-            .field("len", &self.len)
-            .field("tcp", &self.tcp)
-            .field("ts", &self.ts)
-            .finish()
-    }
+impl Event for FlowPacket {
+    type Payload = FlowPacket;
 }
 
 /// Periodic per-flow [`FlowStats`] snapshot. Only emitted when
@@ -316,7 +322,7 @@ impl<P: Protocol> FlowTick<P> {
     }
 }
 
-impl<P: Protocol> Event for FlowTick<P> {
+impl<P: FlowProtocol> Event for FlowTick<P> {
     type Payload = FlowTick<P>;
 }
 

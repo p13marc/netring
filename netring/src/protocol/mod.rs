@@ -170,6 +170,44 @@ pub trait Protocol: Send + Sync + 'static {
     }
 }
 
+/// 0.22 R1: a protocol whose **flows the tracker follows** end to
+/// end. Flow-tracked protocols emit the lifecycle events
+/// [`FlowStarted`](crate::protocol::event_typed::FlowStarted) /
+/// [`FlowEstablished`](crate::protocol::event_typed::FlowEstablished) /
+/// [`FlowEnded`](crate::protocol::event_typed::FlowEnded) /
+/// [`FlowTick`](crate::protocol::event_typed::FlowTick) and
+/// participate in the flat
+/// [`FlowPacket`](crate::protocol::event_typed::FlowPacket) stream;
+/// they are keyed by 5-tuple.
+///
+/// Implemented for [`builtin::Tcp`], [`builtin::Udp`], and
+/// [`builtin::Icmp`] (ICMP is *both* flow-tracked — the kernel/
+/// flowscope tracker follows ICMP echo + error 5-tuples — and a
+/// [`MessageProtocol`]). It is **not** implemented for the L7 markers
+/// (`Http`/`Dns`/`Tls`/…): their "flow" is the underlying TCP/UDP
+/// flow, so `FlowStarted<Http>` is a type error — use
+/// `FlowStarted<Tcp>` and scope by parser via `on::<Http>` instead.
+///
+/// The bound is what makes `on::<FlowStarted<Http>>(…)` fail to
+/// compile (caught at build, not silently never-firing at runtime).
+pub trait FlowProtocol: Protocol {}
+
+/// 0.22 R1: a protocol that delivers **discrete parsed messages**.
+/// `on::<Self>(|msg, ctx| …)` fires once per [`Protocol::Message`]
+/// the parser emits.
+///
+/// Implemented for the L7 markers (`Http`/`Dns`/`Tls`/`TlsHandshake`)
+/// and [`builtin::Icmp`]. It is **not** implemented for the
+/// lifecycle-only markers [`builtin::Tcp`] / [`builtin::Udp`] (their
+/// [`Protocol::Message`] is `()`), so `on::<Tcp>(…)` is a type error —
+/// use a lifecycle event (`on::<FlowStarted<Tcp>>`) instead.
+///
+/// Also gates the broadcast surface
+/// ([`MonitorBuilder::with_broadcast`](crate::monitor::MonitorBuilder::with_broadcast)
+/// / [`Monitor::subscribe`](crate::monitor::Monitor::subscribe)):
+/// only message protocols carry a meaningful per-message stream.
+pub trait MessageProtocol: Protocol {}
+
 /// How a protocol selects packets for its parser.
 #[derive(Debug, Clone)]
 #[non_exhaustive]

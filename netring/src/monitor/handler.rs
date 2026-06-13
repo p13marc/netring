@@ -92,6 +92,8 @@ mod tests {
             sink,
             counters,
             flow_states,
+            label_table: crate::ctx::default_label_table(),
+            tracker: None,
         }
     }
 

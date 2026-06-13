@@ -6,7 +6,11 @@
 use flowscope::driver::{DriverBuilder, SlotHandle};
 use flowscope::extract::{FiveTuple, FiveTupleKey};
 
-use crate::protocol::{Dispatch, Protocol, ProtocolInitError};
+use crate::protocol::{Dispatch, MessageProtocol, Protocol, ProtocolInitError};
+
+// 0.22 R1: DNS is a message protocol (`on::<Dns>` fires `DnsMessage`);
+// its flow lifecycle is the underlying UDP flow.
+impl MessageProtocol for Dns {}
 
 /// DNS over UDP. Default port: 53. Uses
 /// [`flowscope::dns::DnsUdpParser::with_correlation`] so responses

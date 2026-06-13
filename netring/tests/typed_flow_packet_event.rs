@@ -1,8 +1,8 @@
-//! 0.21 A.8: integration test for the per-packet / per-tick / parser-close
-//! typed events. Drives the dispatcher directly with synthetic
-//! `FlowPacket<P>`, `FlowTick<P>`, and `ParserClosed<P>` payloads
-//! and asserts handlers scoped to the right `P` fire — TCP-typed
-//! handler doesn't see UDP events and vice versa.
+//! 0.21 A.8 / 0.22 R2: integration test for the per-packet /
+//! per-tick / parser-close typed events. `FlowPacket` is now flat
+//! (0.22 R2) — one handler sees every L4 and distinguishes via
+//! `evt.proto`. `FlowTick<P>` / `ParserClosed<P>` stay parameterised
+//! and assert per-`P` scoping.
 
 #![cfg(all(feature = "tokio", feature = "flow"))]
 
@@ -14,7 +14,7 @@ use flowscope::{EndReason, FlowSide, FlowStats, L4Proto, Timestamp};
 use netring::anomaly::sink::NoopSink;
 use netring::ctx::{CounterRegistry, Ctx, SourceIdx, StateMap};
 use netring::monitor::{Dispatcher, HandlerRegistry};
-use netring::protocol::builtin::{Tcp, Udp};
+use netring::protocol::builtin::Tcp;
 use netring::protocol::event_typed::{FlowPacket, FlowTick, ParserClosed};
 
 fn key(proto: L4Proto) -> flowscope::extract::FiveTupleKey {
@@ -43,19 +43,22 @@ fn fresh_ctx<'a>(
 }
 
 #[test]
-fn flow_packet_tcp_handler_fires_only_for_tcp_payloads() {
+fn flat_flow_packet_handler_sees_all_l4_via_proto() {
+    // 0.22 R2: one flat `FlowPacket` handler fires for every L4; it
+    // distinguishes protocols through `evt.proto` rather than the
+    // former per-`P` typing.
     let tcp_count = Arc::new(AtomicU32::new(0));
     let udp_count = Arc::new(AtomicU32::new(0));
     let t = Arc::clone(&tcp_count);
     let u = Arc::clone(&udp_count);
 
     let mut reg = HandlerRegistry::default();
-    reg.register::<FlowPacket<Tcp>, _, _>(move |_evt: &FlowPacket<Tcp>| {
-        t.fetch_add(1, Ordering::Relaxed);
-        Ok(())
-    });
-    reg.register::<FlowPacket<Udp>, _, _>(move |_evt: &FlowPacket<Udp>| {
-        u.fetch_add(1, Ordering::Relaxed);
+    reg.register::<FlowPacket, _, _>(move |evt: &FlowPacket| {
+        match evt.proto {
+            L4Proto::Tcp => t.fetch_add(1, Ordering::Relaxed),
+            L4Proto::Udp => u.fetch_add(1, Ordering::Relaxed),
+            _ => 0,
+        };
         Ok(())
     });
     let mut disp: Dispatcher = reg.into_dispatcher().unwrap();
@@ -66,14 +69,16 @@ fn flow_packet_tcp_handler_fires_only_for_tcp_payloads() {
     let mut flow_states = netring::ctx::FlowStateRegistry::default();
     let mut ctx = fresh_ctx(&mut state, &mut sink, &mut counters, &mut flow_states);
 
-    let tcp_pkt = FlowPacket::<Tcp>::new(
+    let tcp_pkt = FlowPacket::new(
+        L4Proto::Tcp,
         key(L4Proto::Tcp),
         FlowSide::Initiator,
         64,
         None,
         Timestamp::new(0, 0),
     );
-    let udp_pkt = FlowPacket::<Udp>::new(
+    let udp_pkt = FlowPacket::new(
+        L4Proto::Udp,
         key(L4Proto::Udp),
         FlowSide::Responder,
         128,
@@ -82,12 +87,10 @@ fn flow_packet_tcp_handler_fires_only_for_tcp_payloads() {
     );
 
     for _ in 0..3 {
-        disp.dispatch::<FlowPacket<Tcp>>(&tcp_pkt, &mut ctx)
-            .unwrap();
+        disp.dispatch::<FlowPacket>(&tcp_pkt, &mut ctx).unwrap();
     }
     for _ in 0..2 {
-        disp.dispatch::<FlowPacket<Udp>>(&udp_pkt, &mut ctx)
-            .unwrap();
+        disp.dispatch::<FlowPacket>(&udp_pkt, &mut ctx).unwrap();
     }
 
     assert_eq!(tcp_count.load(Ordering::Relaxed), 3);

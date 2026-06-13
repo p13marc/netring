@@ -130,6 +130,11 @@ pub struct Monitor {
     /// thread shares the same group_id, kernel hashes packets to
     /// shards).
     pub(crate) fanout: Option<(crate::config::FanoutMode, u16)>,
+    /// 0.22: active well-known label table for app/protocol-label
+    /// lookups. Set via [`MonitorBuilder::label_table`]; defaults to
+    /// flowscope's built-in table. Borrowed into every
+    /// [`crate::ctx::Ctx`] at dispatch time.
+    pub(crate) label_table: flowscope::well_known::LabelTable,
 }
 
 impl Monitor {
@@ -222,7 +227,9 @@ impl Monitor {
     /// Takes `&self`: a monitor may have multiple subscribers
     /// minted before being moved into `run_until` / `run_for` /
     /// `run_until_signal`. The subscribers outlive the run loop.
-    pub fn subscribe<P: Protocol>(&self) -> Result<EventStream<P::Message>>
+    pub fn subscribe<P: crate::protocol::MessageProtocol>(
+        &self,
+    ) -> Result<EventStream<P::Message>>
     where
         P::Message: Send + Sync + Clone + 'static,
     {
@@ -369,9 +376,36 @@ pub struct MonitorBuilder {
     /// [`Self::pcap_speed_factor`].
     #[cfg(all(feature = "pcap", feature = "tokio"))]
     pcap_speed_factor: Option<f32>,
+    /// 0.22: optional custom well-known label table. `None` → the
+    /// flowscope built-in table is used. Set via
+    /// [`Self::label_table`]; moved into [`Monitor::label_table`] at
+    /// build.
+    label_table: Option<flowscope::well_known::LabelTable>,
 }
 
 impl MonitorBuilder {
+    /// 0.22: use a custom [`LabelTable`](flowscope::well_known::LabelTable)
+    /// for app/protocol-label lookups in this monitor.
+    ///
+    /// Site deployments register internal services (e.g. gRPC on
+    /// 8765, telemetry on 9101) without forking flowscope's
+    /// well-known table:
+    ///
+    /// ```ignore
+    /// let mut table = flowscope::well_known::LabelTable::new(); // inherits built-ins
+    /// table.set(flowscope::L4Proto::Tcp, 8765, "grpc");
+    /// Monitor::builder().interface("eth0").label_table(table)…
+    /// ```
+    ///
+    /// The table is read at dispatch via
+    /// [`Ctx::label_table`](crate::ctx::Ctx::label_table) and used by
+    /// [`MonitorBuilder::bandwidth_by_app`] (0.22) when both are set.
+    /// Defaults to flowscope's built-in table when unset.
+    pub fn label_table(mut self, table: flowscope::well_known::LabelTable) -> Self {
+        self.label_table = Some(table);
+        self
+    }
+
     /// Set the capture interface(s). Phase F.1 enables N > 1 —
     /// each event is tagged with its source-interface index
     /// (`SourceIdx(0)` for the first interface in registration
@@ -528,7 +562,7 @@ impl MonitorBuilder {
     ///     .build()?;
     /// let mut stream = monitor.subscribe::<Http>()?;
     /// ```
-    pub fn with_broadcast<P: Protocol>(mut self) -> Self
+    pub fn with_broadcast<P: crate::protocol::MessageProtocol>(mut self) -> Self
     where
         P::Message: Send + Sync + Clone + 'static,
     {
@@ -931,6 +965,17 @@ impl MonitorBuilder {
             pcap_speed_factor: self.pcap_speed_factor,
             flow_states: self.flow_states,
             fanout: self.fanout,
+            // NOT `unwrap_or_default()`: `LabelTable::default()` derives
+            // `inherit_builtin = false` (whitelist-only, like
+            // `standalone()`), whereas `new()` inherits flowscope's
+            // built-in well-known port table — which is what an
+            // unconfigured monitor must get so `app_label` resolves
+            // "http"/"dns"/… out of the box. (flowscope 0.15 wishlist:
+            // make `Default` == `new`.)
+            #[allow(clippy::unwrap_or_default)]
+            label_table: self
+                .label_table
+                .unwrap_or_else(flowscope::well_known::LabelTable::new),
         })
     }
 }

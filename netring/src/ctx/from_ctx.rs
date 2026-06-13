@@ -68,6 +68,15 @@ impl StateMap {
         self.by_type.insert(TypeId::of::<T>(), Box::new(value));
     }
 
+    /// 0.22: immutable, non-creating read of the `T` slot. Returns
+    /// `None` if `T` was never registered/touched. Backs
+    /// [`crate::ctx::Ctx::state`] and the bandwidth/report views.
+    pub fn get<T: 'static>(&self) -> Option<&T> {
+        self.by_type
+            .get(&TypeId::of::<T>())
+            .and_then(|b| b.downcast_ref::<T>())
+    }
+
     /// Number of distinct state slots currently registered.
     pub fn len(&self) -> usize {
         self.by_type.len()
@@ -156,6 +165,19 @@ impl CounterRegistry {
     /// `MonitorBuilder::build()` to validate detector declarations.
     pub fn registered_type_names(&self) -> &[&'static str] {
         &self.registered_type_names
+    }
+
+    /// 0.22: immutable, non-panicking read of the `K`-keyed counter.
+    /// Returns `None` if unregistered (sibling to the panicking
+    /// [`Self::get_mut`]). Backs [`crate::ctx::Ctx::counter`] +
+    /// the report snapshot accessors.
+    pub fn get<K>(&self) -> Option<&TimeBucketedCounter<K>>
+    where
+        K: std::hash::Hash + Eq + Clone + Send + 'static,
+    {
+        self.by_type
+            .get(&TypeId::of::<K>())
+            .and_then(|b| b.downcast_ref::<TimeBucketedCounter<K>>())
     }
 
     /// Borrow the `K`-keyed counter. Panics if the user didn't

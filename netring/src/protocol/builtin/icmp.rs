@@ -6,7 +6,7 @@ use flowscope::driver::{DriverBuilder, SlotHandle};
 use flowscope::extract::{FiveTuple, FiveTupleKey};
 
 #[cfg(feature = "icmp")]
-use crate::protocol::{Dispatch, Protocol, ProtocolInitError};
+use crate::protocol::{Dispatch, FlowProtocol, MessageProtocol, Protocol, ProtocolInitError};
 
 /// ICMPv4 + ICMPv6 message parser. Surfaces `IcmpMessage` events
 /// including `inner: Option<IcmpInner>` on error variants — the
@@ -30,6 +30,14 @@ impl Protocol for Icmp {
         Ok(builder.datagram_broadcast(flowscope::icmp::IcmpParser::new()))
     }
 }
+
+// 0.22 R1: ICMP is *both* flow-tracked (the tracker follows ICMP
+// echo + error 5-tuples → `FlowStarted<Icmp>` / `FlowPacket`) and a
+// message protocol (`on::<Icmp>` fires `IcmpMessage`).
+#[cfg(feature = "icmp")]
+impl FlowProtocol for Icmp {}
+#[cfg(feature = "icmp")]
+impl MessageProtocol for Icmp {}
 
 #[cfg(all(test, feature = "icmp"))]
 mod tests {

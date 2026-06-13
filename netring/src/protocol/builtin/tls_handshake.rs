@@ -4,7 +4,11 @@
 use flowscope::driver::{DriverBuilder, SlotHandle};
 use flowscope::extract::{FiveTuple, FiveTupleKey};
 
-use crate::protocol::{Dispatch, Protocol, ProtocolInitError};
+use crate::protocol::{Dispatch, MessageProtocol, Protocol, ProtocolInitError};
+
+// 0.22 R1: the TLS handshake aggregator is a message protocol
+// (`on::<TlsHandshake>` fires one event per completed handshake).
+impl MessageProtocol for TlsHandshake {}
 
 /// TLS handshake aggregator. Emits one
 /// [`flowscope::tls::TlsHandshake`] per completed handshake,

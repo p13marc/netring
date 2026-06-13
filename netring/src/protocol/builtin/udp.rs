@@ -3,7 +3,7 @@
 use flowscope::driver::{DriverBuilder, SlotHandle};
 use flowscope::extract::{FiveTuple, FiveTupleKey};
 
-use crate::protocol::{Dispatch, Protocol, ProtocolInitError};
+use crate::protocol::{Dispatch, FlowProtocol, Protocol, ProtocolInitError};
 
 /// UDP lifecycle marker. Registering this protocol enables
 /// `FlowStarted<Udp>`, `FlowEnded<Udp>` typed events — no parser
@@ -30,6 +30,9 @@ impl Protocol for Udp {
         ))
     }
 }
+
+// 0.22 R1: UDP is flow-tracked, not a message protocol.
+impl FlowProtocol for Udp {}
 
 #[cfg(test)]
 mod tests {

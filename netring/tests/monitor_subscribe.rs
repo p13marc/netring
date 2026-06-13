@@ -7,7 +7,7 @@
 
 use netring::error::{BuildError, Error};
 use netring::monitor::Monitor;
-use netring::protocol::builtin::{Http, Tcp};
+use netring::protocol::builtin::Http;
 
 #[test]
 fn subscribe_without_with_broadcast_returns_not_broadcast() {
@@ -74,19 +74,9 @@ fn event_stream_satisfies_futures_core_stream_trait() {
     _accept_stream(stream);
 }
 
-#[test]
-fn subscribe_for_unbroadcast_protocol_errors_on_lifecycle_marker() {
-    // Tcp is lifecycle-only — no parser, no broadcast. Subscribe
-    // should surface ProtocolNotBroadcast even after
-    // `with_broadcast::<Tcp>()` (the call is a no-op for
-    // lifecycle-only markers).
-    let m = Monitor::builder()
-        .interface("lo")
-        .with_broadcast::<Tcp>()
-        .build()
-        .expect("build");
-    match m.subscribe::<Tcp>() {
-        Err(Error::Build(BuildError::ProtocolNotBroadcast { .. })) => {}
-        other => panic!("expected ProtocolNotBroadcast on Tcp; got: {other:?}"),
-    }
-}
+// 0.22 R1: the former Tcp-specific `ProtocolNotBroadcast` test is
+// gone — `subscribe::<Tcp>()` / `with_broadcast::<Tcp>()` are now
+// *compile* errors (Tcp is flow-only, not a `MessageProtocol`). The
+// runtime error path (message protocol without broadcast enrolment)
+// is covered by `subscribe_without_with_broadcast_returns_not_broadcast`
+// above.

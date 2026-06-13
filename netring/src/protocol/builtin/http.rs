@@ -3,7 +3,12 @@
 use flowscope::driver::{BroadcastSlotHandle, DriverBuilder, SlotHandle};
 use flowscope::extract::{FiveTuple, FiveTupleKey};
 
-use crate::protocol::{Dispatch, Protocol, ProtocolInitError};
+use crate::protocol::{Dispatch, MessageProtocol, Protocol, ProtocolInitError};
+
+// 0.22 R1: HTTP is a message protocol — `on::<Http>` fires
+// `HttpMessage`. Its flow lifecycle is the underlying TCP flow
+// (`FlowStarted<Tcp>`), so `FlowStarted<Http>` is a type error.
+impl MessageProtocol for Http {}
 
 /// HTTP/1.x — RFC 7230 request/response over TCP.
 ///

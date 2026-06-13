@@ -41,14 +41,19 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     let beacon = netring::pattern_detector! {
         name: "BeaconCv",
-        event: FlowPacket<Tcp>,
+        // 0.22 R2: FlowPacket is flat (fires for every L4); scope to
+        // TCP in the feed via `evt.proto`.
+        event: FlowPacket,
         detector: Beacon::new(),
         feed: |evt, w| {
             // Feed `(key, ts, bytes)` into the per-key
             // inter-arrival window. The detector returns
             // `Some(BeaconScore)` once the window has enough
-            // samples to score.
-            w.last_score = w.detector.observe(evt.key, evt.ts, evt.len as u64);
+            // samples to score. Scope to TCP via `evt.proto`
+            // (0.22 R2: FlowPacket is flat).
+            if matches!(evt.proto, L4Proto::Tcp) {
+                w.last_score = w.detector.observe(evt.key, evt.ts, evt.len as u64);
+            }
         },
         verdict: |_evt, w| {
             // Emit only above a confidence threshold; lower

@@ -3,7 +3,7 @@
 use flowscope::driver::{DriverBuilder, SlotHandle};
 use flowscope::extract::{FiveTuple, FiveTupleKey};
 
-use crate::protocol::{Dispatch, Protocol, ProtocolInitError};
+use crate::protocol::{Dispatch, FlowProtocol, Protocol, ProtocolInitError};
 
 /// TCP lifecycle marker. Registering this protocol enables
 /// `FlowStarted<Tcp>`, `FlowEstablished<Tcp>`, `FlowEnded<Tcp>`
@@ -31,6 +31,11 @@ impl Protocol for Tcp {
         ))
     }
 }
+
+// 0.22 R1: TCP is flow-tracked (lifecycle + FlowPacket), not a
+// message protocol — `on::<Tcp>` is a type error, use
+// `on::<FlowStarted<Tcp>>` etc.
+impl FlowProtocol for Tcp {}
 
 #[cfg(test)]
 mod tests {

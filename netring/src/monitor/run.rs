@@ -83,6 +83,7 @@ pub(crate) async fn run_loop(monitor: Monitor, stop: StopCondition) -> Result<()
             pcap_speed_factor: _,
         mut flow_states,
         fanout,
+        label_table,
     } = monitor;
     // Borrow the monitor name as `&str` for the run loop's
     // dispatch sites. The owned `Box<str>` lives in this stack
@@ -162,6 +163,7 @@ pub(crate) async fn run_loop(monitor: Monitor, stop: StopCondition) -> Result<()
                     &mut counters,
                     monitor_name_borrow,
                     &mut flow_states,
+                    &label_table,
                 )
                 .await?;
                 continue;
@@ -193,6 +195,7 @@ pub(crate) async fn run_loop(monitor: Monitor, stop: StopCondition) -> Result<()
                     source,
                     monitor_name_borrow,
                     &mut flow_states,
+                    &label_table,
                 )?;
                 dispatch_lifecycle_async(&mut dispatcher, evt).await?;
             }
@@ -213,6 +216,11 @@ pub(crate) async fn run_loop(monitor: Monitor, stop: StopCondition) -> Result<()
                 // defaults `monitor_name` to `None`; set it
                 // explicitly after construction.
                 ctx.monitor_name = monitor_name_borrow;
+                // 0.22: thread the label table + a read-only flow
+                // tracker so ICMP synthesis can join inner 5-tuples
+                // and app-label lookups use the monitor's table.
+                ctx.label_table = &label_table;
+                ctx.tracker = Some(driver.tracker());
                 slot.drain_and_dispatch(&mut dispatcher, &mut ctx)?;
             }
         }
@@ -236,6 +244,7 @@ pub(crate) async fn run_loop(monitor: Monitor, stop: StopCondition) -> Result<()
             monitor_name_borrow,
             deadline,
             &mut flow_states,
+            &label_table,
         )
         .await?;
     }
@@ -278,6 +287,7 @@ pub(crate) async fn replay_loop(
         pcap_speed_factor: _,
         mut flow_states,
         fanout: _,
+        label_table,
     } = monitor;
     let monitor_name_borrow: Option<&str> = monitor_name.as_deref();
 
@@ -310,6 +320,7 @@ pub(crate) async fn replay_loop(
                 SourceIdx(0),
                 monitor_name_borrow,
                 &mut flow_states,
+                &label_table,
             )?;
             dispatch_lifecycle_async(&mut dispatcher, evt).await?;
         }
@@ -325,6 +336,8 @@ pub(crate) async fn replay_loop(
                 &mut flow_states,
             );
             ctx.monitor_name = monitor_name_borrow;
+            ctx.label_table = &label_table;
+            ctx.tracker = Some(driver.tracker());
             slot.drain_and_dispatch(&mut dispatcher, &mut ctx)?;
         }
     }
@@ -344,6 +357,7 @@ pub(crate) async fn replay_loop(
             monitor_name_borrow,
             deadline,
             &mut flow_states,
+            &label_table,
         )
         .await?;
     }
@@ -380,6 +394,7 @@ async fn drain_phase(
     monitor_name: Option<&str>,
     deadline: Instant,
     flow_states: &mut crate::ctx::FlowStateRegistry,
+    label_table: &flowscope::well_known::LabelTable,
 ) -> Result<()> {
     // Step 1: drain the central tracker.
     let mut leftover: Vec<FsEvent<FlowKey>> = Vec::new();
@@ -397,6 +412,7 @@ async fn drain_phase(
             SourceIdx(0),
             monitor_name,
             flow_states,
+            label_table,
         )?;
         dispatch_lifecycle_async(dispatcher, evt).await?;
     }
@@ -421,6 +437,8 @@ async fn drain_phase(
             flow_states,
         );
         ctx.monitor_name = monitor_name;
+        ctx.label_table = label_table;
+        ctx.tracker = Some(driver.tracker());
         slot.drain_and_dispatch(dispatcher, &mut ctx)?;
     }
 
@@ -532,6 +550,7 @@ async fn fire_tick(
     counters: &mut CounterRegistry,
     monitor_name: Option<&str>,
     flow_states: &mut crate::ctx::FlowStateRegistry,
+    label_table: &flowscope::well_known::LabelTable,
 ) -> Result<()> {
     let reg = &mut tick_handlers[tick_idx];
     let tick = Tick {
@@ -549,6 +568,7 @@ async fn fire_tick(
             flow_states,
         );
         ctx.monitor_name = monitor_name;
+        ctx.label_table = label_table;
         (reg.handler)(&tick, &mut ctx)?;
     }
     {
@@ -562,6 +582,7 @@ async fn fire_tick(
             flow_states,
         );
         ctx.monitor_name = monitor_name;
+        ctx.label_table = label_table;
         dispatcher.dispatch::<Tick>(&tick, &mut ctx)?;
     }
     dispatcher.dispatch_async::<Tick>(&tick).await?;
@@ -708,31 +729,19 @@ async fn dispatch_lifecycle_async(
                 })
                 .await?;
         }
+        // 0.22 R2: one flat FlowPacket carrying `proto`; no per-L4
+        // dispatch fan-out.
         FsEvent::FlowPacket {
             key,
             side,
             len,
             ts,
             tcp,
-        } => match key.proto {
-            L4Proto::Tcp => {
-                dispatcher
-                    .dispatch_async(&FlowPacket::<Tcp>::new(key, side, len, tcp, ts))
-                    .await?;
-            }
-            L4Proto::Udp => {
-                dispatcher
-                    .dispatch_async(&FlowPacket::<Udp>::new(key, side, len, tcp, ts))
-                    .await?;
-            }
-            #[cfg(feature = "icmp")]
-            L4Proto::Icmp | L4Proto::IcmpV6 => {
-                dispatcher
-                    .dispatch_async(&FlowPacket::<Icmp>::new(key, side, len, tcp, ts))
-                    .await?;
-            }
-            _ => {}
-        },
+        } => {
+            dispatcher
+                .dispatch_async(&FlowPacket::new(key.proto, key, side, len, tcp, ts))
+                .await?;
+        }
         FsEvent::FlowTick { key, stats, ts } => match key.proto {
             L4Proto::Tcp => {
                 dispatcher
@@ -791,6 +800,7 @@ fn dispatch_lifecycle(
     source: SourceIdx,
     monitor_name: Option<&str>,
     flow_states: &mut crate::ctx::FlowStateRegistry,
+    label_table: &flowscope::well_known::LabelTable,
 ) -> Result<()> {
     // Macro inlines the Ctx construction at each match arm so the
     // borrow checker can shorten each `&mut` borrow to the
@@ -807,6 +817,8 @@ fn dispatch_lifecycle(
                 sink: &mut *sink,
                 counters: &mut *counters,
                 flow_states: &mut *flow_states,
+                label_table,
+                tracker: None,
             };
             dispatcher.dispatch::<$ty>(&$payload, &mut ctx)?;
         }};
@@ -910,40 +922,21 @@ fn dispatch_lifecycle(
                 ts
             );
         }
+        // 0.22 R2: one flat FlowPacket carrying `proto`.
         FsEvent::FlowPacket {
             key,
             side,
             len,
             ts,
             tcp,
-        } => match key.proto {
-            L4Proto::Tcp => {
-                dispatch_one!(
-                    FlowPacket<Tcp>,
-                    FlowPacket::<Tcp>::new(key, side, len, tcp, ts),
-                    Some(key),
-                    ts
-                );
-            }
-            L4Proto::Udp => {
-                dispatch_one!(
-                    FlowPacket<Udp>,
-                    FlowPacket::<Udp>::new(key, side, len, tcp, ts),
-                    Some(key),
-                    ts
-                );
-            }
-            #[cfg(feature = "icmp")]
-            L4Proto::Icmp | L4Proto::IcmpV6 => {
-                dispatch_one!(
-                    FlowPacket<Icmp>,
-                    FlowPacket::<Icmp>::new(key, side, len, tcp, ts),
-                    Some(key),
-                    ts
-                );
-            }
-            _ => {}
-        },
+        } => {
+            dispatch_one!(
+                FlowPacket,
+                FlowPacket::new(key.proto, key, side, len, tcp, ts),
+                Some(key),
+                ts
+            );
+        }
         FsEvent::FlowTick { key, stats, ts } => match key.proto {
             L4Proto::Tcp => {
                 dispatch_one!(

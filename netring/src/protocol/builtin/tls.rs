@@ -3,7 +3,11 @@
 use flowscope::driver::{DriverBuilder, SlotHandle};
 use flowscope::extract::{FiveTuple, FiveTupleKey};
 
-use crate::protocol::{Dispatch, Protocol, ProtocolInitError};
+use crate::protocol::{Dispatch, MessageProtocol, Protocol, ProtocolInitError};
+
+// 0.22 R1: TLS is a message protocol; its flow lifecycle is the
+// underlying TCP flow.
+impl MessageProtocol for Tls {}
 
 /// TLS handshake observation at message granularity
 /// (ClientHello / ServerHello / Alert). For one synthesised

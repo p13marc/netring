@@ -89,6 +89,8 @@ mod tests {
             sink: &mut sink,
             counters: &mut counters,
             flow_states: &mut flow_states,
+            label_table: crate::ctx::default_label_table(),
+            tracker: None,
         };
 
         let tick = Tick {

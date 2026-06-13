@@ -1,5 +1,28 @@
 # netring 0.22 — consolidated implementation plan
 
+## Implementation status (on `0.22-dev`)
+
+| Phase / item | Status |
+|---|---|
+| §1 Foundations (flowscope 0.14, Ctx infra, R1 roles, R2 flat FlowPacket) | ✅ shipped |
+| §2 flowscope absorption (KeyIndexed, bandwidth/`on_bandwidth`, `IcmpError`/`on_icmp_error`, `TcpRst`, `all_l4`/`all_l7`, prelude, net_diagnostic, discoverability) | ✅ shipped |
+| §3 report model (R3: `Report`/`ReportSink`/`report`/`report_to`) | ✅ shipped |
+| §4 legacy 0.19 API deletion (−5378 LoC) | ✅ shipped |
+| §5.2 `LayerSpec` per-shard layers | ✅ shipped |
+| §7 polish (MinSeverity const, `tick_ctx`, migration guide, Send-future decision, multi_thread demo, CI gate) | ✅ shipped |
+| **§5.1 cross-shard `merge_state` worker** | ⏳ **remaining** — heaviest item; cross-thread merge worker + run-loop `select!` branch + `BuildError::FanoutWithoutMerge`. Design in §5.1 below. Deferred for a focused session (concurrency-sensitive). |
+| **§6 eBPF bandwidth backend** | ⏳ **remaining** — R4 backend seam + R6 spike-gated XDP path. High risk; needs perf measurement on real hardware. Design in §6 below. |
+
+Side effect: shipped **flowscope 0.14.1** (ICMP datagram-routing fix —
+`datagram_broadcast(IcmpParser)` had never delivered ICMP messages;
+netring patches to the local checkout until 0.14.1 is published).
+
+Every shipped commit holds the cross-phase invariants: `clippy
+--all-features --all-targets -D warnings` clean, 326 lib + integration
+tests + doctests pass, dhat **Δ 0 / 0**.
+
+---
+
 **Single authoritative plan for the 0.22 cycle.** Supersedes the prior
 `netring-0.22-roadmap.md` + the per-phase splinter files (all deleted).
 Grounded against the netring 0.21.0 tree and the shipped flowscope 0.14.0 API

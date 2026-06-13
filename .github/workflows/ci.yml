@@ -158,3 +158,41 @@ jobs:
     steps:
       - uses: actions/checkout@v5
       - uses: bnjbvr/cargo-machete@main
+
+  # ── miri: UB / provenance checking of the unsafe-heavy logic ───────────────
+  # Scoped to the pure-logic surface (no syscalls/mmap): the in-tree cBPF
+  # compiler + interpreter (`config::`) and the zero-copy `BatchIter`/`Packet`
+  # pointer walk (`packet::`). Tree Borrows is the aliasing model we validate
+  # against — the `BatchIter` raw-pointer iteration is sound under TB but trips
+  # the stricter (legacy) Stacked Borrows; see docs/MIRI.md.
+  miri:
+    name: miri (Tree Borrows)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+      - uses: dtolnay/rust-toolchain@nightly
+        with:
+          components: miri
+      - uses: Swatinem/rust-cache@v2
+      - name: miri test (pure-logic surface)
+        env:
+          MIRIFLAGS: "-Zmiri-tree-borrows"
+        run: |
+          cargo +nightly miri test -p netring --lib config::
+          cargo +nightly miri test -p netring --lib packet:: -- --skip afpacket
+
+  # ── cargo-fuzz smoke: BPF compiler + interpreter against adversarial input ─
+  fuzz:
+    name: fuzz smoke
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+      - uses: dtolnay/rust-toolchain@nightly
+      - uses: Swatinem/rust-cache@v2
+      - name: install cargo-fuzz
+        run: cargo install cargo-fuzz --locked
+      - name: fuzz smoke (60s each)
+        working-directory: netring
+        run: |
+          cargo +nightly fuzz run bpf_matches -- -runs=200000 -max_total_time=60
+          cargo +nightly fuzz run bpf_builder -- -runs=200000 -max_total_time=60

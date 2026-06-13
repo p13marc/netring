@@ -1,0 +1,36 @@
+# cargo-fuzz crate for netring. Detached from the workspace (its own
+# `[workspace]`) so the libfuzzer instrumentation doesn't leak into normal
+# builds. Run: `cargo +nightly fuzz run bpf_matches` (from netring/).
+[package]
+name = "netring-fuzz"
+version = "0.0.0"
+publish = false
+edition = "2024"
+
+[package.metadata]
+cargo-fuzz = true
+
+[dependencies]
+libfuzzer-sys = "0.4"
+arbitrary = { version = "1", features = ["derive"] }
+netring = { path = ".." }
+
+# Detach from the parent workspace.
+[workspace]
+
+[profile.release]
+debug = 1
+
+[[bin]]
+name = "bpf_matches"
+path = "fuzz_targets/bpf_matches.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "bpf_builder"
+path = "fuzz_targets/bpf_builder.rs"
+test = false
+doc = false
+bench = false

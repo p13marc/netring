@@ -23,6 +23,20 @@ jobs:
         run: cargo check --workspace --all-features
       - name: clippy
         run: cargo clippy --workspace --all-targets --all-features -- --deny warnings
+      # Feature-combination matrix beyond --all-features: catch broken gating
+      # (e.g. a module that only compiles with a feature it forgot to declare).
+      - name: cargo check (feature combos)
+        run: |
+          for f in \
+            "--no-default-features" \
+            "--features flow" \
+            "--features af-xdp" \
+            "--features monitor-lite" \
+            "--features tokio,flow,dns,http"; do
+            echo "::group::cargo check -p netring $f"
+            cargo check -p netring $f
+            echo "::endgroup::"
+          done
 
   fmt:
     name: Format

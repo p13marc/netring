@@ -73,78 +73,78 @@ core_affinity = "0.8"
 futures = "0.3"
 proptest = "1"
 
+# ── Feature graph ───────────────────────────────────────────────────────────
+# Features are organized as ORTHOGONAL AXES. See `docs/FEATURES.md` for the
+# full matrix + recipes, and `docs/CRATE_BOUNDARY.md` for the netring↔flowscope
+# split. Quick recipes:
+#   bare capture/inject : default = []
+#   AF_XDP              : af-xdp           (+ xdp-loader for the bundled program)
+#   lean Monitor        : monitor-lite     (tokio + channel + flow)
+#   Monitor + L7 + sinks: monitor
+#   everything app-tier : monitor-quickstart
 [features]
 default = []
+
+# ── Axis: async runtime ──────────────────────────────────────────────────────
 tokio = ["dep:tokio", "dep:tokio-stream", "dep:futures-core"]
 channel = ["dep:crossbeam-channel"]
-parse = ["dep:etherparse", "flowscope/extractors"]
-pcap = ["dep:pcap-file"]
-metrics = ["dep:metrics"]
+
+# ── Axis: capture backend ────────────────────────────────────────────────────
+# AF_PACKET is always compiled (the base). These add the other backends.
 af-xdp = []
-# Built-in XDP redirect-all program loader for AF_XDP. Pulls `aya`.
-# Lets `XdpSocketBuilder::with_default_program()` create an XSKMAP,
-# load the program, attach it to the interface, and register the
-# socket — no external program loader required.
+# Built-in XDP redirect-all program loader for AF_XDP. Pulls `aya` (HEAVY).
+# Lets `XdpSocketBuilder::with_default_program()` create an XSKMAP, load the
+# program, attach it, and register the socket — no external loader required.
 xdp-loader = ["af-xdp", "dep:aya"]
-nightly = []
-integration-tests = []
-# Flow & session tracking. `flow + tokio` enables `AsyncCapture::flow_stream`.
-# Pulls `bytes` since the async reassembler API uses it.
+pcap = ["dep:pcap-file"]
+
+# ── Axis: parse depth (parse → flow → L7 parsers) ────────────────────────────
+parse = ["dep:etherparse", "flowscope/extractors"]
+# Flow & session tracking. `flow + tokio` enables `AsyncCapture::flow_stream`
+# + the Monitor. Pulls `bytes` (async reassembler) + `ahash` (flow-key hashing).
+# NOTE: `flow` implies `parse` — the tracker needs etherparse extractors.
 flow = ["parse", "flowscope/tracker", "flowscope/reassembler", "flowscope/session", "dep:bytes", "dep:ahash"]
-# L7 parser pass-through features — pull flowscope's HTTP/DNS/TLS modules.
-# Used by `examples/l7/*` and any consumer that wants a ready-made parser.
+# L7 parser pass-through — pull flowscope's HTTP/DNS/TLS/ICMP modules.
 http = ["flow", "flowscope/http"]
 dns = ["flow", "flowscope/dns"]
 tls = ["flow", "flowscope/tls"]
 icmp = ["flow", "flowscope/icmp"]
-# 0.21 I.5 — pass-through for flowscope's `detect::file` module
-# (Sha256Sink / Md5Sink / FileType). No extra deps beyond
-# `sha2` (already pulled by `flowscope/file-hash`).
-file-hash = ["flowscope/file-hash"]
-# Umbrella for everything flowscope-side.
 all-parsers = ["http", "dns", "tls", "icmp"]
+# Pass-through for flowscope's `detect::file` (Sha256Sink / FileType).
+file-hash = ["flowscope/file-hash"]
 
-# 0.20: convenience umbrella for app users that want the full
-# Monitor + detector! macro experience without enumerating every
-# sub-feature. Embedded users who need a leaner build keep using
-# the granular feature set.
+# ── Axis: sinks / exporters / serialization ──────────────────────────────────
+# serde derives on `Anomaly<K>` / `AnomalyContext` / `Severity` + JSON sinks.
+serde = ["dep:serde", "dep:serde_json", "flowscope/serde"]
+metrics = ["dep:metrics"]
+# Pass-through for flowscope's `emit` module (Zeek conn.log, CSV writers).
+emit = ["flow", "flowscope/emit"]
+# Suricata EVE JSON sink over `flowscope::emit::EveJsonWriter`.
+eve-sink = ["emit", "dep:serde_json", "flowscope/emit-eve"]
+# (0.24 Phase D adds `syslog` and `ipfix` here; OTLP/Kafka live in the
+#  `netring-exporters` companion crate, not as core features.)
+
+# ── Umbrellas ────────────────────────────────────────────────────────────────
+# Lean Monitor: the typed dispatch + run loop, no serde/metrics/eve/parsers.
+# The minimum viable Monitor baseline for embedded/embedded-app builds.
+monitor-lite = ["tokio", "channel", "flow"]
+# Full Monitor + detector! experience for app users.
 monitor = [
     "tokio", "channel", "flow", "parse", "metrics",
     "http", "dns", "tls", "icmp",
     "emit", "serde",
 ]
-
-# 0.21 H.4: maximal umbrella that pulls every 0.21 sink + detector
-# + flowscope bonus feature. Suitable for "full-stack" app builds
-# that want everything netring + flowscope-0.13 can offer; lean
-# embedded builds should still wire `tokio + flow` (or the
-# narrower `monitor`) directly.
+# Maximal app-tier umbrella (every shipped sink + parser + flowscope bonus).
 monitor-quickstart = [
     "tokio", "channel", "flow", "parse", "pcap", "metrics",
     "http", "dns", "tls", "icmp",
     "emit", "eve-sink", "file-hash", "serde",
 ]
 
-# Opt-in serde derives on `Anomaly<K>` / `AnomalyContext` /
-# `Severity`. Composes with `flowscope/serde` (0.8+) so users
-# can ship `Anomaly`s carrying full parsed `ProtocolMessage`
-# payloads through line-oriented JSON sinks (Vector, Fluentd,
-# Loki, …). Provides `Anomaly::to_json_value() -> serde_json::Value`
-# alongside the zero-dep `to_json_line()`.
-serde = ["dep:serde", "dep:serde_json", "flowscope/serde"]
-# Pass-through for flowscope's `emit` module (Zeek conn.log,
-# CSV writers). Pulls no extra deps. Used by
-# `examples/flow/zeek_export.rs`.
-emit = ["flow", "flowscope/emit"]
-# 0.21 Phase B.2 — Suricata EVE JSON sink. Adapter over
-# `flowscope::emit::EveJsonWriter` exposed at
-# `netring::anomaly::EveSink`. Pulls flowscope's `emit-eve`
-# (which pulls `serde_json`).
-eve-sink = ["emit", "dep:serde_json", "flowscope/emit-eve"]
-# Opt-in: drives the dhat-based allocation regression test in
-# `benches/zero_alloc.rs`. Pulls `flow + tokio + parse` because
-# the dispatcher + builtin Protocol markers + Ctx surface live
-# under those gates.
+# ── Misc / build-time ────────────────────────────────────────────────────────
+nightly = []
+integration-tests = []
+# Drives the dhat allocation-regression bench (`benches/zero_alloc.rs`).
 bench-zero-alloc = ["dep:dhat", "flow", "tokio", "parse"]
 
 [package.metadata.docs.rs]

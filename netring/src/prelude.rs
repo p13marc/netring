@@ -25,13 +25,20 @@ pub use crate::protocol::builtin::{Tcp, Udp};
 #[cfg(feature = "tls")]
 pub use crate::protocol::builtin::{Tls, TlsHandshake};
 
-// ─── Protocol trait + dispatch types (for custom Protocol impls) ─
-pub use crate::protocol::{Dispatch, FlowKey, Protocol, ProtocolInitError, SignatureMatch};
+// ─── Protocol trait + roles + dispatch types ─────────────────────
+pub use crate::protocol::{
+    Dispatch, FlowKey, FlowProtocol, MessageProtocol, Protocol, ProtocolInitError, SignatureMatch,
+};
 
 // ─── Event types ─────────────────────────────────────────────────
+// 0.22: FlowPacket is flat (carries `proto`); FlowTick/ParserClosed are
+// parameterised lifecycle events; TcpRst/IcmpError are synthesised.
 pub use crate::protocol::event_typed::{
-    AnyFlowAnomaly, FlowEnded, FlowEstablished, FlowStarted, Tick,
+    AnyFlowAnomaly, FlowEnded, FlowEstablished, FlowPacket, FlowStarted, FlowTick, ParserClosed,
+    TcpRst, Tick,
 };
+#[cfg(feature = "icmp")]
+pub use crate::protocol::event_typed::{IcmpError, IcmpErrorKind, IcmpFamily};
 
 // ─── Per-event Ctx ───────────────────────────────────────────────
 pub use crate::ctx::{Ctx, SourceIdx};
@@ -56,7 +63,15 @@ pub use crate::anomaly::{AnomalyFields, DetectorScore, Key, KeyFields};
 pub use crate::layer::{DedupeAnomalies, Layer, MinSeverity, RateLimitAnomalies, Sample, Tee};
 
 // ─── Sliding-window correlate primitives ─────────────────────────
-pub use crate::correlate::{KeyIndexed, TimeBucketedCounter};
+pub use crate::correlate::{
+    BurstDetector, Ewma, KeyIndexed, RollingRate, TimeBucketedCounter, TimeBucketedSet, TopK,
+};
+
+// ─── Bandwidth + well-known labels (0.22) ────────────────────────
+pub use crate::monitor::BandwidthReport;
+pub use crate::well_known::LabelTable;
+#[cfg(feature = "icmp")]
+pub use flowscope::icmp::{DestUnreachableKind, MtuSignalKind};
 
 // ─── Common external types ───────────────────────────────────────
 pub use flowscope::{EndReason, FlowSide, L4Proto, Timestamp};

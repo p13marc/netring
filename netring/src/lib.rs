@@ -47,6 +47,15 @@ pub mod protocol;
 pub mod stats;
 pub mod traits;
 
+/// 0.22 §2.2: well-known port → app/protocol label table, re-exported
+/// from flowscope for a stable `netring::well_known::LabelTable` path.
+/// Pass a custom table to
+/// [`MonitorBuilder::label_table`](crate::monitor::MonitorBuilder::label_table).
+#[cfg(feature = "parse")]
+pub mod well_known {
+    pub use flowscope::well_known::LabelTable;
+}
+
 pub(crate) mod sockopt;
 pub(crate) mod syscall;
 

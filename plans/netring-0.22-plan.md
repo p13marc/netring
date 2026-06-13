@@ -313,6 +313,17 @@ Classifier from flowscope 0.14: `is_error()` (:589), `mtu_signal()` (:609),
 
 ### 2.5 ICMP synthesis + `on_icmp_error` sugar
 
+> **Impl note (blocker found + fixed):** `datagram_broadcast(IcmpParser)`
+> never actually delivered ICMP messages — flowscope's datagram driver
+> extracted only UDP payloads (`extract_udp_payload` matched
+> `TransportSlice::Udp` only), so the ICMP parser was never fed and the
+> driver-level ICMP path was untested. Fixed in **flowscope 0.14.1**
+> (handle `Icmpv4`/`Icmpv6`, regression test
+> `tests/icmp_datagram_routing.rs`); netring bumps its floor to `0.14.1`
+> and patches `[patch.crates-io] flowscope = { path = "../flowscope" }`
+> until 0.14.1 is published. Routing is via a new `Protocol::make_slot`
+> hook (default `TypedProtocolSlot`; `Icmp` overrides → `IcmpSlot`).
+
 `Icmp` is drained by one dedicated `IcmpSlot` (replaces the generic
 `TypedProtocolSlot::<Icmp>` whenever `Icmp` is declared) that always forwards the
 raw `IcmpMessage` *and* synthesises `IcmpError` (no flag; `dispatch` no-ops

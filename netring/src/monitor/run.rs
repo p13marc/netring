@@ -20,19 +20,15 @@
 //!    closure *and* dispatch the typed `Tick` event so users
 //!    who registered via `.on::<Tick>(...)` see it too.
 
-use std::pin::Pin;
 use std::task::{Context, Poll};
 use std::time::{Duration, Instant};
 
 use flowscope::L4Proto;
 use flowscope::driver::Event as FsEvent;
 use flowscope::extract::FiveTuple;
-use futures_core::Stream;
 
 use crate::AsyncCapture;
-use crate::OwnedPacket;
 use crate::anomaly::sink::AnomalySink;
-use crate::async_adapters::tokio_adapter::PacketStream;
 use crate::ctx::{CounterRegistry, Ctx, SourceIdx, StateMap};
 use crate::error::Result;
 use crate::monitor::Monitor;
@@ -97,7 +93,12 @@ pub(crate) async fn run_loop(monitor: Monitor, stop: StopCondition) -> Result<()
     // monitor (the common case) opens exactly one ring — the
     // round-robin select reduces to a one-armed select with the
     // same latency as the prior single-cap path.
-    let mut streams: Vec<PacketStream<_>> = Vec::with_capacity(interfaces.len());
+    // 0.24 Phase B: hold each `AsyncCapture` directly (not an owned
+    // `PacketStream`) so the run loop can drain **borrowed** zero-copy batches
+    // in place — no per-packet `to_owned` copy. The future stays `Send` because
+    // the only borrow held across an `.await` is inside `readable()`, and
+    // `AsyncCapture` is `Send`; all dispatch runs *after* the batch is dropped.
+    let mut caps: Vec<AsyncCapture<crate::Capture>> = Vec::with_capacity(interfaces.len());
     for iface in &interfaces {
         // 0.21 C: when the user set a fanout (single-shard or
         // sharded via ShardedRunner), open each ring with the
@@ -113,7 +114,7 @@ pub(crate) async fn run_loop(monitor: Monitor, stop: StopCondition) -> Result<()
             }
             None => AsyncCapture::open(iface)?,
         };
-        streams.push(cap.into_stream());
+        caps.push(cap);
     }
 
     let mut events: Vec<FsEvent<FlowKey>> = Vec::with_capacity(64);
@@ -145,10 +146,10 @@ pub(crate) async fn run_loop(monitor: Monitor, stop: StopCondition) -> Result<()
         // the next tick. The `if !tick_intervals.is_empty()`
         // gate keeps the tick branch from being polled when no
         // handlers are registered (saves one cx wake per loop).
-        let next = tokio::select! {
+        let ready = tokio::select! {
             biased;
             _ = shutdown.recv(last_event_at) => break,
-            packet = next_packet(&mut streams, &mut rr_anchor) => packet,
+            idx = ready_capture(&mut caps, &mut rr_anchor) => idx,
             tick_idx = next_tick(&mut tick_intervals), if !tick_intervals.is_empty() => {
                 // Reset idle timer on every tick — periodic
                 // tick fires are intended user activity, not
@@ -180,49 +181,64 @@ pub(crate) async fn run_loop(monitor: Monitor, stop: StopCondition) -> Result<()
                 continue;
             }
         };
-        let (source_idx, batch) = match next {
-            Some((i, Ok(b))) => (i, b),
-            Some((_, Err(e))) => return Err(e),
-            None => break, // all streams exhausted
+        let i = match ready {
+            Some(Ok(i)) => i,
+            Some(Err(e)) => return Err(e),
+            None => break, // all captures exhausted (AF_PACKET never reports this)
         };
-        let source = SourceIdx(source_idx as u8);
-        // Reset idle timer on every received batch.
+        let source = SourceIdx(i as u8);
+        // Reset idle timer on every readable wake.
         last_event_at = Instant::now();
 
-        for pkt in batch {
-            let view = flowscope::PacketView::new(&pkt.data, pkt.timestamp);
-
-            // (1) Lifecycle events from the central tracker.
-            events.clear();
-            driver.track_into(view, &mut events);
-            dispatch_tracked_events(
-                &mut dispatcher,
-                sink.as_mut(),
-                &mut state_map,
-                &mut counters,
-                &mut events,
-                source,
-                monitor_name_borrow,
-                &mut flow_states,
-                &label_table,
-            )
-            .await?;
-
-            // (2) Typed messages from each registered slot.
-            drain_protocol_slots(
-                &mut dispatcher,
-                &mut protocol_slots,
-                &driver,
-                sink.as_mut(),
-                &mut state_map,
-                &mut counters,
-                &mut flow_states,
-                pkt.timestamp,
-                source,
-                monitor_name_borrow,
-                &label_table,
-            )?;
+        // IN-BORROW: drain every retired block now ready on this capture and
+        // feed each packet's zero-copy view to the tracker. `track_into` copies
+        // only the metadata it needs into the owned `events` buffer (and feeds
+        // the L7 parsers, which buffer owned messages) — no packet-data copy.
+        events.clear();
+        let mut last_ts: Option<flowscope::Timestamp> = None;
+        {
+            let mut guard = caps[i].readable().await?;
+            while let Some(batch) = guard.next_batch() {
+                for pkt in &batch {
+                    last_ts = Some(pkt.timestamp());
+                    let view = flowscope::PacketView::new(pkt.data(), pkt.timestamp());
+                    driver.track_into(view, &mut events);
+                }
+                // `batch` drops here → the kernel block is returned.
+            }
+            // `guard` drops here → the capture-ring borrow is released, *before*
+            // any dispatch `.await`, which is what keeps the future `Send`.
         }
+
+        // A spurious wake (no retired block) leaves `last_ts == None`.
+        let Some(ts) = last_ts else { continue };
+
+        // AFTER BORROW: dispatch on owned data (sync + async, Send-safe).
+        dispatch_tracked_events(
+            &mut dispatcher,
+            sink.as_mut(),
+            &mut state_map,
+            &mut counters,
+            &mut events,
+            source,
+            monitor_name_borrow,
+            &mut flow_states,
+            &label_table,
+        )
+        .await?;
+        drain_protocol_slots(
+            &mut dispatcher,
+            &mut protocol_slots,
+            &driver,
+            sink.as_mut(),
+            &mut state_map,
+            &mut counters,
+            &mut flow_states,
+            ts,
+            source,
+            monitor_name_borrow,
+            &label_table,
+        )?;
     }
 
     // 0.21 D.2: graceful drain phase. After the stop condition
@@ -267,6 +283,8 @@ pub(crate) async fn replay_loop(
     path: std::path::PathBuf,
     config: crate::pcap_source::AsyncPcapConfig,
 ) -> Result<()> {
+    use std::pin::Pin;
+
     use futures_core::Stream;
 
     let Monitor {
@@ -452,53 +470,39 @@ async fn drain_phase(
     Ok(())
 }
 
-/// Round-robin poll across the N capture streams. Returns
-/// `Some((source_idx, batch))` on the next ready stream, or
-/// `None` when every stream is exhausted.
+/// Round-robin readiness poll across the N captures. Returns
+/// `Some(Ok(index))` for the next *readable* capture (the caller then drains
+/// its borrowed batches in place), `Some(Err(_))` on a readiness error, or
+/// `None` only when there are no captures.
 ///
-/// The poll is fair: `anchor` records the index just past the
-/// last successful batch, so the next call starts the scan there.
-/// A chatty stream can't starve the quieter ones — even if every
-/// stream is always ready, we cycle through them.
-async fn next_packet<S>(
-    streams: &mut [PacketStream<S>],
-    anchor: &mut usize,
-) -> Option<(usize, Result<Vec<OwnedPacket>>)>
+/// Fair: `anchor` records the index just past the last serviced capture, so the
+/// scan resumes there — a chatty interface can't starve the quiet ones. The
+/// readiness guard from `poll_read_ready_mut` is dropped without clearing, so
+/// the level-triggered fd stays ready and the caller's `readable()` resolves
+/// immediately.
+async fn ready_capture<S>(caps: &mut [AsyncCapture<S>], anchor: &mut usize) -> Option<Result<usize>>
 where
-    S: crate::traits::PacketSource + std::os::unix::io::AsRawFd + Unpin,
+    S: crate::traits::PacketSource + std::os::unix::io::AsRawFd,
 {
-    std::future::poll_fn(
-        |cx: &mut Context<'_>| -> Poll<Option<(usize, Result<Vec<OwnedPacket>>)>> {
-            let n = streams.len();
-            if n == 0 {
-                return Poll::Ready(None);
-            }
-            let start = *anchor % n;
-            let mut all_done = true;
-            for offset in 0..n {
-                let i = (start + offset) % n;
-                match Pin::new(&mut streams[i]).poll_next(cx) {
-                    Poll::Ready(Some(item)) => {
-                        *anchor = (i + 1) % n;
-                        return Poll::Ready(Some((i, item)));
-                    }
-                    Poll::Ready(None) => {
-                        // This stream is exhausted; keep checking the
-                        // others. `all_done` stays true only if every
-                        // stream reports Ready(None).
-                    }
-                    Poll::Pending => {
-                        all_done = false;
-                    }
+    std::future::poll_fn(|cx: &mut Context<'_>| -> Poll<Option<Result<usize>>> {
+        let n = caps.len();
+        if n == 0 {
+            return Poll::Ready(None);
+        }
+        let start = *anchor % n;
+        for offset in 0..n {
+            let i = (start + offset) % n;
+            match caps[i].poll_read_ready_mut(cx) {
+                Poll::Ready(Ok(_guard)) => {
+                    *anchor = (i + 1) % n;
+                    return Poll::Ready(Some(Ok(i)));
                 }
+                Poll::Ready(Err(e)) => return Poll::Ready(Some(Err(crate::error::Error::Io(e)))),
+                Poll::Pending => {}
             }
-            if all_done {
-                Poll::Ready(None)
-            } else {
-                Poll::Pending
-            }
-        },
-    )
+        }
+        Poll::Pending
+    })
     .await
 }
 

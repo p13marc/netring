@@ -172,17 +172,13 @@ pub use pcap_flow::{PcapDatagramStream, PcapFlowStream, PcapSessionStream};
 pub use pcap_source::{AsyncPcapConfig, AsyncPcapSource, PcapFormat};
 #[cfg(all(feature = "pcap", feature = "tokio"))]
 pub use pcap_tap::{PcapTap, TapErrorPolicy};
+// 0.20 plugin layer re-exports. Consumed by the `Monitor::builder()`
+// API. The 0.19 `ProtocolMonitor` / `ProtocolEvent` surface was removed
+// in 0.22.
 #[cfg(all(feature = "flow", feature = "tokio"))]
-#[allow(deprecated)]
-pub use protocol::{ProtocolEvent, ProtocolMessage, ProtocolMonitor, ProtocolMonitorBuilder};
-
-// 0.20 plugin layer re-exports (Phase A). These get consumed by
-// the new `Monitor::builder()` API landing in Phase B.
-#[cfg(all(feature = "flow", feature = "tokio"))]
-pub use protocol::{Dispatch, FlowKey, Protocol, ProtocolInitError, SignatureMatch};
-
-#[cfg(all(feature = "flow", feature = "tokio"))]
-#[allow(deprecated)]
-pub use anomaly::{
-    Anomaly, AnomalyContext, AnomalyMonitor, AnomalyRule, FlowAnomalyRule, Severity,
+pub use protocol::{
+    Dispatch, FlowKey, FlowProtocol, MessageProtocol, Protocol, ProtocolInitError, SignatureMatch,
 };
+
+#[cfg(all(feature = "flow", feature = "tokio"))]
+pub use anomaly::{Anomaly, AnomalyContext, Severity};

@@ -825,25 +825,8 @@ impl MonitorBuilder {
         self
     }
 
-    /// Deprecated three-generic handler registration.
-    ///
-    /// Replaced by [`Self::on`] (payload-only) and [`Self::on_ctx`]
-    /// (payload + ctx); both take one generic each — the marker
-    /// type is fixed per method instead of `_, _`-inferred. Removed
-    /// in netring 0.22.
-    #[deprecated(
-        since = "0.21.0",
-        note = "use `.on::<E>(handler)` (payload-only) or `.on_ctx::<E>(handler)` (payload + ctx); the marker is fixed per method"
-    )]
-    pub fn on_with_marker<E, H, M>(mut self, handler: H) -> Self
-    where
-        E: Event,
-        H: Handler<E, M>,
-        M: 'static,
-    {
-        self.handlers.register::<E, H, M>(handler);
-        self
-    }
+    // 0.22: the deprecated three-generic `on_with_marker` is removed —
+    // use `.on::<E>(handler)` or `.on_ctx::<E>(handler)`.
 
     /// Register a [`crate::detector_macro::Detector<E, F>`] produced by the
     /// [`crate::detector!`] macro. Inference flows from the
@@ -1251,17 +1234,6 @@ mod tests {
         assert_eq!(m.interfaces, vec!["lo".to_string()]);
     }
 
-    #[test]
-    #[allow(deprecated)]
-    fn build_with_legacy_on_with_marker_still_compiles() {
-        // 0.21 A.2 deprecation gate: confirm the 0.20 three-generic
-        // form still compiles for one cycle. Removed in 0.22.
-        let _ = Monitor::builder()
-            .interface("lo")
-            .on_with_marker::<FlowStarted<Tcp>, _, _>(|_evt: &FlowStarted<Tcp>| Ok(()))
-            .build()
-            .unwrap();
-    }
 
     #[test]
     fn builder_state_pre_registration_visible_at_build() {

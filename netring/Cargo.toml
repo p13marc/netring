@@ -384,12 +384,6 @@ path = "examples/l7/dns_lookups.rs"
 required-features = ["tokio", "dns"]
 
 [[example]]
-name = "full_monitor"
-path = "examples/l7/full_monitor.rs"
-required-features = ["tokio", "http", "dns"]
-
-# anomaly/ — multi-protocol correlators on top of `netring::correlate`
-[[example]]
 name = "dns_query_burst"
 path = "examples/anomaly/dns_query_burst.rs"
 required-features = ["tokio", "dns"]
@@ -399,57 +393,6 @@ name = "dns_resolved_no_connection"
 path = "examples/anomaly/dns_resolved_no_connection.rs"
 required-features = ["tokio", "dns"]
 
-[[example]]
-name = "anomaly_monitor_demo"
-path = "examples/anomaly/anomaly_monitor_demo.rs"
-required-features = ["tokio", "dns"]
-
-[[example]]
-name = "slow_tls_handshake"
-path = "examples/anomaly/slow_tls_handshake.rs"
-required-features = ["tokio", "tls"]
-
-[[example]]
-name = "lateral_movement"
-path = "examples/anomaly/lateral_movement.rs"
-required-features = ["tokio", "flow", "parse"]
-
-[[example]]
-name = "icmp_explained_drop"
-path = "examples/anomaly/icmp_explained_drop.rs"
-required-features = ["tokio", "icmp"]
-
-[[example]]
-name = "pcap_replay_anomaly"
-path = "examples/anomaly/pcap_replay.rs"
-required-features = ["tokio", "flow", "parse", "pcap", "dns"]
-
-[[example]]
-name = "pcap_replay_multi"
-path = "examples/anomaly/pcap_replay_multi.rs"
-required-features = ["tokio", "flow", "parse", "pcap", "dns", "tls"]
-
-[[example]]
-name = "tls_to_unresolved_ip"
-path = "examples/anomaly/tls_to_unresolved_ip.rs"
-required-features = ["tokio", "dns", "tls"]
-
-[[example]]
-name = "dns_tunnel_detect"
-path = "examples/anomaly/dns_tunnel_detect.rs"
-required-features = ["tokio", "dns"]
-
-[[example]]
-name = "port_scan"
-path = "examples/anomaly/port_scan.rs"
-required-features = ["tokio", "flow", "parse"]
-
-[[example]]
-name = "syn_flood_burst"
-path = "examples/anomaly/syn_flood_burst.rs"
-required-features = ["tokio", "flow", "parse"]
-
-# monitor/ — 0.20 Monitor::builder() API demos
 [[example]]
 name = "monitor_basic"
 path = "examples/monitor/basic.rs"
@@ -545,11 +488,6 @@ required-features = ["tokio", "flow", "parse", "pcap"]
 [[bench]]
 name = "throughput"
 harness = false
-
-[[bench]]
-name = "anomaly"
-harness = false
-required-features = ["tokio", "flow", "parse", "dns", "tls"]
 
 [[bench]]
 name = "zero_alloc"

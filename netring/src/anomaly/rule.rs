@@ -7,7 +7,6 @@
 
 use flowscope::Timestamp;
 
-use crate::protocol::ProtocolEvent;
 
 impl From<flowscope::event::Severity> for Severity {
     fn from(s: flowscope::event::Severity) -> Self {
@@ -394,29 +393,5 @@ pub struct AnomalyContext {
     pub metrics: Vec<(&'static str, f64)>,
 }
 
-/// One anomaly detector.
-///
-/// Implement [`observe`](Self::observe) to react to per-event
-/// state, [`on_tick`](Self::on_tick) for time-bound detections
-/// (drains, sweeps, sliding windows). Both methods push any
-/// findings into the shared `emit` buffer — the
-/// [`AnomalyMonitor`](super::AnomalyMonitor) reuses one allocation
-/// across rules.
-#[deprecated(
-    since = "0.21.0",
-    note = "Use `netring::monitor::Monitor::builder()` + `detect(detector!{...})` or `pattern_detector!{...}` (the 0.20+ typed-handler API) instead. \
-            Removed in 0.22.0. See docs/MIGRATING_0.20_TO_0.21.md."
-)]
-pub trait AnomalyRule<K>: Send {
-    /// Stable detector identifier — also used as the default
-    /// `Anomaly::kind` slug.
-    fn name(&self) -> &'static str;
-
-    /// Inspect an event and append any anomalies it surfaces.
-    fn observe(&mut self, evt: &ProtocolEvent<K>, emit: &mut Vec<Anomaly<K>>);
-
-    /// Time-bound detection hook — called once per sweep tick from
-    /// [`AnomalyMonitor::on_tick`](super::AnomalyMonitor::on_tick).
-    /// Default no-op: rules that don't need it can ignore it.
-    fn on_tick(&mut self, _now: Timestamp, _emit: &mut Vec<Anomaly<K>>) {}
-}
+// 0.22: the legacy `AnomalyRule<K>` trait (0.19 API) is removed. Use
+// `Monitor::builder()` + `detect(detector!{…})` / `pattern_detector!{…}`.

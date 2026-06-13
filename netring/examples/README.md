@@ -92,8 +92,8 @@ matrix and anti-patterns.
 
 The L7 surface. `multi_protocol_monitor` demuxes ICMP/TCP/UDP at
 the flow level; `http_session` and `dns_lookups` add real protocol
-parsing; `full_monitor` combines all three concurrently — the
-production-style "watch this interface for everything" recipe.
+parsing. For the "watch this interface for everything" recipe, use
+the declarative `Monitor::builder()` API (see `monitor/` below).
 
 | Example | What it shows | Features |
 |---|---|---|
@@ -101,7 +101,6 @@ production-style "watch this interface for everything" recipe.
 | `multi_protocol_monitor` | One `flow_stream`, demux per-L4 (ICMP / TCP / UDP) | `tokio,flow,parse` |
 | `http_session` | TCP/80,8080 → `HttpParser` → request/response events | `tokio,http` |
 | `dns_lookups` | UDP/53 → `DnsUdpParser::with_correlation()` → query/response/RTT/unanswered | `tokio,dns` |
-| **`full_monitor`** | **One `ProtocolMonitorBuilder` call drives flow + HTTP + DNS through a unified `ProtocolEvent` stream.** The "all at once" showcase. Replaces the previous hand-rolled `tokio::select!` boilerplate. | `tokio,http,dns` |
 
 ## pcap/ — offline replay
 
@@ -154,27 +153,19 @@ for the older legacy → 0.20 path.
 ## anomaly/ — multi-protocol anomaly correlators
 
 Real-life detectors built on `netring::correlate`'s primitives
-(`TimeBucketedCounter`, `KeyIndexed`). The foundation for plan
-[`netring-0.16-roadmap-2026-05-29.md`](../../plans/netring-0.16-roadmap-2026-05-29.md)
-Part III's `AnomalyMonitor` harness.
+(`TimeBucketedCounter`, `KeyIndexed`) over raw `AsyncCapture` streams.
 
-**See [`docs/WRITING_DETECTORS.md`](../docs/WRITING_DETECTORS.md)
-for the full tutorial** — anatomy of a rule, state primitives
-(when to use which), `observe` vs `on_tick`, cross-protocol
-correlator pattern, testing recipes, production deployment, false
-positives, MITRE mapping.
+> **0.22:** the legacy `AnomalyMonitor` / `AnomalyRule` harness was
+> removed. The detector examples that used it are gone; their
+> equivalents live under `monitor/` on the declarative
+> `Monitor::builder()` + `detector!` / `pattern_detector!` API
+> (`monitor/port_scan`, `monitor/beacon_detector`, `monitor/dga_query`,
+> `monitor/net_diagnostic`).
 
 | Example | What it shows | Features |
 |---|---|---|
 | `dns_query_burst` | Per-source-IP DNS rate anomaly via `TimeBucketedCounter`. Raw primitives, no harness. | `tokio,dns` |
-| `dns_resolved_no_connection` | Cross-protocol: DNS resolved but no TCP/UDP follows within timeout. Uses `KeyIndexed::drain_expired` to surface unfulfilled resolutions as anomalies. Raw primitives. | `tokio,dns` |
-| **`anomaly_monitor_demo`** | **Both detectors above in one event loop using `AnomalyMonitor` + `ProtocolMonitor`.** The "easy to write" recipe: each rule is a small `AnomalyRule<FiveTupleKey>` impl. Compose freely; one builder + one event loop drives the whole correlator. | `tokio,dns` |
-| `slow_tls_handshake` | `SlowTlsHandshakeRule` — `ClientHello` not followed by `ServerHello` within threshold. Uses `KeyIndexed::drain_expired` on sweep tick. | `tokio,tls` |
-| `lateral_movement` | `LateralMovementRule` — one internal IP contacts > N distinct internal peers in window. Per-source `KeyIndexed<IpAddr, ()>` fan-out tracking; persistent state across flows. | `tokio,flow,parse` |
-| **`icmp_explained_drop`** | **`IcmpExplainedDropRule` — cross-protocol correlation using `IcmpInner` (flowscope 0.7).** Classifies aborted flows into "explained" (matching ICMP Destination Unreachable / Time Exceeded arrived first; Severity::Info) vs "unexplained" (no matching ICMP; Severity::Warning). Catches firewall silent-drop / peer-RST patterns. | `tokio,icmp` |
-| **`pcap_replay_anomaly`** | **Drive any `AnomalyMonitor` from a pcap file.** `AsyncPcapSource` + `datagrams()` → `ProtocolEvent::Message` (constructed in-place since the variant is `pub`) → rules. Same detector code as live capture; no privileges needed. The "replay incident pcap against detector-v2 pre-deploy" workflow. | `tokio,flow,parse,pcap,dns` |
-| **`pcap_replay_multi`** | **Multi-protocol pcap replay.** Opens the pcap twice (DNS + TLS passes), merges events by timestamp, then drives the same `TlsToUnresolvedIpRule` shape that runs on live traffic. The pattern for any detector that needs ≥2 protocols off a recorded trace. | `tokio,flow,parse,pcap,dns,tls` |
-| **`tls_to_unresolved_ip`** | **Three-protocol correlator** — joins DNS resolutions with TLS ClientHello observations to flag TLS connections to IPs the host never DNS-resolved. MITRE T1571 / T1090 signal: hardcoded-IP C2, misconfigured clients, exfil over TLS skipping the resolver. Per-source `HashMap<IpAddr, KeyIndexed<IpAddr, ()>>` cache. | `tokio,dns,tls` |
+| `dns_resolved_no_connection` | Cross-protocol: DNS resolved but no TCP/UDP follows within timeout. Uses `KeyIndexed::drain_expired` to surface unfulfilled resolutions. Raw primitives. | `tokio,dns` |
 
 ## util/ — demo helpers
 
@@ -196,8 +187,7 @@ just synthetic-traffic 30
 
 # Terminal B — pick a detector:
 just example dns_query_burst tokio,dns -- lo 30 50
-just example lateral_movement tokio,flow,parse -- lo 30 10 60
-just example full_monitor tokio,http,dns -- lo 30
+just example monitor_net_diagnostic monitor-quickstart,icmp -- lo 30
 ```
 
 Other run patterns:
@@ -206,8 +196,8 @@ Other run patterns:
 # Most examples take an `iface` arg, default `lo`:
 cargo run --example multi_protocol_monitor --features tokio,flow,parse -- lo 30
 
-# Full L4+L7 monitor on a real interface:
-cargo run --example full_monitor --features tokio,http,dns -- eth0 60
+# Full L4+L7 monitor on a real interface (declarative API):
+cargo run --example monitor_net_diagnostic --features monitor-quickstart,icmp -- eth0 60
 
 # Offline pcap replay (no privileges needed):
 cargo run --example async_pcap_sessions --features tokio,flow,parse,pcap -- trace.pcap

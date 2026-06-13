@@ -1,81 +1,52 @@
-//! Multi-protocol anomaly correlation harness.
+//! Anomaly value types + emission sinks.
 //!
-//! Built on top of [`ProtocolEvent`](crate::protocol::ProtocolEvent),
-//! `AnomalyMonitor` lets you compose detectors as small typed rules
-//! (each implementing the [`AnomalyRule`] trait), feed them events
-//! and periodic ticks, and collect their findings as
-//! [`Anomaly`] records.
+//! The [`Anomaly`] / [`AnomalyContext`] / [`Severity`] value types
+//! describe a structured finding; the [`sink::AnomalySink`] trait +
+//! the shipped sinks ([`shipped_sinks`], [`eve_sink`], [`metrics_sink`])
+//! ship them somewhere.
 //!
-//! Compared to writing each detector as a hand-rolled
-//! `tokio::select!` over multiple streams (see
-//! `examples/anomaly/dns_resolved_no_connection.rs`), the harness
-//! collapses the boilerplate to:
-//!
-//! 1. one `ProtocolMonitorBuilder` to declare which protocols to
-//!    observe,
-//! 2. one `AnomalyMonitor` populated via `.with_rule(...)`, and
-//! 3. one event-loop calling `monitor.observe(&evt)` + a tick that
-//!    calls `monitor.on_tick(now)`.
+//! Detectors are written on the declarative
+//! [`Monitor::builder()`](crate::monitor::Monitor) API — `on`/`on_ctx`
+//! handlers, the [`detector!`](crate::detector) /
+//! [`pattern_detector!`](crate::pattern_detector) macros — which emit
+//! through `ctx.emit(kind, severity)`:
 //!
 //! ```no_run
 //! # #[cfg(all(feature = "tokio", feature = "flow"))]
 //! # async fn _ex() -> Result<(), Box<dyn std::error::Error>> {
-//! use std::time::Duration;
-//! use futures::StreamExt;
-//! use flowscope::Timestamp;
-//! use netring::anomaly::{Anomaly, AnomalyMonitor, AnomalyRule, Severity};
-//! use netring::flow::extract::{FiveTuple, FiveTupleKey};
-//! use netring::protocol::{ProtocolEvent, ProtocolMonitorBuilder};
+//! use netring::prelude::*;
 //!
-//! struct AlwaysFires;
-//! impl AnomalyRule<FiveTupleKey> for AlwaysFires {
-//!     fn name(&self) -> &'static str { "always_fires" }
-//!     fn observe(&mut self, evt: &ProtocolEvent<FiveTupleKey>, emit: &mut Vec<Anomaly<FiveTupleKey>>) {
-//!         emit.push(Anomaly::new(self.name(), Severity::Info, evt.timestamp())
-//!             .with_key_opt(evt.key().cloned()));
-//!     }
-//! }
-//!
-//! let mut monitor = ProtocolMonitorBuilder::new()
+//! Monitor::builder()
 //!     .interface("eth0")
-//!     .flow()
-//!     .build(FiveTuple::bidirectional())?;
-//!
-//! let mut rules = AnomalyMonitor::<FiveTupleKey>::new()
-//!     .with_rule(AlwaysFires);
-//!
-//! let mut sweep = tokio::time::interval(Duration::from_secs(1));
-//! loop {
-//!     tokio::select! {
-//!         Some(evt) = monitor.next() => {
-//!             for a in rules.observe(&evt?) { println!("{}", a.kind); }
-//!         }
-//!         _ = sweep.tick() => {
-//!             for a in rules.on_tick(Timestamp::default()) { println!("{}", a.kind); }
-//!         }
-//!     }
-//! }
-//! # }
+//!     .protocol::<Tcp>()
+//!     .on_ctx::<FlowStarted<Tcp>>(|evt: &FlowStarted<Tcp>, ctx: &mut Ctx<'_>| {
+//!         ctx.emit("FlowStarted", Severity::Info).with_key(&evt.key).emit();
+//!         Ok(())
+//!     })
+//!     .sink(StdoutSink::default())
+//!     .build()?
+//!     .run_until_signal()
+//!     .await?;
+//! # Ok(()) }
 //! ```
+//!
+//! The 0.19 `AnomalyMonitor` / `AnomalyRule` harness was removed in 0.22.
 
-mod builtin;
 #[cfg(feature = "eve-sink")]
 pub mod eve_sink;
 pub mod key;
 #[cfg(feature = "metrics")]
 pub mod metrics_sink;
-mod monitor;
 mod rule;
 
 pub mod shipped_sinks;
 pub mod sink;
 
-pub use builtin::FlowAnomalyRule;
 pub use key::{Key, KeyFields};
-#[allow(deprecated)]
-pub use monitor::AnomalyMonitor;
-#[allow(deprecated)]
-pub use rule::{Anomaly, AnomalyContext, AnomalyRule, Severity};
+// 0.22: the 0.19 `AnomalyMonitor` / `AnomalyRule` / `FlowAnomalyRule`
+// API is removed. The `Anomaly` / `AnomalyContext` / `Severity` value
+// types stay — they back the 0.20+ sinks + the `serde` feature.
+pub use rule::{Anomaly, AnomalyContext, Severity};
 
 /// 0.21 A.10 — canonical owned-anomaly value type is now upstream.
 /// Re-exported here so `crate::anomaly::OwnedAnomaly` works regardless

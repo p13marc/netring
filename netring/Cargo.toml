@@ -459,6 +459,16 @@ path = "examples/monitor/multi_thread_default.rs"
 required-features = ["tokio", "flow", "channel"]
 
 [[example]]
+name = "monitor_report_stream"
+path = "examples/monitor/report_stream.rs"
+required-features = ["tokio", "flow", "serde"]
+
+[[example]]
+name = "monitor_label_table"
+path = "examples/monitor/label_table.rs"
+required-features = ["tokio", "flow"]
+
+[[example]]
 name = "monitor_beacon_detector"
 path = "examples/monitor/beacon_detector.rs"
 required-features = ["tokio", "flow"]

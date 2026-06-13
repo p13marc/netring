@@ -598,9 +598,47 @@ mod tests {
 
     // ── Synthetic block builder for BatchIter tests ────────────────────
 
+    /// 8-byte-aligned owned byte buffer for synthetic TPACKET_V3 blocks.
+    ///
+    /// A plain `Vec<u8>` is only 1-aligned; casting it to
+    /// `tpacket_block_desc` / `tpacket3_hdr` (which require 8-alignment) and
+    /// writing through the pointer is Undefined Behaviour — miri flags it under
+    /// `-Zmiri-strict-provenance`. Backing the buffer with `Vec<u64>`
+    /// guarantees 8-alignment. (In production the real mmap ring is
+    /// page-aligned, so this only matters for these synthetic tests.)
+    struct AlignedBlock {
+        words: Vec<u64>,
+        len: usize,
+    }
+
+    impl AlignedBlock {
+        fn zeroed(len: usize) -> Self {
+            Self {
+                words: vec![0u64; len.div_ceil(8)],
+                len,
+            }
+        }
+    }
+
+    impl std::ops::Deref for AlignedBlock {
+        type Target = [u8];
+        fn deref(&self) -> &[u8] {
+            // SAFETY: `words` owns `len.div_ceil(8) * 8 >= len` zero-initialized,
+            // 8-aligned bytes; reinterpreting the `len`-byte prefix is sound.
+            unsafe { std::slice::from_raw_parts(self.words.as_ptr().cast::<u8>(), self.len) }
+        }
+    }
+
+    impl std::ops::DerefMut for AlignedBlock {
+        fn deref_mut(&mut self) -> &mut [u8] {
+            // SAFETY: as `deref`, with unique access.
+            unsafe { std::slice::from_raw_parts_mut(self.words.as_mut_ptr().cast::<u8>(), self.len) }
+        }
+    }
+
     /// Build a synthetic TPACKET_V3 block with the given packet payloads.
-    /// Returns a Vec<u8> that can be used as a fake mmap block.
-    fn build_synthetic_block(packets: &[&[u8]], block_status: u32) -> Vec<u8> {
+    /// Returns an 8-aligned buffer usable as a fake mmap block.
+    fn build_synthetic_block(packets: &[&[u8]], block_status: u32) -> AlignedBlock {
         let block_desc_size = std::mem::size_of::<ffi::tpacket_block_desc>();
         let hdr_size = std::mem::size_of::<ffi::tpacket3_hdr>();
 
@@ -613,7 +651,7 @@ mod tests {
         // Round up to a reasonable block size
         let block_size = total.max(4096);
 
-        let mut block = vec![0u8; block_size];
+        let mut block = AlignedBlock::zeroed(block_size);
 
         // Write block descriptor
         let bd = block.as_mut_ptr().cast::<ffi::tpacket_block_desc>();

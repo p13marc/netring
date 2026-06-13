@@ -8,10 +8,10 @@
 | §2 flowscope absorption (KeyIndexed, bandwidth/`on_bandwidth`, `IcmpError`/`on_icmp_error`, `TcpRst`, `all_l4`/`all_l7`, prelude, net_diagnostic, discoverability) | ✅ shipped |
 | §3 report model (R3: `Report`/`ReportSink`/`report`/`report_to`) | ✅ shipped |
 | §4 legacy 0.19 API deletion (−5378 LoC) | ✅ shipped |
+| §5.1 cross-shard `merge_state` worker | ✅ shipped — merge-worker thread + gated run-loop `select!` branch; `merge_state`/`state_auto_merge`/`on_merge`. (Dropped `FanoutWithoutMerge` — per-shard-local state is legitimate.) End-to-end cross-thread test. |
 | §5.2 `LayerSpec` per-shard layers | ✅ shipped |
 | §7 polish (MinSeverity const, `tick_ctx`, migration guide, Send-future decision, multi_thread demo, CI gate) | ✅ shipped |
-| **§5.1 cross-shard `merge_state` worker** | ⏳ **remaining** — heaviest item; cross-thread merge worker + run-loop `select!` branch + `BuildError::FanoutWithoutMerge`. Design in §5.1 below. Deferred for a focused session (concurrency-sensitive). |
-| **§6 eBPF bandwidth backend** | ⏳ **remaining** — R4 backend seam + R6 spike-gated XDP path. High risk; needs perf measurement on real hardware. Design in §6 below. |
+| **§6 eBPF bandwidth backend** | 🟡 **designed, not shipped** — full spike design in `docs/EBPF_BANDWIDTH.md` (grounded in Cilium/aya research). The XDP backend's payoff is a perf ceiling that needs measurement on a real multi-Gbps NIC; gated on that. The R4 seam ships *with* the XDP backend (a one-variant enum is hollow). 0.23 or a NIC-equipped session. |
 
 Side effect: shipped **flowscope 0.14.1** (ICMP datagram-routing fix —
 `datagram_broadcast(IcmpParser)` had never delivered ICMP messages;

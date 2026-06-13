@@ -77,6 +77,15 @@ impl StateMap {
             .and_then(|b| b.downcast_ref::<T>())
     }
 
+    /// 0.22 §5.1: remove the slot keyed by `type_id` and return it
+    /// boxed (the cross-shard merge worker's "hand me your `T`" probe).
+    /// The shard's next `state_mut::<T>()` lazily re-creates
+    /// `T::default()`, so this is a take-and-reset: each merge interval
+    /// folds the delta accumulated since the previous take.
+    pub fn take_dyn(&mut self, type_id: TypeId) -> Option<Box<dyn Any + Send>> {
+        self.by_type.remove(&type_id)
+    }
+
     /// Number of distinct state slots currently registered.
     pub fn len(&self) -> usize {
         self.by_type.len()
@@ -244,6 +253,18 @@ mod tests {
         let m = StateMap::default();
         assert!(m.is_empty());
         assert_eq!(m.len(), 0);
+    }
+
+    #[test]
+    fn take_dyn_removes_slot_and_downcasts() {
+        // 0.22 §5.1: the merge worker's take-and-reset probe.
+        let mut m = StateMap::default();
+        m.get_or_init_mut::<Counter1>().n = 42;
+        let taken = m.take_dyn(std::any::TypeId::of::<Counter1>());
+        assert_eq!(taken.unwrap().downcast::<Counter1>().unwrap().n, 42);
+        assert!(m.is_empty()); // slot removed
+        // A second take finds nothing.
+        assert!(m.take_dyn(std::any::TypeId::of::<Counter1>()).is_none());
     }
 
     #[test]

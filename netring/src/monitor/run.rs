@@ -84,6 +84,7 @@ pub(crate) async fn run_loop(monitor: Monitor, stop: StopCondition) -> Result<()
         mut flow_states,
         fanout,
         label_table,
+        mut merge_rx,
     } = monitor;
     // Borrow the monitor name as `&str` for the run loop's
     // dispatch sites. The owned `Box<str>` lives in this stack
@@ -166,6 +167,16 @@ pub(crate) async fn run_loop(monitor: Monitor, stop: StopCondition) -> Result<()
                     &label_table,
                 )
                 .await?;
+                continue;
+            }
+            // 0.22 §5.1: cross-shard merge probe. Gated so non-merged
+            // monitors never poll it (zero cost, like the tick branch).
+            // Out-of-band — doesn't touch the idle timer.
+            req = recv_merge(&mut merge_rx), if merge_rx.is_some() => {
+                if let Some(req) = req {
+                    let taken = state_map.take_dyn(req.type_id);
+                    let _ = req.reply.send(taken);
+                }
                 continue;
             }
         };
@@ -288,6 +299,7 @@ pub(crate) async fn replay_loop(
         mut flow_states,
         fanout: _,
         label_table,
+        merge_rx: _, // replay is single-shard; no cross-shard merge
     } = monitor;
     let monitor_name_borrow: Option<&str> = monitor_name.as_deref();
 
@@ -526,6 +538,18 @@ async fn next_tick(intervals: &mut [tokio::time::Interval]) -> usize {
         Poll::Pending
     })
     .await
+}
+
+/// 0.22 §5.1: await the next cross-shard merge probe. When no merge
+/// receiver is wired the future never resolves (the `select!` branch is
+/// gated `if merge_rx.is_some()`, so this only runs in the `Some` case).
+async fn recv_merge(
+    rx: &mut Option<tokio::sync::mpsc::UnboundedReceiver<crate::monitor::merge::MergeRequest>>,
+) -> Option<crate::monitor::merge::MergeRequest> {
+    match rx {
+        Some(r) => r.recv().await,
+        None => std::future::pending().await,
+    }
 }
 
 /// Fire the tick handler at `tick_idx`.

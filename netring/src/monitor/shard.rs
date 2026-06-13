@@ -58,6 +58,10 @@ pub struct ShardedRunner {
     /// applied *outside* the builder-registered layers (so runner specs
     /// run first / outermost).
     layer_specs: Vec<Box<dyn crate::layer::LayerSpec>>,
+    /// 0.22 §5.1: cross-shard state merges. Registered via
+    /// [`Self::merge_state`] / [`Self::state_auto_merge`] /
+    /// [`Self::on_merge`]; driven by the merge-worker thread.
+    merges: Vec<crate::monitor::merge::MergeSpec>,
 }
 
 impl ShardedRunner {
@@ -122,7 +126,59 @@ impl ShardedRunner {
             num_shards: num_shards.max(1),
             build_shard: Arc::new(build_shard),
             layer_specs: Vec::new(),
+            merges: Vec::new(),
         }
+    }
+
+    /// 0.22 §5.1: periodically fold each shard's `T` state slot into a
+    /// single primary via `merge(&mut primary, shard_value)`.
+    ///
+    /// Every `period`, a merge-worker thread probes each shard for its
+    /// `T` (removing it — the shard re-creates `T::default()` lazily, so
+    /// each interval folds the delta since the last probe), folds into a
+    /// persistent primary (the running grand total), and hands it to any
+    /// [`Self::on_merge`] observer. Pairs with `MonitorBuilder::state::<T>()`
+    /// in `build_shard`. **flowscope follow-up:** `RollingRate::merge_into`
+    /// would let a sharded `bandwidth_by_app` merge globally (0.15 wishlist).
+    pub fn merge_state<T, F>(mut self, period: Duration, merge: F) -> Self
+    where
+        T: Default + Send + 'static,
+        F: FnMut(&mut T, T) + Send + 'static,
+    {
+        self.merges
+            .push(crate::monitor::merge::MergeSpec::new::<T, F>(period, merge));
+        self
+    }
+
+    /// 0.22 §5.1: [`Self::merge_state`] with `AddAssign` as the fold —
+    /// the common "sum a per-shard counter into a global total" case.
+    pub fn state_auto_merge<T>(mut self, period: Duration) -> Self
+    where
+        T: std::ops::AddAssign + Default + Send + 'static,
+    {
+        self.merges
+            .push(crate::monitor::merge::MergeSpec::new::<T, _>(
+                period,
+                |p: &mut T, t: T| *p += t,
+            ));
+        self
+    }
+
+    /// 0.22 §5.1: observe the merged primary `T` after each interval's
+    /// fold (e.g. print / emit a global view). **Call after**
+    /// [`Self::merge_state`] / [`Self::state_auto_merge`] for the same
+    /// `T` — it attaches to that spec; with no matching spec it is a
+    /// silent no-op.
+    pub fn on_merge<T, G>(mut self, observe: G) -> Self
+    where
+        T: 'static,
+        G: Fn(&T) + Send + 'static,
+    {
+        let tid = std::any::TypeId::of::<T>();
+        if let Some(spec) = self.merges.iter_mut().find(|s| s.type_id() == tid) {
+            spec.set_observe::<T, G>(observe);
+        }
+        self
     }
 
     /// 0.22 §5.2: register a per-shard secondary layer.
@@ -184,10 +240,26 @@ impl ShardedRunner {
         let layer_specs = Arc::new(self.layer_specs);
         let mut handles = Vec::with_capacity(self.num_shards);
 
+        // 0.22 §5.1: if any merge is registered, create one request
+        // channel per shard — the shard run loop owns the receiver, the
+        // merge worker holds all senders.
+        let merges = self.merges;
+        let (merge_txs, mut merge_rxs): (Vec<_>, Vec<Option<_>>) = if merges.is_empty() {
+            (Vec::new(), Vec::new())
+        } else {
+            (0..self.num_shards)
+                .map(|_| {
+                    let (tx, rx) = tokio::sync::mpsc::unbounded_channel();
+                    (tx, Some(rx))
+                })
+                .unzip()
+        };
+
         for cpu in 0..self.num_shards {
             let stop = Arc::clone(&stop);
             let build = Arc::clone(&build_shard);
             let layer_specs = Arc::clone(&layer_specs);
+            let merge_rx = merge_rxs.get_mut(cpu).and_then(Option::take);
             let handle = std::thread::Builder::new()
                 .name(format!("netring-shard-{cpu}"))
                 .spawn(move || -> Result<()> {
@@ -201,6 +273,10 @@ impl ShardedRunner {
                     // Apply per-shard secondary layers (fresh instances).
                     for spec in layer_specs.iter() {
                         monitor.wrap_sink(spec.instantiate());
+                    }
+                    // 0.22 §5.1: wire the merge-request receiver.
+                    if let Some(rx) = merge_rx {
+                        monitor.set_merge_rx(rx);
                     }
 
                     match mode {
@@ -221,6 +297,20 @@ impl ShardedRunner {
                 .map_err(crate::error::Error::Io)?;
             handles.push(handle);
         }
+
+        // 0.22 §5.1: spawn the merge worker (one extra OS thread, no
+        // runtime). It probes shards on each spec's cadence while they
+        // run, and exits when `stop` flips.
+        let merge_handle = if merges.is_empty() {
+            None
+        } else {
+            let stop = Arc::clone(&stop);
+            let handle = std::thread::Builder::new()
+                .name("netring-merge".to_string())
+                .spawn(move || crate::monitor::merge::merge_worker(merge_txs, merges, stop))
+                .map_err(crate::error::Error::Io)?;
+            Some(handle)
+        };
 
         // Drain each shard. Return the first error encountered;
         // continue joining the rest to avoid leaked threads.
@@ -243,6 +333,11 @@ impl ShardedRunner {
             }
         }
         stop.store(true, Ordering::Relaxed);
+        // Join the merge worker (it sees `stop`, does a final best-effort
+        // pass, and exits).
+        if let Some(h) = merge_handle {
+            let _ = h.join();
+        }
         if let Some(e) = first_err {
             return Err(e);
         }

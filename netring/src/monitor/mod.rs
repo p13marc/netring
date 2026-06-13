@@ -69,6 +69,9 @@ pub use subscribe::EventStream;
 pub mod shard;
 pub use shard::ShardedRunner;
 
+// 0.22 §5.1: cross-shard state merging (internal; driven by ShardedRunner).
+pub(crate) mod merge;
+
 // 0.22 §2.3: bandwidth-by-app primitive (gated with the rest of the
 // monitor API on `flow + tokio`).
 pub mod bandwidth;
@@ -140,6 +143,14 @@ pub struct Monitor {
     /// flowscope's built-in table. Borrowed into every
     /// [`crate::ctx::Ctx`] at dispatch time.
     pub(crate) label_table: flowscope::well_known::LabelTable,
+    /// 0.22 §5.1: when this monitor runs as a shard under a
+    /// [`ShardedRunner`] with a registered merge, the run loop polls
+    /// this for "hand me your `T` slot" probes. `None` for ordinary
+    /// (non-merged) monitors — the run-loop branch is then disabled at
+    /// zero cost. Injected by `ShardedRunner::run_inner` via
+    /// [`Self::set_merge_rx`].
+    pub(crate) merge_rx:
+        Option<tokio::sync::mpsc::UnboundedReceiver<merge::MergeRequest>>,
 }
 
 impl Monitor {
@@ -316,6 +327,16 @@ impl Monitor {
             Box::new(crate::anomaly::sink::NoopSink),
         );
         self.sink = layer.wrap(inner);
+    }
+
+    /// 0.22 §5.1: inject the merge-request receiver so this shard's run
+    /// loop answers the merge worker's probes. Called by
+    /// `ShardedRunner::run_inner` after `build`.
+    pub(crate) fn set_merge_rx(
+        &mut self,
+        rx: tokio::sync::mpsc::UnboundedReceiver<merge::MergeRequest>,
+    ) {
+        self.merge_rx = Some(rx);
     }
 }
 
@@ -1223,6 +1244,7 @@ impl MonitorBuilder {
             label_table: self
                 .label_table
                 .unwrap_or_else(flowscope::well_known::LabelTable::new),
+            merge_rx: None,
         })
     }
 }

@@ -2,6 +2,16 @@
 #![deny(unsafe_op_in_unsafe_fn)]
 #![warn(missing_docs)]
 
+// netring is built on AF_PACKET (TPACKET_v3) and AF_XDP, which are Linux-only
+// kernel interfaces. Fail fast with a clear message rather than deep inside
+// `libc` / `nix` / `aya` on other targets.
+#[cfg(not(target_os = "linux"))]
+compile_error!(
+    "netring requires Linux — it is built on AF_PACKET (TPACKET_v3) and AF_XDP, \
+     which are Linux-only kernel interfaces. For cross-platform packet capture, \
+     use the `pcap` crate instead."
+);
+
 pub mod afpacket;
 pub mod afxdp;
 #[cfg(all(feature = "flow", feature = "tokio"))]

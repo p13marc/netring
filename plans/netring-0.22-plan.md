@@ -528,109 +528,240 @@ path resolves) + clippy `-D warnings` (shields gone) + empty legacy grep.
 
 Independent of §1–4. Heaviest single item.
 
-### 5.1 Cross-shard state merging
+### 5.1 Cross-shard state merging — ⏳ REMAINING (design sharpened post-impl)
 
-Each shard runs an independent `Monitor` on its own OS thread + `current_thread`
-runtime; today they share only the fanout group + a stop flag. Add an
-out-of-band probe so the runner folds per-shard state into a primary:
+Each shard runs an independent `Monitor` on its own OS thread + a
+**`current_thread` tokio runtime** (`shard.rs:191`); they share only the fanout
+group + an `Arc<AtomicBool>` stop flag. A merge worker periodically folds each
+shard's copy of a state type `T` into a single primary.
 
-- `src/monitor/merge.rs`: `MergeRequest { type_id, reply: oneshot::Sender<Option<Box<dyn Any+Send>>> }`.
-  `Monitor` gains `merge_rx: Option<mpsc::UnboundedReceiver<MergeRequest>>`; the
-  run-loop `select!` gains a branch that `mem::take`s the slot
-  (`StateMap::take_dyn`) and replies (take-and-reset = correct additive semantic).
-- `ShardedRunner`:
+**Concurrency shape (corrected for the actual threading model).** The shards
+are async (tokio); the merge worker is a **plain OS thread with no runtime**.
+So the two channels must differ:
+
+- **Request** (worker → shard): `tokio::sync::mpsc::UnboundedSender/Receiver`.
+  The worker calls the non-async `UnboundedSender::send` (works without a
+  runtime); the shard polls `merge_rx.recv().await` in its run-loop `select!`.
+- **Reply** (shard → worker): `std::sync::mpsc` — the worker has no runtime, so
+  it **blocks** on `Receiver::recv_timeout(...)` (a tokio `oneshot::blocking_recv`
+  would also work, but `std::mpsc::recv_timeout` is the clean bounded wait).
+
+```rust
+// src/monitor/merge.rs
+pub(crate) struct MergeRequest {
+    type_id: TypeId,
+    reply: std::sync::mpsc::Sender<Option<Box<dyn Any + Send>>>,
+}
+```
+
+- `Monitor` gains `merge_rx: Option<tokio::sync::mpsc::UnboundedReceiver<MergeRequest>>`
+  (default `None`; `ShardedRunner::run_inner` injects one per shard after
+  `build(cpu)?`, via a new `Monitor::set_merge_rx`). The run-loop `select!` gains
+  a branch **gated `if merge_rx.is_some()`** (zero cost for non-merge monitors,
+  exactly like the existing tick-interval branch):
+  ```rust
+  Some(req) = recv_merge(&mut merge_rx), if merge_rx.is_some() => {
+      let taken = state_map.take_dyn(req.type_id); // remove the slot (Box<dyn Any+Send>)
+      let _ = req.reply.send(taken);               // shard re-creates T::default lazily
+  }
+  ```
+  `StateMap::take_dyn(TypeId) -> Option<Box<dyn Any + Send>>` removes the slot.
+  **take-and-reset is the right additive semantic**: each interval folds the
+  delta accumulated since the last take; the shard's next `state_mut::<T>()`
+  lazily re-creates `T::default()`.
+
+- Worker = one OS thread (a tiny `current_thread` runtime is *not* needed since
+  it only `send`s + blocking-`recv`s). It holds the per-shard `Sender`s + a
+  `HashMap<TypeId, MergeSpec>`. Each `MergeSpec` is type-erased:
+  ```rust
+  struct MergeSpec {
+      period: Duration,
+      next_fire: Instant,
+      primary: Box<dyn Any + Send>,                                  // Box<T>, init T::default()
+      fold:    Box<dyn FnMut(&mut (dyn Any), Box<dyn Any + Send>) + Send>, // downcasts both to T
+      observe: Option<Box<dyn Fn(&(dyn Any)) + Send>>,               // from on_merge
+  }
+  ```
+  Loop: park until the soonest `next_fire`; for each due spec, send a
+  `MergeRequest` to every shard, collect replies (`recv_timeout`, **so a stalled
+  shard can't wedge the worker**), `fold` each non-`None` reply into `primary`,
+  then call `observe(primary)`. Exit when the stop flag flips.
+
+- `ShardedRunner` API (one builder addition each):
   ```rust
   pub fn merge_state<T,F>(self, period: Duration, merge: F) -> Self
     where T: Default+Send+'static, F: Fn(&mut T, T)+Send+Sync+'static;
-  pub fn state_auto_merge<T>(self, period: Duration) -> Self where T: AddAssign+Default+Send+'static;
-  pub fn on_merge<T,G>(self, observe: G) -> Self where T: Send+'static, G: Fn(&T)+Send+Sync+'static;
+  pub fn state_auto_merge<T>(self, period: Duration) -> Self
+    where T: AddAssign+Default+Send+'static;        // fold = `*p += t`
+  pub fn on_merge<T,G>(self, observe: G) -> Self     // attaches to the T spec by TypeId
+    where T: Send+'static, G: Fn(&T)+Send+Sync+'static;
   ```
-  `run_inner` wires one `(sender,receiver)` per shard + a merge-worker OS thread
-  holding all senders + type-erased `MergeSpec`s; each interval it sends a
-  `MergeRequest` to every shard and awaits `oneshot` replies **timeout-bounded**
-  so a stalled shard can't wedge shutdown.
-- `BuildError::FanoutWithoutMerge { type_name }` — `run_inner` diffs shard 0's
-  declared state TypeIds (`Monitor::declared_state_types()`) against registered
-  `MergeSpec`s; any fanout state without a merge errors before spawning.
 
-flowscope follow-up (don't block): `RollingRate::merge_into` for sharded
-`bandwidth_by_app` → 0.15 wishlist. Test: `tests/sharded_merge.rs` +
-`FanoutWithoutMerge` unit test. **Risk: medium-high** (cross-thread shutdown
-ordering).
+**Open tension — `FanoutWithoutMerge` is probably wrong as a hard error.**
+The prior plan said: error when a state type is registered under fanout but has
+no merge. But **per-shard-local state is legitimate** (a scratch buffer, a
+per-shard rate the user reads via a per-shard sink). Erroring on *any* unmerged
+state is too aggressive and there's no way to distinguish "forgot to merge" from
+"intentionally local". **Decision: drop the hard error.** Either (a) no check at
+all — `merge_state` is explicit opt-in, or (b) a `log::debug!` listing unmerged
+fanout state types as a hint. Recommend (a) for 0.22; revisit if users actually
+trip on it. (This also removes the need for `Monitor::declared_state_types()`.)
 
-### 5.2 `LayerSpec` + `Layer: Sync` (breaking) + remove `Tee::factory`
+**Shutdown semantics.** Take-and-reset means the final sub-interval of state is
+lost on shutdown unless the worker does one last merge after the stop flag.
+Recommend a single best-effort final pass (send one more round, short timeout)
+and document it. Don't block shutdown on it.
 
-Per-shard layers must be independent instances (a `DedupeAnomalies` table /
-`Sample` RNG must not be shared).
-```rust
-pub trait Layer: Send + Sync + 'static { fn wrap(self: Box<Self>, inner: Box<dyn AnomalySink>) -> Box<dyn AnomalySink>; }
-pub trait LayerSpec: Send + Sync + 'static { fn instantiate(&self) -> Box<dyn Layer>; }
-impl<L: Layer + Clone> LayerSpec for L { fn instantiate(&self) -> Box<dyn Layer> { Box::new(self.clone()) } }
-impl<F: Fn() -> Box<dyn Layer> + Send + Sync + 'static> LayerSpec for F { fn instantiate(&self) -> Box<dyn Layer> { self() } }
-```
-Per-layer audit (none derive `Clone` today): `MinSeverity` → `derive(Clone)`,
-blanket applies; `Sample` → hand-impl reseeding per `instantiate`;
-`DedupeAnomalies`/`RateLimitAnomalies` → hand-impl minting an empty table;
-`Tee` → impl `LayerSpec`, **remove `Tee::factory` + `TeeSecondary::Factory`**
-(`LayerSpec` is the canonical per-shard path). `ShardedRunner::layer<L: LayerSpec>(spec)`
-wraps each shard's built sink (`Monitor::wrap_sink`), outermost. Test:
-`tests/layer_spec.rs` (independent dedupe tables).
+flowscope follow-up (don't block): `RollingRate::merge_into` so sharded
+`bandwidth_by_app` (a `RollingRate` slot) can `state_auto_merge` into a global
+view → 0.15 wishlist. **Test:** `tests/sharded_merge.rs` — two shards each
+increment a `Counter(u64)`; `state_auto_merge` 50ms period; `on_merge` observes
+the cross-shard sum within a few periods. **Risk: medium-high** — the run-loop
+`select!` branch has real blast radius (it's on the live capture path), so keep
+it strictly gated; and the worker↔shard shutdown ordering needs the timeout
+bounds above. Best done in a focused session, not the tail of a marathon.
+
+### 5.2 `LayerSpec` per-shard layers — ✅ SHIPPED (with deviations)
+
+Shipped `d3530bd`. Two corrections vs the original sketch, both verified
+necessary during impl:
+
+1. **`Layer` is NOT made `Sync`.** Adding `Sync` to `Layer` breaks `Tee` — it
+   holds a `Box<dyn AnomalySink>`, and `AnomalySink: Send` (not `Sync`), so
+   `Tee` is `!Sync` and couldn't impl a `Sync` `Layer`. Instead `Sync` lives
+   only on `LayerSpec` (which *is* shared across shard threads); `Layer` stays
+   `Send + 'static`. Less breaking, and `Tee` keeps working.
+2. **`Tee::factory` kept; the `Fn` blanket → a `LayerFactory` newtype.** Two
+   blanket impls (`impl<L: Layer+Clone+Sync>` and `impl<F: Fn()->Box<dyn Layer>>`)
+   **collide under coherence** (Rust can't prove no type is both). So the factory
+   path is an explicit `pub struct LayerFactory<F>(pub F)` with its own impl.
+   `Tee::factory` is unchanged (still used by examples/tests).
+
+Also: the per-layer "hand-impl" audit was **unnecessary**. Each layer's mutable
+state (`DedupeAnomalies` table, `Sample` RNG, `RateLimit` buckets) lives in the
+per-`wrap()` `*Layered` sink, **not** the config struct — so the blanket
+`Clone` impl is correct (each shard's `wrap()` mints fresh state).
+`MinSeverity`/`DedupeAnomalies`/`RateLimitAnomalies`/`Sample` just got
+`#[derive(Clone)]`; `Sample` documents that cloned configs share the seed (use
+`LayerFactory(|| …)` with a varied seed for independent per-shard sampling).
+`ShardedRunner::layer<L: LayerSpec>(spec)` + `Monitor::wrap_sink` apply specs
+outermost. Test: `tests/layer_spec.rs`.
 
 ---
 
-## 6. Phase — eBPF acceleration of bandwidth (R4 + R6), spike-gated
+## 6. Phase — eBPF acceleration of bandwidth (R4 + R6), spike-gated — ⏳ REMAINING
 
-The design's R4/R6: move per-packet bookkeeping off the Rust hot path, optionally
-into the kernel (Cilium/Hubble shape). netring already ships `xdp-loader`. We
-make `bandwidth_by_app`'s backend pluggable behind the **same** `on_bandwidth`
-API, then ship an XDP backend — *behind a time-boxed spike gate* (the one place
-in this plan where we measure before committing, because the perf upside is the
-whole point and the kernel/portability risk is real).
+The design's R4/R6: move per-packet byte accounting off the Rust hot path into
+the kernel, behind the **same** `on_bandwidth` API. This is the established
+**Cilium/Hubble shape** — eBPF programs account bytes into per-CPU BPF maps in a
+single hash lookup; per-CPU maps "eliminate global lock contention and scale
+linearly with core count" (Cilium's `acc_map` keys an accounting map per
+hook/flow). High risk (kernel/driver portability), so it's **spike-gated**: the
+one place in this plan that measures before committing.
 
-### 6.1 Backend abstraction (ships regardless — R4)
+> **Research grounding** (June 2026): aya — the Rust eBPF lib netring already
+> uses for `xdp-loader` — provides userspace `HashMap`, `PerCpuHashMap`,
+> `PerCpuArray`. A `PerCpuHashMap` read returns a `PerCpuValues` (a slice with
+> one value per CPU); **userspace sums the slice** to get the total for a key.
+> Per-CPU maps need **no atomics in the kernel** — each CPU writes its own slot,
+> so the XDP `+= len` is a plain add. Maps an XDP program defines are reachable
+> from userspace via `Ebpf::map` / `take_map` after load. Sources at the end of
+> this section.
+
+### 6.1 Backend abstraction (the R4 seam)
 
 ```rust
 // src/monitor/bandwidth.rs
-#[non_exhaustive] pub enum BandwidthBackend {
+#[non_exhaustive]
+pub enum BandwidthBackend {
     /// Per-packet accounting in the Rust dispatcher (default; portable; Δ0 alloc).
     Userland,
-    /// Kernel-side BPF_MAP_TYPE_PERCPU_HASH keyed by flow tuple, read into
-    /// BandwidthReport on the report cadence. Requires `xdp-loader` + kernel ≥ 5.x.
-    #[cfg(feature = "xdp-loader")] Xdp,
+    /// Kernel-side per-CPU-hash accounting read on the report cadence.
+    /// Requires `xdp-loader` + a recent kernel. (See §6.2.)
+    #[cfg(feature = "xdp-loader")]
+    Xdp,
 }
 impl MonitorBuilder {
-    pub fn bandwidth_backend(self, b: BandwidthBackend) -> Self;   // default Userland
+    pub fn bandwidth_backend(self, b: BandwidthBackend) -> Self; // default Userland
 }
 ```
-`Userland` is the §2.3 path. `BandwidthReport` reads from whichever backend —
-the user-facing API and the typed view are identical. R4 alone (the seam) ships
-even if the spike defers the XDP backend.
+`Userland` is the shipped §2.3 path. `BandwidthReport` reads from whichever
+backend — the user-facing API + typed view are identical, only the producer
+changes. **Note:** a one-variant enum is hollow on its own, so §6.1 ships
+*with* §6.2 (gated), not before it — if the spike defers `Xdp`, the seam lands
+as `#[non_exhaustive] enum { Userland }` so adding `Xdp` later isn't breaking.
 
 ### 6.2 XDP backend (R6) — spike → implement → gate
 
-1. **Spike (time-boxed, 1 week).** Vendor a minimal XDP program incrementing a
-   `BPF_MAP_TYPE_PERCPU_HASH<FlowKey, u64>` on RX; load it via the existing
-   `aya`-based `xdp-loader` (`src/afxdp/loader/`); read the map from userland on
-   the report cadence and fold into `BandwidthReport`. Measure on a real
-   multi-Gbps NIC: dropped-packet rate + CPU vs the userland path. **Decision
-   gate:** ship only if the delta is material and the portability cost
-   (kernel/driver/`SKB`-vs-`DRV` mode) is acceptable; otherwise the seam (§6.1)
-   stays and the XDP backend is documented as experimental/deferred to 0.23 with
-   the spike numbers recorded.
-2. **If green:** the BPF program is **flowscope-side** (it owns the flow/key
-   model; netring loads + reads it) — file the program + a stable map ABI on the
-   flowscope 0.15 wishlist; netring exposes the readout as `BandwidthReport`.
-   Keyed per-flow in-kernel → `app_label` mapping happens userland on readout.
-3. Stretch (explicitly 0.23, not 0.22): kernel-side TCP-RST (`SOCK_OPS`) and
-   ICMP correlation. Out of scope here; recorded so the eBPF story is coherent.
+**Kernel side.** netring already vendors a redirect-all XDP program
+(`src/afxdp/loader/programs/redirect_all.bpf.{c,o}`) loaded via aya. Extend it
+(or add a sibling program) to maintain a flow-keyed accounting map *before* the
+redirect:
 
-`docs/EBPF_BANDWIDTH.md` documents the backend, kernel requirements, and the
-spike results. Risk: **high** (kernel/portability); fully gated, never blocks the
-rest of 0.22.
+```c
+struct flow_key { __u8 proto; __u8 _pad[3]; __be32 saddr, daddr; __be16 sport, dport; }; // #[repr(C)] mirror in Rust
+struct { __uint(type, BPF_MAP_TYPE_PERCPU_HASH);
+         __type(key, struct flow_key); __type(value, __u64);
+         __uint(max_entries, 1<<16); } acc_map SEC(".maps");
+
+SEC("xdp") int account(struct xdp_md *ctx) {
+    struct flow_key k; __u64 len; /* parse 5-tuple + frame len */
+    __u64 *b = bpf_map_lookup_elem(&acc_map, &k);
+    if (b) *b += len;                       // per-CPU: no atomic needed
+    else   bpf_map_update_elem(&acc_map, &k, &len, BPF_ANY);
+    return /* redirect as today */;
+}
+```
+
+**Userland side (aya).** On the report cadence, read `acc_map` as a
+`PerCpuHashMap<_, FlowKey, u64>`: iterate keys, sum each key's `PerCpuValues`,
+map `FlowKey → app_label` via the `LabelTable` (userland), aggregate per app →
+feed the existing `BandwidthReport` / `RollingRate`. The diff-since-last-read
+gives the interval bytes (or use a `BPF_MAP_TYPE_LRU_PERCPU_HASH` so stale flows
+self-evict). The per-packet path is now **zero** Rust work — the dhat Δ0
+invariant is trivially held because there's no Rust per-packet code at all.
+
+**Key-ABI ownership (open question, resolved direction).** The `flow_key` C
+struct + its Rust `#[repr(C)]` mirror are an ABI. flowscope owns the flow/key
+model (`FiveTupleKey`), so the canonical place for the BPF program + key layout
+is **flowscope** (0.15 wishlist: ship the program + a versioned map ABI);
+netring loads + reads it. For the 0.22 spike, prototype the key netring-side to
+get numbers, then move it to flowscope if it ships.
+
+**Spike methodology + gate (time-boxed, ~1 week).**
+1. Prototype the program + the aya read loop; wire it behind `BandwidthBackend::Xdp`.
+2. Measure on a **real multi-Gbps NIC** (not `lo`): packet-drop rate + CPU vs
+   the `Userland` recorder under load. `SKB_MODE` works on `lo`/unprivileged but
+   has no perf benefit; the win is `DRV_MODE` on a native-driver NIC.
+3. **Gate:** ship `Xdp` only if the delta is material *and* the portability cost
+   (kernel version, driver `DRV` vs `SKB`, the verifier accepting the program) is
+   acceptable. Otherwise: keep the seam (`enum { Userland }`), document `Xdp` as
+   deferred-to-0.23 with the recorded numbers. Either outcome is a clean ship.
+
+**Stretch (explicitly 0.23, not 0.22):** kernel-side TCP-RST (`SOCK_OPS`) +
+ICMP correlation maps. Recorded so the eBPF story is coherent; out of scope here.
+
+`docs/EBPF_BANDWIDTH.md` documents the backend, the kernel/driver requirements,
+the key ABI, and the spike results. Risk: **high** (kernel/portability + a real
+NIC needed to measure); fully gated, never blocks the rest of 0.22.
+
+Sources: [Cilium BPF & XDP Reference Guide](https://docs.cilium.io/en/stable/bpf/)
+(the `acc_map` per-CPU accounting example); [aya `maps` docs](https://docs.rs/aya/latest/aya/maps/index.html)
+(`PerCpuHashMap` / `PerCpuValues`, `Ebpf::map`/`take_map`).
 
 ---
 
-## 7. Phase — Send-future decision + polish
+## 7. Phase — Send-future decision + polish — ✅ SHIPPED
+
+Shipped across `6ea3d09` + `dc60f5f`. The Send-future investigation found a
+**different** root cause than §7.1 assumed (the async-dispatch `*const ()` +
+boxed handler future, not only the mmap ring — see
+`plans/netring-0.22-send-future-decision.md`). Two-marker `tick_ctx` chosen over
+overloading `.tick` (the `PayloadOnly`/`CtxOnly` arity-1 ambiguity the §7.4
+sub-section predicted). MinSeverity const family, migration guide, and the
+multi_thread demo all landed; the CI doc-lint gate was already present
+(`clippy --all-features -D warnings` + `cargo doc` `RUSTDOCFLAGS=-D warnings`).
+The per-sub-section design below is preserved for the record.
 
 ### 7.1 Send-future investigation → decision doc (research, no feature code)
 
@@ -773,4 +904,13 @@ per-packet paths, flowscope floor `>= 0.14.0`.
   i.e. a whitelist-only table that silently drops the built-in port map, unlike
   `new()`. netring works around it with `unwrap_or_else(LabelTable::new)` +
   `#[allow(clippy::unwrap_or_default)]` in `MonitorBuilder::build`).
+- Also wishlist: **reconcile `KeyIndexed`** (found in §2.1) — flowscope's 0.14
+  version is an LRU cache (`get(&mut self)`) while netring's is a TTL map
+  (`get(&self)` + `iter_fresh`/`contains_fresh`/`get_with_ts`); either add the
+  immutable-read surface upstream or bless netring's as the canonical
+  correlation map so netring can drop its copy.
+- **Already shipped this cycle: flowscope 0.14.1** — the ICMP datagram-routing
+  fix (`datagram_broadcast(IcmpParser)` delivering ICMP messages). Publish 0.14.1
+  to crates.io, then drop the `[patch.crates-io] flowscope = { path = … }` from
+  netring's workspace `Cargo.toml` and confirm the `>= 0.14.1` floor resolves.
 - Open 0.23: kernel-side RST/ICMP eBPF (§6.2 step 3) is the natural headline.

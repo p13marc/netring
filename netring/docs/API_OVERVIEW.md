@@ -244,7 +244,7 @@ heartbeats, any time-driven L7 logic.
 
 `AsyncMultiCapture` fans in N AF_PACKET captures (multi-interface or
 per-CPU workers in a fanout group) and yields `TaggedEvent { source_idx, event }`.
-See [`docs/scaling.md`](../netring/docs/scaling.md) for the recipe +
+See [`docs/scaling.md`](scaling.md) for the recipe +
 `FanoutMode` decision matrix.
 
 ### Offline pcap (`pcap + flow` features)
@@ -474,7 +474,7 @@ Per-release breaking changes and migration recipes live in
   `on_tcp_reset` / `TcpRst`, `label_table`, `all_l4`/`all_l7`, the
   report stream (`report` / `report_to` / `ReportSink`), cross-shard
   `merge_state` + `LayerSpec`. Recipes in
-  [`netring/docs/MIGRATING_0.21_TO_0.22.md`](../netring/docs/MIGRATING_0.21_TO_0.22.md).
+  [`netring/docs/MIGRATING_0.21_TO_0.22.md`](MIGRATING_0.21_TO_0.22.md).
 - **0.21.0** — `Monitor` becomes `Send` (flowscope 0.13);
   `AnomalySink::write` key narrowed from `&dyn Debug` to
   `&dyn Key`; legacy `ProtocolMonitor` / `AnomalyMonitor` /

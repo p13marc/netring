@@ -62,7 +62,7 @@ The async API surface. Use these as templates for the typical
 | `async_fanout_workers` | `AsyncMultiCapture::open_workers` |
 | `async_multi_interface` | `AsyncMultiCapture::open(&["lo", "eth0"])` |
 
-See [`docs/scaling.md`](docs/scaling.md) for the fanout decision
+See [`docs/scaling.md`](../docs/scaling.md) for the fanout decision
 matrix and anti-patterns.
 
 ## xdp/ — AF_XDP kernel bypass

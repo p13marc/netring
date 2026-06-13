@@ -303,6 +303,20 @@ impl Monitor {
     pub fn fanout(&self) -> Option<(crate::config::FanoutMode, u16)> {
         self.fanout
     }
+
+    /// 0.22 §5.2: wrap the already-built sink chain in one more
+    /// [`Layer`](crate::layer::Layer). Used by
+    /// [`ShardedRunner::layer`](crate::monitor::ShardedRunner::layer) to
+    /// apply per-shard secondary layers *outside* the builder-registered
+    /// ones (so a runner spec runs first). The layer wraps the current
+    /// composed sink and becomes the new outermost sink.
+    pub(crate) fn wrap_sink(&mut self, layer: Box<dyn crate::layer::Layer>) {
+        let inner = std::mem::replace(
+            &mut self.sink,
+            Box::new(crate::anomaly::sink::NoopSink),
+        );
+        self.sink = layer.wrap(inner);
+    }
 }
 
 impl std::fmt::Debug for Monitor {

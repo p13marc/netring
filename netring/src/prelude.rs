@@ -60,7 +60,9 @@ pub use crate::anomaly::sink::{AnomalySink, AnomalySinkExt, AnomalyWriter, NoopS
 pub use crate::anomaly::{AnomalyFields, DetectorScore, Key, KeyFields};
 
 // ─── Middleware (Phase D) ────────────────────────────────────────
-pub use crate::layer::{DedupeAnomalies, Layer, MinSeverity, RateLimitAnomalies, Sample, Tee};
+pub use crate::layer::{
+    DedupeAnomalies, Layer, LayerFactory, LayerSpec, MinSeverity, RateLimitAnomalies, Sample, Tee,
+};
 
 // ─── Sliding-window correlate primitives ─────────────────────────
 pub use crate::correlate::{

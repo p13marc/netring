@@ -67,12 +67,16 @@ The type system now encodes which events a protocol can produce:
 `FlowPacket` now carries a `proto: L4Proto` field. (`FlowStarted` /
 `FlowEnded` / `FlowEstablished` / `FlowTick<P>` stay parameterised.)
 
-## 4. `Layer: Sync` + `Tee::factory` removed
+## 4. `LayerSpec` for per-shard layers (additive)
 
-The `Layer` trait gained a `Sync` supertrait (no shipped layer is
-affected; only external `Layer` impls with a non-`Sync` field break).
-`Tee::factory(f)` is removed — pass the factory closure to
-`ShardedRunner::layer(spec)` (a `LayerSpec`) for per-shard minting.
+New in 0.22: `ShardedRunner::layer(spec)` mints an independent layer per
+shard via the `LayerSpec` trait. `Layer` is **unchanged** (still
+`Send + 'static`, not `Sync` — so `Tee` keeps working), and
+`Tee::factory` is **kept**. Cloneable config layers (`MinSeverity`,
+`DedupeAnomalies`, `RateLimitAnomalies`, `Sample`) gained a `Clone`
+derive and pass directly; non-`Clone` layers (`Tee`) go through
+`LayerFactory(|| …)`. (No migration needed unless you adopt per-shard
+layers.)
 
 ## 5. `KeyIndexed` stays netring-side (richer API)
 

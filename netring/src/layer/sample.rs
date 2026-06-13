@@ -13,6 +13,13 @@ use crate::layer::Layer;
 /// to `0.0..=1.0`. Uses an inline xorshift64* generator (no
 /// dependency on the `rand` crate); the seed is set at
 /// construction time and can be overridden via [`Self::with_seed`].
+///
+/// `Clone` (0.22): the RNG state lives in the per-`wrap()` sink, so the
+/// config clones cleanly for [`LayerSpec`](crate::layer::LayerSpec).
+/// **Caveat:** cloned configs share the same `seed`, so sharded copies
+/// sample *identically*. For independent per-shard sampling, register a
+/// factory closure with a varied seed via `ShardedRunner::layer(|| …)`.
+#[derive(Debug, Clone)]
 pub struct Sample {
     rate: f64,
     seed: u64,

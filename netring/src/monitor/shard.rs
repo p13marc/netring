@@ -53,6 +53,11 @@ pub struct ShardedRunner {
     group_id: u16,
     num_shards: usize,
     build_shard: Arc<dyn Fn(usize) -> Result<Monitor> + Send + Sync + 'static>,
+    /// 0.22 §5.2: per-shard secondary layers. Each shard calls
+    /// `spec.instantiate()` for its own independent layer instance;
+    /// applied *outside* the builder-registered layers (so runner specs
+    /// run first / outermost).
+    layer_specs: Vec<Box<dyn crate::layer::LayerSpec>>,
 }
 
 impl ShardedRunner {
@@ -116,7 +121,22 @@ impl ShardedRunner {
             group_id,
             num_shards: num_shards.max(1),
             build_shard: Arc::new(build_shard),
+            layer_specs: Vec::new(),
         }
+    }
+
+    /// 0.22 §5.2: register a per-shard secondary layer.
+    ///
+    /// Each shard calls `spec.instantiate()` to get its **own**
+    /// independent layer (so a `DedupeAnomalies` table / `Sample` RNG
+    /// isn't shared across shards). Cloneable config layers
+    /// (`MinSeverity`, `DedupeAnomalies`, …) pass directly; non-`Clone`
+    /// layers like `Tee` go through
+    /// [`LayerFactory`](crate::layer::LayerFactory). Runner layers wrap
+    /// *outside* the per-shard builder layers (they run first).
+    pub fn layer<L: crate::layer::LayerSpec>(mut self, spec: L) -> Self {
+        self.layer_specs.push(Box::new(spec));
+        self
     }
 
     /// Number of shards this runner will spawn.
@@ -159,11 +179,15 @@ impl ShardedRunner {
     fn run_inner(self, mode: RunMode) -> Result<()> {
         let stop = Arc::new(AtomicBool::new(false));
         let build_shard = self.build_shard;
+        // 0.22 §5.2: share the layer specs across shard threads; each
+        // shard instantiates its own layer instances.
+        let layer_specs = Arc::new(self.layer_specs);
         let mut handles = Vec::with_capacity(self.num_shards);
 
         for cpu in 0..self.num_shards {
             let stop = Arc::clone(&stop);
             let build = Arc::clone(&build_shard);
+            let layer_specs = Arc::clone(&layer_specs);
             let handle = std::thread::Builder::new()
                 .name(format!("netring-shard-{cpu}"))
                 .spawn(move || -> Result<()> {
@@ -173,7 +197,11 @@ impl ShardedRunner {
                         .build()
                         .map_err(crate::error::Error::Io)?;
 
-                    let monitor = build(cpu)?;
+                    let mut monitor = build(cpu)?;
+                    // Apply per-shard secondary layers (fresh instances).
+                    for spec in layer_specs.iter() {
+                        monitor.wrap_sink(spec.instantiate());
+                    }
 
                     match mode {
                         RunMode::Deadline(deadline) => {

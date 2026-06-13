@@ -50,6 +50,58 @@ pub trait Layer: Send + 'static {
     fn wrap(self: Box<Self>, inner: Box<dyn AnomalySink>) -> Box<dyn AnomalySink>;
 }
 
+/// 0.22 §5.2: a blueprint that mints a **fresh** [`Layer`] per shard.
+///
+/// A [`crate::monitor::ShardedRunner`] needs one independent layer
+/// instance per shard — a `DedupeAnomalies` table or `Sample` RNG must
+/// not be shared across shards. `LayerSpec::instantiate` produces a new
+/// `Box<dyn Layer>` on each call.
+///
+/// Two blanket impls cover the common cases:
+/// - **cloneable config layers** (`MinSeverity`, `DedupeAnomalies`,
+///   `RateLimitAnomalies`, `Sample`) — their mutable state lives in the
+///   per-`wrap()` sink, so cloning the config is safe.
+/// - **factory closures**, via [`LayerFactory`] — for layers that
+///   aren't `Clone` (e.g. `Tee`, whose secondary sink isn't cloneable),
+///   or when you want a varied seed / config per shard.
+///
+/// Note: `LayerSpec` carries the `Sync` bound (it's shared across shard
+/// threads), but [`Layer`] itself does **not** — so non-`Sync` layers
+/// like `Tee` still work, wrapped in a [`LayerFactory`].
+pub trait LayerSpec: Send + Sync + 'static {
+    /// Mint a fresh layer instance.
+    fn instantiate(&self) -> Box<dyn Layer>;
+}
+
+impl<L> LayerSpec for L
+where
+    L: Layer + Clone + Sync,
+{
+    fn instantiate(&self) -> Box<dyn Layer> {
+        Box::new(self.clone())
+    }
+}
+
+/// Wraps a `Fn() -> Box<dyn Layer>` as a [`LayerSpec`] — the factory
+/// path for non-`Clone` layers (`Tee`) or varied-per-shard config.
+///
+/// ```ignore
+/// runner.layer(LayerFactory(|| Box::new(Tee::factory(|| StdoutSink::default().boxed()))));
+/// ```
+///
+/// (A bare `Fn` blanket impl would collide with the `Clone` blanket
+/// under coherence, so the closure is wrapped explicitly.)
+pub struct LayerFactory<F>(pub F);
+
+impl<F> LayerSpec for LayerFactory<F>
+where
+    F: Fn() -> Box<dyn Layer> + Send + Sync + 'static,
+{
+    fn instantiate(&self) -> Box<dyn Layer> {
+        (self.0)()
+    }
+}
+
 #[cfg(test)]
 mod tests {
     //! Cross-layer composition + ordering checks live here so

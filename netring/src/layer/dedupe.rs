@@ -17,6 +17,11 @@ use crate::layer::Layer;
 ///
 /// Allocates one `String` per unique `(kind, key)` pair seen at
 /// least once. The internal hashmap is `FxHashMap` for fast lookup.
+///
+/// `Clone` (0.22): the dedup table lives in the per-`wrap()` sink, so
+/// the config clones cleanly for [`LayerSpec`](crate::layer::LayerSpec)
+/// — each shard gets its own empty table.
+#[derive(Debug, Clone)]
 pub struct DedupeAnomalies {
     window: Duration,
 }

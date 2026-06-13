@@ -17,6 +17,11 @@ use crate::layer::Layer;
 /// Algorithm: a sliding window — we track the bucket-start
 /// timestamp and the count seen since. When `period` elapses the
 /// count resets.
+///
+/// `Clone` (0.22): the per-kind buckets live in the per-`wrap()` sink,
+/// so the config clones cleanly for
+/// [`LayerSpec`](crate::layer::LayerSpec) — each shard gets its own.
+#[derive(Debug, Clone)]
 pub struct RateLimitAnomalies {
     period: Duration,
     max_per_period: u32,

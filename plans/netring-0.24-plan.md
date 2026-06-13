@@ -33,16 +33,16 @@
 ## Status table
 | Phase | Item | Breaking | Status |
 |---|---|---|---|
-| A | non-Linux `compile_error!` | no | ☐ |
-| A | feature-graph flatten + crate-boundary contract + `monitor-lite` | yes | ☐ |
-| A | miri CI + cargo-fuzz + loom scaffold | no | ☐ |
-| A | docs consolidation (one tree) + `FEATURES.md` | no | ☐ |
-| A | perf-gate harness (pps/latency bench + baseline + live-alloc) | no | ☐ |
-| **B** | **`AnyBackend` enum + borrowed zero-copy + Send run loop** | shim | ☐ |
-| B | AF_XDP + pcap backends (AF_XDP reaches the Monitor) | no | ☐ |
+| A | non-Linux `compile_error!` | no | ✅ |
+| A | feature-graph flatten + crate-boundary contract + `monitor-lite` | yes | ✅ |
+| A | miri CI + cargo-fuzz + loom scaffold | no | ✅ (loom→0.25) |
+| A | docs consolidation (one tree) + `FEATURES.md` | no | ✅ |
+| A | perf-gate harness (pps/latency bench + baseline + live-alloc) | no | ✅ |
+| **B** | **borrowed zero-copy + Send run loop** (per-packet copy eliminated) | no | ✅ |
+| B | `AnyBackend` enum + AF_XDP + pcap unify (AF_XDP reaches the Monitor) | shim | ☐ |
 | B | resilience: backend/handler/panic policies | no | ☐ |
 | B | AF_XDP UMEM hugepages + NUMA + ZC/cloud-fallback detect | no | ☐ |
-| B | io_uring ZC-RX seam (design only) | no | ☐ |
+| B | io_uring ZC-RX seam (design only) | no | ✅ (`docs/BACKENDS.md`) |
 | C | `CaptureTelemetry` + run-loop sampling + `on_capture_stats` + `CaptureHealth` | minor | ☐ |
 | C | bounded `ChannelSink` + lag/error counters; backpressure contract | minor | ☐ |
 | C | `MonitorHealth` + readiness/liveness + tracing JSON + `METRICS.md` | no | ☐ |

@@ -370,14 +370,17 @@ let mut rules = AnomalyMonitor::<FiveTupleKey>::new()
 `to_json_line()` for production-pipeline JSON (no `serde` dep —
 escaping is hand-rolled to RFC 8259 §7). Severity tiers
 (`Info/Warning/Error/Critical`) port directly to flowscope's
-`AnomalyKind::severity()` via a `From` impl. Eight reference
-detectors live under `examples/anomaly/`: `dns_query_burst`,
-`dns_resolved_no_connection`, `anomaly_monitor_demo`,
-`slow_tls_handshake`, `lateral_movement`, `icmp_explained_drop`,
-`pcap_replay_anomaly`, `tls_to_unresolved_ip` (3-protocol). Set
-`NETRING_JSON=1` to switch the showcase to JSON output. Pair
-with `cargo run --example synthetic_traffic` to demo on `lo`
+`AnomalyKind::severity()` via a `From` impl. Reference detectors
+live under `examples/monitor/` on the declarative `Monitor::builder()`
+API (`port_scan`, `beacon_detector`, `dga_query`, `net_diagnostic`,
+`file_hash_dfir`), plus raw-primitive correlators under
+`examples/anomaly/` (`dns_query_burst`, `dns_resolved_no_connection`).
+Pair with `cargo run --example synthetic_traffic` to demo on `lo`
 without `CAP_NET_RAW`.
+
+> **0.22:** the legacy `AnomalyMonitor` / `AnomalyRule` harness was
+> removed; the detectors that used it now ship on the
+> `Monitor::builder()` + `detector!` / `pattern_detector!` API.
 
 See [docs/WRITING_DETECTORS.md](docs/WRITING_DETECTORS.md) for
 the full tutorial — anatomy of an `AnomalyRule`, state-primitive
@@ -718,7 +721,8 @@ cargo run --example async_on_tick         --features "tokio,flow,parse" -- lo 30
 cargo run --example multi_protocol_monitor --features "tokio,flow,parse"  -- eth0 30
 cargo run --example http_session           --features "tokio,http"        -- eth0 60
 cargo run --example dns_lookups            --features "tokio,dns"         -- eth0 60
-cargo run --example full_monitor           --features "tokio,http,dns"    -- eth0 60
+# "watch everything" recipe — use the declarative Monitor (0.22):
+cargo run --example monitor_net_diagnostic --features "monitor-quickstart,icmp" -- eth0 60
 # 0.21 — declarative Monitor (subscribe / pcap replay / pattern detectors):
 cargo run --example monitor_basic            --features "monitor-quickstart"  -- eth0
 cargo run --example monitor_stream_consumer  --features "monitor-quickstart"  -- eth0

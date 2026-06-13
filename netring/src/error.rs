@@ -73,21 +73,6 @@ pub enum BuildError {
     /// Multi-interface monitors land in Phase E; today the builder
     /// rejects more than one interface.
     ///
-    /// **Phase F.1 shipped multi-interface support.** The builder
-    /// no longer returns this variant — it accepts any number of
-    /// interfaces and the run loop fans them in. The variant is
-    /// kept for source-compat with code that pattern-matched on
-    /// `BuildError` exhaustively; it's `#[non_exhaustive]` anyway
-    /// so external code shouldn't have done that. Removed in 0.22.0.
-    #[error(
-        "multi-interface monitors land in netring 0.20 phase E (Phase B accepts one interface)"
-    )]
-    #[deprecated(
-        since = "0.20.0",
-        note = "Phase F.1 shipped multi-interface support; this variant is no longer returned"
-    )]
-    MultiInterfaceNotYetSupported,
-
     /// More than the dispatcher's per-monitor handler-type cap.
     #[error("too many event types registered: limit {limit}, found {actual}")]
     TooManyEventTypes {

@@ -7,16 +7,19 @@
 //! Suricata `stats.log` / Zeek `conn.log` shape, which monitors used
 //! to hand-roll on `Tick` + `println!`.
 //!
-//! - [`Report`] — a typed snapshot a monitor emits each cadence.
-//! - [`ReportSink<R>`] — consumes reports of type `R`.
-//! - [`ReportSnapshot`] — read view over the monitor's registered
-//!   primitives, handed to the `report()` / `report_to()` closures.
+//! - [`Report`](crate::report::Report) — a typed snapshot a monitor
+//!   emits each cadence.
+//! - [`ReportSink`](crate::report::ReportSink) — consumes reports of
+//!   type `R`.
+//! - [`ReportSnapshot`](crate::report::ReportSnapshot) — read view over
+//!   the monitor's registered primitives, handed to the `report()` /
+//!   `report_to()` closures.
 //!
 //! Register via
 //! [`MonitorBuilder::report`](crate::monitor::MonitorBuilder::report)
 //! (closure) or
 //! [`MonitorBuilder::report_to`](crate::monitor::MonitorBuilder::report_to)
-//! (typed `R` → a [`ReportSink`]).
+//! (typed `R` → a [`ReportSink`](crate::report::ReportSink)).
 
 use crate::anomaly::Severity;
 use crate::anomaly::sink::AnomalyWriter;

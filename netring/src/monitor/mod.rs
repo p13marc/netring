@@ -439,7 +439,7 @@ impl MonitorBuilder {
     /// ```ignore
     /// let mut table = flowscope::well_known::LabelTable::new(); // inherits built-ins
     /// table.set(flowscope::L4Proto::Tcp, 8765, "grpc");
-    /// Monitor::builder().interface("eth0").label_table(table)…
+    /// Monitor::builder().interface("eth0").label_table(table);
     /// ```
     ///
     /// The table is read at dispatch via
@@ -478,7 +478,7 @@ impl MonitorBuilder {
     /// 0.21 D.4: tag this monitor with a human-readable name.
     ///
     /// The name surfaces on every dispatched
-    /// [`Ctx`](crate::ctx::Ctx) as
+    /// [`Ctx`] as
     /// [`Ctx::monitor_name`](crate::ctx::Ctx::monitor_name)
     /// (`Option<&'a str>`); user handlers
     /// running under multiple monitors in the same process can
@@ -827,8 +827,7 @@ impl MonitorBuilder {
     /// ```
     ///
     /// For handlers that also need `&mut Ctx<'_>`, use
-    /// [`Self::on_ctx`]. The 0.20 three-generic form
-    /// [`Self::on_with_marker`] is `#[deprecated]`.
+    /// [`Self::on_ctx`].
     pub fn on<E: Event>(
         mut self,
         handler: impl Handler<E, crate::monitor::handler::PayloadOnly>,
@@ -1096,7 +1095,7 @@ impl MonitorBuilder {
     /// `.tick_ctx(period, |ctx| { … })`.
     ///
     /// The same as [`Self::tick`] but with the
-    /// [`CtxOnly`](crate::monitor::CtxOnly) marker fixed, so an untyped
+    /// [`CtxOnly`] marker fixed, so an untyped
     /// `|ctx|` closure isn't ambiguous between "payload only" and "ctx
     /// only" (both are arity-1). Most tick handlers never read the
     /// `Tick` fields, so this is the common case.

@@ -1,15 +1,11 @@
 //! Typed event markers for handler registration.
 //!
 //! These types pair with the [`Event`] trait to let users write
-//! `Monitor::builder().on::<E>(handler)` for typed payload
-//! dispatch. They re-package the existing lifecycle variants of
-//! [`super::ProtocolEvent`] into per-[`Protocol`]
-//! typed structs, letting handlers scope to a single L4
-//! protocol (e.g. `FlowStarted<Tcp>`) without writing a runtime
-//! filter.
-//!
-//! In Phase A these types are defined but NOT yet consumed. Phase
-//! B introduces the `Handler` trait + dispatcher that uses them.
+//! `Monitor::builder().on::<E>(handler)` for typed payload dispatch.
+//! Per-[`Protocol`] typed structs (`FlowStarted<Tcp>`, …) let handlers
+//! scope to a single L4 protocol without writing a runtime filter;
+//! the flat events (`FlowPacket`, `TcpRst`, `IcmpError`) carry their
+//! own discriminants.
 
 use std::marker::PhantomData;
 

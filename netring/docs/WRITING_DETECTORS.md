@@ -1,8 +1,18 @@
 # Writing your own anomaly detector
 
-A practical guide to the `AnomalyRule` trait and the
-`AnomalyMonitor` harness — how to compose a new detector, what
-the state primitives are good for, and how to debug a rule that
+> ⚠️ **0.22 API note.** The `AnomalyRule` trait + `AnomalyMonitor`
+> harness this guide is written around were **removed in 0.22**.
+> Detectors now live on the declarative `Monitor::builder()` API —
+> `on_ctx::<E>` handlers, the `detector!` / `pattern_detector!` macros,
+> and `ctx.emit(kind, severity)`. See `docs/discoverability.md`,
+> `docs/MIGRATING_0.21_TO_0.22.md`, and `examples/monitor/`
+> (`port_scan`, `beacon_detector`, `dga_query`, `net_diagnostic`). The
+> **concepts** below (state primitives, `observe` vs periodic ticks,
+> cross-protocol correlation, MITRE mapping) carry over unchanged; only
+> the trait/harness wrapper differs.
+
+A practical guide to detector design — how to compose a new detector,
+what the state primitives are good for, and how to debug one that
 doesn't fire when you expect it to.
 
 Companion to:
@@ -487,8 +497,9 @@ Reference example: `anomaly_monitor_demo.rs` reads
 `NETRING_JSON=1` to switch between the two:
 
 ```bash
-NETRING_JSON=1 cargo run --example anomaly_monitor_demo \
-    --features tokio,dns -- eth0 60 | jq .
+# 0.22: pipe any monitor with a StdoutJsonSink through jq, e.g.
+cargo run --example monitor_dga_query \
+    --features "monitor-quickstart" -- eth0 60 | jq .
 ```
 
 ### Pipeline integration

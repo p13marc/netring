@@ -1,9 +1,7 @@
-//! [`AnomalyRule`] trait + [`Anomaly`] value type.
+//! [`Anomaly`] / [`AnomalyContext`] / [`Severity`] value types.
 //!
-//! 0.21 H.3: the `AnomalyRule` trait is `#[deprecated]`. Internal
-//! impls in this file allow the deprecation; external consumers
-//! still see the warning at the trait import.
-#![allow(deprecated)]
+//! 0.22: the legacy `AnomalyRule` trait (0.19 API) was removed; these
+//! value types back the 0.20+ sinks + the `serde` feature.
 
 use flowscope::Timestamp;
 
@@ -39,8 +37,8 @@ impl From<Severity> for flowscope::event::Severity {
 
 /// Severity tier carried on every [`Anomaly`].
 ///
-/// Rule authors pick the tier; the [`AnomalyMonitor`](super::AnomalyMonitor)
-/// is policy-neutral about what to do with it (log, page, alert).
+/// Detectors pick the tier; the sink chain is policy-neutral about what
+/// to do with it (log, page, alert).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Default)]
 #[cfg_attr(feature = "serde", derive(serde::Serialize))]
 #[cfg_attr(feature = "serde", serde(rename_all = "snake_case"))]
@@ -56,7 +54,7 @@ pub enum Severity {
     Critical,
 }
 
-/// A single anomaly produced by an [`AnomalyRule`].
+/// A single anomaly produced by a detector.
 ///
 /// The `kind` identifies the detector that fired (use a short
 /// stable slug — e.g. `"DnsResolvedNoConnection"`). `key` is the
@@ -157,7 +155,7 @@ impl<K> Anomaly<K> {
     }
 
     /// Same as [`Self::with_key`] but accepting an `Option<K>` —
-    /// convenient when reading from [`ProtocolEvent::key`].
+    /// convenient when the source key is itself optional.
     pub fn with_key_opt(mut self, key: Option<K>) -> Self {
         self.key = key;
         self

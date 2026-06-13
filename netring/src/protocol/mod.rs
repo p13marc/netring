@@ -150,13 +150,9 @@ pub trait Protocol: Send + Sync + 'static {
 
 /// 0.22 R1: a protocol whose **flows the tracker follows** end to
 /// end. Flow-tracked protocols emit the lifecycle events
-/// [`FlowStarted`](crate::protocol::event_typed::FlowStarted) /
-/// [`FlowEstablished`](crate::protocol::event_typed::FlowEstablished) /
-/// [`FlowEnded`](crate::protocol::event_typed::FlowEnded) /
-/// [`FlowTick`](crate::protocol::event_typed::FlowTick) and
-/// participate in the flat
-/// [`FlowPacket`](crate::protocol::event_typed::FlowPacket) stream;
-/// they are keyed by 5-tuple.
+/// [`FlowStarted`] / [`FlowEstablished`] / [`FlowEnded`] / [`FlowTick`]
+/// and participate in the flat [`FlowPacket`] stream; they are keyed by
+/// 5-tuple.
 ///
 /// Implemented for [`builtin::Tcp`], [`builtin::Udp`], and
 /// [`builtin::Icmp`] (ICMP is *both* flow-tracked — the kernel/

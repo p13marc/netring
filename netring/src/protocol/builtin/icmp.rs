@@ -29,6 +29,15 @@ impl Protocol for Icmp {
     ) -> Result<SlotHandle<Self::Message, FiveTupleKey>, ProtocolInitError> {
         Ok(builder.datagram_broadcast(flowscope::icmp::IcmpParser::new()))
     }
+
+    /// 0.22 §2.5: ICMP installs an `IcmpSlot` (raw `IcmpMessage`
+    /// forwarding **plus** `IcmpError` synthesis) instead of the
+    /// generic `TypedProtocolSlot`.
+    fn make_slot(
+        handle: SlotHandle<Self::Message, FiveTupleKey>,
+    ) -> Box<dyn crate::monitor::ProtocolSlot> {
+        Box::new(crate::monitor::registry::IcmpSlot::new(handle))
+    }
 }
 
 // 0.22 R1: ICMP is *both* flow-tracked (the tracker follows ICMP

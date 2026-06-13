@@ -168,6 +168,23 @@ pub trait Protocol: Send + Sync + 'static {
             Self::NAME
         )))
     }
+
+    /// 0.22 §2.5: build the runtime drain slot for this protocol's
+    /// parser `handle`. The default wraps it in a
+    /// [`TypedProtocolSlot<Self>`](crate::monitor::TypedProtocolSlot);
+    /// [`builtin::Icmp`] overrides this to install an `IcmpSlot` that
+    /// also synthesises [`IcmpError`](crate::protocol::event_typed::IcmpError)
+    /// events. Called by
+    /// [`MonitorBuilder::protocol`](crate::monitor::MonitorBuilder::protocol)
+    /// after a successful [`Self::register`].
+    fn make_slot(
+        handle: flowscope::driver::SlotHandle<Self::Message, flowscope::extract::FiveTupleKey>,
+    ) -> Box<dyn crate::monitor::ProtocolSlot>
+    where
+        Self: Sized,
+    {
+        Box::new(crate::monitor::TypedProtocolSlot::<Self>::new(handle))
+    }
 }
 
 /// 0.22 R1: a protocol whose **flows the tracker follows** end to

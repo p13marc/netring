@@ -30,3 +30,10 @@ metrics = "0.24"
 ahash = { version = "0.8", default-features = false }
 bytes = "1"
 xxhash-rust = { version = "0.8", default-features = false, features = ["xxh3"] }
+
+# 0.22: netring needs the flowscope 0.14.1 ICMP-datagram-routing fix
+# (datagram_broadcast(IcmpParser) delivering ICMP messages — required
+# for on_icmp_error). Until 0.14.1 is published to crates.io, build
+# against the local checkout. Remove this patch once 0.14.1 ships.
+[patch.crates-io]
+flowscope = { path = "../flowscope" }

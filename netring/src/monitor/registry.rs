@@ -289,6 +289,78 @@ impl<P: Protocol> ProtocolSlot for TypedProtocolSlot<P> {
     }
 }
 
+/// 0.22 §2.5: ICMP drain slot. A strict superset of
+/// `TypedProtocolSlot::<Icmp>`: it forwards every raw `IcmpMessage`
+/// to `on::<Icmp>` handlers AND synthesises a typed
+/// [`IcmpError`](crate::protocol::event_typed::IcmpError) for error
+/// messages — joining the inner 5-tuple (`from_inner_canonical`) and
+/// live stats (`Ctx::lookup_icmp_flow`). Installed in place of the
+/// generic slot whenever `Icmp` is declared (see
+/// [`crate::protocol::Protocol::make_slot`]).
+#[cfg(feature = "icmp")]
+pub struct IcmpSlot {
+    handle: SlotHandle<flowscope::icmp::IcmpMessage, flowscope::extract::FiveTupleKey>,
+    scratch: Vec<SlotMessage<flowscope::icmp::IcmpMessage, flowscope::extract::FiveTupleKey>>,
+}
+
+#[cfg(feature = "icmp")]
+impl IcmpSlot {
+    /// Wrap the ICMP parser handle.
+    pub fn new(
+        handle: SlotHandle<flowscope::icmp::IcmpMessage, flowscope::extract::FiveTupleKey>,
+    ) -> Self {
+        Self {
+            handle,
+            scratch: Vec::new(),
+        }
+    }
+}
+
+#[cfg(feature = "icmp")]
+impl ProtocolSlot for IcmpSlot {
+    fn drain_and_dispatch(&mut self, dispatcher: &mut Dispatcher, ctx: &mut Ctx<'_>) -> Result<()> {
+        use crate::protocol::event_typed::{IcmpError, classify_icmp_error};
+
+        self.scratch.clear();
+        let n = self.handle.drain(&mut self.scratch);
+        if n == 0 {
+            return Ok(());
+        }
+        let saved_flow = ctx.flow;
+        let saved_ts = ctx.ts;
+
+        for slot_msg in self.scratch.drain(..) {
+            ctx.flow = Some(slot_msg.key);
+            ctx.ts = slot_msg.ts;
+
+            // (1) raw message → `on::<Icmp>` handlers.
+            dispatcher.dispatch::<flowscope::icmp::IcmpMessage>(&slot_msg.message, ctx)?;
+
+            // (2) typed IcmpError → `on_icmp_error` handlers. Build only
+            // for error messages; dispatch is a no-op when no IcmpError
+            // handler is registered.
+            if let Some(kind) = classify_icmp_error(&slot_msg.message) {
+                let inner = slot_msg.message.error_inner().map(|(_, i)| i);
+                let correlated_flow =
+                    inner.and_then(flowscope::extract::FiveTupleKey::from_inner_canonical);
+                let stats = inner.and_then(|i| ctx.lookup_icmp_flow(i).map(|(_, s)| s));
+                let err = IcmpError {
+                    family: slot_msg.message.family,
+                    kind,
+                    correlated_flow,
+                    stats,
+                    ts: slot_msg.ts,
+                };
+                dispatcher.dispatch::<IcmpError>(&err, ctx)?;
+            }
+        }
+
+        ctx.flow = saved_flow;
+        ctx.ts = saved_ts;
+        Ok(())
+    }
+}
+
 /// 0.21 F: broadcast variant of [`TypedProtocolSlot`]. Holds one
 /// clone of the [`BroadcastSlotHandle`] returned by
 /// [`crate::protocol::Protocol::register_broadcast`]; user
@@ -530,5 +602,87 @@ mod tests {
             }
             other => panic!("expected TooManyEventTypes, got {other:?}"),
         }
+    }
+
+    /// 0.22 §2.5: end-to-end through a real flowscope driver — feed an
+    /// Ethernet+IPv4+ICMPv4 Port-Unreachable frame, drain the
+    /// `IcmpSlot`, and assert it synthesises a typed `IcmpError` with
+    /// the inner TCP flow joined.
+    #[cfg(feature = "icmp")]
+    #[test]
+    fn icmp_slot_synthesises_icmp_error_from_a_real_frame() {
+        use std::sync::Arc;
+        use std::sync::atomic::{AtomicU32, Ordering};
+
+        use flowscope::driver::Driver;
+        use flowscope::extract::FiveTuple;
+
+        use crate::protocol::Protocol;
+        use crate::protocol::builtin::Icmp;
+        use crate::protocol::event_typed::IcmpError;
+
+        // Build a driver with the ICMP parser; route its handle through
+        // `make_slot` so we exercise the real `IcmpSlot`.
+        let mut builder = Driver::builder(FiveTuple::bidirectional());
+        let handle = Icmp::register(&mut builder).expect("icmp registers");
+        let mut slot = Icmp::make_slot(handle);
+        let mut driver = builder.build();
+
+        // Handler records each IcmpError it sees.
+        let seen = Arc::new(AtomicU32::new(0));
+        let s = Arc::clone(&seen);
+        let mut reg = HandlerRegistry::default();
+        reg.register::<IcmpError, _, crate::monitor::handler::PayloadCtx>(
+            move |err: &IcmpError, _ctx: &mut Ctx<'_>| {
+                assert_eq!(err.kind.as_str(), "port_unreachable");
+                assert!(err.correlated_flow.is_some(), "inner 5-tuple joined");
+                s.fetch_add(1, Ordering::Relaxed);
+                Ok(())
+            },
+        );
+        let mut dispatcher = reg.into_dispatcher().unwrap();
+
+        // Build a valid Ethernet/IPv4(proto=ICMP) frame via etherparse
+        // (correct lengths + checksum so the extractor accepts it). The
+        // ICMP body is a type=3 code=3 (Port Unreachable) carrying an
+        // inner IPv4+TCP header (the original 5-tuple).
+        use etherparse::{Ethernet2Header, IpNumber, Ipv4Header};
+        let mut inner = Vec::new();
+        inner.extend_from_slice(&[0x45, 0, 0x00, 0x28, 0, 0, 0, 0, 64, 6, 0, 0]);
+        inner.extend_from_slice(&[10, 0, 0, 1]); // inner src
+        inner.extend_from_slice(&[10, 0, 0, 2]); // inner dst
+        inner.extend_from_slice(&12345u16.to_be_bytes()); // sport
+        inner.extend_from_slice(&80u16.to_be_bytes()); // dport
+        inner.extend_from_slice(&[0, 0, 0, 1]); // seq
+        let mut icmp = vec![3u8, 3, 0, 0, 0, 0, 0, 0]; // type/code/csum/unused
+        icmp.extend_from_slice(&inner);
+
+        let ip = Ipv4Header::new(icmp.len() as u16, 64, IpNumber::ICMP, [192, 0, 2, 1], [192, 0, 2, 2])
+            .unwrap();
+        let eth = Ethernet2Header {
+            destination: [2u8; 6],
+            source: [1u8; 6],
+            ether_type: etherparse::EtherType::IPV4,
+        };
+        let mut frame = Vec::new();
+        eth.write(&mut frame).unwrap();
+        ip.write(&mut frame).unwrap();
+        frame.extend_from_slice(&icmp);
+
+        let ts = Timestamp::new(1, 0);
+        let view = flowscope::PacketView::new(&frame, ts);
+        let mut events = Vec::new();
+        driver.track_into(view, &mut events);
+
+        // Drain the ICMP slot with a Ctx carrying the driver's tracker.
+        let mut state = StateMap::default();
+        let mut sink = NoopSink;
+        let mut counters = CounterRegistry::default();
+        let mut flow_states = crate::ctx::FlowStateRegistry::default();
+        let mut ctx = fresh_ctx(&mut state, &mut sink, &mut counters, &mut flow_states);
+        ctx.tracker = Some(driver.tracker());
+        slot.drain_and_dispatch(&mut dispatcher, &mut ctx).unwrap();
+
+        assert_eq!(seen.load(Ordering::Relaxed), 1, "one IcmpError synthesised");
     }
 }

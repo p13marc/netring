@@ -537,8 +537,9 @@ impl MonitorBuilder {
             .driver_builder
             .get_or_insert_with(|| Driver::builder(FiveTuple::bidirectional()));
         if let Ok(handle) = P::register(builder) {
-            self.protocol_slots
-                .push(Box::new(TypedProtocolSlot::<P>::new(handle)));
+            // 0.22 §2.5: the protocol chooses its slot type. Default is
+            // `TypedProtocolSlot<P>`; `Icmp` installs an `IcmpSlot`.
+            self.protocol_slots.push(P::make_slot(handle));
         }
         // Err(_) = lifecycle-only; nothing to register on the driver
         // side. Still record the marker in `declared_protocols` so
@@ -685,6 +686,41 @@ impl MonitorBuilder {
                 Ok(())
             },
         )
+    }
+
+    /// 0.22 §2.5: handle ICMP errors — Destination Unreachable / Time
+    /// Exceeded / Parameter Problem / PMTU (v4 + v6), pre-classified and
+    /// with the originating flow joined.
+    ///
+    /// Implicitly declares `Icmp`, which installs the
+    /// `IcmpError`-synthesising drain slot. The handler receives the
+    /// [`IcmpError`](crate::protocol::event_typed::IcmpError) plus
+    /// `&mut Ctx`. Sync-only for 0.22.
+    ///
+    /// ```ignore
+    /// .on_icmp_error(|err, ctx| {
+    ///     if let Some(flow) = err.correlated_flow {
+    ///         ctx.emit("FlowKilledByIcmp", Severity::Warning)
+    ///             .with_key(&flow)
+    ///             .with("kind", err.kind.as_str())
+    ///             .emit();
+    ///     }
+    ///     Ok(())
+    /// })
+    /// ```
+    #[cfg(feature = "icmp")]
+    pub fn on_icmp_error(
+        self,
+        handler: impl Handler<
+            crate::protocol::event_typed::IcmpError,
+            crate::monitor::handler::PayloadCtx,
+        >,
+    ) -> Self {
+        let mut s = self.protocol::<crate::protocol::builtin::Icmp>();
+        s.handlers.register::<crate::protocol::event_typed::IcmpError, _, crate::monitor::handler::PayloadCtx>(
+            handler,
+        );
+        s
     }
 
     /// 0.21 F: register `P` for broadcast delivery.

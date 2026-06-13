@@ -335,6 +335,102 @@ impl Event for TcpRst {
     type Payload = TcpRst;
 }
 
+// ─── ICMP error (0.22 §2.4) ─────────────────────────────────────
+
+/// ICMP family discriminant (`V4` / `V6`). Re-exported from flowscope
+/// so handlers name one canonical type.
+#[cfg(feature = "icmp")]
+pub use flowscope::icmp::IcmpFamily;
+
+/// 0.22 §2.4: a unified, pre-classified ICMP error with the
+/// originating flow already joined — handlers see one event shape
+/// regardless of v4/v6.
+///
+/// Synthesised internally when a registered `Icmp` parser emits an
+/// error message; register a handler via
+/// [`MonitorBuilder::on_icmp_error`](crate::monitor::MonitorBuilder::on_icmp_error)
+/// (or `on::<IcmpError>`).
+#[cfg(feature = "icmp")]
+#[non_exhaustive]
+#[derive(Debug, Clone)]
+pub struct IcmpError {
+    /// v4 vs v6.
+    pub family: IcmpFamily,
+    /// Pre-classified error kind, unified across families.
+    pub kind: IcmpErrorKind,
+    /// The originating flow, reconstructed from the ICMP message's
+    /// embedded inner 5-tuple (`FiveTupleKey::from_inner_canonical`).
+    /// `Some` whenever the inner packet carries a usable 5-tuple —
+    /// independent of whether the flow is still live.
+    pub correlated_flow: Option<FlowKey>,
+    /// Live-flow stats at error time, when the inner 5-tuple still
+    /// matches a tracked flow (`FlowTracker::stats_for_inner`); `None`
+    /// once the flow has been evicted or was never tracked.
+    pub stats: Option<FlowStats>,
+    /// Timestamp of the ICMP error.
+    pub ts: Timestamp,
+}
+
+/// 0.22 §2.4: the operationally-meaningful ICMP error classes,
+/// unified across v4/v6. `DestUnreachable` / `MtuSignal` carry the
+/// flowscope sub-classification.
+#[cfg(feature = "icmp")]
+#[non_exhaustive]
+#[derive(Debug, Clone)]
+pub enum IcmpErrorKind {
+    /// Destination Unreachable (host / port / network / admin / …).
+    DestUnreachable(flowscope::icmp::DestUnreachableKind),
+    /// Time Exceeded (TTL expired in transit / reassembly).
+    TimeExceeded,
+    /// Parameter Problem (malformed header field).
+    ParameterProblem,
+    /// PMTU signal — v4 Fragmentation-Needed / v6 Packet-Too-Big.
+    MtuSignal(flowscope::icmp::MtuSignalKind),
+}
+
+#[cfg(feature = "icmp")]
+impl IcmpErrorKind {
+    /// Stable slug for sinks / metrics labels (delegates to flowscope's
+    /// `as_str` for the sub-classified variants).
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::DestUnreachable(k) => k.as_str(),
+            Self::TimeExceeded => "time_exceeded",
+            Self::ParameterProblem => "parameter_problem",
+            Self::MtuSignal(k) => k.as_str(),
+        }
+    }
+}
+
+#[cfg(feature = "icmp")]
+impl Event for IcmpError {
+    type Payload = IcmpError;
+}
+
+/// 0.22 §2.4: classify a parsed ICMP message into an [`IcmpErrorKind`],
+/// or `None` for non-error / unsurfaced types (echo, redirect, ND).
+/// Order matters: MTU signals are a sub-case of v4 Dest-Unreachable,
+/// so check `mtu_signal()` before `dest_unreachable_kind()`.
+#[cfg(feature = "icmp")]
+pub(crate) fn classify_icmp_error(
+    msg: &flowscope::icmp::IcmpMessage,
+) -> Option<IcmpErrorKind> {
+    if !msg.is_error() {
+        return None;
+    }
+    if let Some(k) = msg.mtu_signal() {
+        return Some(IcmpErrorKind::MtuSignal(k));
+    }
+    if let Some(k) = msg.dest_unreachable_kind() {
+        return Some(IcmpErrorKind::DestUnreachable(k));
+    }
+    match msg.short_kind() {
+        "time_exceeded" => Some(IcmpErrorKind::TimeExceeded),
+        "parameter_problem" => Some(IcmpErrorKind::ParameterProblem),
+        _ => None,
+    }
+}
+
 /// Periodic per-flow [`FlowStats`] snapshot. Only emitted when
 /// `FlowTrackerConfig::flow_tick_interval` is set on the underlying
 /// driver.
@@ -498,6 +594,39 @@ mod tests {
         // Distinct types — compile-time check only.
         fn _accept_tcp(_: &FlowStarted<Tcp>) {}
         fn _accept_udp(_: &FlowStarted<Udp>) {}
+    }
+
+    // 0.22 §2.4/2.5: classify a real (parsed) ICMPv4 Port-Unreachable
+    // carrying a TCP inner, and join its inner 5-tuple to a flow key.
+    #[cfg(feature = "icmp")]
+    #[test]
+    fn classify_and_join_icmpv4_port_unreachable() {
+        // ICMPv4 header: type=3 (Dest Unreachable), code=3 (Port).
+        let mut payload = vec![3u8, 3, 0, 0, 0, 0, 0, 0];
+        // Embedded inner: IPv4(proto=TCP) + first 8 bytes of TCP header.
+        payload.extend_from_slice(&[0x45, 0, 0x00, 0x28, 0, 0, 0, 0, 64, 6, 0, 0]);
+        payload.extend_from_slice(&[10, 0, 0, 1]); // inner src
+        payload.extend_from_slice(&[10, 0, 0, 2]); // inner dst
+        payload.extend_from_slice(&12345u16.to_be_bytes()); // sport
+        payload.extend_from_slice(&80u16.to_be_bytes()); // dport
+        payload.extend_from_slice(&[0, 0, 0, 1]); // seq
+
+        let msg = flowscope::icmp::parse_v4(&payload).expect("parses");
+
+        // Classifier → DestUnreachable(Port).
+        let kind = classify_icmp_error(&msg).expect("is an error");
+        assert_eq!(kind.as_str(), "port_unreachable");
+        assert!(matches!(kind, IcmpErrorKind::DestUnreachable(_)));
+
+        // Inner 5-tuple joins to a canonical flow key.
+        let (_, inner) = msg.error_inner().expect("has inner");
+        let key = flowscope::extract::FiveTupleKey::from_inner_canonical(inner)
+            .expect("builds a key");
+        assert_eq!(key.proto, flowscope::L4Proto::Tcp);
+
+        // Non-error ICMP (echo request, type=8) classifies as None.
+        let echo = flowscope::icmp::parse_v4(&[8u8, 0, 0, 0, 0x12, 0x34, 0x56, 0x78]).unwrap();
+        assert!(classify_icmp_error(&echo).is_none());
     }
 
     #[test]

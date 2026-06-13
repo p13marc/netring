@@ -1,87 +1,104 @@
 # plans/ — netring backlog
 
-Forward-looking implementation plans only. Historical record lives in `CHANGELOG.md` + `git log`; reference material lives in `netring/docs/`. Convention: when a plan ships, **delete the plan file** in the same PR.
+Forward-looking implementation plans only. Historical record lives in `CHANGELOG.md`
++ `git log`; reference material lives in `netring/docs/`. Convention: when a plan ships,
+**delete it** in the same PR.
 
-> **Scope split.** Flow & session tracking lives in the separate [`flowscope`](https://github.com/p13marc/flowscope) crate. flowscope's `plans/` covers flow extraction, tracking, reassembly, session/datagram parsing, observability of flows, and L7 parsers. This index covers only netring-side plans (capture, monitor builder, anomaly toolkit, sinks, sharding).
+> **Scope split.** Flow & session tracking lives in the separate
+> [`flowscope`](https://github.com/p13marc/flowscope) crate (computational, no-tokio:
+> parsers, tracking, reassembly, fingerprints incl. JA3/JA4, correlate primitives). This
+> index covers netring-side plans (capture backends, the Monitor/subscription engine,
+> sinks/exporters, sharding, observability).
 
 ---
 
-## Current
+## The six documents
 
-| Plan | Scope | Status |
-|---|---|---|
-| [`netring-0.21-release-gates.md`](./netring-0.21-release-gates.md) | Version bump + `netring/CLAUDE.md` refresh + tag + publish. The four release-gate items the user explicitly held back. | Held pending user trigger |
-| [`netring-0.22-send-future-decision.md`](./netring-0.22-send-future-decision.md) | Send-future investigation. **Resolved in 0.23** (Option A alone — run-loop future now `Send + 'static`). | ✅ Resolved — delete on 0.23 ship |
-| [`upstream-tracking.md`](./upstream-tracking.md) | rustc / kernel / flowscope features being watched | Live |
+| Doc | Role |
+|---|---|
+| [`netring-architecture.md`](./netring-architecture.md) | **Design north-star — read first.** The coherent end-to-end design every release implements: the data path, the `AnyBackend` enum, typed multi-stage filtering, the handler/effect model, resilience, threading, and the SemVer strategy. Design values: **performance · strongly-typed · async-friendly (tokio) · idiomatic.** |
+| [`netring-strategic-review-2026-06.md`](./netring-strategic-review-2026-06.md) | The *why* — competitive landscape, pain points, differentiators, the M1–M4 roadmap. |
+| [`netring-0.24-plan.md`](./netring-0.24-plan.md) | **Next release** — Zero-Copy Core + Production Trust (Phases A–E; keystone = B). |
+| [`netring-0.25-plan.md`](./netring-0.25-plan.md) | **Release after** — Subscriptions, Async Effects & Performance (Phases A–D). |
+| [`upstream-tracking.md`](./upstream-tracking.md) | Live: rustc / kernel / flowscope features being watched. |
+| *(this)* `INDEX.md` | Roadmap overview, decisions, invariants, history. |
+
+The first drafts were a single mega-plan, then nine phase files; this is the settled middle:
+**one architecture spine + two consolidated release plans.** The architecture doc holds the
+design rationale so the release plans stay execution-focused (phased sections, not re-derived
+design).
+
+---
+
+## The roadmap to 1.0
+
+```
+0.23  Send run-loop future                 ── DONE (on 0.23-dev; publish pending)
+0.24  Zero-Copy Core + Production Trust     ── keystone: AnyBackend enum + borrowed
+  │     zero-copy + Send loop · AF_XDP reaches the Monitor · resilience · telemetry/
+  │     health · syslog/IPFIX (+ OTLP/Kafka companion) · JA4/JA4S · miri/fuzz/perf-gate
+0.25  Subscriptions, Effects & Performance  ── typed 3-tier subscriptions · filter
+  │     pushdown → cBPF / table-driven XDP map (differentiator) · async read+effect
+  │     handlers · NUMA pinning + symmetric fanout · published pps/Gbps · TX
+  ▼   community test window → feedback incorporated → shims removed
+1.0   Stabilization (SemVer promise; plan written once feedback is in)
+```
+
+**One break, not three.** 0.24/0.25 are *additive-with-shims* — they add the new surface
+(`backend()`, `subscribe()`, effect-`on_async`) and **deprecate** the old; existing code
+**keeps compiling**. The single forced migration — removing the shims + the SemVer-stable
+promise — happens once, at **1.0**, after the new surface is field-tested. (Arch §7.)
+
+**The keystone is 0.24 Phase B** — one rewrite that simultaneously makes the Monitor
+zero-copy, keeps it `Send`, brings AF_XDP to the high-level API, and creates the `AnyBackend`
+seam everything else (incl. 0.25's subscriptions) builds on.
+
+### Decisions locked
+- **Split:** 0.24 = foundations + I/O keystone + production trust · 0.25 = subscriptions +
+  async-effect redesign + perf numbers + TX.
+- **0.23 (Send):** ships first as a small interim; 0.24 builds on it.
+- **OTLP/Kafka:** `netring-exporters` companion crate; **syslog + IPFIX in-tree**.
+- **Filters:** typed builders first; `.expr()` strings → `wirefilter` are the runtime escape hatch.
+- **`Packets` miri:** if flagged, ship the safer borrowed `for_each`/closure surface (0.24-B).
+- **Health endpoint:** netring exposes `MonitorHealth`; the embedder serves HTTP.
+- **Compat shims** live through 0.24/0.25, **removed at 1.0**.
+
+### Design corrections locked into the architecture (don't re-introduce)
+1. `dyn CaptureBackend` + `async fn` → silently `!Send` ⇒ use the **`AnyBackend` enum**.
+2. AF_XDP filter "codegen" is unrealistic ⇒ **vendored parameterized XDP program + BPF map**.
+3. No resilience story ⇒ **backend/handler/panic policies + telemetry**.
+4. Stringly-typed filters ⇒ **typed builders**; `.expr()` is the runtime escape hatch.
+5. Async handlers couldn't read `Ctx` ⇒ **`Fn(&P,&Ctx)->'static Fut`**: sync read + effect write.
+
+---
 
 ## Recently shipped (durable record in CHANGELOG)
 
-| Crate | Status |
+| Release | Status |
 |---|---|
-| netring **0.21** | 28 commits on `0.21-dev`. Phases A–I complete; release gates held. Send Monitor, ShardedRunner, subscribe::<P>(), pcap replay, run_until_idle, drain phase, flow_state, pattern_detector!, EveSink + MetricsSink, build-time validation. CHANGELOG entry drafted; tag/publish pending. |
-| netring **0.20** | shipped at `8555929`. Monitor builder + Handler trait + 5 layers + detector! macro + multi-interface + tick handlers. F.1+F.2 shipped; F.3 → 0.21 Phase C. |
-| netring **0.19** | flowscope 0.11.1 absorption (typed `Driver<E>` + `SlotHandle<M, K>`). |
-| netring **0.18** | unified-driver refactor + heuristic routing + 4 flow demos. |
-| netring **0.17** | flowscope 0.10 absorption (parser_kinds + DnsResolutionCache + serde feature). |
+| netring **0.23** | `Send` run-loop future (`run_for`/… `Send + 'static`, spawnable). Done on `0.23-dev`; publish pending. |
+| netring **0.22** | **Published 2026-06-13** (tag `0.22.0`). Operations toolkit + typed protocol model (breaking). Depends on flowscope 0.14.1 (also published 2026-06-13). |
+| netring **0.21** | Send Monitor, `ShardedRunner`, `subscribe::<P>()`, pcap replay, drain phase, `pattern_detector!`, EveSink + MetricsSink. |
+| netring **0.20** | Declarative `Monitor` builder + Handler trait + 5 layers + `detector!` + multi-interface + ticks. |
+| netring **0.17–0.19** | flowscope 0.10→0.13 absorption (`Driver<E>: Send` unconditional). |
 
-## Companion flowscope wishlists — both shipped
-
-- Round 1 → flowscope 0.12.0 (`781595f → 1ed1228`): plans 122–127 + bonus 143, 144, 146.
-- Round 2 → flowscope 0.13.0 (`2095f28 → 7735587`): plans 147–156. Headline: Plan 156 was a 1-line `+ Send` bound fix; `Driver<E>: Send + Sync` unconditional.
-
-Wishlist files deleted per convention (shipped → not forward-looking). Recipes preserved here + in flowscope's CHANGELOG.
+**Companion flowscope:** 0.12.0 (plans 122–127), 0.13.0 (147–156), 0.14.1 (ICMP routing fix).
+**Next:** flowscope **0.15** (companion to netring 0.24 Phase E) — JA4S + ServerHello
+extension/sig-alg + QUIC marker (~410 LoC, 0 deps, additive); lockstep publish gates 0.24.
 
 ---
 
-## 0.21 cycle retrospective (informational)
+## Invariants enforced through every commit (carried from 0.21, extended)
+1. clippy `--all-features -D warnings` · `fmt --check` · `RUSTDOCFLAGS="-D warnings" doc` — clean.
+2. `benches/zero_alloc.rs` **Δ 0 / 0** **and (0.24+)** a live-capture test reads **0 heap
+   allocs/packet** in the run loop.
+3. Run-loop future stays **`Send + 'static`** (`tests/monitor_send.rs`).
+4. **(0.24+)** miri green on the pure-logic suite; cargo-fuzz smoke green; **(0.25)** loom on
+   the effect/subscription paths; perf regression gate vs the 0.24 baseline.
+5. flowscope dep floor `>= 0.15.0`.
 
-The 0.21 cycle ran as 9 phase plans (A–I) plus an audit-fix
-batch. Each plan was deleted on ship; the post-audit gap items
-(`AnomalyFields` re-export, `Tee::factory`, `pcap_speed_factor`,
-`futures_core::Stream for EventStream`) folded into one
-follow-up commit `d51e763` and don't have their own plan file
-because they re-target items the phase plans already specified.
-
-Cross-phase invariants enforced through every commit:
-
-1. `cargo nextest run -p netring --features monitor-quickstart` passes
-2. `cargo +stable clippy -p netring --features monitor-quickstart --all-targets -- -D warnings` clean
-3. `cargo fmt --check` clean
-4. `cargo test --doc` passes
-5. `benches/zero_alloc.rs` reads **Δ 0 bytes / Δ 0 blocks** per 100k synthetic events
-6. flowscope dep floor: `>= 0.13.0`
-
-These invariants carry forward to 0.22+ unless explicitly relaxed.
-
-### Backward compatibility breaks shipped in 0.21
-
-| Break | Mitigation |
-|---|---|
-| `AnomalySink::write` key: `&dyn Debug` → `&dyn Key` (KeyFields + Debug) | Custom sink impls update one method signature; existing `with_key(&fivetuple)` users unaffected (FiveTupleKey already implements both) |
-| `AnomalyWriter::with_key<K>` bound: `K: Debug` → `K: Key` | Same; blanket impl makes `Key` automatic for `KeyFields + Debug` types |
-| `Monitor: Send` propagates (was `!Send` in 0.20) | `#[tokio::main(flavor = "current_thread")]` becomes `#[tokio::main]`; user code unaffected |
-| Legacy `ProtocolMonitor` / `AnomalyMonitor` / `AnomalyRule` gain `#[deprecated]` | Removal in 0.22; one-cycle deprecation window |
-| netring's `correlate::TimeBucketedCounter` deleted; re-export from flowscope | `pub use flowscope::correlate::*` — call sites change `::new(window, bucket)` → `::new_unbounded(window, bucket)` |
-| netring's `OwnedAnomaly` re-exported from flowscope | Path change only; struct fields/methods identical |
-| `flowscope = "0.13"` from `0.11.1` (skipping 0.12) | Direct jump; flowscope 0.12 changes absorbed in one bump |
-| `ProtocolSlot: Send` supertrait | Required to make Monitor Send; no impact on user code (no public ProtocolSlot impls) |
-
-Full migration recipes: `docs/MIGRATING_0.20_TO_0.21.md`.
-
-## Deferred to 0.22+ (recorded so a future ask doesn't get re-litigated)
-
-- **Bevy-style `MonitorParam`** — compile-time access validation. `ctx.split_*` covers most ergonomics.
-- **VRL embedded DSL** — wrong altitude; netring users write Rust `detector!` / `pattern_detector!`.
-- **JA4+ family / IPFIX / HTTP/2 / QUIC** — flowscope's strategic deferrals; netring inherits.
-- **Suricata-compatible rule DSL** — declined; Zeek/Suricata territory.
-- **Encrypted-traffic ML detection** — out of scope; user-defined `Handler`s.
-
-0.22 shipped (published to crates.io 2026-06-13; plan deleted on ship).
-Active work: 0.23 (spawnable run loop) on `0.23-dev` — see CHANGELOG
-`## 0.23.0` and [`netring-0.22-send-future-decision.md`](./netring-0.22-send-future-decision.md).
-
----
-
-## Numbering
-
-0.21 phases used letters (A–I). 0.22+ uses descriptive slugs ("legacy-delete", "merge-worker", "layer-spec") because the cycle is more list-of-discrete-items than phased delivery.
+### Backward-compat breaks (history + planned)
+0.21 `AnomalySink::write` key `→ &dyn Key` · 0.22 typed roles + flat `FlowPacket` + 0.19
+removed · 0.23 `on_async` futures `Send` · **0.24** `backend()` axis + feature flatten
+(shimmed) · **0.25** typed 3-tier subscriptions + `on_async` effects (shimmed). SemVer
+stability only at **1.0**.

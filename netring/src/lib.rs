@@ -34,6 +34,12 @@ pub mod dedup;
 #[macro_use]
 pub mod detector_macro;
 pub mod error;
+/// 0.24 Phase D: flow export — `FlowRecord` / `FlowExporter` /
+/// `MonitorBuilder::export_flows`. The fourth output shape beside
+/// anomalies, reports, and broadcast streams: one record per *completed
+/// flow* (NetFlow/IPFIX-style).
+#[cfg(all(feature = "flow", feature = "tokio"))]
+pub mod export;
 pub mod interface;
 #[cfg(all(feature = "flow", feature = "tokio"))]
 pub mod layer;

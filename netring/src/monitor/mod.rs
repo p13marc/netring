@@ -173,6 +173,11 @@ pub struct Monitor {
     /// handful of atomics); the run loop updates it and
     /// [`Self::health`] hands out cloneable [`MonitorHealth`] readers.
     pub(crate) health: std::sync::Arc<health::HealthState>,
+    /// 0.24 Phase D1: flow exporters registered via
+    /// [`MonitorBuilder::export_flows`]. The run loop builds a
+    /// [`crate::export::FlowRecord`] for every `FlowEnded` and hands it
+    /// to each. Empty (the common case) is zero cost.
+    pub(crate) flow_exporters: Vec<Box<dyn crate::export::FlowExporter>>,
 }
 
 /// How the run loop reacts when a handler (detector / sink / async handler)
@@ -457,6 +462,9 @@ pub struct MonitorBuilder {
     /// `None` until [`Self::on_capture_stats`] is called. Moved into
     /// [`Monitor::capture_stats`] at [`Self::build`].
     capture_stats: Option<telemetry::CaptureStatsRegistration>,
+    /// 0.24 Phase D1: flow exporters registered via
+    /// [`Self::export_flows`]. Moved into [`Monitor::flow_exporters`].
+    flow_exporters: Vec<Box<dyn crate::export::FlowExporter>>,
     /// 0.21 D.1: TypeIds of protocol markers registered via
     /// `.protocol::<P>()`, paired with each marker's stable
     /// `Protocol::NAME` slug. Consulted at `build()` time against
@@ -707,6 +715,42 @@ impl MonitorBuilder {
             t.record_metrics();
             Ok(())
         })
+    }
+
+    /// 0.24 Phase D: emit a [`FlowRecord`](crate::export::FlowRecord) for
+    /// every completed flow to `exporter`.
+    ///
+    /// The run loop builds a record from each `FlowEnded` (FIN / RST /
+    /// idle / eviction / parser close) — 5-tuple + directional byte/packet
+    /// counts + start/end + reason — and hands it to the exporter. The
+    /// NetFlow / IPFIX / Zeek `conn.log` output shape, the fourth beside
+    /// anomalies, reports, and broadcast streams.
+    ///
+    /// Call repeatedly to fan out to several exporters. A bare
+    /// `FnMut(&FlowRecord)` is a [`FlowExporter`](crate::export::FlowExporter),
+    /// so the quick path is a closure:
+    ///
+    /// ```no_run
+    /// # use netring::monitor::Monitor;
+    /// # use netring::protocol::builtin::Tcp;
+    /// # fn _ex() -> Result<(), netring::Error> {
+    /// let monitor = Monitor::builder()
+    ///     .interface("eth0")
+    ///     .protocol::<Tcp>()
+    ///     .export_flows(|rec: &netring::export::FlowRecord| {
+    ///         println!("{:?} {} ↔ {} : {} bytes", rec.proto, rec.a, rec.b, rec.total_bytes());
+    ///     })
+    ///     .build()?;
+    /// # let _ = monitor;
+    /// # Ok(())
+    /// # }
+    /// ```
+    pub fn export_flows<E>(mut self, exporter: E) -> Self
+    where
+        E: crate::export::FlowExporter + 'static,
+    {
+        self.flow_exporters.push(Box::new(exporter));
+        self
     }
 
     /// 0.21 D.2: maximum time the run loop spends draining
@@ -1446,6 +1490,7 @@ impl MonitorBuilder {
             backend_error_policy: self.backend_error_policy,
             capture_stats: self.capture_stats,
             health: health::HealthState::new(),
+            flow_exporters: self.flow_exporters,
         })
     }
 }

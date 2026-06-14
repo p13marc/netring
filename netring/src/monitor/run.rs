@@ -85,6 +85,7 @@ pub(crate) async fn run_loop(monitor: Monitor, stop: StopCondition) -> Result<()
         backend_error_policy,
         mut capture_stats,
         health,
+        mut flow_exporters,
     } = monitor;
     // Borrow the monitor name as `&str` for the run loop's
     // dispatch sites. The owned `Box<str>` lives in this stack
@@ -303,6 +304,7 @@ pub(crate) async fn run_loop(monitor: Monitor, stop: StopCondition) -> Result<()
             &mut flow_states,
             &label_table,
             handler_error_policy,
+            &mut flow_exporters,
         )
         .await?;
         drain_protocol_slots(
@@ -345,8 +347,14 @@ pub(crate) async fn run_loop(monitor: Monitor, stop: StopCondition) -> Result<()
             &mut flow_states,
             &label_table,
             handler_error_policy,
+            &mut flow_exporters,
         )
         .await?;
+    }
+
+    // 0.24 Phase D: flush exporters (NDJSON/IPFIX writers may buffer).
+    for exporter in flow_exporters.iter_mut() {
+        let _ = exporter.flush();
     }
 
     Ok(())
@@ -395,6 +403,7 @@ pub(crate) async fn replay_loop(
         backend_error_policy: _, // replay has no live capture backend
         capture_stats: _,        // pcap replay has no kernel ring to sample
         health,
+        mut flow_exporters,
     } = monitor;
     let monitor_name_borrow: Option<&str> = monitor_name.as_deref();
 
@@ -432,6 +441,7 @@ pub(crate) async fn replay_loop(
             &mut flow_states,
             &label_table,
             handler_error_policy,
+            &mut flow_exporters,
         )
         .await?;
 
@@ -471,8 +481,14 @@ pub(crate) async fn replay_loop(
             &mut flow_states,
             &label_table,
             handler_error_policy,
+            &mut flow_exporters,
         )
         .await?;
+    }
+
+    // 0.24 Phase D: flush exporters after replay drain.
+    for exporter in flow_exporters.iter_mut() {
+        let _ = exporter.flush();
     }
 
     Ok(())
@@ -509,6 +525,7 @@ async fn drain_phase(
     flow_states: &mut crate::ctx::FlowStateRegistry,
     label_table: &flowscope::well_known::LabelTable,
     policy: HandlerErrorPolicy,
+    flow_exporters: &mut [Box<dyn crate::export::FlowExporter>],
 ) -> Result<()> {
     // Step 1: drain the central tracker.
     let mut leftover: Vec<FsEvent<FlowKey>> = Vec::new();
@@ -516,6 +533,18 @@ async fn drain_phase(
     for evt in leftover.drain(..) {
         if Instant::now() >= deadline {
             return Ok(());
+        }
+        // 0.24 Phase D: export the flows finalized by `finish_into` (flows
+        // still open at shutdown get a synthesized FlowEnded here).
+        if !flow_exporters.is_empty()
+            && let FsEvent::FlowEnded {
+                key, stats, reason, ..
+            } = &evt
+        {
+            let record = crate::export::FlowRecord::from_ended(key, stats, *reason);
+            for exporter in flow_exporters.iter_mut() {
+                exporter.export(&record);
+            }
         }
         let res = match dispatch_lifecycle(
             dispatcher,
@@ -750,8 +779,23 @@ async fn dispatch_tracked_events(
     flow_states: &mut crate::ctx::FlowStateRegistry,
     label_table: &flowscope::well_known::LabelTable,
     policy: HandlerErrorPolicy,
+    flow_exporters: &mut [Box<dyn crate::export::FlowExporter>],
 ) -> Result<()> {
     for evt in events.drain(..) {
+        // 0.24 Phase D: a flow just ended → build a FlowRecord and fan it
+        // out to every registered exporter. Cheap no-op when none are
+        // registered. Done before dispatch so exporters see the flow even
+        // if a downstream handler errors under `Propagate`.
+        if !flow_exporters.is_empty()
+            && let FsEvent::FlowEnded {
+                key, stats, reason, ..
+            } = &evt
+        {
+            let record = crate::export::FlowRecord::from_ended(key, stats, *reason);
+            for exporter in flow_exporters.iter_mut() {
+                exporter.export(&record);
+            }
+        }
         // Sync handlers first, then async — but on the SAME event, so one error
         // is isolated per-event under `Isolate` (a malformed flow can't tear
         // down the pipeline).

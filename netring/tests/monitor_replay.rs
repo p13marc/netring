@@ -99,6 +99,46 @@ async fn replay_fires_flow_started_for_udp_traffic() {
 }
 
 #[tokio::test(flavor = "current_thread")]
+async fn replay_export_flows_emits_a_flow_record() {
+    use std::sync::Mutex;
+
+    use netring::export::FlowRecord;
+
+    let pcap = write_synthetic_pcap();
+    let collected: Arc<Mutex<Vec<FlowRecord>>> = Arc::new(Mutex::new(Vec::new()));
+    let sink = Arc::clone(&collected);
+
+    let monitor = Monitor::builder()
+        .pcap_source(pcap.path())
+        .protocol::<Udp>()
+        // A bare FnMut(&FlowRecord) is a FlowExporter (blanket impl).
+        .export_flows(move |rec: &FlowRecord| sink.lock().unwrap().push(*rec))
+        .build()
+        .expect("build with pcap_source + export_flows");
+
+    monitor.replay().await.expect("replay completes");
+
+    let records = collected.lock().unwrap();
+    // The 3 UDP packets are one flow; on EOF the drain phase synthesizes a
+    // FlowEnded, which the exporter turns into exactly one FlowRecord.
+    assert_eq!(
+        records.len(),
+        1,
+        "expected one flow record, got {records:?}"
+    );
+    let rec = &records[0];
+    assert_eq!(rec.proto, flowscope::L4Proto::Udp);
+    // 3 packets all from the initiator.
+    assert_eq!(rec.total_packets(), 3, "rec = {rec:?}");
+    assert!(rec.total_bytes() >= 3 * 12, "rec = {rec:?}");
+    // Canonical endpoints: 10.0.0.1:54321 (a) ↔ 10.0.0.2:80 (b).
+    assert!(
+        rec.a.port() == 80 || rec.b.port() == 80,
+        "expected port 80 endpoint, rec = {rec:?}"
+    );
+}
+
+#[tokio::test(flavor = "current_thread")]
 async fn replay_without_pcap_source_returns_error() {
     // Build with an interface (so NoInterface doesn't fire) but
     // no pcap_source; calling replay should surface the new

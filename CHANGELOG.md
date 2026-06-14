@@ -56,6 +56,12 @@ runs *after* the batch is dropped). dhat steady state stays `Δ 0 / 0`.
 
 ### Exporters (Phase D)
 
+- `FlowRecord` + `FlowExporter` + `MonitorBuilder::export_flows(e)` — the
+  fourth output shape: one record per *completed flow* (5-tuple +
+  directional byte/packet counts + start/end + end-reason), built from
+  each `FlowEnded` and fanned out to registered exporters (live + replay,
+  including flows finalized at shutdown). A bare `FnMut(&FlowRecord)` is a
+  `FlowExporter`; `JsonFlowExporter<W>` writes NDJSON (feature `serde`).
 - `SyslogSink<W>` (feature `syslog`, no deps) — an `AnomalySink` that
   writes one RFC 5424 line per anomaly to any `Write`. `<PRI>1 TS HOST
   APP PROCID MSGID [SD] MSG`, with the 5-tuple key + observations/metrics

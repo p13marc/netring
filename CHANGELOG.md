@@ -1,5 +1,51 @@
 # Changelog
 
+## 0.24.0 — zero-copy core + production trust
+
+> **Unreleased / in progress on `0.24-dev`.** Makes the `Monitor`
+> pipeline zero-copy + resilient + self-observable. Additive over 0.23
+> (the one planned break is reserved for 1.0). See
+> [`plans/netring-0.24-plan.md`](plans/netring-0.24-plan.md).
+
+### Zero-copy + `Send` borrowed run loop (Phase B keystone)
+
+The run loop drains **borrowed** zero-copy batches in place and feeds
+each packet's view straight to the flowscope driver — the per-packet
+`Packet::to_owned` copy is gone. The future stays `Send` (the only
+borrow held across an `.await` is inside `readable()`, and all dispatch
+runs *after* the batch is dropped). dhat steady state stays `Δ 0 / 0`.
+
+### Resilience (Phase B)
+
+- `HandlerErrorPolicy { Propagate (default), Isolate }` +
+  `MonitorBuilder::handler_error_policy` — `Isolate` logs + counts a
+  handler error and continues, so one bad detector/flow can't tear down
+  the pipeline.
+- `BackendErrorPolicy { FailFast (default), SkipSource }` +
+  `MonitorBuilder::backend_error_policy` — `SkipSource` keeps servicing
+  the other capture sources, with a consecutive-error circuit breaker.
+
+### Capture telemetry (Phase C1/C2)
+
+- `CaptureTelemetry { source, packets, drops, freezes, drop_rate }` +
+  `MonitorBuilder::on_capture_stats(period, |telemetry, ctx|)` — the run
+  loop samples each source's cumulative kernel counters every `period`
+  and fires the handler once per source, with a **windowed** `drop_rate`
+  (so a current loss spike is visible even when lifetime totals dwarf
+  it) plus `lifetime_drop_rate()` / `is_degraded(threshold)` helpers.
+  Gated: a monitor without the hook never arms the sampler (zero cost).
+
+### Backpressure honesty (Phase C3)
+
+- `ChannelSink::bounded(capacity)` — drop-with-count via `try_send`, so
+  the capture task never blocks on a slow anomaly consumer.
+
+### CI
+
+- Dedicated cap-free **Monitor lib tests** job runs the `flow`-gated
+  Monitor/telemetry/layer suite (~300 tests) that no other job covered.
+- miri (Tree Borrows) + cargo-fuzz (cBPF compiler/interpreter) jobs.
+
 ## 0.23.0 — spawnable run loop (breaking)
 
 > **Unreleased / in progress on `0.23-dev`.** A small, focused

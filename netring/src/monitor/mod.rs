@@ -55,12 +55,14 @@ pub mod dispatcher;
 pub mod handler;
 pub mod registry;
 pub mod run;
+pub mod telemetry;
 pub mod tick;
 
 pub use async_handler::{AsyncHandler, BoxFuture};
 pub use dispatcher::{Dispatcher, MAX_EVENT_TYPES};
 pub use handler::{CtxOnly, Handler, PayloadCtx, PayloadOnly};
 pub use registry::{HandlerRegistry, ProtocolSlot, TypedBroadcastProtocolSlot, TypedProtocolSlot};
+pub use telemetry::CaptureTelemetry;
 pub use tick::TickRegistration;
 
 pub mod subscribe;
@@ -158,6 +160,13 @@ pub struct Monitor {
     /// 0.24 Phase B: what to do when a capture backend errors. Default
     /// [`BackendErrorPolicy::FailFast`].
     pub(crate) backend_error_policy: BackendErrorPolicy,
+    /// 0.24 Phase C1/C2: optional capture-telemetry sampling hook set via
+    /// [`MonitorBuilder::on_capture_stats`]. When `None` the run loop
+    /// never arms the sampling interval (zero cost). When `Some`, the run
+    /// loop samples each source's cumulative kernel counters every
+    /// `period` and invokes the handler with a [`CaptureTelemetry`] +
+    /// `&mut Ctx`.
+    pub(crate) capture_stats: Option<telemetry::CaptureStatsRegistration>,
 }
 
 /// How the run loop reacts when a handler (detector / sink / async handler)
@@ -414,6 +423,10 @@ pub struct MonitorBuilder {
     /// [`Self::backend_error_policy`].
     handler_error_policy: HandlerErrorPolicy,
     backend_error_policy: BackendErrorPolicy,
+    /// 0.24 Phase C1/C2: optional capture-telemetry sampling hook.
+    /// `None` until [`Self::on_capture_stats`] is called. Moved into
+    /// [`Monitor::capture_stats`] at [`Self::build`].
+    capture_stats: Option<telemetry::CaptureStatsRegistration>,
     /// 0.21 D.1: TypeIds of protocol markers registered via
     /// `.protocol::<P>()`, paired with each marker's stable
     /// `Protocol::NAME` slug. Consulted at `build()` time against
@@ -554,6 +567,54 @@ impl MonitorBuilder {
     /// where one NIC can fail independently).
     pub fn backend_error_policy(mut self, policy: BackendErrorPolicy) -> Self {
         self.backend_error_policy = policy;
+        self
+    }
+
+    /// 0.24 Phase C: sample each capture source's kernel counters every
+    /// `period` and hand them to `handler`.
+    ///
+    /// The handler is called **once per capture source** each period
+    /// with that source's [`CaptureTelemetry`] (cumulative
+    /// packets/drops/freezes + a windowed drop rate) and a `&mut Ctx`,
+    /// so it can update monitor state, emit anomalies, or feed a report
+    /// — the same context handlers get. This is the "is my capture
+    /// keeping up?" hook: rising
+    /// [`drop_rate`](CaptureTelemetry::drop_rate) means the consumer
+    /// isn't draining the ring fast enough.
+    ///
+    /// Sampling reads cumulative stats, so it's cheap and never resets
+    /// the user-visible counters. A monitor that never calls this pays
+    /// nothing — the sampling interval is only armed when a handler is
+    /// registered (same gating as the tick / merge branches). Calling it
+    /// again replaces the previous handler.
+    ///
+    /// ```no_run
+    /// # use std::time::Duration;
+    /// # use netring::monitor::Monitor;
+    /// # use netring::protocol::builtin::Tcp;
+    /// # fn _ex() -> Result<(), netring::Error> {
+    /// let monitor = Monitor::builder()
+    ///     .interface("eth0")
+    ///     .protocol::<Tcp>()
+    ///     .on_capture_stats(Duration::from_secs(5), |t, _ctx| {
+    ///         if t.is_degraded(0.01) {
+    ///             eprintln!("source {:?}: losing {:.1}% of packets", t.source, t.drop_rate * 100.0);
+    ///         }
+    ///         Ok(())
+    ///     })
+    ///     .build()?;
+    /// # let _ = monitor;
+    /// # Ok(())
+    /// # }
+    /// ```
+    pub fn on_capture_stats<F>(mut self, period: Duration, handler: F) -> Self
+    where
+        F: FnMut(&CaptureTelemetry, &mut Ctx<'_>) -> Result<()> + Send + 'static,
+    {
+        self.capture_stats = Some(telemetry::CaptureStatsRegistration {
+            period,
+            handler: Box::new(handler),
+        });
         self
     }
 
@@ -1292,6 +1353,7 @@ impl MonitorBuilder {
             merge_rx: None,
             handler_error_policy: self.handler_error_policy,
             backend_error_policy: self.backend_error_policy,
+            capture_stats: self.capture_stats,
         })
     }
 }

@@ -83,6 +83,7 @@ pub(crate) async fn run_loop(monitor: Monitor, stop: StopCondition) -> Result<()
         mut merge_rx,
         handler_error_policy,
         backend_error_policy,
+        mut capture_stats,
     } = monitor;
     // Borrow the monitor name as `&str` for the run loop's
     // dispatch sites. The owned `Box<str>` lives in this stack
@@ -146,6 +147,26 @@ pub(crate) async fn run_loop(monitor: Monitor, stop: StopCondition) -> Result<()
         })
         .collect();
 
+    // 0.24 Phase C: capture-telemetry sampling. Only armed when an
+    // `on_capture_stats` handler is registered — otherwise the `Option`
+    // is `None` and the `select!` branch is gated off at zero cost (same
+    // pattern as the tick / merge branches). The sampler keeps per-source
+    // cumulative state so each sample's `drop_rate` is windowed.
+    let mut telemetry_interval = capture_stats.as_ref().map(|reg| {
+        let mut int =
+            tokio::time::interval_at(tokio::time::Instant::now() + reg.period, reg.period);
+        int.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+        int
+    });
+    // Allocate per-source sampler slots only when telemetry is armed — an
+    // empty `Vec` doesn't allocate, so an unconfigured monitor pays nothing.
+    let mut telemetry_sampler =
+        crate::monitor::telemetry::TelemetrySampler::new(if capture_stats.is_some() {
+            caps.len()
+        } else {
+            0
+        });
+
     loop {
         // tokio::select! waits on shutdown, the next packet, OR
         // the next tick. The `if !tick_intervals.is_empty()`
@@ -182,6 +203,33 @@ pub(crate) async fn run_loop(monitor: Monitor, stop: StopCondition) -> Result<()
                 if let Some(req) = req {
                     let taken = state_map.take_dyn(req.type_id);
                     let _ = req.reply.send(taken);
+                }
+                continue;
+            }
+            // 0.24 Phase C: capture-telemetry sample. Gated on the
+            // `on_capture_stats` registration so monitors without it
+            // never poll the interval. Out-of-band like the merge probe:
+            // sampling is observability, not traffic, so it must NOT reset
+            // the idle timer (else `on_capture_stats` + `run_until_idle`
+            // would never idle-stop). The sampling itself runs in the
+            // branch body — after the `select!` drops the other branch
+            // futures, so the `&caps` read here can't alias the
+            // `ready_capture` branch's `&mut caps`.
+            _ = next_telemetry_sample(&mut telemetry_interval),
+                if telemetry_interval.is_some() =>
+            {
+                if let Some(reg) = capture_stats.as_mut() {
+                    sample_and_fire_capture_stats(
+                        &caps,
+                        &mut telemetry_sampler,
+                        reg,
+                        sink.as_mut(),
+                        &mut state_map,
+                        &mut counters,
+                        monitor_name_borrow,
+                        &mut flow_states,
+                        &label_table,
+                    )?;
                 }
                 continue;
             }
@@ -331,6 +379,7 @@ pub(crate) async fn replay_loop(
         merge_rx: _, // replay is single-shard; no cross-shard merge
         handler_error_policy,
         backend_error_policy: _, // replay has no live capture backend
+        capture_stats: _,        // pcap replay has no kernel ring to sample
     } = monitor;
     let monitor_name_borrow: Option<&str> = monitor_name.as_deref();
 
@@ -583,6 +632,70 @@ async fn recv_merge(
         Some(r) => r.recv().await,
         None => std::future::pending().await,
     }
+}
+
+/// 0.24 Phase C: await the next capture-telemetry sample tick. When no
+/// `on_capture_stats` handler is registered the interval is `None` and the
+/// future never resolves (the `select!` branch is gated `if
+/// telemetry_interval.is_some()`, so this only runs in the `Some` case).
+async fn next_telemetry_sample(interval: &mut Option<tokio::time::Interval>) {
+    match interval {
+        Some(int) => {
+            int.tick().await;
+        }
+        None => std::future::pending().await,
+    }
+}
+
+/// 0.24 Phase C: read each capture source's cumulative kernel counters,
+/// fold them into a windowed [`CaptureTelemetry`], and fire the registered
+/// `on_capture_stats` handler once per source.
+///
+/// Reads `cumulative_stats` (non-destructive at the API level — the inner
+/// `Capture` accumulates the destructive `u32` kernel reads internally), so
+/// it never disturbs the user-visible counters. A per-source stats read
+/// that errors is logged and skipped rather than tearing down the monitor:
+/// telemetry is best-effort observability.
+#[allow(clippy::too_many_arguments)]
+fn sample_and_fire_capture_stats(
+    caps: &[AsyncCapture<crate::Capture>],
+    sampler: &mut crate::monitor::telemetry::TelemetrySampler,
+    reg: &mut crate::monitor::telemetry::CaptureStatsRegistration,
+    sink: &mut dyn AnomalySink,
+    state_map: &mut StateMap,
+    counters: &mut CounterRegistry,
+    monitor_name: Option<&str>,
+    flow_states: &mut crate::ctx::FlowStateRegistry,
+    label_table: &flowscope::well_known::LabelTable,
+) -> Result<()> {
+    let now = flowscope::Timestamp::from_system_time(SystemTime::now());
+    for (i, cap) in caps.iter().enumerate() {
+        let cum = match cap.cumulative_stats() {
+            Ok(s) => s,
+            Err(e) => {
+                tracing::warn!(
+                    source = i,
+                    error = %e,
+                    "capture stats read failed; skipping telemetry sample for this source"
+                );
+                continue;
+            }
+        };
+        let telemetry = sampler.sample(i, cum);
+        let mut ctx = Ctx::new(
+            None,
+            now,
+            SourceIdx(i as u8),
+            state_map,
+            sink,
+            counters,
+            flow_states,
+        );
+        ctx.monitor_name = monitor_name;
+        ctx.label_table = label_table;
+        (reg.handler)(&telemetry, &mut ctx)?;
+    }
+    Ok(())
 }
 
 /// Dispatch the lifecycle events drained from the central tracker — sync

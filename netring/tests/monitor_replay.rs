@@ -377,6 +377,57 @@ async fn replay_packet_tier_subscription_sees_every_matching_frame() {
     );
 }
 
+#[tokio::test(flavor = "current_thread")]
+async fn replay_flow_tier_delivers_once_at_flow_end_gated_by_stats() {
+    // 0.25 S3: a flow subscription fires once per flow, at FlowEnded, with the
+    // accumulated stats — and the byte/packet filter gates on those stats.
+    use std::sync::Mutex;
+
+    use netring::monitor::subscription::flow;
+    use netring::protocol::event_typed::FlowEnded;
+
+    let pcap = write_synthetic_pcap(); // 3 UDP packets, one flow
+    let ended: Arc<Mutex<Vec<u64>>> = Arc::new(Mutex::new(Vec::new())); // packet counts seen
+    let seen = Arc::clone(&ended);
+    let big_fired = Arc::new(AtomicU32::new(0));
+    let big = Arc::clone(&big_fired);
+
+    Monitor::builder()
+        .pcap_source(pcap.path())
+        .protocol::<Udp>()
+        // Matches every UDP flow → fires once with the flow's 3-packet stats.
+        .subscribe(flow::<Udp>().to(move |e: &FlowEnded<Udp>, _ctx| {
+            seen.lock().unwrap().push(e.stats.total_packets());
+            Ok(())
+        }))
+        // packets_over(10) → the 3-packet flow must NOT fire.
+        .subscribe(
+            flow::<Udp>()
+                .packets_over(10)
+                .to(move |_e: &FlowEnded<Udp>, _ctx| {
+                    big.fetch_add(1, Ordering::Relaxed);
+                    Ok(())
+                }),
+        )
+        .build()
+        .expect("build with flow subscriptions")
+        .replay()
+        .await
+        .expect("replay completes");
+
+    let counts = ended.lock().unwrap();
+    assert_eq!(
+        counts.as_slice(),
+        &[3],
+        "flow tier should deliver exactly once, with the 3-packet stats"
+    );
+    assert_eq!(
+        big_fired.load(Ordering::Relaxed),
+        0,
+        "packets_over(10) must not fire on a 3-packet flow"
+    );
+}
+
 #[test]
 fn builder_pcap_source_relaxes_no_interface_check() {
     let pcap = write_synthetic_pcap();

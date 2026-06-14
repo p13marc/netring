@@ -21,6 +21,7 @@
 //! [`PacketView`]: flowscope::PacketView
 
 pub mod builder;
+pub mod flow;
 pub(crate) mod kernel_filter;
 pub mod packet;
 pub mod predicate;
@@ -29,5 +30,42 @@ pub use builder::{
     FlowTier, HasHttpHost, HasQname, HasSni, PacketTier, SessionTier, SubscriptionBuilder, flow,
     packet, session,
 };
+pub use flow::{FlowHandler, FlowSubscription};
 pub use packet::{PacketHandler, PacketSubscription};
 pub use predicate::{Atom, FieldSource, Glob, Predicate};
+
+/// A built subscription that knows how to **install itself** onto a
+/// [`MonitorBuilder`](crate::monitor::MonitorBuilder) (0.25 S3). Lets the one
+/// [`subscribe`](crate::monitor::MonitorBuilder::subscribe) method accept any
+/// tier — packet subs push onto the zero-copy drain; flow/session subs install
+/// a predicate-gated handler on the existing typed dispatch.
+pub trait Subscribable {
+    /// Install this subscription, returning the updated builder.
+    fn install(self, builder: crate::monitor::MonitorBuilder) -> crate::monitor::MonitorBuilder;
+}
+
+impl Subscribable for PacketSubscription {
+    fn install(self, builder: crate::monitor::MonitorBuilder) -> crate::monitor::MonitorBuilder {
+        builder.add_packet_sub(self)
+    }
+}
+
+impl<P: crate::protocol::FlowProtocol> Subscribable for FlowSubscription<P> {
+    fn install(self, builder: crate::monitor::MonitorBuilder) -> crate::monitor::MonitorBuilder {
+        let pred = self.predicate;
+        let user = self.handler;
+        // Sugar: a predicate-gated handler on the flow's natural completion
+        // event. The flow's traffic interest is recorded by `on_ctx` via
+        // `FlowEnded<P>::traffic_class()` (a superset of the filter — safe).
+        builder.on_ctx::<crate::protocol::event_typed::FlowEnded<P>>(
+            move |evt: &crate::protocol::event_typed::FlowEnded<P>,
+                  ctx: &mut crate::ctx::Ctx<'_>| {
+                if pred.eval(&flow::FlowEndedFields { evt }) {
+                    user(evt, ctx)
+                } else {
+                    Ok(())
+                }
+            },
+        )
+    }
+}

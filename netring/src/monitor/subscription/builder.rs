@@ -204,6 +204,29 @@ impl<P: FlowProtocol> SubscriptionBuilder<FlowTier<P>> {
     pub fn packets_over(self, n: u64) -> Self {
         self.and_atom(Atom::PacketsOver(n))
     }
+
+    /// Finish a flow subscription with its handler (0.25 S3). The handler is
+    /// called **once per flow, at its end** ([`FlowEnded<P>`]) — with the
+    /// flow's final key + stats — for flows matching the filter. Register the
+    /// result with
+    /// [`MonitorBuilder::subscribe`](crate::monitor::MonitorBuilder::subscribe).
+    ///
+    /// [`FlowEnded<P>`]: crate::protocol::event_typed::FlowEnded
+    pub fn to<H>(self, handler: H) -> super::flow::FlowSubscription<P>
+    where
+        H: for<'c> Fn(
+                &crate::protocol::event_typed::FlowEnded<P>,
+                &mut crate::ctx::Ctx<'c>,
+            ) -> crate::error::Result<()>
+            + Send
+            + Sync
+            + 'static,
+    {
+        super::flow::FlowSubscription {
+            predicate: self.predicate,
+            handler: std::sync::Arc::new(handler),
+        }
+    }
 }
 
 // ---- session-tier combinators (gated by which L7 field P exposes) -------

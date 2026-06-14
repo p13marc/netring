@@ -1353,10 +1353,20 @@ impl MonitorBuilder {
     /// flow tracking, for every frame matching the filter. Monitors that
     /// register no packet subs keep the `track_into`-only hot loop (zero cost).
     ///
-    /// Flow- and session-tier subscriptions (`flow::<P>()` / `session::<P>()`)
-    /// land in a follow-up; today their builders expose `into_predicate()` for
-    /// composing filters.
-    pub fn subscribe(mut self, sub: subscription::PacketSubscription) -> Self {
+    /// Accepts any tier (0.25 S3): a [`PacketSubscription`] (every frame,
+    /// pre-tracking), or a [`FlowSubscription`] (`flow::<P>()…​.to(h)` —
+    /// delivered once per flow at its end, with final stats). Session-tier
+    /// `.to()` lands next.
+    ///
+    /// [`PacketSubscription`]: subscription::PacketSubscription
+    /// [`FlowSubscription`]: subscription::FlowSubscription
+    pub fn subscribe<S: subscription::Subscribable>(self, sub: S) -> Self {
+        sub.install(self)
+    }
+
+    /// Push a packet-tier subscription onto the zero-copy drain. The
+    /// installation hook for [`subscription::PacketSubscription`].
+    pub(crate) fn add_packet_sub(mut self, sub: subscription::PacketSubscription) -> Self {
         self.packet_subs.push(sub);
         self
     }

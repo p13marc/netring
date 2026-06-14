@@ -113,7 +113,11 @@ async fn serve_health(health: MonitorHealth, port: u16, liveness_window: Duratio
              Content-Type: application/json\r\n\
              Content-Length: {len}\r\n\
              Connection: close\r\n\r\n{body}",
-            reason = if status == 200 { "OK" } else { "Service Unavailable" },
+            reason = if status == 200 {
+                "OK"
+            } else {
+                "Service Unavailable"
+            },
             len = body.len(),
         );
         let _ = sock.write_all(response.as_bytes()).await;

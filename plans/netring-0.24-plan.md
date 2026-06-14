@@ -43,9 +43,9 @@
 | B | resilience: handler-isolation + backend-error policy | no | ✅ (panic-catch + Reopen → AnyBackend) |
 | B | AF_XDP UMEM hugepages + NUMA + ZC/cloud-fallback detect | no | ☐ |
 | B | io_uring ZC-RX seam (design only) | no | ✅ (`docs/BACKENDS.md`) |
-| C | `CaptureTelemetry` + run-loop sampling + `on_capture_stats` + `CaptureHealth` | minor | ☐ |
+| C | `CaptureTelemetry` + run-loop sampling + `on_capture_stats` + `CaptureHealth` | minor | ✅ |
 | C | bounded `ChannelSink` + drop-with-count; backpressure contract | minor | ✅ |
-| C | `MonitorHealth` + readiness/liveness + tracing JSON + `METRICS.md` | no | ☐ |
+| C | `MonitorHealth` + readiness/liveness + Prometheus gauges + `METRICS.md` | no | ✅ (tracing-JSON example → 0.25) |
 | D | exporter taxonomy + `FlowRecord`/`FlowExporter` + `.export_flows()` | no | ☐ |
 | D | `SyslogSink` (RFC 5424) + IPFIX/NetFlow v10 (in-tree) | no | ☐ |
 | D | `netring-exporters` companion crate: OTLP + Kafka | no | ☐ |

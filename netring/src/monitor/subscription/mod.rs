@@ -20,6 +20,11 @@
 //!
 //! [`PacketView`]: flowscope::PacketView
 
+pub mod builder;
 pub mod predicate;
 
+pub use builder::{
+    FlowTier, HasHttpHost, HasQname, HasSni, PacketTier, SessionTier, SubscriptionBuilder, flow,
+    packet, session,
+};
 pub use predicate::{Atom, FieldSource, Glob, Predicate};

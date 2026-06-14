@@ -41,14 +41,15 @@ use netring::monitor::Monitor;
 use netring::protocol::builtin::Http;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
-// FIXME(0.24, PR #2): this test never ran in CI before the A5 feature expansion
-// (the old integration job lacked `flow`), and it had a latent bug (HTTP server
-// on an ephemeral port vs the 80/8080-gated `Http` parser, now fixed to 8080).
-// It still fails in CI — the broadcast `HttpMessage` isn't observed within the
-// window. The 30+ other root-gated live tests pass on real AF_PACKET capture, so
-// the zero-copy + Send run-loop keystone is validated; this one needs debugging
-// under live capture (the dev sandbox blocks AF_PACKET sockets). `#[ignore]`d so
-// it doesn't gate CI; run locally with `--ignored` after `just setcap`.
+// FIXME(0.24, PR #2): this `flow`-gated live test is not in the CI integration
+// job (that job runs the proven-green `tokio,channel,af-xdp` surface, no `flow`).
+// It had a latent bug (HTTP server on an ephemeral port vs the 80/8080-gated
+// `Http` parser, now fixed to 8080), and even so the broadcast `HttpMessage`
+// isn't observed within the window when run locally. The 30+ other root-gated
+// live tests pass on real AF_PACKET capture, so the zero-copy + Send run-loop
+// keystone is validated; this one needs debugging under live capture (the dev
+// sandbox blocks AF_PACKET sockets). `#[ignore]`d so a local `just test` run
+// doesn't trip over it; run explicitly with `--ignored` after `just setcap`.
 #[ignore = "FIXME(0.24): broadcast HttpMessage not observed in CI; needs live-capture debug — see PR #2"]
 #[tokio::test(flavor = "current_thread")]
 async fn monitor_lo_subscribe_yields_http_message_from_real_traffic() {

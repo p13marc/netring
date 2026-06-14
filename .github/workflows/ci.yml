@@ -77,6 +77,22 @@ jobs:
       - name: Unit tests (workspace)
         run: cargo test --workspace --features tokio,channel
 
+  # ── Monitor lib tests (flow surface, NO privileges) ───────────────────────
+  # The Monitor / telemetry / layer / protocol modules are gated on `flow`,
+  # which the unit-test and integration jobs don't enable — so without this
+  # job the ~300 pure Monitor lib tests never run in CI. They open no sockets
+  # (live capture lives in the `integration-tests`-gated root suite), so they
+  # need no CAP_NET_RAW: run them here, fast and cap-free.
+  test-monitor-lib:
+    name: Monitor lib tests
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - name: Monitor lib tests (flow surface)
+        run: cargo test -p netring --features "tokio,channel,flow,parse,http,dns,tls,icmp" --lib
+
   # ── Integration tests (need CAP_NET_RAW) ──────────────────────────────────
   test-integration:
     name: Integration Tests

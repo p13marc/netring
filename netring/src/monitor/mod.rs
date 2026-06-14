@@ -53,6 +53,7 @@ use crate::protocol::event_typed::{Event, Tick};
 pub mod async_handler;
 pub mod dispatcher;
 pub mod handler;
+pub mod health;
 pub mod registry;
 pub mod run;
 pub mod telemetry;
@@ -61,6 +62,7 @@ pub mod tick;
 pub use async_handler::{AsyncHandler, BoxFuture};
 pub use dispatcher::{Dispatcher, MAX_EVENT_TYPES};
 pub use handler::{CtxOnly, Handler, PayloadCtx, PayloadOnly};
+pub use health::{MonitorHealth, MonitorHealthSnapshot};
 pub use registry::{HandlerRegistry, ProtocolSlot, TypedBroadcastProtocolSlot, TypedProtocolSlot};
 pub use telemetry::{CaptureHealth, CaptureTelemetry};
 pub use tick::TickRegistration;
@@ -167,6 +169,10 @@ pub struct Monitor {
     /// `period` and invokes the handler with a [`CaptureTelemetry`] +
     /// `&mut Ctx`.
     pub(crate) capture_stats: Option<telemetry::CaptureStatsRegistration>,
+    /// 0.24 Phase C4: shared health state. Always present (cheap — a
+    /// handful of atomics); the run loop updates it and
+    /// [`Self::health`] hands out cloneable [`MonitorHealth`] readers.
+    pub(crate) health: std::sync::Arc<health::HealthState>,
 }
 
 /// How the run loop reacts when a handler (detector / sink / async handler)
@@ -344,6 +350,30 @@ impl Monitor {
     /// instrument without branching on the runner type.
     pub fn shard_count(&self) -> usize {
         1
+    }
+
+    /// 0.24 Phase C4: a cloneable [`MonitorHealth`] handle for this
+    /// monitor.
+    ///
+    /// Grab it **before** spawning the run loop, clone it into your
+    /// health endpoint, and poll readiness/liveness while the loop runs:
+    ///
+    /// ```no_run
+    /// # use std::time::Duration;
+    /// # use netring::monitor::Monitor;
+    /// # use netring::protocol::builtin::Tcp;
+    /// # #[tokio::main] async fn main() -> Result<(), netring::Error> {
+    /// let monitor = Monitor::builder().interface("eth0").protocol::<Tcp>().build()?;
+    /// let health = monitor.health();
+    /// let run = tokio::spawn(monitor.run_for(Duration::from_secs(30)));
+    /// // ... in a /readyz handler: `health.is_ready()` ...
+    /// // ... in a /healthz handler: `health.is_live(Duration::from_secs(10))` ...
+    /// # let _ = (health, run);
+    /// # Ok(())
+    /// # }
+    /// ```
+    pub fn health(&self) -> MonitorHealth {
+        MonitorHealth::new(self.health.clone())
     }
 
     /// 0.21 C: the AF_PACKET fanout config set via
@@ -1415,6 +1445,7 @@ impl MonitorBuilder {
             handler_error_policy: self.handler_error_policy,
             backend_error_policy: self.backend_error_policy,
             capture_stats: self.capture_stats,
+            health: health::HealthState::new(),
         })
     }
 }

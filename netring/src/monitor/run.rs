@@ -84,6 +84,7 @@ pub(crate) async fn run_loop(monitor: Monitor, stop: StopCondition) -> Result<()
         handler_error_policy,
         backend_error_policy,
         mut capture_stats,
+        health,
     } = monitor;
     // Borrow the monitor name as `&str` for the run loop's
     // dispatch sites. The owned `Box<str>` lives in this stack
@@ -119,6 +120,11 @@ pub(crate) async fn run_loop(monitor: Monitor, stop: StopCondition) -> Result<()
         };
         caps.push(cap);
     }
+    // 0.24 Phase C4: all sockets are open and the loop is about to run —
+    // readiness flips true. `mark_started` stamps the uptime/liveness
+    // clock now (not at build time).
+    health.mark_started();
+    health.mark_sockets_open();
 
     let mut events: Vec<FsEvent<FlowKey>> = Vec::with_capacity(64);
     let mut shutdown = ShutdownSignal::new(stop);
@@ -194,6 +200,9 @@ pub(crate) async fn run_loop(monitor: Monitor, stop: StopCondition) -> Result<()
                     &label_table,
                 )
                 .await?;
+                // 0.24 Phase C4: a tick is progress too — keeps liveness
+                // alive on a quiet link with a registered heartbeat tick.
+                health.record_event(driver.tracker().flow_count());
                 continue;
             }
             // 0.22 §5.1: cross-shard merge probe. Gated so non-merged
@@ -229,6 +238,7 @@ pub(crate) async fn run_loop(monitor: Monitor, stop: StopCondition) -> Result<()
                         monitor_name_borrow,
                         &mut flow_states,
                         &label_table,
+                        &health,
                     )?;
                 }
                 continue;
@@ -309,6 +319,10 @@ pub(crate) async fn run_loop(monitor: Monitor, stop: StopCondition) -> Result<()
             &label_table,
             handler_error_policy,
         )?;
+
+        // 0.24 Phase C4: record progress for the health handle — a packet
+        // batch was processed; snapshot the tracker's active-flow count.
+        health.record_event(driver.tracker().flow_count());
     }
 
     // 0.21 D.2: graceful drain phase. After the stop condition
@@ -380,11 +394,17 @@ pub(crate) async fn replay_loop(
         handler_error_policy,
         backend_error_policy: _, // replay has no live capture backend
         capture_stats: _,        // pcap replay has no kernel ring to sample
+        health,
     } = monitor;
     let monitor_name_borrow: Option<&str> = monitor_name.as_deref();
 
     let mut source = crate::pcap_source::AsyncPcapSource::open_with_config(&path, config).await?;
     let mut events: Vec<FsEvent<FlowKey>> = Vec::with_capacity(64);
+
+    // 0.24 Phase C4: the pcap source is open and replay is starting — the
+    // same readiness/liveness handle works for offline replay.
+    health.mark_started();
+    health.mark_sockets_open();
 
     loop {
         // Pin the stream + poll the next packet. The source's
@@ -429,6 +449,9 @@ pub(crate) async fn replay_loop(
             &label_table,
             handler_error_policy,
         )?;
+
+        // 0.24 Phase C4: record replay progress for the health handle.
+        health.record_event(driver.tracker().flow_count());
     }
 
     // EOF reached. Run the drain phase to land any trailing
@@ -667,8 +690,13 @@ fn sample_and_fire_capture_stats(
     monitor_name: Option<&str>,
     flow_states: &mut crate::ctx::FlowStateRegistry,
     label_table: &flowscope::well_known::LabelTable,
+    health: &crate::monitor::health::HealthState,
 ) -> Result<()> {
     let now = flowscope::Timestamp::from_system_time(SystemTime::now());
+    // Accumulate the cumulative totals across sources for the health
+    // handle (the per-source telemetry still goes to the user handler).
+    let mut total_packets: u64 = 0;
+    let mut total_drops: u64 = 0;
     for (i, cap) in caps.iter().enumerate() {
         let cum = match cap.cumulative_stats() {
             Ok(s) => s,
@@ -682,6 +710,8 @@ fn sample_and_fire_capture_stats(
             }
         };
         let telemetry = sampler.sample(i, cum);
+        total_packets += telemetry.packets;
+        total_drops += telemetry.drops;
         let mut ctx = Ctx::new(
             None,
             now,
@@ -695,6 +725,7 @@ fn sample_and_fire_capture_stats(
         ctx.label_table = label_table;
         (reg.handler)(&telemetry, &mut ctx)?;
     }
+    health.record_totals(total_packets, total_drops);
     Ok(())
 }
 

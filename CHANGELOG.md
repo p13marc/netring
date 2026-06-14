@@ -42,6 +42,18 @@ runs *after* the batch is dropped). dhat steady state stays `Δ 0 / 0`.
   tagged `source`. New `docs/METRICS.md` catalogs every `netring_*` metric
   with cardinality notes.
 
+### Monitor health (Phase C4)
+
+- `Monitor::health()` → `MonitorHealth`, a cheap cloneable `Arc`-backed
+  handle (lock-free atomics). Kubernetes-probe split:
+  `is_ready()` (sockets open + loop servicing) for `/readyz`,
+  `is_live(window)` (event within window, with startup grace) for
+  `/healthz`, plus `uptime()` / `last_event_age()` / `active_flows()` /
+  `packets()` / `drops()` / `snapshot()`. The run loop (live + replay)
+  updates it as it captures.
+- `examples/monitor/health_endpoint.rs` — serves readiness/liveness over
+  a dependency-free tiny tokio HTTP/1.1 responder (no axum).
+
 ### Backpressure honesty (Phase C3)
 
 - `ChannelSink::bounded(capacity)` — drop-with-count via `try_send`, so

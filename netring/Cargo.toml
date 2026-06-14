@@ -469,6 +469,11 @@ path = "examples/monitor/label_table.rs"
 required-features = ["tokio", "flow"]
 
 [[example]]
+name = "monitor_health_endpoint"
+path = "examples/monitor/health_endpoint.rs"
+required-features = ["tokio", "flow"]
+
+[[example]]
 name = "monitor_beacon_detector"
 path = "examples/monitor/beacon_detector.rs"
 required-features = ["tokio", "flow"]

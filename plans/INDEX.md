@@ -18,8 +18,8 @@ Forward-looking implementation plans only. Historical record lives in `CHANGELOG
 |---|---|
 | [`netring-architecture.md`](./netring-architecture.md) | **Design north-star — read first.** The coherent end-to-end design every release implements: the data path, the `AnyBackend` enum, typed multi-stage filtering, the handler/effect model, resilience, threading, and the SemVer strategy. Design values: **performance · strongly-typed · async-friendly (tokio) · idiomatic.** |
 | [`netring-strategic-review-2026-06.md`](./netring-strategic-review-2026-06.md) | The *why* — competitive landscape, pain points, differentiators, the M1–M4 roadmap. |
-| [`netring-0.24-plan.md`](./netring-0.24-plan.md) | **Next release** — Zero-Copy Core + Production Trust (Phases A–E; keystone = B). |
-| [`netring-0.25-plan.md`](./netring-0.25-plan.md) | **Release after** — Subscriptions, Async Effects & Performance (Phases A–D). |
+| ~~`netring-0.24-plan.md`~~ | **Shipped — 0.24.0 released 2026-06-14** (Zero-Copy Core + Production Trust; keystone `AnyBackend`). Plan deleted on ship; deferrals carried into the 0.25 plan's "Deferred from 0.24" section. |
+| [`netring-0.25-plan.md`](./netring-0.25-plan.md) | **Next release** — Subscriptions, Async Effects & Performance (Phases A–D) + the 0.24 deferral backlog. |
 | [`upstream-tracking.md`](./upstream-tracking.md) | Live: rustc / kernel / flowscope features being watched. |
 | *(this)* `INDEX.md` | Roadmap overview, decisions, invariants, history. |
 

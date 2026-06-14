@@ -42,6 +42,28 @@ clippy/fmt/doc clean · dhat **Δ0** + **0 allocs/packet** · run-loop **`Send`*
 **Order:** A + B parallel (both wrap the dispatcher; A needs 0.24-B's `set_filter`) →
 C (measures A's pushdown, tunes B's AF_XDP path). D independent/deferrable.
 
+## Deferred from 0.24 (backlog — fold into the phases above or do standalone)
+Items the 0.24 plan scoped but shipped without (0.24.0 released 2026-06-14, additive):
+- **B4 resilience tail:** `BackendErrorPolicy::Reopen{backoff}` (re-open a flapping
+  source) + opt-in `catch_handler_panics` (`catch_unwind` around dispatch; needs an
+  unwind-safety pass). Both want a *failing-backend rig* to exercise. `MonitorHealth::
+  {handler,backend}_errors` counters + gauges already shipped in 0.24.
+- **B5 AF_XDP UMEM hugepages + NUMA + ZC/copy-mode detect** (`MAP_HUGETLB`/`mbind`,
+  `tracing::warn!` on silent copy-mode fallback) — overlaps 0.25-C NUMA pinning; needs HW.
+- **AF_XDP live validation:** `xdp_interface` is compile-wired in 0.24 but never run on
+  real AF_XDP; full in-Monitor xdp-loader integration (attach redirect program) + an
+  end-to-end rig.
+- **pcap → `AnyBackend` unification:** fold `replay_loop` into the one generic loop
+  (a Pcap arm); 0.24 kept `replay_loop` separate.
+- **D1 active-timeout flow export:** 0.24 emits a `FlowRecord` on `FlowEnded` (incl. idle
+  timeout); add NetFlow-style *active* timeout (periodic export of still-open flows via
+  `FlowTick`).
+- **E2 EVE-tls-record:** JA4/JA4S/SNI in a Suricata `tls` EVE record (needs a TLS-record
+  EVE writer; 0.24 has only the anomaly `EveSink`).
+- **C5 tracing-JSON example** (structured logging of anomalies/telemetry).
+- **`netring-exporters` companion crate:** `OtlpAnomalySink` + `KafkaSink` (heavy async/C
+  deps kept out of core).
+
 ---
 
 ## Phase A — Subscription Engine & Multi-Stage Filtering — arch §4, §5

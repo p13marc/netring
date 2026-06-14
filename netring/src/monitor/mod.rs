@@ -150,6 +150,37 @@ pub struct Monitor {
     /// zero cost. Injected by `ShardedRunner::run_inner` via
     /// [`Self::set_merge_rx`].
     pub(crate) merge_rx: Option<tokio::sync::mpsc::UnboundedReceiver<merge::MergeRequest>>,
+    /// 0.24 Phase B: what to do when a handler returns `Err`. Default
+    /// [`HandlerErrorPolicy::Propagate`] (tear down the monitor — the historic
+    /// behavior); [`HandlerErrorPolicy::Isolate`] logs + counts and continues so
+    /// one misbehaving detector or flow can't kill the pipeline.
+    pub(crate) handler_error_policy: HandlerErrorPolicy,
+    /// 0.24 Phase B: what to do when a capture backend errors. Default
+    /// [`BackendErrorPolicy::FailFast`].
+    pub(crate) backend_error_policy: BackendErrorPolicy,
+}
+
+/// How the run loop reacts when a handler (detector / sink / async handler)
+/// returns an error. See [`MonitorBuilder::handler_error_policy`].
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub enum HandlerErrorPolicy {
+    /// Propagate the error and stop the monitor (the default; historic behavior).
+    #[default]
+    Propagate,
+    /// Log + count the error and continue to the next event/packet. One bad
+    /// detector or flow does not tear down the capture pipeline.
+    Isolate,
+}
+
+/// How the run loop reacts when a capture backend errors (e.g. a readiness or
+/// receive failure). See [`MonitorBuilder::backend_error_policy`].
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub enum BackendErrorPolicy {
+    /// Propagate the error and stop the monitor (the default).
+    #[default]
+    FailFast,
+    /// Log + count the error and keep servicing the other capture sources.
+    SkipSource,
 }
 
 impl Monitor {
@@ -378,6 +409,11 @@ pub struct MonitorBuilder {
     /// [`Self::drain_timeout`] is called; defaults to 1 second
     /// at [`Self::build`] time.
     drain_timeout: Option<Duration>,
+    /// 0.24 Phase B: resilience policies. Default `Propagate` / `FailFast`
+    /// (historic behavior). See [`Self::handler_error_policy`] /
+    /// [`Self::backend_error_policy`].
+    handler_error_policy: HandlerErrorPolicy,
+    backend_error_policy: BackendErrorPolicy,
     /// 0.21 D.1: TypeIds of protocol markers registered via
     /// `.protocol::<P>()`, paired with each marker's stable
     /// `Protocol::NAME` slug. Consulted at `build()` time against
@@ -495,6 +531,29 @@ impl MonitorBuilder {
     /// lifetime of the monitor; `&str` view at dispatch time.
     pub fn name(mut self, name: impl Into<Box<str>>) -> Self {
         self.monitor_name = Some(name.into());
+        self
+    }
+
+    /// 0.24 Phase B: set the handler-error policy.
+    ///
+    /// Default [`HandlerErrorPolicy::Propagate`] stops the monitor on the first
+    /// handler error (historic behavior). [`HandlerErrorPolicy::Isolate`] logs +
+    /// counts the error and continues to the next event/packet — recommended for
+    /// production, so one misbehaving detector or malformed flow can't tear down
+    /// the whole capture pipeline.
+    pub fn handler_error_policy(mut self, policy: HandlerErrorPolicy) -> Self {
+        self.handler_error_policy = policy;
+        self
+    }
+
+    /// 0.24 Phase B: set the capture-backend error policy.
+    ///
+    /// Default [`BackendErrorPolicy::FailFast`] stops the monitor on a backend
+    /// error. [`BackendErrorPolicy::SkipSource`] logs + counts and keeps
+    /// servicing the other capture sources (useful for multi-interface monitors
+    /// where one NIC can fail independently).
+    pub fn backend_error_policy(mut self, policy: BackendErrorPolicy) -> Self {
+        self.backend_error_policy = policy;
         self
     }
 
@@ -1231,6 +1290,8 @@ impl MonitorBuilder {
                 .label_table
                 .unwrap_or_else(flowscope::well_known::LabelTable::new),
             merge_rx: None,
+            handler_error_policy: self.handler_error_policy,
+            backend_error_policy: self.backend_error_policy,
         })
     }
 }

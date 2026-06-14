@@ -15,7 +15,7 @@ use std::sync::atomic::{AtomicU32, Ordering};
 use std::time::Duration;
 
 use netring::error::{BuildError, Error};
-use netring::monitor::Monitor;
+use netring::monitor::{HandlerErrorPolicy, Monitor};
 use netring::protocol::builtin::Udp;
 use netring::protocol::event_typed::FlowStarted;
 use tempfile::NamedTempFile;
@@ -139,6 +139,53 @@ async fn replay_with_pcap_speed_factor_setter() {
         .expect("replay completes");
 
     assert!(counter.load(Ordering::Relaxed) >= 1);
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn replay_isolates_handler_errors() {
+    // 0.24 Phase B: a handler that always errors must NOT tear down the run
+    // loop under `HandlerErrorPolicy::Isolate` — replay runs to completion and
+    // the handler is still invoked.
+    let pcap = write_synthetic_pcap();
+    let calls = Arc::new(AtomicU32::new(0));
+    let c = Arc::clone(&calls);
+
+    Monitor::builder()
+        .pcap_source(pcap.path())
+        .handler_error_policy(HandlerErrorPolicy::Isolate)
+        .protocol::<Udp>()
+        .on::<FlowStarted<Udp>>(move |_e: &FlowStarted<Udp>| {
+            c.fetch_add(1, Ordering::Relaxed);
+            Err(Error::Config("boom".into()))
+        })
+        .build()
+        .expect("build")
+        .replay()
+        .await
+        .expect("replay completes despite handler errors under Isolate");
+
+    assert!(
+        calls.load(Ordering::Relaxed) >= 1,
+        "the erroring handler should still have been invoked"
+    );
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn replay_propagates_handler_errors_by_default() {
+    // Default policy is Propagate: a handler error tears the monitor down.
+    let pcap = write_synthetic_pcap();
+    let result = Monitor::builder()
+        .pcap_source(pcap.path())
+        .protocol::<Udp>()
+        .on::<FlowStarted<Udp>>(move |_e: &FlowStarted<Udp>| Err(Error::Config("boom".into())))
+        .build()
+        .expect("build")
+        .replay()
+        .await;
+    assert!(
+        result.is_err(),
+        "default Propagate policy should surface the handler error"
+    );
 }
 
 #[test]

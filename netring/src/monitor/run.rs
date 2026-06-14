@@ -31,8 +31,8 @@ use crate::AsyncCapture;
 use crate::anomaly::sink::AnomalySink;
 use crate::ctx::{CounterRegistry, Ctx, SourceIdx, StateMap};
 use crate::error::Result;
-use crate::monitor::Monitor;
 use crate::monitor::dispatcher::Dispatcher;
+use crate::monitor::{BackendErrorPolicy, HandlerErrorPolicy, Monitor};
 use crate::protocol::FlowKey;
 #[cfg(feature = "icmp")]
 use crate::protocol::builtin::Icmp;
@@ -81,6 +81,8 @@ pub(crate) async fn run_loop(monitor: Monitor, stop: StopCondition) -> Result<()
         fanout,
         label_table,
         mut merge_rx,
+        handler_error_policy,
+        backend_error_policy,
     } = monitor;
     // Borrow the monitor name as `&str` for the run loop's
     // dispatch sites. The owned `Box<str>` lives in this stack
@@ -120,6 +122,9 @@ pub(crate) async fn run_loop(monitor: Monitor, stop: StopCondition) -> Result<()
     let mut events: Vec<FsEvent<FlowKey>> = Vec::with_capacity(64);
     let mut shutdown = ShutdownSignal::new(stop);
     let mut rr_anchor: usize = 0;
+    // 0.24 Phase B: consecutive backend-error count for the SkipSource circuit
+    // breaker. Reset on every successful readable wake.
+    let mut backend_errors: u64 = 0;
     // 0.21 E.2: bumped on every packet batch + every tick. Idle
     // mode computes its deadline as `last_event_at + window`,
     // so refreshing this resets the idle timer. Initialized to
@@ -183,9 +188,24 @@ pub(crate) async fn run_loop(monitor: Monitor, stop: StopCondition) -> Result<()
         };
         let i = match ready {
             Some(Ok(i)) => i,
-            Some(Err(e)) => return Err(e),
+            Some(Err(e)) => match backend_error_policy {
+                BackendErrorPolicy::FailFast => return Err(e),
+                BackendErrorPolicy::SkipSource => {
+                    backend_errors += 1;
+                    tracing::warn!(error = %e, count = backend_errors, "capture backend error (SkipSource)");
+                    // Circuit breaker: a persistently-failing fd would otherwise
+                    // spin the readiness select. Back off, and after many
+                    // consecutive failures give up rather than burn a core.
+                    if backend_errors > 64 {
+                        return Err(e);
+                    }
+                    tokio::time::sleep(Duration::from_millis(50)).await;
+                    continue;
+                }
+            },
             None => break, // all captures exhausted (AF_PACKET never reports this)
         };
+        backend_errors = 0; // a successful wake clears the circuit breaker
         let source = SourceIdx(i as u8);
         // Reset idle timer on every readable wake.
         last_event_at = Instant::now();
@@ -224,6 +244,7 @@ pub(crate) async fn run_loop(monitor: Monitor, stop: StopCondition) -> Result<()
             monitor_name_borrow,
             &mut flow_states,
             &label_table,
+            handler_error_policy,
         )
         .await?;
         drain_protocol_slots(
@@ -238,6 +259,7 @@ pub(crate) async fn run_loop(monitor: Monitor, stop: StopCondition) -> Result<()
             source,
             monitor_name_borrow,
             &label_table,
+            handler_error_policy,
         )?;
     }
 
@@ -260,6 +282,7 @@ pub(crate) async fn run_loop(monitor: Monitor, stop: StopCondition) -> Result<()
             deadline,
             &mut flow_states,
             &label_table,
+            handler_error_policy,
         )
         .await?;
     }
@@ -306,6 +329,8 @@ pub(crate) async fn replay_loop(
         fanout: _,
         label_table,
         merge_rx: _, // replay is single-shard; no cross-shard merge
+        handler_error_policy,
+        backend_error_policy: _, // replay has no live capture backend
     } = monitor;
     let monitor_name_borrow: Option<&str> = monitor_name.as_deref();
 
@@ -337,6 +362,7 @@ pub(crate) async fn replay_loop(
             monitor_name_borrow,
             &mut flow_states,
             &label_table,
+            handler_error_policy,
         )
         .await?;
 
@@ -352,6 +378,7 @@ pub(crate) async fn replay_loop(
             SourceIdx(0),
             monitor_name_borrow,
             &label_table,
+            handler_error_policy,
         )?;
     }
 
@@ -371,6 +398,7 @@ pub(crate) async fn replay_loop(
             deadline,
             &mut flow_states,
             &label_table,
+            handler_error_policy,
         )
         .await?;
     }
@@ -408,6 +436,7 @@ async fn drain_phase(
     deadline: Instant,
     flow_states: &mut crate::ctx::FlowStateRegistry,
     label_table: &flowscope::well_known::LabelTable,
+    policy: HandlerErrorPolicy,
 ) -> Result<()> {
     // Step 1: drain the central tracker.
     let mut leftover: Vec<FsEvent<FlowKey>> = Vec::new();
@@ -416,7 +445,7 @@ async fn drain_phase(
         if Instant::now() >= deadline {
             return Ok(());
         }
-        dispatch_lifecycle(
+        let res = match dispatch_lifecycle(
             dispatcher,
             sink,
             state_map,
@@ -426,8 +455,18 @@ async fn drain_phase(
             monitor_name,
             flow_states,
             label_table,
-        )?;
-        dispatch_lifecycle_async(dispatcher, evt).await?;
+        ) {
+            Ok(()) => dispatch_lifecycle_async(dispatcher, evt).await,
+            Err(e) => Err(e),
+        };
+        if let Err(e) = res {
+            match policy {
+                HandlerErrorPolicy::Propagate => return Err(e),
+                HandlerErrorPolicy::Isolate => {
+                    tracing::warn!(error = %e, "handler error isolated (drain)")
+                }
+            }
+        }
     }
 
     if Instant::now() >= deadline {
@@ -452,7 +491,14 @@ async fn drain_phase(
         ctx.monitor_name = monitor_name;
         ctx.label_table = label_table;
         ctx.tracker = Some(driver.tracker());
-        slot.drain_and_dispatch(dispatcher, &mut ctx)?;
+        if let Err(e) = slot.drain_and_dispatch(dispatcher, &mut ctx) {
+            match policy {
+                HandlerErrorPolicy::Propagate => return Err(e),
+                HandlerErrorPolicy::Isolate => {
+                    tracing::warn!(error = %e, "handler error isolated (drain slot)")
+                }
+            }
+        }
     }
 
     if Instant::now() >= deadline {
@@ -559,9 +605,13 @@ async fn dispatch_tracked_events(
     monitor_name: Option<&str>,
     flow_states: &mut crate::ctx::FlowStateRegistry,
     label_table: &flowscope::well_known::LabelTable,
+    policy: HandlerErrorPolicy,
 ) -> Result<()> {
     for evt in events.drain(..) {
-        dispatch_lifecycle(
+        // Sync handlers first, then async — but on the SAME event, so one error
+        // is isolated per-event under `Isolate` (a malformed flow can't tear
+        // down the pipeline).
+        let res = match dispatch_lifecycle(
             dispatcher,
             sink,
             state_map,
@@ -571,8 +621,18 @@ async fn dispatch_tracked_events(
             monitor_name,
             flow_states,
             label_table,
-        )?;
-        dispatch_lifecycle_async(dispatcher, evt).await?;
+        ) {
+            Ok(()) => dispatch_lifecycle_async(dispatcher, evt).await,
+            Err(e) => Err(e),
+        };
+        if let Err(e) = res {
+            match policy {
+                HandlerErrorPolicy::Propagate => return Err(e),
+                HandlerErrorPolicy::Isolate => {
+                    tracing::warn!(error = %e, "handler error isolated (per-event)")
+                }
+            }
+        }
     }
     Ok(())
 }
@@ -594,13 +654,21 @@ fn drain_protocol_slots(
     source: SourceIdx,
     monitor_name: Option<&str>,
     label_table: &flowscope::well_known::LabelTable,
+    policy: HandlerErrorPolicy,
 ) -> Result<()> {
     for slot in protocol_slots.iter_mut() {
         let mut ctx = Ctx::new(None, ts, source, state_map, sink, counters, flow_states);
         ctx.monitor_name = monitor_name;
         ctx.label_table = label_table;
         ctx.tracker = Some(driver.tracker());
-        slot.drain_and_dispatch(dispatcher, &mut ctx)?;
+        if let Err(e) = slot.drain_and_dispatch(dispatcher, &mut ctx) {
+            match policy {
+                HandlerErrorPolicy::Propagate => return Err(e),
+                HandlerErrorPolicy::Isolate => {
+                    tracing::warn!(error = %e, "handler error isolated (per-slot)")
+                }
+            }
+        }
     }
     Ok(())
 }

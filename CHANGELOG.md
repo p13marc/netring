@@ -6,6 +6,21 @@
 > the 0.24 keystone: typed 3-tier subscriptions + kernel filter pushdown,
 > async read+effect handlers, and perf. Additive-with-shims over 0.24.
 
+### JA4S licensing fix + JA3/JA4 now actually populate
+
+- **JA4S moved behind the opt-in `ja4plus` feature** (off by default; excluded
+  from the `monitor` / `all-parsers` umbrellas). JA4S is part of the JA4+ suite
+  and is **FoxIO License 1.1** (non-commercial; patent pending), not MIT/Apache.
+  `TlsFingerprint.ja4s` only exists under `ja4plus`, which pulls flowscope's
+  `ja4plus` (≥ 0.16). The default TLS fingerprint surface (JA3 + JA4 client)
+  stays royalty-free / BSD. Commercial use of `ja4plus` requires a FoxIO OEM
+  license — see `docs/FINGERPRINTS.md`. Depends on **flowscope 0.16**, which
+  did the same gating upstream (`LICENSE-FoxIO-1.1` + `NOTICE`).
+- **Fix:** the `tls` feature now enables `flowscope/tls-fingerprints`, so JA3 +
+  JA4 client fingerprints actually compute (they were silently always-`None`
+  before — the passthrough was missing). The `monitor_ja4_fingerprint` example
+  now requires `ja4plus` (it demonstrates JA4S).
+
 ### Subscription engine — typed tiers + filter predicates (Phase A1)
 
 The new front door (additive; `on::<E>` unaffected). A **subscription** pairs

@@ -23,7 +23,7 @@ exclude = ["CLAUDE.md", "SPEC.md"]
 # pulls only `bitflags` + `thiserror` — both already in netring's tree.
 # The `parse` feature additionally enables `flowscope/extractors`,
 # `flow` enables `tracker`/`reassembler`/`session`.
-flowscope = { version = "0.15", default-features = false }
+flowscope = { version = "0.16", default-features = false }
 
 libc = { workspace = true }
 nix = { workspace = true }
@@ -107,9 +107,17 @@ flow = ["parse", "flowscope/tracker", "flowscope/reassembler", "flowscope/sessio
 # L7 parser pass-through — pull flowscope's HTTP/DNS/TLS/ICMP modules.
 http = ["flow", "flowscope/http"]
 dns = ["flow", "flowscope/dns"]
-tls = ["flow", "flowscope/tls"]
+tls = ["flow", "flowscope/tls", "flowscope/tls-fingerprints"]
 icmp = ["flow", "flowscope/icmp"]
 all-parsers = ["http", "dns", "tls", "icmp"]
+
+# JA4S server fingerprint (`TlsFingerprint.ja4s`). Part of the JA4+ suite,
+# licensed under the FoxIO License 1.1 (source-available, non-commercial;
+# patent pending) — NOT MIT/Apache like the rest of netring. OFF BY DEFAULT
+# (excluded from `monitor`/`all-parsers`). The default TLS fingerprint surface
+# (JA3 + JA4 client) stays royalty-free. Commercial use requires a FoxIO OEM
+# license. See `docs/FINGERPRINTS.md` and flowscope's LICENSE-FoxIO-1.1.
+ja4plus = ["tls", "flowscope/ja4plus"]
 # Pass-through for flowscope's `detect::file` (Sha256Sink / FileType).
 file-hash = ["flowscope/file-hash"]
 
@@ -481,7 +489,9 @@ required-features = ["tokio", "flow"]
 [[example]]
 name = "monitor_ja4_fingerprint"
 path = "examples/monitor/ja4_fingerprint.rs"
-required-features = ["tokio", "flow", "tls"]
+# Demonstrates JA4S (server fingerprint) → requires the opt-in `ja4plus`
+# feature (FoxIO License 1.1). JA3 + JA4 client alone need only `tls`.
+required-features = ["tokio", "flow", "ja4plus"]
 
 [[example]]
 name = "monitor_beacon_detector"

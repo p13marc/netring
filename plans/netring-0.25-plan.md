@@ -75,6 +75,12 @@ Items the 0.24 plan scoped but shipped without (0.24.0 released 2026-06-14, addi
   `FlowTick`).
 - **E2 EVE-tls-record:** JA4/JA4S/SNI in a Suricata `tls` EVE record (needs a TLS-record
   EVE writer; 0.24 has only the anomaly `EveSink`).
+- **✅ JA4S license gating (DONE 2026-06-14):** flowscope **0.16.0** published
+  with an opt-in `ja4plus` feature (JA4S off by default; JA3+JA4-client stay BSD
+  under `tls-fingerprints`) + `LICENSE-FoxIO-1.1` + `NOTICE`. netring depends on
+  flowscope 0.16, adds a passthrough `ja4plus` feature gating
+  `TlsFingerprint.ja4s`, and (fix) `tls` now enables `flowscope/tls-fingerprints`
+  so JA3/JA4 actually populate. Original note below kept for context:
 - **⚠ JA4S license gating (do this in 0.25):** JA4S is **FoxIO License 1.1 + patent-pending**,
   NOT BSD (only JA3/JA4-client are BSD). It shipped un-gated inside flowscope 0.15's
   `tls-fingerprints` (0.24). Split it behind its own opt-in feature — flowscope `ja4plus` (or

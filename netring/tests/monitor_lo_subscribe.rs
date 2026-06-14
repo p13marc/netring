@@ -107,17 +107,21 @@ async fn monitor_lo_subscribe_yields_http_message_from_real_traffic() {
         }
     });
 
-    // Race the monitor's run loop against the broadcast subscriber.
-    // `tokio::select!` polls both on the same task, so the !Send
-    // run_for future + the stream pull live happily together. The
-    // run_for arm caps wall-clock at 3s.
-    let result = tokio::select! {
-        biased;
-        msg = stream.next() => msg,
-        _ = monitor.run_for(Duration::from_secs(3)) => None,
-    };
+    // 0.24: the run-loop future is `Send` (since 0.23), so spawn it — the
+    // modern, recommended pattern — and pull the broadcast subscriber on this
+    // task. This is more robust than racing both in a single-thread
+    // `tokio::select!`: the run loop makes progress on the runtime while we
+    // simply await the next `HttpMessage` with a wall-clock cap.
+    let run = tokio::spawn(monitor.run_for(Duration::from_secs(4)));
+
+    let result = tokio::time::timeout(Duration::from_secs(4), stream.next())
+        .await
+        .ok()
+        .flatten();
 
     // Cleanup.
+    run.abort();
+    let _ = run.await;
     let _ = client.await;
     server.abort();
 

@@ -25,22 +25,37 @@ clippy/fmt/doc clean · dhat **Δ0** + **0 allocs/packet** · run-loop **`Send`*
 0.24 baseline · flowscope floor `>= 0.15`.
 
 ## Status table
+> **Phase A design**: the subscription engine was redesigned research-grounded
+> (Retina/Iris + Suricata/Zeek) — see **`netring-0.25-subscription-engine-design.md`**.
+> netring's primitives already match the validated architecture; the rest is the
+> S1–S5 phasing below. Landed pieces marked ✅.
+
 | Phase | Item | Breaking | Status |
 |---|---|---|---|
-| **A** | 3 strongly-typed tiers: `packet()` / `flow::<P>()` / `session::<P>()` + per-sub typed filters | shim (`on::<E>`) | ☐ |
-| A | filter compiler **splits** AST → kernel conjunction + userspace remainder | additive | ☐ |
-| A | STAGE-0 pushdown: cBPF (AF_PACKET) + **table-driven XDP map** (AF_XDP) | additive | ☐ |
-| A | `.expr()` runtime strings → `wirefilter` (optional feature) | no | ☐ |
-| **B** | async `on_async(|p, &Ctx| -> Future<Effects>)` — read sync + write deferred | shim | ☐ |
-| B | dispatcher: lift `MAX_EVENT_TYPES` (ArrayVec→spill) + debug type-tag | minor | ☐ |
+| **A** | 3 strongly-typed tiers: `packet()` / `flow::<P>()` / `session::<P>()` + per-sub typed filters | shim (`on::<E>`) | ✅ packet tier e2e (A1a/b/c); flow/session `.to()` = **S3** |
+| A | filter compiler **splits** AST → kernel conjunction + userspace remainder | additive | ✅ `kernel_approx` (A2) + cBPF compiler (A3a) |
+| A | STAGE-0 pushdown: cBPF (AF_PACKET) + **table-driven XDP map** (AF_XDP) | additive | ◑ compiler ✅; **safe auto-apply = S2**; XDP map = S5 |
+| A | `.expr()` runtime strings → own `pest`/`nom` parser over the AST (**not** dead `wirefilter` crate) | no | ☐ A4 |
+| **B** | async `on_async(|p, &Ctx| -> Future<Effects>)` — read sync + write deferred | shim | ✅ `on_effect` e2e (B1) |
+| B | dispatcher: lift `MAX_EVENT_TYPES` (ArrayVec→spill) + debug type-tag | minor | ✅ (B2) |
 | **C** | CPU/NUMA pinning in `ShardedRunner` + `FanoutMode::SymmetricHash` | no | ☐ |
 | C | prefetch + batched AF_XDP refill + `#[cold]` (bench-gated) | no | ☐ |
 | C | published pps/Gbps/latency + CI perf gate + `docs/PERFORMANCE.md` | no | ☐ |
 | **D** | TX symmetry: stream injection · pacing · TX timestamps (**trim-able**) | no | ☐ |
 | R | CHANGELOG · migration · publish 0.25 → open community-test window | — | ☐ |
 
-**Order:** A + B parallel (both wrap the dispatcher; A needs 0.24-B's `set_filter`) →
-C (measures A's pushdown, tunes B's AF_XDP path). D independent/deferrable.
+### Subscription-engine phasing (supersedes the A rows above; see design doc)
+- **S1** — `TrafficInterest` model: every consumer (`on::<E>`, `protocol::<P>`,
+  exporters, tier subs) → a `Predicate` interest, collected in one set. *(bookkeeping)*
+- **S2** — **safe union pushdown**: fold the whole set, **fail-open** (any `Always`
+  interest / over-budget union → capture all), apply via `set_filter`. Closes #31
+  correctly (union = superset ⇒ no consumer starved).
+- **S3** — flow/session `.to()` dispatch, **deliver-at-completion** (flow→`FlowEnded`+stats,
+  session→on-parse). Closes #30.
+- **S4** — bounded async-effect channel + drop counter → `CaptureTelemetry`.
+- **S5 (0.26+)** — staged early-shed (bounded L7 depth, per-flow bypass → AF_XDP map).
+
+**Order:** S1→S2 (correctness-closing, additive) → S3 → S4 → C → D. A4 any time.
 
 ## Deferred from 0.24 (backlog — fold into the phases above or do standalone)
 Items the 0.24 plan scoped but shipped without (0.24.0 released 2026-06-14, additive):

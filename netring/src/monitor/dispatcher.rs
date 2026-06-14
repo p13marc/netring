@@ -10,17 +10,78 @@ use std::any::TypeId;
 use std::sync::Arc;
 
 use arrayvec::ArrayVec;
+use rustc_hash::FxHashMap;
 
 use crate::ctx::Ctx;
 use crate::error::Result;
 use crate::monitor::async_handler::BoxFuture;
 
-/// Maximum distinct event-payload types per monitor.
+/// Hard cap on distinct event-payload types per monitor — the slot-index
+/// width (`u16`). Effectively unbounded for any realistic monitor; the
+/// build returns [`BuildError::TooManyEventTypes`](crate::error::BuildError)
+/// only past this.
 ///
-/// Sized so the `ArrayVec` lookup stays inline / branch-predictable.
-/// In practice 4–8 covers any realistic detector; raising this
-/// later is backwards-compatible.
-pub const MAX_EVENT_TYPES: usize = 16;
+/// 0.25-B2 lifted the old hard cap of 16: the first `INLINE_EVENT_TYPES`
+/// live in a no-hash inline table (the common case, zero hot-path cost);
+/// beyond that the table spills to a hash map.
+pub const MAX_EVENT_TYPES: usize = u16::MAX as usize;
+
+/// Event types kept in the inline (linear-scan, no-hashing) lookup table
+/// before the dispatcher spills to a hash map. Covers any realistic
+/// detector with zero hot-path hashing.
+const INLINE_EVENT_TYPES: usize = 16;
+
+/// `TypeId` → slot-index lookup. Inline linear scan for the common
+/// ≤`INLINE_EVENT_TYPES` case (no hashing on the hot path); spills to a
+/// hash map beyond that so there's no hard ceiling (0.25-B2).
+// One instance per Dispatcher (not in a Vec / not on a per-event path), and
+// the `Inline` arm's size IS the point — boxing it would reintroduce the
+// indirection this avoids. So the size asymmetry with `Spilled` is fine.
+#[allow(clippy::large_enum_variant)]
+#[derive(Clone)]
+pub(crate) enum TypeSlotTable {
+    Inline(ArrayVec<(TypeId, u16), INLINE_EVENT_TYPES>),
+    Spilled(FxHashMap<TypeId, u16>),
+}
+
+impl TypeSlotTable {
+    pub(crate) fn new() -> Self {
+        TypeSlotTable::Inline(ArrayVec::new())
+    }
+
+    /// Resolve a payload `TypeId` to its slot index, if registered.
+    #[inline]
+    pub(crate) fn get(&self, ty: TypeId) -> Option<u16> {
+        match self {
+            TypeSlotTable::Inline(v) => v.iter().copied().find(|(t, _)| *t == ty).map(|(_, i)| i),
+            TypeSlotTable::Spilled(m) => m.get(&ty).copied(),
+        }
+    }
+
+    /// Record `ty → idx`. Migrates inline → spilled on overflow.
+    pub(crate) fn insert(&mut self, ty: TypeId, idx: u16) {
+        match self {
+            TypeSlotTable::Inline(v) => {
+                if v.try_push((ty, idx)).is_err() {
+                    // The 17th type spills the whole table into a hash map.
+                    let mut m: FxHashMap<TypeId, u16> = v.iter().copied().collect();
+                    m.insert(ty, idx);
+                    *self = TypeSlotTable::Spilled(m);
+                }
+            }
+            TypeSlotTable::Spilled(m) => {
+                m.insert(ty, idx);
+            }
+        }
+    }
+
+    pub(crate) fn len(&self) -> usize {
+        match self {
+            TypeSlotTable::Inline(v) => v.len(),
+            TypeSlotTable::Spilled(m) => m.len(),
+        }
+    }
+}
 
 /// Type-erased shared handler. The raw payload pointer at call
 /// time is keyed by [`TypeId`] in the dispatcher table; the
@@ -67,28 +128,39 @@ pub(crate) struct AsyncHandlerSlot {
 /// `Debug` skips the boxed closure bodies — it just prints the
 /// slot table shape so test failures stay readable.
 pub struct Dispatcher {
-    /// `TypeId::of::<E::Payload>()` → u8 slot index. ≤ MAX_EVENT_TYPES entries.
-    /// One row in the table covers both sync and async handlers
-    /// for the same event type (parallel slot vectors below).
-    slot_by_type: ArrayVec<(TypeId, u8), MAX_EVENT_TYPES>,
+    /// `TypeId::of::<E::Payload>()` → slot index. Inline ≤16, spills beyond.
+    /// One row covers both sync and async handlers for the same event type
+    /// (parallel slot vectors below).
+    slot_by_type: TypeSlotTable,
     /// Slot table — sync handlers grouped by payload type.
     slots: Box<[Vec<HandlerSlot>]>,
     /// Slot table — async handlers grouped by payload type, in
     /// lockstep with `slots`. Both vectors are indexed by the same
     /// `slot_by_type` lookup.
     async_slots: Box<[Vec<AsyncHandlerSlot>]>,
+    /// 0.25-B2 type-tag: `slot index → registered TypeId`, parallel to
+    /// `slots`. Read only by the `debug_assertions` check in dispatch — it
+    /// proves the `slot_by_type` → `slots` mapping stays consistent (a build
+    /// bug routing a type to the wrong slot would make the type-erased
+    /// `*const ()` cast in a handler UB). Built once; a `Box<[TypeId]>` of
+    /// `type_count` entries (negligible), so it's stored unconditionally to
+    /// keep the constructor signature cfg-free.
+    #[allow(dead_code)] // read only under debug_assertions
+    slot_types: Box<[TypeId]>,
 }
 
 impl Dispatcher {
     pub(crate) fn new(
-        slot_by_type: ArrayVec<(TypeId, u8), MAX_EVENT_TYPES>,
+        slot_by_type: TypeSlotTable,
         slots: Box<[Vec<HandlerSlot>]>,
         async_slots: Box<[Vec<AsyncHandlerSlot>]>,
+        slot_types: Box<[TypeId]>,
     ) -> Self {
         Self {
             slot_by_type,
             slots,
             async_slots,
+            slot_types,
         }
     }
 
@@ -103,14 +175,16 @@ impl Dispatcher {
     #[inline]
     pub fn dispatch<P: 'static>(&mut self, payload: &P, ctx: &mut Ctx<'_>) -> Result<()> {
         let target = TypeId::of::<P>();
-        let Some((_, slot_idx)) = self
-            .slot_by_type
-            .iter()
-            .copied()
-            .find(|(t, _)| *t == target)
-        else {
+        let Some(slot_idx) = self.slot_by_type.get(target) else {
             return Ok(());
         };
+        // 0.25-B2: in debug, prove the slot index really maps to `target`
+        // before we hand a `*const P` to handlers registered for that slot.
+        #[cfg(debug_assertions)]
+        debug_assert_eq!(
+            self.slot_types[slot_idx as usize], target,
+            "dispatcher slot/type desync — type-erased cast would be UB"
+        );
 
         let ptr = payload as *const P as *const ();
         for slot in &mut self.slots[slot_idx as usize] {
@@ -147,14 +221,14 @@ impl Dispatcher {
     /// for monitors without async handlers.
     pub async fn dispatch_async<P: 'static>(&mut self, payload: &P) -> Result<()> {
         let target = TypeId::of::<P>();
-        let Some((_, slot_idx)) = self
-            .slot_by_type
-            .iter()
-            .copied()
-            .find(|(t, _)| *t == target)
-        else {
+        let Some(slot_idx) = self.slot_by_type.get(target) else {
             return Ok(());
         };
+        #[cfg(debug_assertions)]
+        debug_assert_eq!(
+            self.slot_types[slot_idx as usize], target,
+            "dispatcher slot/type desync — type-erased cast would be UB"
+        );
 
         let slots = &self.async_slots[slot_idx as usize];
         match slots.len() {
@@ -228,6 +302,7 @@ impl Dispatcher {
                 })
                 .collect::<Vec<_>>()
                 .into_boxed_slice(),
+            slot_types: self.slot_types.clone(),
         }
     }
 
@@ -300,11 +375,12 @@ mod tests {
             Ok(())
         });
 
-        let mut slot_by_type = ArrayVec::new();
-        slot_by_type.push((TypeId::of::<u32>(), 0));
+        let mut slot_by_type = TypeSlotTable::new();
+        slot_by_type.insert(TypeId::of::<u32>(), 0);
         let slots = vec![vec![HandlerSlot { handler }]].into_boxed_slice();
         let async_slots = vec![vec![]].into_boxed_slice();
-        let primary = Dispatcher::new(slot_by_type, slots, async_slots);
+        let slot_types = vec![TypeId::of::<u32>()].into_boxed_slice();
+        let primary = Dispatcher::new(slot_by_type, slots, async_slots, slot_types);
 
         // Clone for a hypothetical shard.
         let mut shard = primary.clone_for_shard();
@@ -330,9 +406,67 @@ mod tests {
     }
 
     #[test]
+    fn type_slot_table_stays_inline_then_spills_preserving_lookups() {
+        // Distinct TypeIds via distinct unit types. Use primitive arrays of
+        // increasing size so each has a unique TypeId.
+        let mut t = TypeSlotTable::new();
+        let tys: [TypeId; 4] = [
+            TypeId::of::<u8>(),
+            TypeId::of::<u16>(),
+            TypeId::of::<u32>(),
+            TypeId::of::<u64>(),
+        ];
+        for (i, ty) in tys.iter().enumerate() {
+            t.insert(*ty, i as u16);
+        }
+        assert!(matches!(t, TypeSlotTable::Inline(_)), "≤16 stays inline");
+        for (i, ty) in tys.iter().enumerate() {
+            assert_eq!(t.get(*ty), Some(i as u16));
+        }
+        assert_eq!(t.get(TypeId::of::<i8>()), None);
+        assert_eq!(t.len(), 4);
+
+        // Fill past the inline cap (16) to force a spill, keeping earlier
+        // entries resolvable. Reuse a fresh table with 17 synthetic types.
+        let mut big = TypeSlotTable::new();
+        fn synth_ty(n: usize) -> TypeId {
+            // 17 distinct concrete types → 17 distinct TypeIds.
+            const TYS: [fn() -> TypeId; 17] = [
+                || TypeId::of::<[u8; 0]>(),
+                || TypeId::of::<[u8; 1]>(),
+                || TypeId::of::<[u8; 2]>(),
+                || TypeId::of::<[u8; 3]>(),
+                || TypeId::of::<[u8; 4]>(),
+                || TypeId::of::<[u8; 5]>(),
+                || TypeId::of::<[u8; 6]>(),
+                || TypeId::of::<[u8; 7]>(),
+                || TypeId::of::<[u8; 8]>(),
+                || TypeId::of::<[u8; 9]>(),
+                || TypeId::of::<[u8; 10]>(),
+                || TypeId::of::<[u8; 11]>(),
+                || TypeId::of::<[u8; 12]>(),
+                || TypeId::of::<[u8; 13]>(),
+                || TypeId::of::<[u8; 14]>(),
+                || TypeId::of::<[u8; 15]>(),
+                || TypeId::of::<[u8; 16]>(),
+            ];
+            TYS[n]()
+        }
+        for i in 0..17 {
+            big.insert(synth_ty(i), i as u16);
+        }
+        assert!(matches!(big, TypeSlotTable::Spilled(_)), "17 spills to map");
+        assert_eq!(big.len(), 17);
+        // Both an early (inline-era) and the spilled entry resolve.
+        assert_eq!(big.get(synth_ty(0)), Some(0));
+        assert_eq!(big.get(synth_ty(16)), Some(16));
+    }
+
+    #[test]
     fn empty_dispatch_is_noop() {
         let mut d = Dispatcher::new(
-            ArrayVec::new(),
+            TypeSlotTable::new(),
+            Vec::new().into_boxed_slice(),
             Vec::new().into_boxed_slice(),
             Vec::new().into_boxed_slice(),
         );
@@ -372,9 +506,9 @@ mod tests {
             Ok(())
         });
 
-        let mut slot_by_type = ArrayVec::new();
-        slot_by_type.push((TypeId::of::<u32>(), 0));
-        slot_by_type.push((TypeId::of::<u64>(), 1));
+        let mut slot_by_type = TypeSlotTable::new();
+        slot_by_type.insert(TypeId::of::<u32>(), 0);
+        slot_by_type.insert(TypeId::of::<u64>(), 1);
         let slots: Box<[Vec<HandlerSlot>]> = vec![
             vec![HandlerSlot {
                 handler: u32_handler,
@@ -386,7 +520,8 @@ mod tests {
         .into_boxed_slice();
         let async_slots: Box<[Vec<AsyncHandlerSlot>]> =
             vec![Vec::new(), Vec::new()].into_boxed_slice();
-        let mut d = Dispatcher::new(slot_by_type, slots, async_slots);
+        let slot_types = vec![TypeId::of::<u32>(), TypeId::of::<u64>()].into_boxed_slice();
+        let mut d = Dispatcher::new(slot_by_type, slots, async_slots, slot_types);
 
         let mut s = StateMap::default();
         let mut k = NoopSink;

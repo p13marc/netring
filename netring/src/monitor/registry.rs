@@ -14,7 +14,6 @@ use std::any::TypeId;
 use std::marker::PhantomData;
 use std::sync::Arc;
 
-use arrayvec::ArrayVec;
 use flowscope::driver::{BroadcastSlotHandle, SlotHandle, SlotMessage};
 use rustc_hash::FxHashMap;
 
@@ -24,7 +23,7 @@ use crate::error::{BuildError, Result};
 use crate::monitor::async_handler::{AsyncHandler, BoxFuture};
 use crate::monitor::dispatcher::{
     AsyncHandlerSlot, BoxedAsyncHandler, BoxedHandler, Dispatcher, DynAsyncHandler, HandlerSlot,
-    MAX_EVENT_TYPES,
+    MAX_EVENT_TYPES, TypeSlotTable,
 };
 use crate::monitor::handler::Handler;
 use crate::protocol::Protocol;
@@ -154,12 +153,17 @@ impl HandlerRegistry {
             });
         }
 
-        let mut slot_by_type: ArrayVec<(TypeId, u8), MAX_EVENT_TYPES> = ArrayVec::new();
+        // 0.25-B2: TypeSlotTable is inline (no-hash) for the first 16 types,
+        // spilling to a hash map beyond — so no hard cap short of the u16
+        // slot-index width.
+        let mut slot_by_type = TypeSlotTable::new();
         let mut slots: Vec<Vec<HandlerSlot>> = Vec::with_capacity(all_types.len());
         let mut async_slots: Vec<Vec<AsyncHandlerSlot>> = Vec::with_capacity(all_types.len());
+        let mut slot_types: Vec<TypeId> = Vec::with_capacity(all_types.len());
 
         for (i, type_id) in all_types.into_iter().enumerate() {
-            slot_by_type.push((type_id, i as u8));
+            slot_by_type.insert(type_id, i as u16);
+            slot_types.push(type_id);
             slots.push(
                 self.by_type
                     .remove(&type_id)
@@ -181,6 +185,7 @@ impl HandlerRegistry {
             slot_by_type,
             slots.into_boxed_slice(),
             async_slots.into_boxed_slice(),
+            slot_types.into_boxed_slice(),
         ))
     }
 }
@@ -557,11 +562,14 @@ mod tests {
     }
 
     #[test]
-    fn too_many_event_types_errors_at_build() {
-        // Synthesize >MAX_EVENT_TYPES distinct event types by
-        // registering with distinct wrapper struct types. Each
-        // unit struct is auto-Send + auto-Sync, so the Event impl
-        // just needs `type Payload`.
+    fn more_than_inline_event_types_spill_and_still_dispatch() {
+        // 0.25-B2: the old hard cap of 16 is gone — registering >16 distinct
+        // event types now spills the lookup table to a hash map and builds
+        // fine. Synthesize 17 distinct unit-struct event types and prove the
+        // 17th (the spilled one) still dispatches.
+        use std::sync::Arc;
+        use std::sync::atomic::{AtomicU32, Ordering};
+
         macro_rules! synth {
             ($($name:ident),+ $(,)?) => {
                 $(
@@ -574,6 +582,9 @@ mod tests {
         synth!(
             E0, E1, E2, E3, E4, E5, E6, E7, E8, E9, E10, E11, E12, E13, E14, E15, E16
         );
+
+        let fired = Arc::new(AtomicU32::new(0));
+        let f = Arc::clone(&fired);
 
         let mut reg = HandlerRegistry::default();
         reg.register::<E0, _, _>(|_: &E0| Ok(()));
@@ -592,16 +603,30 @@ mod tests {
         reg.register::<E13, _, _>(|_: &E13| Ok(()));
         reg.register::<E14, _, _>(|_: &E14| Ok(()));
         reg.register::<E15, _, _>(|_: &E15| Ok(()));
-        reg.register::<E16, _, _>(|_: &E16| Ok(()));
+        // The 17th type — lives past the inline table, in the spilled map.
+        reg.register::<E16, _, _>(move |_: &E16| {
+            f.fetch_add(1, Ordering::Relaxed);
+            Ok(())
+        });
 
-        let err = reg.into_dispatcher().unwrap_err();
-        match err {
-            BuildError::TooManyEventTypes { limit, actual } => {
-                assert_eq!(limit, MAX_EVENT_TYPES);
-                assert_eq!(actual, MAX_EVENT_TYPES + 1);
-            }
-            other => panic!("expected TooManyEventTypes, got {other:?}"),
-        }
+        assert_eq!(reg.type_count(), 17);
+        let mut disp = reg
+            .into_dispatcher()
+            .expect("17 event types build (no cap at 16 anymore)");
+        assert_eq!(disp.type_count(), 17);
+
+        let mut s = StateMap::default();
+        let mut sink = NoopSink;
+        let mut cr = CounterRegistry::default();
+        let mut fs = crate::ctx::FlowStateRegistry::default();
+        let mut ctx = fresh_ctx(&mut s, &mut sink, &mut cr, &mut fs);
+
+        disp.dispatch::<E16>(&E16, &mut ctx).unwrap();
+        assert_eq!(
+            fired.load(Ordering::Relaxed),
+            1,
+            "the spilled (17th) event type must still dispatch"
+        );
     }
 
     /// 0.22 §2.5: end-to-end through a real flowscope driver — feed an

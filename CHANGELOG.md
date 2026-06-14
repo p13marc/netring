@@ -1,5 +1,20 @@
 # Changelog
 
+## 0.25.0 — subscriptions, async effects & performance
+
+> **Unreleased / in progress on `0.25-dev`.** Builds the redesigned API on
+> the 0.24 keystone: typed 3-tier subscriptions + kernel filter pushdown,
+> async read+effect handlers, and perf. Additive-with-shims over 0.24.
+
+### Dispatcher (Phase B2)
+
+- The per-monitor distinct-event-type cap is lifted (was a hard 16): the
+  lookup table is inline (no hashing) for the first 16 types and spills to
+  a hash map beyond, so there's no practical ceiling. dhat stays `Δ 0`.
+- Debug-only dispatcher type-tag asserts the `TypeId → slot` mapping stays
+  consistent (turns a silent type-erasure desync into a loud test panic;
+  zero release cost).
+
 ## 0.24.0 — zero-copy core + production trust
 
 > **Released 2026-06-14.** Makes the `Monitor` pipeline zero-copy +

@@ -271,6 +271,34 @@ impl<P: HasQname> SubscriptionBuilder<SessionTier<P>> {
     }
 }
 
+impl<P> SubscriptionBuilder<SessionTier<P>>
+where
+    P: MessageProtocol,
+    P::Message: super::session::L7Fields,
+{
+    /// Finish a session subscription with its handler (0.25 S3b). The handler
+    /// is called with each parsed `P::Message` whose L7 fields + flow 5-tuple
+    /// match the filter. Register the result with
+    /// [`MonitorBuilder::subscribe`](crate::monitor::MonitorBuilder::subscribe);
+    /// the protocol's parser must also be registered via
+    /// [`protocol::<P>()`](crate::monitor::MonitorBuilder::protocol).
+    pub fn to<H>(self, handler: H) -> super::session::SessionSubscription<P>
+    where
+        H: for<'c> Fn(
+                &<P as crate::protocol::Protocol>::Message,
+                &mut crate::ctx::Ctx<'c>,
+            ) -> crate::error::Result<()>
+            + Send
+            + Sync
+            + 'static,
+    {
+        super::session::SessionSubscription {
+            predicate: self.predicate,
+            handler: std::sync::Arc::new(handler),
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use std::net::Ipv4Addr;

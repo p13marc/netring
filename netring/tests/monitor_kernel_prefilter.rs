@@ -134,6 +134,28 @@ fn packet_sub_interest_joins_the_union() {
 }
 
 #[test]
+fn session_subscription_installs_and_contributes_interest() {
+    // 0.25 S3b: a session sub installs a predicate-gated on::<Tls> handler and
+    // builds; it contributes the Tls protocol's traffic interest (tcp/443,8443)
+    // to the kernel prefilter union.
+    use flowscope::tls::TlsMessage;
+    use netring::monitor::subscription::session;
+
+    let bpf = Monitor::builder()
+        .interface("lo")
+        .protocol::<Tls>()
+        .subscribe(
+            session::<Tls>()
+                .sni_glob("*.bank")
+                .to(|_m: &TlsMessage, _ctx| Ok(())),
+        )
+        .kernel_prefilter()
+        .expect("a tls session sub yields the tcp/443 interest");
+    assert!(bpf.matches(&frame(TCP, 443)), "tls/443 wanted");
+    assert!(!bpf.matches(&frame(UDP, 53)), "udp/53 not wanted");
+}
+
+#[test]
 fn pure_l4_protocol_keeps_all_of_that_l4() {
     // protocol::<Tcp>() is the lifecycle marker → Dispatch::AllTcp → all TCP.
     let bpf = Monitor::builder()

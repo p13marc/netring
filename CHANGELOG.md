@@ -61,8 +61,27 @@ and auto-applied to the AF_PACKET capture — safely.
   `BpfFilter::matches` interpreter (`tests/monitor_kernel_prefilter.rs`).
   `kernel_prefilter()` stays public for inspection. dhat `Δ 0` on the hot path.
 
-Flow/session tier handler dispatch (`.to()` for those tiers) and the
-table-driven AF_XDP map program follow. (Design:
+### Flow & session tier dispatch (Phase S3)
+
+The flow and session tiers now deliver, at each tier's **natural completion
+point** (Retina `on_terminate` semantics):
+
+- `flow::<P>().bytes_over(N).to(handler)` — fires once per flow, at `FlowEnded`,
+  with the accumulated stats (so byte/packet-count filters are meaningful).
+- `session::<P>().sni_glob("*.bank").to(handler)` — fires with each parsed
+  `P::Message` whose L7 fields (SNI / HTTP host / DNS qname, via a new
+  `L7Fields` trait per message type) and flow 5-tuple match the filter.
+
+Both are sugar over the existing typed dispatch: `.to()` installs a
+predicate-gated `on::<…>` handler. A new `Subscribable` trait lets the one
+`MonitorBuilder::subscribe` accept any tier (packet / flow / session). The
+tier's traffic interest is recorded automatically (a superset of the filter),
+so it composes with the S1/S2 kernel-prefilter union safely. Verified end-to-end
+via pcap replay (`replay_flow_tier_delivers_once_at_flow_end_gated_by_stats`,
+`replay_session_tier_dns_qname_glob_gates_delivery`). dhat `Δ 0`.
+
+The table-driven AF_XDP map program (A3c, hardware-gated) and the runtime
+`.expr()` string frontend (A4) follow. (Design:
 `plans/netring-0.25-subscription-engine-design.md`.)
 
 ### Async read + effect handlers (Phase B1)

@@ -428,6 +428,106 @@ async fn replay_flow_tier_delivers_once_at_flow_end_gated_by_stats() {
     );
 }
 
+/// A UDP/53 frame carrying a minimal DNS A-query for `qname`.
+#[cfg(all(feature = "dns", feature = "tls"))]
+fn dns_query_frame(qname: &str) -> Vec<u8> {
+    let mut dns = Vec::new();
+    dns.extend_from_slice(&0x1234u16.to_be_bytes()); // txid
+    dns.extend_from_slice(&0x0100u16.to_be_bytes()); // flags: standard query, RD
+    dns.extend_from_slice(&1u16.to_be_bytes()); // qdcount
+    dns.extend_from_slice(&[0, 0, 0, 0, 0, 0]); // an/ns/ar count
+    for label in qname.split('.') {
+        dns.push(label.len() as u8);
+        dns.extend_from_slice(label.as_bytes());
+    }
+    dns.push(0); // root label
+    dns.extend_from_slice(&1u16.to_be_bytes()); // qtype A
+    dns.extend_from_slice(&1u16.to_be_bytes()); // qclass IN
+
+    let total_len = 14 + 20 + 8 + dns.len();
+    let mut frame = Vec::with_capacity(total_len);
+    frame.extend_from_slice(&[0x02, 0, 0, 0, 0, 1]);
+    frame.extend_from_slice(&[0x02, 0, 0, 0, 0, 2]);
+    frame.extend_from_slice(&[0x08, 0x00]);
+    frame.push(0x45);
+    frame.push(0x00);
+    frame.extend_from_slice(&((20 + 8 + dns.len()) as u16).to_be_bytes());
+    frame.extend_from_slice(&[0, 0, 0, 0]);
+    frame.push(64);
+    frame.push(17); // UDP
+    frame.extend_from_slice(&[0, 0]);
+    frame.extend_from_slice(&[10, 0, 0, 1]);
+    frame.extend_from_slice(&[10, 0, 0, 2]);
+    frame.extend_from_slice(&54321u16.to_be_bytes());
+    frame.extend_from_slice(&53u16.to_be_bytes()); // dst port 53
+    frame.extend_from_slice(&((8 + dns.len()) as u16).to_be_bytes());
+    frame.extend_from_slice(&[0, 0]);
+    frame.extend_from_slice(&dns);
+    frame
+}
+
+#[cfg(all(feature = "dns", feature = "tls"))]
+#[tokio::test(flavor = "current_thread")]
+async fn replay_session_tier_dns_qname_glob_gates_delivery() {
+    // 0.25 S3b: a session subscription delivers the parsed DNS message, gated
+    // by the qname glob. Two queries (evil.test, good.example); only the one
+    // matching `*.test` reaches the handler.
+    use std::sync::Mutex;
+
+    use netring::monitor::subscription::session;
+    use netring::protocol::builtin::Dns;
+    use pcap_file::pcap::{PcapHeader, PcapPacket, PcapWriter};
+
+    let file = NamedTempFile::new().unwrap();
+    let header = PcapHeader {
+        version_major: 2,
+        version_minor: 4,
+        ts_correction: 0,
+        ts_accuracy: 0,
+        snaplen: u32::MAX,
+        datalink: pcap_file::DataLink::from(1),
+        ts_resolution: pcap_file::TsResolution::NanoSecond,
+        endianness: pcap_file::Endianness::native(),
+    };
+    let mut w = PcapWriter::with_header(file.reopen().unwrap(), header).unwrap();
+    for (i, q) in ["evil.test", "good.example"].iter().enumerate() {
+        let frame = dns_query_frame(q);
+        let pkt =
+            PcapPacket::new_owned(Duration::new(100 + i as u64, 0), frame.len() as u32, frame);
+        w.write_packet(&pkt).unwrap();
+    }
+    drop(w);
+
+    let matched: Arc<Mutex<Vec<String>>> = Arc::new(Mutex::new(Vec::new()));
+    let seen = Arc::clone(&matched);
+
+    Monitor::builder()
+        .pcap_source(file.path())
+        .protocol::<Dns>()
+        .subscribe(session::<Dns>().qname_glob("*.test").to(
+            move |msg: &flowscope::dns::DnsMessage, _ctx| {
+                if let flowscope::dns::DnsMessage::Query(q) = msg
+                    && let Some(question) = q.questions.first()
+                {
+                    seen.lock().unwrap().push(question.name.clone());
+                }
+                Ok(())
+            },
+        ))
+        .build()
+        .expect("build with dns session sub")
+        .replay()
+        .await
+        .expect("replay completes");
+
+    let names = matched.lock().unwrap();
+    assert_eq!(
+        names.as_slice(),
+        &["evil.test".to_string()],
+        "only the *.test query should reach the gated handler, got {names:?}"
+    );
+}
+
 #[test]
 fn builder_pcap_source_relaxes_no_interface_check() {
     let pcap = write_synthetic_pcap();

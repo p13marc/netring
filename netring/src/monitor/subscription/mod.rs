@@ -11,12 +11,11 @@
 //! | `session::<P>()`   | `P::Message` (L7)                      | + sni / host / qname globs |
 //!
 //! The filter lowers to a single [`Predicate`] AST shared by userspace
-//! evaluation and (Phase A2/A3) kernel pushdown. `on::<E>(h)` is reframed as
-//! a subscription with an [`Always`](Predicate::Always) filter — the typed
-//! builders are additive sugar, not a replacement.
-//!
-//! Phase A1 lands the AST + evaluator ([`predicate`]); the typed tier builders
-//! and run-loop wiring land in the follow-up units.
+//! evaluation and kernel pushdown (the OR-union of every consumer's interest is
+//! compiled to cBPF and applied via `set_filter` — fail-open, starvation-free).
+//! `on::<E>(h)` stays the ergonomic surface; tier subs are additive sugar that
+//! deliver at the tier's natural point: packet = per-frame (pre-tracking),
+//! flow = at `FlowEnded` with stats, session = when the L7 message parses.
 //!
 //! [`PacketView`]: flowscope::PacketView
 
@@ -25,6 +24,7 @@ pub mod flow;
 pub(crate) mod kernel_filter;
 pub mod packet;
 pub mod predicate;
+pub mod session;
 
 pub use builder::{
     FlowTier, HasHttpHost, HasQname, HasSni, PacketTier, SessionTier, SubscriptionBuilder, flow,
@@ -33,6 +33,7 @@ pub use builder::{
 pub use flow::{FlowHandler, FlowSubscription};
 pub use packet::{PacketHandler, PacketSubscription};
 pub use predicate::{Atom, FieldSource, Glob, Predicate};
+pub use session::{L7Fields, SessionHandler, SessionSubscription};
 
 /// A built subscription that knows how to **install itself** onto a
 /// [`MonitorBuilder`](crate::monitor::MonitorBuilder) (0.25 S3). Lets the one
@@ -67,5 +68,28 @@ impl<P: crate::protocol::FlowProtocol> Subscribable for FlowSubscription<P> {
                 }
             },
         )
+    }
+}
+
+impl<P> Subscribable for SessionSubscription<P>
+where
+    P: crate::protocol::MessageProtocol,
+    P::Message: session::L7Fields,
+{
+    fn install(self, builder: crate::monitor::MonitorBuilder) -> crate::monitor::MonitorBuilder {
+        let pred = self.predicate;
+        let user = self.handler;
+        // Sugar: a predicate-gated handler on the L7 message event. The 5-tuple
+        // comes from `ctx.flow` (the message doesn't carry the key); L7 fields
+        // come from the message via `L7Fields`. `on_ctx::<P>` records the
+        // protocol's traffic interest (a superset of the filter — safe).
+        builder.on_ctx::<P>(move |msg: &P::Message, ctx: &mut crate::ctx::Ctx<'_>| {
+            let fields = session::SessionFields { key: ctx.flow, msg };
+            if pred.eval(&fields) {
+                user(msg, ctx)
+            } else {
+                Ok(())
+            }
+        })
     }
 }

@@ -82,6 +82,87 @@ impl Effects {
     pub fn extend(&mut self, other: Effects) {
         self.anomalies.extend(other.anomalies);
     }
+
+    /// Apply the effects to the monitor's anomaly sink. Called by the run
+    /// loop after the batch is drained (the `&mut Ctx` write phase).
+    // Allowed dead until the dispatcher/run-loop effect pass is wired (next
+    // B1 commit); the test below exercises it.
+    #[allow(dead_code)]
+    pub(crate) fn apply(self, sink: &mut dyn crate::anomaly::sink::AnomalySink) {
+        for anomaly in self.anomalies {
+            apply_owned_anomaly(sink, anomaly);
+        }
+    }
+}
+
+/// Write one [`OwnedAnomaly`] to a `&mut dyn AnomalySink`. Bridges the
+/// flattened owned form (post-`with_key`) back onto the sink's
+/// `write(kind, severity, ts, key, observations, metrics)` surface,
+/// reconstructing the 5-tuple key when the anomaly carries a complete one.
+#[allow(dead_code)] // used by Effects::apply (wired into the run loop next)
+fn apply_owned_anomaly(sink: &mut dyn crate::anomaly::sink::AnomalySink, a: OwnedAnomaly) {
+    use std::borrow::Cow;
+    use std::net::SocketAddr;
+
+    // `write` wants a `&'static str` kind. Anomalies almost always use a
+    // `&'static str` literal (`Cow::Borrowed`); a runtime-built kind
+    // (`Cow::Owned`, rare) is leaked — same documented cost as
+    // `AnomalyWriter::with_dynamic`.
+    let kind: &'static str = match a.kind {
+        Cow::Borrowed(s) => s,
+        Cow::Owned(s) => Box::leak(s.into_boxed_str()),
+    };
+
+    // Reconstruct a FiveTupleKey when the anomaly carries a full 5-tuple
+    // (the common case for flow/session anomalies). Incomplete → no key.
+    let key: Option<flowscope::extract::FiveTupleKey> = match (
+        a.src_ip,
+        a.src_port,
+        a.dest_ip,
+        a.dest_port,
+        a.proto.and_then(l4proto_from_str),
+    ) {
+        (Some(sip), Some(sp), Some(dip), Some(dp), Some(proto)) => {
+            Some(flowscope::extract::FiveTupleKey {
+                proto,
+                a: SocketAddr::new(sip, sp),
+                b: SocketAddr::new(dip, dp),
+            })
+        }
+        _ => None,
+    };
+
+    // Observations re-borrow as `Cow::Borrowed` (no clone of the values).
+    let observations: Vec<(&'static str, Cow<'_, str>)> = a
+        .observations
+        .iter()
+        .map(|(l, v)| (*l, Cow::Borrowed(v.as_ref())))
+        .collect();
+
+    let key_dyn: Option<&dyn crate::anomaly::key::Key> =
+        key.as_ref().map(|k| k as &dyn crate::anomaly::key::Key);
+    sink.write(
+        kind,
+        a.severity.into(),
+        a.ts,
+        key_dyn,
+        &observations,
+        &a.metrics,
+    );
+}
+
+/// Map an `OwnedAnomaly::proto` label back to an `L4Proto` for key
+/// reconstruction. Unknown → `None` (the key is then omitted).
+#[allow(dead_code)] // used by apply_owned_anomaly
+fn l4proto_from_str(p: &str) -> Option<flowscope::L4Proto> {
+    use flowscope::L4Proto;
+    match p {
+        "tcp" | "TCP" => Some(L4Proto::Tcp),
+        "udp" | "UDP" => Some(L4Proto::Udp),
+        "icmp" | "ICMP" => Some(L4Proto::Icmp),
+        "icmpv6" | "icmp6" | "ipv6-icmp" => Some(L4Proto::IcmpV6),
+        _ => None,
+    }
 }
 
 /// An async handler that reads `&Ctx` synchronously and returns a
@@ -188,6 +269,53 @@ mod tests {
             .unwrap();
         assert_eq!(effects.anomalies.len(), 1);
         assert!(!effects.is_empty());
+    }
+
+    #[test]
+    fn apply_writes_anomalies_to_the_sink_preserving_kind_and_reconstructed_key() {
+        use crate::anomaly::sink::AnomalySink;
+        use std::borrow::Cow;
+
+        // A sink that records what `write` received.
+        #[derive(Default)]
+        struct Capturing {
+            writes: Vec<(&'static str, bool, usize)>, // (kind, has_key, obs_count)
+        }
+        impl AnomalySink for Capturing {
+            fn write(
+                &mut self,
+                kind: &'static str,
+                _severity: Severity,
+                _ts: Timestamp,
+                key: Option<&dyn crate::anomaly::key::Key>,
+                observations: &[(&'static str, Cow<'_, str>)],
+                _metrics: &[(&'static str, f64)],
+            ) {
+                self.writes.push((kind, key.is_some(), observations.len()));
+            }
+        }
+
+        let key = flowscope::extract::FiveTupleKey {
+            proto: flowscope::L4Proto::Tcp,
+            a: "10.0.0.1:1234".parse().unwrap(),
+            b: "10.0.0.2:443".parse().unwrap(),
+        };
+        let anomaly =
+            OwnedAnomaly::new("ioc_match", Severity::Critical.into(), Timestamp::new(0, 0))
+                .with_key(&key)
+                .with_observation("ja4", "t13d1516h2");
+
+        let mut sink = Capturing::default();
+        Effects::emit(anomaly).apply(&mut sink);
+
+        assert_eq!(sink.writes.len(), 1);
+        let (kind, has_key, obs) = sink.writes[0];
+        assert_eq!(kind, "ioc_match");
+        assert!(
+            has_key,
+            "complete 5-tuple should be reconstructed into a key"
+        );
+        assert_eq!(obs, 1);
     }
 
     #[test]

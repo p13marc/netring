@@ -24,6 +24,7 @@ use std::task::{Context, Poll};
 use std::time::{Duration, Instant};
 
 use flowscope::L4Proto;
+use flowscope::PacketView;
 use flowscope::driver::Event as FsEvent;
 use flowscope::extract::FiveTuple;
 
@@ -33,6 +34,8 @@ use crate::ctx::{CounterRegistry, Ctx, SourceIdx, StateMap};
 use crate::error::Result;
 use crate::monitor::backend::AnyBackend;
 use crate::monitor::dispatcher::Dispatcher;
+use crate::monitor::subscription::PacketSubscription;
+use crate::monitor::subscription::packet::{PacketFields, packet_field_extractor};
 use crate::monitor::{BackendErrorPolicy, HandlerErrorPolicy, Monitor};
 use crate::protocol::FlowKey;
 #[cfg(feature = "icmp")]
@@ -89,11 +92,16 @@ pub(crate) async fn run_loop(monitor: Monitor, stop: StopCondition) -> Result<()
         mut capture_stats,
         health,
         mut flow_exporters,
+        packet_subs,
     } = monitor;
     // Borrow the monitor name as `&str` for the run loop's
     // dispatch sites. The owned `Box<str>` lives in this stack
     // frame so the borrow is valid for the run loop's lifetime.
     let monitor_name_borrow: Option<&str> = monitor_name.as_deref();
+
+    // 0.25 A1: directional extractor for packet-tier field evaluation (a=src,
+    // b=dst). Stateless; only consulted per frame when packet subs exist.
+    let pkt_extractor = packet_field_extractor();
 
     // Phase F.1: open one AsyncCapture per interface. The order
     // matches the builder's `.interfaces([...])` order; each event
@@ -304,9 +312,39 @@ pub(crate) async fn run_loop(monitor: Monitor, stop: StopCondition) -> Result<()
         // `.await` below, which is what keeps the run loop's future `Send`.
         // `track_into` copies only the metadata it needs into `events`; no
         // packet-data copy.
+        // 0.25 A1: when packet-tier subs exist, dispatch them per frame
+        // *inside* the synchronous drain (before `track_into`), so a borrowed
+        // `PacketView` reaches the handler with no copy. The dispatch is
+        // synchronous — its borrows drop before the `.await` below, preserving
+        // `Send`. A `Propagate` error is stashed and surfaced after the drain.
+        let mut packet_err: Option<crate::error::Error> = None;
         let last_ts = caps[i]
-            .drain_batch(|view| driver.track_into(view, &mut events))
+            .drain_batch(|view| {
+                if !packet_subs.is_empty()
+                    && packet_err.is_none()
+                    && let Err(e) = dispatch_packet_subs(
+                        &packet_subs,
+                        view,
+                        &pkt_extractor,
+                        sink.as_mut(),
+                        &mut state_map,
+                        &mut counters,
+                        &mut flow_states,
+                        &label_table,
+                        source,
+                        monitor_name_borrow,
+                        handler_error_policy,
+                        &health,
+                    )
+                {
+                    packet_err = Some(e);
+                }
+                driver.track_into(view, &mut events)
+            })
             .await?;
+        if let Some(e) = packet_err {
+            return Err(e);
+        }
 
         // A spurious wake (no retired block) leaves `last_ts == None`.
         let Some(ts) = last_ts else { continue };
@@ -429,11 +467,14 @@ pub(crate) async fn replay_loop(
         capture_stats: _,        // pcap replay has no kernel ring to sample
         health,
         mut flow_exporters,
+        packet_subs,
     } = monitor;
     let monitor_name_borrow: Option<&str> = monitor_name.as_deref();
 
     let mut source = crate::pcap_source::AsyncPcapSource::open_with_config(&path, config).await?;
     let mut events: Vec<FsEvent<FlowKey>> = Vec::with_capacity(64);
+    // 0.25 A1: packet-tier dispatch also runs on offline replay.
+    let pkt_extractor = packet_field_extractor();
 
     // 0.24 Phase C4: the pcap source is open and replay is starting — the
     // same readiness/liveness handle works for offline replay.
@@ -452,6 +493,24 @@ pub(crate) async fn replay_loop(
         };
 
         let view = flowscope::PacketView::new(&pkt.data, pkt.timestamp);
+
+        // 0.25 A1: packet-tier subs fire before tracking, as on the live path.
+        if !packet_subs.is_empty() {
+            dispatch_packet_subs(
+                &packet_subs,
+                view,
+                &pkt_extractor,
+                sink.as_mut(),
+                &mut state_map,
+                &mut counters,
+                &mut flow_states,
+                &label_table,
+                SourceIdx(0),
+                monitor_name_borrow,
+                handler_error_policy,
+                &health,
+            )?;
+        }
 
         events.clear();
         driver.track_into(view, &mut events);
@@ -1193,6 +1252,67 @@ async fn dispatch_lifecycle_async(
             _ => {}
         },
         _ => {}
+    }
+    Ok(())
+}
+
+/// 0.25 A1: dispatch the packet-tier subscriptions for one frame.
+///
+/// Extracts the 5-tuple once (directional — `a`=src, `b`=dst), builds one
+/// `Ctx`, and invokes every sub whose [`Predicate`](crate::monitor::subscription::Predicate)
+/// matches the frame's fields. Synchronous — called from inside the zero-copy
+/// drain (or the replay packet loop) before flow tracking, so the borrowed
+/// `PacketView` reaches the handler with no copy. Returns `Err` only under
+/// [`HandlerErrorPolicy::Propagate`]; `Isolate` records the error on the
+/// health handle and continues.
+///
+/// Frames the extractor skips (ARP / non-IP / malformed) match no sub and
+/// return `Ok(())` immediately.
+#[allow(clippy::too_many_arguments)]
+fn dispatch_packet_subs(
+    subs: &[PacketSubscription],
+    view: PacketView<'_>,
+    extractor: &FiveTuple,
+    sink: &mut dyn AnomalySink,
+    state_map: &mut StateMap,
+    counters: &mut CounterRegistry,
+    flow_states: &mut crate::ctx::FlowStateRegistry,
+    label_table: &flowscope::well_known::LabelTable,
+    source: SourceIdx,
+    monitor_name: Option<&str>,
+    policy: HandlerErrorPolicy,
+    health: &crate::monitor::health::HealthState,
+) -> Result<()> {
+    let Some((key, fields)) = PacketFields::extract(view, extractor) else {
+        return Ok(());
+    };
+    // Build the Ctx once and reuse it across subs (sequential dispatch). The
+    // packet tier is pre-flow, so `tracker` is `None` (no flow correlation
+    // before this frame is tracked).
+    let mut ctx = Ctx {
+        flow: Some(key),
+        ts: view.timestamp,
+        source,
+        monitor_name,
+        state_map,
+        sink,
+        counters,
+        flow_states,
+        label_table,
+        tracker: None,
+    };
+    for sub in subs {
+        if sub.predicate.eval(&fields)
+            && let Err(e) = (sub.handler)(&view, &mut ctx)
+        {
+            match policy {
+                HandlerErrorPolicy::Propagate => return Err(e),
+                HandlerErrorPolicy::Isolate => {
+                    health.record_handler_error();
+                    tracing::warn!(error = %e, "packet-sub handler error isolated");
+                }
+            }
+        }
     }
     Ok(())
 }

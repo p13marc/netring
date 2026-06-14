@@ -6,6 +6,32 @@
 > the 0.24 keystone: typed 3-tier subscriptions + kernel filter pushdown,
 > async read+effect handlers, and perf. Additive-with-shims over 0.24.
 
+### Subscription engine — typed tiers + filter predicates (Phase A1)
+
+The new front door (additive; `on::<E>` unaffected). A **subscription** pairs
+a strongly-typed tier with a filter [`Predicate`] and a handler:
+
+- Three tier constructors in `netring::monitor::subscription`: `packet()`
+  (every frame), `flow::<P: FlowProtocol>()`, `session::<P: MessageProtocol>()`.
+  Invalid combinations are compile errors — `flow::<Http>()` and
+  `session::<Tcp>()` don't compile; L7 glob filters are gated per protocol
+  (`session::<Tls>().sni_glob`, `session::<Dns>().qname_glob`).
+- Typed filter combinators AND into one `Predicate` AST (proto / ports /
+  host / net / vlan — kernel-pushable — plus byte/packet counts and L7
+  sni/host/qname globs). The AST is shared by userspace evaluation
+  (`Predicate::eval` over a `FieldSource`) and, in A2/A3, kernel pushdown;
+  `Atom::is_kernel_pushable()` is the split classifier.
+- **Packet tier wired end-to-end**: `MonitorBuilder::subscribe(packet()…​.to(h))`
+  runs the handler on every matching frame as a borrowed `PacketView`,
+  synchronously **inside the zero-copy drain before flow tracking** — so the
+  handler sees raw frames pre-tracking with no copy. Works on live capture and
+  pcap replay. Monitors with no packet subs keep the `track_into`-only hot
+  loop (dhat stays `Δ 0`); the run-loop future stays `Send`.
+- `IpNet::contains(&IpAddr)` (v4 + v6); dependency-free case-insensitive `Glob`.
+
+Flow/session tier handler dispatch (`.to()` for those tiers) and the A2 filter
+split + A3 kernel pushdown (cBPF / XDP map) follow.
+
 ### Async read + effect handlers (Phase B1)
 
 - New `MonitorBuilder::on_effect::<E>(handler)` — an **async** handler that

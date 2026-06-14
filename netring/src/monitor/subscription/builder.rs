@@ -167,6 +167,31 @@ impl<T> SubscriptionBuilder<T> {
     }
 }
 
+// ---- packet-tier terminal ----------------------------------------------
+
+impl SubscriptionBuilder<PacketTier> {
+    /// Finish a packet subscription with its handler. The handler sees every
+    /// frame matching the filter as a borrowed `PacketView`, with `&mut Ctx`
+    /// for emitting / state — synchronous (it runs in the zero-copy drain).
+    /// Register the result with
+    /// [`MonitorBuilder::subscribe`](crate::monitor::MonitorBuilder::subscribe).
+    pub fn to<H>(self, handler: H) -> super::packet::PacketSubscription
+    where
+        H: for<'a, 'c> Fn(
+                &flowscope::PacketView<'a>,
+                &mut crate::ctx::Ctx<'c>,
+            ) -> crate::error::Result<()>
+            + Send
+            + Sync
+            + 'static,
+    {
+        super::packet::PacketSubscription {
+            predicate: self.predicate,
+            handler: std::sync::Arc::new(handler),
+        }
+    }
+}
+
 // ---- flow-tier combinators (byte / packet counts) ----------------------
 
 impl<P: FlowProtocol> SubscriptionBuilder<FlowTier<P>> {

@@ -192,6 +192,11 @@ pub struct Monitor {
     /// [`crate::export::FlowRecord`] for every `FlowEnded` and hands it
     /// to each. Empty (the common case) is zero cost.
     pub(crate) flow_exporters: Vec<Box<dyn crate::export::FlowExporter>>,
+    /// 0.25 A1: packet-tier subscriptions. Dispatched inside the zero-copy
+    /// drain (before flow tracking) for every captured frame matching the
+    /// sub's filter. Empty (the common case) keeps the `track_into`-only
+    /// hot loop — zero cost, dhat `Δ 0`.
+    pub(crate) packet_subs: Vec<subscription::PacketSubscription>,
 }
 
 /// How the run loop reacts when a handler (detector / sink / async handler)
@@ -524,6 +529,10 @@ pub struct MonitorBuilder {
     /// (e.g. `on_bandwidth` after an explicit `bandwidth_windowed`)
     /// don't double-register the per-packet handler and double-count.
     bandwidth_registered: bool,
+    /// 0.25 A1: packet-tier subscriptions (`packet()…​.to(h)`). Run in the
+    /// zero-copy drain before flow tracking; moved into
+    /// [`Monitor::packet_subs`] at build.
+    packet_subs: Vec<subscription::PacketSubscription>,
 }
 
 impl MonitorBuilder {
@@ -1304,6 +1313,36 @@ impl MonitorBuilder {
         self
     }
 
+    /// Register a **packet-tier subscription** (0.25 Phase A1).
+    ///
+    /// Build one with the typed [`packet()`](subscription::packet) tier:
+    ///
+    /// ```no_run
+    /// use netring::monitor::Monitor;
+    /// use netring::monitor::subscription::packet;
+    ///
+    /// let _m = Monitor::builder()
+    ///     .interface("eth0")
+    ///     .subscribe(packet().tcp().dst_port(443).to(|view, _ctx| {
+    ///         // sees every TCP/443 frame as a borrowed PacketView, pre-tracking
+    ///         let _ = view.frame.len();
+    ///         Ok(())
+    ///     }))
+    ///     .build();
+    /// ```
+    ///
+    /// The handler runs synchronously inside the zero-copy drain, **before**
+    /// flow tracking, for every frame matching the filter. Monitors that
+    /// register no packet subs keep the `track_into`-only hot loop (zero cost).
+    ///
+    /// Flow- and session-tier subscriptions (`flow::<P>()` / `session::<P>()`)
+    /// land in a follow-up; today their builders expose `into_predicate()` for
+    /// composing filters.
+    pub fn subscribe(mut self, sub: subscription::PacketSubscription) -> Self {
+        self.packet_subs.push(sub);
+        self
+    }
+
     /// Pre-register a `T: Default` state slot. Optional —
     /// `Ctx::state_mut::<T>()` lazy-creates on first access; this
     /// call surfaces typos at build time and lets you set
@@ -1615,6 +1654,7 @@ impl MonitorBuilder {
             capture_stats: self.capture_stats,
             health: health::HealthState::new(),
             flow_exporters: self.flow_exporters,
+            packet_subs: self.packet_subs,
         })
     }
 }

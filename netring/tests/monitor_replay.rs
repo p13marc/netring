@@ -332,6 +332,51 @@ async fn replay_on_effect_emits_anomaly_through_the_sink() {
     );
 }
 
+#[tokio::test(flavor = "current_thread")]
+async fn replay_packet_tier_subscription_sees_every_matching_frame() {
+    // 0.25 A1: the packet tier sees EVERY captured frame (pre-flow), unlike
+    // the flow tier which collapses a flow's packets into one FlowStarted.
+    // The 3 UDP/80 frames each hit the packet handler → count == 3.
+    use netring::monitor::subscription::packet;
+
+    let pcap = write_synthetic_pcap();
+    let hits = Arc::new(AtomicU32::new(0));
+    let c = Arc::clone(&hits);
+    let mismatches = Arc::new(AtomicU32::new(0));
+    let m = Arc::clone(&mismatches);
+
+    Monitor::builder()
+        .pcap_source(pcap.path())
+        .protocol::<Udp>()
+        // Matches: udp AND dst_port 80 — every one of the 3 frames.
+        .subscribe(packet().udp().dst_port(80).to(move |view, _ctx| {
+            assert!(!view.frame.is_empty(), "handler sees the borrowed frame");
+            c.fetch_add(1, Ordering::Relaxed);
+            Ok(())
+        }))
+        // Never matches (tcp): proves the filter actually gates.
+        .subscribe(packet().tcp().to(move |_view, _ctx| {
+            m.fetch_add(1, Ordering::Relaxed);
+            Ok(())
+        }))
+        .build()
+        .expect("build with packet subscription")
+        .replay()
+        .await
+        .expect("replay completes");
+
+    assert_eq!(
+        hits.load(Ordering::Relaxed),
+        3,
+        "packet tier should fire once per matching frame (3 UDP/80 packets)"
+    );
+    assert_eq!(
+        mismatches.load(Ordering::Relaxed),
+        0,
+        "the tcp-filtered sub must not fire on udp frames"
+    );
+}
+
 #[test]
 fn builder_pcap_source_relaxes_no_interface_check() {
     let pcap = write_synthetic_pcap();

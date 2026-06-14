@@ -42,6 +42,17 @@ runs *after* the batch is dropped). dhat steady state stays `Δ 0 / 0`.
   tagged `source`. New `docs/METRICS.md` catalogs every `netring_*` metric
   with cardinality notes.
 
+### TLS fingerprinting — JA4/JA4S (Phase E)
+
+- Bumps flowscope to **0.15** (adds JA4S server fingerprinting).
+- `TlsFingerprint` + `MonitorBuilder::on_fingerprint(|fp, ctx|)` (feature
+  `tls`) — bundles SNI + ALPN + JA3/JA4/JA4S + flow key per completed
+  handshake, auto-registering the `TlsHandshake` protocol. `.ja4s` is also
+  available directly via `on::<TlsHandshake>` now that the dep carries it.
+- `examples/monitor/ja4_fingerprint.rs` — JA4/JA4S blocklist IOC matcher;
+  `docs/FINGERPRINTS.md` — the JA3/JA4/JA4S guide + JA4 (BSD) vs JA4+
+  (FoxIO) licensing note.
+
 ### Monitor health (Phase C4)
 
 - `Monitor::health()` → `MonitorHealth`, a cheap cloneable `Arc`-backed

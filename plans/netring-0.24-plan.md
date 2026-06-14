@@ -49,7 +49,7 @@
 | D | exporter taxonomy + `FlowRecord`/`FlowExporter` + `.export_flows()` | no | ✅ |
 | D | `SyslogSink` (RFC 5424) + IPFIX/NetFlow v10 (in-tree) | no | ✅ |
 | D | `netring-exporters` companion crate: OTLP + Kafka | no | ☐ (post-0.24) |
-| E | JA4/JA4S surfacing (`on_fingerprint`, EVE fields) + flowscope 0.15 | no | ☐ |
+| E | JA4/JA4S surfacing (`on_fingerprint`) + flowscope 0.15 | no | ✅ impl (EVE-tls-record→0.25; gated on flowscope 0.15 publish) |
 | R | flowscope 0.15 lockstep · CHANGELOG · migration · publish | — | ☐ |
 
 **Order:** A (de-risk) → **B** (keystone) → C → D, with E parallel. Release gated on the

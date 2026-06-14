@@ -12,6 +12,7 @@ All netring documentation lives in this one tree (`netring/docs/`). The repo roo
 - [API_OVERVIEW.md](API_OVERVIEW.md) — types, methods, configuration.
 - [ASYNC_GUIDE.md](ASYNC_GUIDE.md) — tokio patterns, Send rules, Monitor on multi-thread.
 - [WRITING_DETECTORS.md](WRITING_DETECTORS.md) — `detector!` / `pattern_detector!` tutorial.
+- [FINGERPRINTS.md](FINGERPRINTS.md) — TLS fingerprinting (JA3 / JA4 / JA4S), `on_fingerprint`, licensing.
 - [discoverability.md](discoverability.md) — the Monitor toolkit by use case.
 - [scaling.md](scaling.md) — fan-out capture, `FanoutMode` matrix, anti-patterns.
 - [TUNING_GUIDE.md](TUNING_GUIDE.md) — performance profiles, system tuning.

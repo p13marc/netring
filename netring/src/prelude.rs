@@ -16,6 +16,8 @@ pub use crate::monitor::{Handler, Monitor, MonitorBuilder};
 pub use crate::monitor::AsyncHandler;
 
 // ─── Protocol markers (built-in) ─────────────────────────────────
+#[cfg(feature = "tls")]
+pub use crate::monitor::TlsFingerprint;
 #[cfg(feature = "dns")]
 pub use crate::protocol::builtin::Dns;
 #[cfg(feature = "http")]

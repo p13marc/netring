@@ -52,6 +52,8 @@ use crate::protocol::event_typed::{Event, Tick};
 
 pub mod async_handler;
 pub mod dispatcher;
+#[cfg(feature = "tls")]
+pub mod fingerprint;
 pub mod handler;
 pub mod health;
 pub mod registry;
@@ -61,6 +63,8 @@ pub mod tick;
 
 pub use async_handler::{AsyncHandler, BoxFuture};
 pub use dispatcher::{Dispatcher, MAX_EVENT_TYPES};
+#[cfg(feature = "tls")]
+pub use fingerprint::TlsFingerprint;
 pub use handler::{CtxOnly, Handler, PayloadCtx, PayloadOnly};
 pub use health::{MonitorHealth, MonitorHealthSnapshot};
 pub use registry::{HandlerRegistry, ProtocolSlot, TypedBroadcastProtocolSlot, TypedProtocolSlot};
@@ -1105,6 +1109,60 @@ impl MonitorBuilder {
         self.handlers
             .register::<E, _, crate::monitor::handler::PayloadCtx>(handler);
         self
+    }
+
+    /// 0.24 Phase E: handle each completed TLS handshake as a
+    /// [`TlsFingerprint`] bundle (SNI + ALPN + JA3 / JA4 / JA4S + flow
+    /// key).
+    ///
+    /// Sugar over `.on_ctx::<TlsHandshake>(…)`: the handshake's
+    /// identity fields are gathered into one struct, the flow key is
+    /// pulled from the dispatch context, and your handler gets
+    /// `(&TlsFingerprint, &mut Ctx)`. The canonical shape for IOC
+    /// matching (a JA4/JA4S blocklist) and TLS asset inventory.
+    ///
+    /// Auto-registers the [`TlsHandshake`](crate::protocol::builtin::TlsHandshake)
+    /// protocol if it wasn't already declared, so a one-liner suffices.
+    /// JA3/JA4/JA4S are populated only when the `tls` build runs against
+    /// flowscope's fingerprinting (the `TlsHandshakeParser` enables it by
+    /// default); otherwise those fields are `None`.
+    ///
+    /// ```no_run
+    /// # use netring::monitor::Monitor;
+    /// # fn _ex() -> Result<(), netring::Error> {
+    /// let monitor = Monitor::builder()
+    ///     .interface("eth0")
+    ///     .on_fingerprint(|fp, _ctx| {
+    ///         if let Some(ja4) = &fp.ja4 {
+    ///             println!("{} -> {ja4} (sni={:?})", "tls", fp.sni);
+    ///         }
+    ///         Ok(())
+    ///     })
+    ///     .build()?;
+    /// # let _ = monitor;
+    /// # Ok(())
+    /// # }
+    /// ```
+    #[cfg(feature = "tls")]
+    pub fn on_fingerprint<F>(mut self, handler: F) -> Self
+    where
+        F: Fn(&TlsFingerprint, &mut Ctx<'_>) -> Result<()> + Send + Sync + 'static,
+    {
+        use crate::protocol::builtin::TlsHandshake;
+        // Register the handshake protocol once (calling `.protocol` twice
+        // would install a duplicate session parser).
+        if !self
+            .declared_protocols
+            .contains_key(&std::any::TypeId::of::<TlsHandshake>())
+        {
+            self = self.protocol::<TlsHandshake>();
+        }
+        self.on_ctx::<TlsHandshake>(
+            move |hs: &flowscope::tls::TlsHandshake, ctx: &mut Ctx<'_>| {
+                let fp = TlsFingerprint::from_handshake(hs, ctx.flow);
+                handler(&fp, ctx)
+            },
+        )
     }
 
     // 0.22: the deprecated three-generic `on_with_marker` is removed —

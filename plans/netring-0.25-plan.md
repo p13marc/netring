@@ -60,6 +60,14 @@ Items the 0.24 plan scoped but shipped without (0.24.0 released 2026-06-14, addi
   `FlowTick`).
 - **E2 EVE-tls-record:** JA4/JA4S/SNI in a Suricata `tls` EVE record (needs a TLS-record
   EVE writer; 0.24 has only the anomaly `EveSink`).
+- **⚠ JA4S license gating (do this in 0.25):** JA4S is **FoxIO License 1.1 + patent-pending**,
+  NOT BSD (only JA3/JA4-client are BSD). It shipped un-gated inside flowscope 0.15's
+  `tls-fingerprints` (0.24). Split it behind its own opt-in feature — flowscope `ja4plus` (or
+  `ja4s`) **off by default**, netring passthrough — so the default fingerprint surface stays
+  royalty-free (JA3 + JA4-client) and commercial vendors must consciously opt in. Carry the
+  license notice (`FINGERPRINTS.md` already warns). Strategic: our target audience includes
+  commercial NDR vendors, who need a FoxIO OEM license for JA4S — don't make them pull it by
+  default. (arch §9.6.)
 - **C5 tracing-JSON example** (structured logging of anomalies/telemetry).
 - **`netring-exporters` companion crate:** `OtlpAnomalySink` + `KafkaSink` (heavy async/C
   deps kept out of core).
@@ -101,7 +109,10 @@ userspace). In-tree cBPF compiler exists (`config/bpf_compile.rs`); 0.24-B gave
     populates the maps; reload = map update.
 - **A4 `wirefilter`** (optional feature) — netring field schema (5-tuple, proto, `tls.sni`/
   `tls.ja4`, `http.host`, `dns.qname`, byte/pkt counts) → the same AST as A2, so `.expr()`
-  strings split identically. Compile-time typed path stays dep-free + inlined.
+  strings split identically. Compile-time typed path stays dep-free + inlined. **Verify
+  `wirefilter-engine` (Cloudflare; 0.6.1 on crates.io) is still maintained before depending;
+  it's an *optional* escape hatch so the blast radius is contained, but a hand-rolled
+  recursive-descent parser over the same AST is the fallback if it bit-rots.**
 - **Tests:** each tier dispatches; **split** correctness (`tcp port 443 and tls.sni~…` →
   kernel=443, userspace=SNI); **pushdown** verified via 0.24-C `CaptureTelemetry.packets`
   (only the matching subset reaches userspace); conservative-union (sub X not dropped by sub Y);

@@ -64,11 +64,15 @@ case; keeping the loop `Send` costs nothing (§3), so we don't fork the code pat
 
 ## 3. I/O core — `AnyBackend` enum + borrowed-batch loop *(perf + strongly typed)*
 
-**Why an enum, not `dyn CaptureBackend`.** `async fn` in a trait does **not** yield a `Send`
-future (the AFIT/RPITIT Send-bound problem) — a `dyn` backend with `async fn readable` would
-silently make the run loop `!Send`, breaking the 0.23 premise. And `drain_batch(&mut self, f:
-impl FnMut(PacketView))` is generic → **not object-safe**. A concrete enum kills both and
-keeps the hot path monomorphized/inlinable — and it's the strongly-typed choice:
+**Why an enum, not `dyn CaptureBackend`.** Two object-safety walls, both still standing in
+2026 (verified against the stable-Rust async-trait state, Rust 1.85+): (1) **`async fn` in a
+trait is not object-safe** — you cannot build a `dyn CaptureBackend` whose `readable` is an
+`async fn` at all. (Return-type notation — `where T::readable(): Send`, stabilization report
+filed 2025 — now *expresses* the Send bound for the generic/`impl Trait` case, but it does
+**not** make the trait object-safe; `dyn` async traits remain unavailable.) (2)
+`drain_batch(&mut self, f: impl FnMut(PacketView))` is a **generic method** → not object-safe
+regardless. A concrete enum kills both, keeps the hot path monomorphized/inlinable, and is the
+strongly-typed choice:
 
 ```rust
 pub enum AnyBackend {                       // arms cfg-gated by backend features
@@ -209,8 +213,16 @@ compiling."
 
 ## 9. Corrections this design locked in (don't re-introduce)
 
-1. **`dyn CaptureBackend` + `async fn` → silently `!Send`.** Use the `AnyBackend` enum.
+1. **`dyn CaptureBackend` is not object-safe** (async fn in traits + the generic
+   `drain_batch(impl FnMut)`; still true on stable Rust 2026 — RTN expresses the Send bound
+   but doesn't grant `dyn`). Use the `AnyBackend` enum.
 2. **AF_XDP filter "codegen" is unrealistic.** Vendored parameterized XDP program + BPF map.
 3. **No resilience story.** Per-source backend + per-handler error/panic policies + telemetry.
 4. **Stringly-typed filters.** Typed builders first; `.expr()` string is the runtime escape hatch.
 5. **Async handlers couldn't read `Ctx`.** `Fn(&P,&Ctx)->'static Fut` gives sync read + effect write.
+6. **JA4S is *not* royalty-free.** JA3 + JA4(client) are **BSD-3 + no patent**; **JA4S (and the
+   rest of JA4+) is FoxIO License 1.1 + patent-pending** — internal/academic use is fine but
+   commercial vendors need a FoxIO OEM license (even without exposing the fingerprint). Keep
+   the *default* fingerprint surface BSD-clean: JA4S must be an **opt-in feature** (flowscope
+   + netring), off by default, with a license notice. (Shipped un-gated in 0.24 / flowscope
+   0.15 — gating is on the 0.25 backlog; `docs/FINGERPRINTS.md` carries the warning.)

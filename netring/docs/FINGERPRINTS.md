@@ -60,14 +60,29 @@ ECH state). `TlsFingerprint` is the identity-focused subset.
 See [`examples/monitor/ja4_fingerprint.rs`](../examples/monitor/ja4_fingerprint.rs)
 for a JA4/JA4S blocklist IOC matcher.
 
-## Licensing note
+## ⚠️ Licensing — JA4S is **not** BSD; read before using commercially
 
-JA4 and JA4S (the **base** algorithms used here) are **BSD-3-Clause** and
-free for any use. The broader **JA4+** suite (JA4H, JA4L, JA4X, JA4SSH, …)
-is licensed by FoxIO under a separate, more restrictive license for
-commercial products — netring does **not** implement JA4+, only the
-BSD-licensed JA4 / JA4S. If you add JA4+ algorithms, review the FoxIO
-license: <https://github.com/FoxIO-LLC/ja4/blob/main/License%20FAQ.md>.
+The licenses **differ by fingerprint**, and this matters:
+
+| Fingerprint | License | Commercial use |
+|---|---|---|
+| **JA3**, **JA4** (TLS *client*) | BSD-3-Clause, no patent | Free for any use, including resale |
+| **JA4S** (TLS *server*) | **FoxIO License 1.1**, **patent-pending** | Internal / academic **OK**; **vendors selling or providing value to paying customers need an OEM license from FoxIO** — *even without exposing the fingerprint* |
+
+JA4S is part of the **JA4+** suite (JA4S/JA4H/JA4L/JA4X/JA4SSH/…), which
+FoxIO licenses under the [FoxIO License 1.1] and describes as patent-pending.
+netring's / flowscope's JA4S is an independent implementation of the public
+algorithm, but that **does not** exempt downstream commercial users from
+FoxIO's license + patent-pending terms. If you ship a product that uses
+JA4S, get an OEM license. Read the FoxIO [License FAQ] first.
+
+**Staying BSD-clean:** if you only need royalty-free fingerprints, use JA3 +
+JA4 (client) and don't read `.ja4s`. (A future release will move JA4S behind
+its own opt-in feature so the default fingerprint surface is BSD-only — see
+the 0.25 plan's "Deferred from 0.24" backlog.)
+
+[FoxIO License 1.1]: https://github.com/FoxIO-LLC/ja4
+[License FAQ]: https://github.com/FoxIO-LLC/ja4/blob/main/License%20FAQ.md
 
 ## Enabling
 

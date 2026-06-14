@@ -8,6 +8,22 @@
 > document is deliberately ambitious — treat the "Redesign" sections as options,
 > not commitments. Sources at the end.
 
+> **Update 2026-06-14 (post-0.24 release + web re-validation).** netring **0.24.0 shipped**
+> (the production-output gap of move #1 + the foundations of move #3 are now closed:
+> JA4/JA4S, IPFIX/syslog export, drop/backpressure telemetry, `MonitorHealth`, the
+> `AnyBackend` keystone). Move #2 (Retina's subscription model + kernel filter pushdown) is
+> **0.25** — still the differentiator. Re-checked the landscape: **Retina is still DPDK-only**
+> (DPDK 24.11, Jan 2025) → the AF_XDP/in-kernel-pushdown wedge holds. **Suricata 8** (2025;
+> HTTP parser in Rust, DoH/LDAP/WebSocket, transactional rules) and **Stamus Clear NDR
+> Community 1.0** reinforce the "open Rust NDR substrate" space — netring stays a *library/
+> feature-emitter*, not a competing IDS. NDR market ≈ **$4.1 B (2026)**, consolidating under
+> XDR/AI pressure → "emit what downstream understands; ML/response stays downstream" thesis
+> holds. **NEW RISK (acted on):** **JA4S is FoxIO License 1.1 + patent-pending, *not* BSD**
+> (only JA4-client/JA3 are BSD). Our target audience includes commercial NDR vendors, who'd
+> need a FoxIO OEM license for JA4S. It shipped un-gated in 0.24/flowscope 0.15 → gate it
+> behind an opt-in feature (0.25), keep the default surface royalty-free; `FINGERPRINTS.md`
+> now carries the warning. (See architecture §9.6.)
+
 ---
 
 ## 0. TL;DR

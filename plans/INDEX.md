@@ -33,13 +33,16 @@ design).
 ## The roadmap to 1.0
 
 ```
-0.23  Send run-loop future                 ── DONE (on 0.23-dev; publish pending)
-0.24  Zero-Copy Core + Production Trust     ── keystone: AnyBackend enum + borrowed
-  │     zero-copy + Send loop · AF_XDP reaches the Monitor · resilience · telemetry/
-  │     health · syslog/IPFIX (+ OTLP/Kafka companion) · JA4/JA4S · miri/fuzz/perf-gate
-0.25  Subscriptions, Effects & Performance  ── typed 3-tier subscriptions · filter
+0.23  Send run-loop future                 ── folded into 0.24 (never published standalone)
+0.24  Zero-Copy Core + Production Trust     ── ✅ PUBLISHED 2026-06-14 (tag 0.24.0): AnyBackend
+  │     enum + borrowed zero-copy + Send loop · AF_XDP reaches the Monitor (xdp_interface;
+  │     live-XDP→0.25) · resilience + error counters · telemetry/health · syslog/IPFIX ·
+  │     JA4/JA4S (flowscope 0.15.0) · miri/fuzz/perf-gate.  Deferrals → 0.25 backlog.
+0.25  Subscriptions, Effects & Performance  ── NEXT: typed 3-tier subscriptions · filter
   │     pushdown → cBPF / table-driven XDP map (differentiator) · async read+effect
   │     handlers · NUMA pinning + symmetric fanout · published pps/Gbps · TX
+  │     + the 0.24 deferral backlog (live AF_XDP, UMEM/NUMA, Reopen/panic-catch,
+  │     JA4S license-gating, pcap→AnyBackend, OTLP/Kafka crate, EVE-tls-record)
   ▼   community test window → feedback incorporated → shims removed
 1.0   Stabilization (SemVer promise; plan written once feedback is in)
 ```
@@ -64,11 +67,16 @@ seam everything else (incl. 0.25's subscriptions) builds on.
 - **Compat shims** live through 0.24/0.25, **removed at 1.0**.
 
 ### Design corrections locked into the architecture (don't re-introduce)
-1. `dyn CaptureBackend` + `async fn` → silently `!Send` ⇒ use the **`AnyBackend` enum**.
+1. `dyn CaptureBackend` is **not object-safe** (async fn in traits + the generic
+   `drain_batch(impl FnMut)`; still true on stable Rust 2026 — RTN expresses the Send bound,
+   doesn't grant `dyn`) ⇒ use the **`AnyBackend` enum**.
 2. AF_XDP filter "codegen" is unrealistic ⇒ **vendored parameterized XDP program + BPF map**.
 3. No resilience story ⇒ **backend/handler/panic policies + telemetry**.
 4. Stringly-typed filters ⇒ **typed builders**; `.expr()` is the runtime escape hatch.
 5. Async handlers couldn't read `Ctx` ⇒ **`Fn(&P,&Ctx)->'static Fut`**: sync read + effect write.
+6. **JA4S ≠ BSD** ⇒ JA3/JA4(client) are BSD-3 + royalty-free; **JA4S is FoxIO License 1.1 +
+   patent-pending** (commercial vendors need a FoxIO OEM license). Keep the default fingerprint
+   surface BSD-clean: **JA4S opt-in feature, off by default** (0.25 backlog). (arch §9.6.)
 
 ---
 
@@ -76,15 +84,17 @@ seam everything else (incl. 0.25's subscriptions) builds on.
 
 | Release | Status |
 |---|---|
-| netring **0.23** | `Send` run-loop future (`run_for`/… `Send + 'static`, spawnable). Done on `0.23-dev`; publish pending. |
+| netring **0.24** | **Published 2026-06-14** (tag `0.24.0`). Zero-Copy Core + Production Trust: `AnyBackend` + borrowed zero-copy + `Send` loop · AF_XDP-in-Monitor · resilience + error counters · telemetry/health · syslog/IPFIX exporters · JA4/JA4S. Depends on flowscope 0.15.0. Additive over 0.23. |
+| netring **0.23** | `Send` run-loop future (spawnable). **Folded into 0.24 — never published standalone.** |
 | netring **0.22** | **Published 2026-06-13** (tag `0.22.0`). Operations toolkit + typed protocol model (breaking). Depends on flowscope 0.14.1 (also published 2026-06-13). |
 | netring **0.21** | Send Monitor, `ShardedRunner`, `subscribe::<P>()`, pcap replay, drain phase, `pattern_detector!`, EveSink + MetricsSink. |
 | netring **0.20** | Declarative `Monitor` builder + Handler trait + 5 layers + `detector!` + multi-interface + ticks. |
 | netring **0.17–0.19** | flowscope 0.10→0.13 absorption (`Driver<E>: Send` unconditional). |
 
-**Companion flowscope:** 0.12.0 (plans 122–127), 0.13.0 (147–156), 0.14.1 (ICMP routing fix).
-**Next:** flowscope **0.15** (companion to netring 0.24 Phase E) — JA4S + ServerHello
-extension/sig-alg + QUIC marker (~410 LoC, 0 deps, additive); lockstep publish gates 0.24.
+**Companion flowscope:** 0.12.0 (plans 122–127), 0.13.0 (147–156), 0.14.1 (ICMP routing fix),
+**0.15.0 (PUBLISHED 2026-06-14** — JA4S + ServerHello `extension_types` + FoxIO-correct JA4
+ALPN; companion to netring 0.24 Phase E). **Watch:** flowscope 0.16 should split JA4S behind
+an opt-in `ja4plus`/`ja4s` feature (FoxIO License 1.1 — see Design correction 6).
 
 ---
 

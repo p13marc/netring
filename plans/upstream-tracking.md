@@ -5,6 +5,34 @@ at each minor release and update the "Last checked" line.
 
 ---
 
+## Return-type notation (RTN) — `where T::method(): Send`
+- **Status (checked 2026-06)**: async fn in traits stable since 1.75; RTN
+  (`where T::readable(): Send`) stabilization report filed **2025**, landing in
+  where-clause/bound position. As of stable 1.85+ "Send/Sync bounds on async trait
+  methods are still rough." `dyn` async traits remain **non-object-safe**.
+- **Relevance**: does NOT change the `AnyBackend`-enum decision (arch §3/§9.1 — the
+  enum is forced by object-safety of both async-fn-in-trait *and* the generic
+  `drain_batch(impl FnMut)`, which RTN doesn't address). It *may* tidy the **0.25-B**
+  async-effect bound (`Fut: Send`) — re-check when writing 0.25-B.
+- **Action**: none for 0.24; re-evaluate RTN ergonomics at 0.25-B kickoff.
+
+## JA4S / JA4+ licensing (FoxIO License 1.1, patent-pending)
+- **Status (checked 2026-06)**: JA3 + JA4(client) = **BSD-3 + no patent**; **JA4S and the
+  rest of JA4+ = FoxIO License 1.1 + patent-pending** — internal/academic use permitted,
+  commercial vendor use needs a FoxIO OEM license. JA4S shipped un-gated in flowscope 0.15 /
+  netring 0.24.
+- **Action**: flowscope 0.16 + netring 0.25 — split JA4S behind an opt-in `ja4plus`/`ja4s`
+  feature (off by default); keep the default fingerprint surface BSD-clean. See arch §9.6 +
+  0.25 plan "Deferred from 0.24" + `netring/docs/FINGERPRINTS.md`.
+
+## `wirefilter-engine` (0.25-A `.expr()` escape hatch)
+- **Status (checked 2026-06)**: Cloudflare `wirefilter`, `wirefilter-engine` 0.6.1 on
+  crates.io; maintenance cadence unconfirmed. Only an **optional** feature in 0.25-A.
+- **Action**: verify maintenance before depending; fallback is a hand-rolled recursive-descent
+  parser over the same predicate AST (the typed builders already define it).
+
+---
+
 ## `gen` blocks (Iterator generator syntax)
 
 - **RFC**: https://rust-lang.github.io/rfcs/3513-gen-blocks.html

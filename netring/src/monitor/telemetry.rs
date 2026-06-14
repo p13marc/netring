@@ -81,6 +81,36 @@ impl CaptureTelemetry {
     pub fn is_degraded(&self, threshold: f64) -> bool {
         self.drop_rate >= threshold
     }
+
+    /// Emit this sample as Prometheus-style gauges through the `metrics`
+    /// facade (feature `metrics`).
+    ///
+    /// Four gauges, each tagged `source="<idx>"`:
+    /// [`netring_capture_packets`](crate::metrics::GAUGE_PACKETS),
+    /// [`netring_capture_drops`](crate::metrics::GAUGE_DROPS),
+    /// [`netring_capture_freezes`](crate::metrics::GAUGE_FREEZES) (all
+    /// cumulative), and
+    /// [`netring_capture_drop_rate`](crate::metrics::GAUGE_DROP_RATE) (the
+    /// windowed rate). Gauges, not counters: `drop_rate` is a rate and the
+    /// totals are read as absolute cumulative values, so a scrape always
+    /// sees the latest sample rather than an increment.
+    ///
+    /// Call from an [`on_capture_stats`](crate::monitor::MonitorBuilder::on_capture_stats)
+    /// handler, or use the
+    /// [`capture_metrics`](crate::monitor::MonitorBuilder::capture_metrics)
+    /// builder sugar. A no-op until the host app installs a `metrics`
+    /// recorder.
+    #[cfg(feature = "metrics")]
+    pub fn record_metrics(&self) {
+        let source = self.source.0.to_string();
+        metrics::gauge!(crate::metrics::GAUGE_PACKETS, "source" => source.clone())
+            .set(self.packets as f64);
+        metrics::gauge!(crate::metrics::GAUGE_DROPS, "source" => source.clone())
+            .set(self.drops as f64);
+        metrics::gauge!(crate::metrics::GAUGE_FREEZES, "source" => source.clone())
+            .set(self.freezes as f64);
+        metrics::gauge!(crate::metrics::GAUGE_DROP_RATE, "source" => source).set(self.drop_rate);
+    }
 }
 
 /// A built-in [`Report`](crate::report::Report) shape for capture health —
@@ -289,6 +319,17 @@ mod tests {
         assert_eq!(h.freezes, 3);
         assert!((h.drop_rate - 0.9).abs() < 1e-9);
         assert!((h.lifetime_drop_rate - 0.45).abs() < 1e-9);
+    }
+
+    #[cfg(feature = "metrics")]
+    #[test]
+    fn record_metrics_is_a_noop_without_a_recorder() {
+        // With no `metrics` recorder installed the gauge! macros are
+        // no-ops — recording must succeed regardless (mirrors
+        // `metrics::tests::record_does_not_panic_with_no_recorder`).
+        let mut s = TelemetrySampler::new(1);
+        let t = s.sample(0, stats(1000, 10, 0));
+        t.record_metrics();
     }
 
     #[cfg(feature = "serde")]

@@ -37,6 +37,10 @@ runs *after* the batch is dropped). dhat steady state stays `Δ 0 / 0`.
 - `CaptureHealth` (a built-in `Report`) + `MonitorBuilder::capture_health(period, sink)`
   — the no-code form: ships one per-source health record per period to any
   `ReportSink<CaptureHealth>` (`StdoutReportSink` / `JsonReportSink` / custom).
+- `CaptureTelemetry::record_metrics()` + `MonitorBuilder::capture_metrics(period)`
+  (feature `metrics`) — Prometheus gauges `netring_capture_{packets,drops,freezes,drop_rate}`
+  tagged `source`. New `docs/METRICS.md` catalogs every `netring_*` metric
+  with cardinality notes.
 
 ### Backpressure honesty (Phase C3)
 

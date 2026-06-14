@@ -18,6 +18,7 @@ All netring documentation lives in this one tree (`netring/docs/`). The repo roo
 - [TROUBLESHOOTING.md](TROUBLESHOOTING.md) — common errors and fixes.
 
 ## Quality / internals
+- [METRICS.md](METRICS.md) — every `netring_*` metric (capture gauges/counters, anomalies) + cardinality notes.
 - [MIRI.md](MIRI.md) — miri + fuzzing strategy and the Stacked-vs-Tree-Borrows note.
 - [EBPF_BANDWIDTH.md](EBPF_BANDWIDTH.md) — design doc for the eBPF bandwidth backend.
 - [AF_XDP_EVALUATION.md](AF_XDP_EVALUATION.md) — AF_XDP design notes.

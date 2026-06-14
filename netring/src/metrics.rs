@@ -34,6 +34,19 @@ pub const COUNTER_DROPS: &str = "netring_capture_drops_total";
 /// Counter name: total ring freeze events.
 pub const COUNTER_FREEZES: &str = "netring_capture_freezes_total";
 
+/// Gauge name: cumulative packets delivered, per capture source. Emitted
+/// by [`CaptureTelemetry::record_metrics`](crate::monitor::CaptureTelemetry::record_metrics).
+pub const GAUGE_PACKETS: &str = "netring_capture_packets";
+
+/// Gauge name: cumulative kernel drops, per capture source.
+pub const GAUGE_DROPS: &str = "netring_capture_drops";
+
+/// Gauge name: cumulative ring freezes, per capture source.
+pub const GAUGE_FREEZES: &str = "netring_capture_freezes";
+
+/// Gauge name: windowed drop rate (`[0.0, 1.0]`), per capture source.
+pub const GAUGE_DROP_RATE: &str = "netring_capture_drop_rate";
+
 /// Record a capture-stats delta as `metrics` counters.
 ///
 /// Best paired with [`crate::Capture::stats`] (which returns the delta

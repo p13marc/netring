@@ -658,6 +658,27 @@ impl MonitorBuilder {
         })
     }
 
+    /// 0.24 Phase C: export per-source capture telemetry as Prometheus
+    /// gauges every `period` (feature `metrics`).
+    ///
+    /// Sugar over [`Self::on_capture_stats`] that calls
+    /// [`CaptureTelemetry::record_metrics`] each sample —
+    /// `netring_capture_{packets,drops,freezes,drop_rate}` tagged
+    /// `source="<idx>"`. Needs a `metrics` recorder installed by the host
+    /// app (e.g. `metrics-exporter-prometheus`) to actually surface.
+    ///
+    /// Shares the single `on_capture_stats` slot with
+    /// [`Self::capture_health`] / [`Self::on_capture_stats`] — to do both
+    /// metrics *and* a report, write one `on_capture_stats` handler that
+    /// calls `t.record_metrics()` and ships your report.
+    #[cfg(feature = "metrics")]
+    pub fn capture_metrics(self, period: Duration) -> Self {
+        self.on_capture_stats(period, |t, _ctx| {
+            t.record_metrics();
+            Ok(())
+        })
+    }
+
     /// 0.21 D.2: maximum time the run loop spends draining
     /// residual events after the stop condition fires.
     ///

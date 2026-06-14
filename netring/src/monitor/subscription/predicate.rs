@@ -28,7 +28,7 @@ use crate::config::ipnet::IpNet;
 ///
 /// `Always` is the identity used by the `on::<E>` shim (a subscription with
 /// no filter). Build larger expressions with [`Self::and`] / [`Self::or`] /
-/// [`Self::not`], or via the tier builders' typed combinators.
+/// [`Self::negate`], or via the tier builders' typed combinators.
 #[derive(Debug, Clone, PartialEq)]
 pub enum Predicate {
     /// Matches every event (the unfiltered subscription).
@@ -81,6 +81,49 @@ impl Predicate {
             Predicate::And(l, r) => l.eval(src) && r.eval(src),
             Predicate::Or(l, r) => l.eval(src) || r.eval(src),
             Predicate::Not(p) => !p.eval(src),
+        }
+    }
+
+    /// `true` if every atom in this predicate is kernel-pushable (L2–L4) — so
+    /// the whole expression, *including negations*, can be pushed to the kernel
+    /// with no userspace remainder.
+    pub fn is_fully_kernel_pushable(&self) -> bool {
+        match self {
+            Predicate::Always => true,
+            Predicate::Atom(a) => a.is_kernel_pushable(),
+            Predicate::And(l, r) | Predicate::Or(l, r) => {
+                l.is_fully_kernel_pushable() && r.is_fully_kernel_pushable()
+            }
+            Predicate::Not(p) => p.is_fully_kernel_pushable(),
+        }
+    }
+
+    /// The **kernel over-approximation** (Phase A2 split): a predicate over
+    /// only kernel-pushable atoms that is a conservative *superset* — every
+    /// frame matching `self` also matches the result, so using it as a kernel
+    /// prefilter never drops a frame any subscription wants. The full `self`
+    /// stays the userspace filter (the kernel result only ever lets *more*
+    /// through).
+    ///
+    /// Rules (each preserving the superset property):
+    /// - a userspace atom we can't test in-kernel relaxes to [`Always`](Self::Always)
+    ///   (match everything);
+    /// - `And` / `Or` recurse (superset is preserved under ∩ and ∪, and the
+    ///   `Always`-identity/absorbing smart constructors collapse dead nodes);
+    /// - `Not` can only be pushed when its operand is *fully* kernel-pushable
+    ///   (negating an over-approximation would *under*-approximate and could
+    ///   drop wanted frames) — otherwise it relaxes to `Always`.
+    pub fn kernel_approx(&self) -> Predicate {
+        match self {
+            Predicate::Always => Predicate::Always,
+            Predicate::Atom(a) if a.is_kernel_pushable() => Predicate::Atom(a.clone()),
+            Predicate::Atom(_) => Predicate::Always,
+            Predicate::And(l, r) => l.kernel_approx().and(r.kernel_approx()),
+            Predicate::Or(l, r) => l.kernel_approx().or(r.kernel_approx()),
+            Predicate::Not(p) if p.is_fully_kernel_pushable() => {
+                Predicate::Not(Box::new(p.kernel_approx()))
+            }
+            Predicate::Not(_) => Predicate::Always,
         }
     }
 }
@@ -423,6 +466,90 @@ mod tests {
         assert!(Glob::new("*.bank").matches("x.bank"));
         assert!(!Glob::new("*.bank").matches("bank"));
         assert!(Glob::new("api.*").matches("api.example.com"));
+    }
+
+    #[test]
+    fn kernel_approx_drops_userspace_atoms_to_always() {
+        // `tcp AND dst_port(443) AND sni~*.bank` → kernel keeps `tcp AND 443`,
+        // the SNI relaxes to Always (userspace remainder).
+        let p = Predicate::Atom(Atom::Proto(L4Proto::Tcp))
+            .and(Predicate::Atom(Atom::DstPort(443)))
+            .and(Predicate::Atom(Atom::SniGlob(Glob::new("*.bank"))));
+        let k = p.kernel_approx();
+        // Equivalent to tcp AND 443 (no SNI atom survives).
+        let expected =
+            Predicate::Atom(Atom::Proto(L4Proto::Tcp)).and(Predicate::Atom(Atom::DstPort(443)));
+        assert_eq!(k, expected);
+        assert!(!p.is_fully_kernel_pushable());
+        assert!(k.is_fully_kernel_pushable());
+    }
+
+    #[test]
+    fn kernel_approx_or_with_userspace_branch_is_always() {
+        // `dst_port(443) OR bytes_over(1M)` → can't push (a non-matching-port
+        // frame might still satisfy the byte branch), so the kernel must pass
+        // everything.
+        let p = Predicate::Atom(Atom::DstPort(443)).or(Predicate::Atom(Atom::BytesOver(1 << 20)));
+        assert_eq!(p.kernel_approx(), Predicate::Always);
+    }
+
+    #[test]
+    fn kernel_approx_not_only_pushed_when_fully_kernel() {
+        // Not(tcp) is fully kernel-pushable → pushed as Not(tcp).
+        let p = Predicate::Atom(Atom::Proto(L4Proto::Tcp)).negate();
+        assert_eq!(
+            p.kernel_approx(),
+            Predicate::Not(Box::new(Predicate::Atom(Atom::Proto(L4Proto::Tcp))))
+        );
+        // Not(sni) involves a userspace atom → relaxes to Always (pushing the
+        // negation of an over-approximation would drop wanted frames).
+        let q = Predicate::Atom(Atom::SniGlob(Glob::new("*.bank"))).negate();
+        assert_eq!(q.kernel_approx(), Predicate::Always);
+    }
+
+    #[test]
+    fn kernel_approx_is_a_conservative_superset() {
+        // Property: for every field source, p.eval ⟹ kernel_approx.eval.
+        // Check across a grid of crafted sources for several predicates.
+        let preds = [
+            Predicate::Atom(Atom::Proto(L4Proto::Tcp)).and(Predicate::Atom(Atom::DstPort(443))),
+            Predicate::Atom(Atom::DstPort(443)).or(Predicate::Atom(Atom::BytesOver(10))),
+            Predicate::Atom(Atom::Proto(L4Proto::Udp))
+                .and(Predicate::Atom(Atom::SniGlob(Glob::new("*.x"))).negate()),
+            Predicate::Atom(Atom::Proto(L4Proto::Tcp)).negate(),
+        ];
+        let sources = [
+            Fields {
+                proto: Some(L4Proto::Tcp),
+                dst_port: Some(443),
+                sni: Some("a.bank".into()),
+                bytes: Some(5),
+                ..Default::default()
+            },
+            Fields {
+                proto: Some(L4Proto::Udp),
+                dst_port: Some(53),
+                bytes: Some(100),
+                ..Default::default()
+            },
+            Fields {
+                proto: Some(L4Proto::Tcp),
+                dst_port: Some(80),
+                ..Default::default()
+            },
+            Fields::default(),
+        ];
+        for p in &preds {
+            let k = p.kernel_approx();
+            for f in &sources {
+                if p.eval(f) {
+                    assert!(
+                        k.eval(f),
+                        "superset violated: p matched but kernel_approx didn't\n p={p:?}\n k={k:?}"
+                    );
+                }
+            }
+        }
     }
 
     #[test]

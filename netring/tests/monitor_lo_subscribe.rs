@@ -47,9 +47,18 @@ async fn monitor_lo_subscribe_yields_http_message_from_real_traffic() {
     // in a loop, reads a request, returns a 200 OK, closes. This
     // gives the HTTP parser real request + response bytes to chew
     // on while we hold the broadcast subscriber.
-    let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
-        .await
-        .expect("bind ephemeral lo socket");
+    // The `Http` parser is registered on TCP ports 80/8080 (`Http::dispatch()`),
+    // so the server MUST listen on one of those — an ephemeral port would never
+    // be parsed (the original bug this test had: it bound `127.0.0.1:0`, so no
+    // HttpMessage was ever produced; it only "passed" because it never actually
+    // ran in CI). 8080 is unprivileged; skip gracefully if it's already in use.
+    let listener = match tokio::net::TcpListener::bind("127.0.0.1:8080").await {
+        Ok(l) => l,
+        Err(e) => {
+            eprintln!("Skipping: cannot bind 127.0.0.1:8080 ({e}) — needed for the Http parser");
+            return;
+        }
+    };
     let target = listener.local_addr().expect("local_addr");
 
     let server = tokio::spawn(async move {

@@ -77,6 +77,8 @@ pub use tick::TickRegistration;
 pub mod subscribe;
 pub use subscribe::EventStream;
 
+pub mod subscription;
+
 pub mod shard;
 pub use shard::ShardedRunner;
 

@@ -41,6 +41,33 @@ impl IpNet {
         if self.is_ipv4() { 32 } else { 128 }
     }
 
+    /// Whether `ip` falls within this network. A v4 net never contains a
+    /// v6 address (and vice-versa). `0.0.0.0/0` / `::/0` contain everything
+    /// of their family.
+    pub fn contains(&self, ip: &IpAddr) -> bool {
+        match (self.addr, ip) {
+            (IpAddr::V4(net), IpAddr::V4(ip)) => {
+                let mask = prefix_mask_u32(self.prefix);
+                (u32::from_be_bytes(net.octets()) & mask)
+                    == (u32::from_be_bytes(ip.octets()) & mask)
+            }
+            (IpAddr::V6(net), IpAddr::V6(ip)) => {
+                let net = u128::from_be_bytes(net.octets());
+                let ip = u128::from_be_bytes(ip.octets());
+                let mask: u128 = if self.prefix == 0 {
+                    0
+                } else if self.prefix >= 128 {
+                    u128::MAX
+                } else {
+                    u128::MAX << (128 - self.prefix as u32)
+                };
+                (net & mask) == (ip & mask)
+            }
+            // Mixed families never intersect.
+            _ => false,
+        }
+    }
+
     /// Returns the network address as a 32-bit big-endian integer
     /// for IPv4, or `None` for IPv6.
     pub(crate) fn as_ipv4_u32(&self) -> Option<u32> {

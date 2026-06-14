@@ -123,8 +123,11 @@ emit = ["flow", "flowscope/emit"]
 eve-sink = ["emit", "dep:serde_json", "flowscope/emit-eve"]
 # RFC 5424 syslog anomaly sink (hand-rolled, no deps).
 syslog = []
-# (0.24 Phase D will add `ipfix` here; OTLP/Kafka live in the
-#  `netring-exporters` companion crate, not as core features.)
+# IPFIX / NetFlow v10 flow exporter (RFC 7011, hand-rolled, no deps).
+# Needs the flow-export rails (`flow` + `tokio` gate `crate::export`).
+ipfix = ["flow", "tokio"]
+# (OTLP/Kafka exporters live in the `netring-exporters` companion crate,
+#  not as core features.)
 
 # ── Umbrellas ────────────────────────────────────────────────────────────────
 # Lean Monitor: the typed dispatch + run loop, no serde/metrics/eve/parsers.

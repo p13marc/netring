@@ -68,6 +68,12 @@ runs *after* the batch is dropped). dhat steady state stays `Δ 0 / 0`.
   in a `[netring@<PEN> …]` structured-data element (RFC 5424 §6.3.3
   escaping). Builder setters for app-name / hostname / procid / facility
   (`SyslogFacility`) / enterprise-id; `SyslogSink::stdout()`.
+- `IpfixExporter<W>` (feature `ipfix`, no deps) — a `FlowExporter` that
+  encodes each `FlowRecord` as an IPFIX / NetFlow v10 message (RFC 7011):
+  IPv4/IPv6 template sets + per-flow data sets over ~11 core IANA IEs
+  (proto, src/dst addr+port, packet/octet counts, flow start/end ms, end
+  reason). `resend_templates_every(n)` for lossy UDP transport. Golden-
+  byte tested.
 
 ### Backpressure honesty (Phase C3)
 

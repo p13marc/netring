@@ -25,6 +25,11 @@ use flowscope::{L4Proto, Timestamp};
 
 use crate::protocol::FlowKey;
 
+#[cfg(feature = "ipfix")]
+pub mod ipfix;
+#[cfg(feature = "ipfix")]
+pub use ipfix::IpfixExporter;
+
 /// A completed-flow record, built from a `FlowEnded` event's key + stats.
 ///
 /// `a` / `b` are the flow's two endpoints. In the default

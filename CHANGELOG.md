@@ -54,6 +54,15 @@ runs *after* the batch is dropped). dhat steady state stays `Δ 0 / 0`.
 - `examples/monitor/health_endpoint.rs` — serves readiness/liveness over
   a dependency-free tiny tokio HTTP/1.1 responder (no axum).
 
+### Exporters (Phase D)
+
+- `SyslogSink<W>` (feature `syslog`, no deps) — an `AnomalySink` that
+  writes one RFC 5424 line per anomaly to any `Write`. `<PRI>1 TS HOST
+  APP PROCID MSGID [SD] MSG`, with the 5-tuple key + observations/metrics
+  in a `[netring@<PEN> …]` structured-data element (RFC 5424 §6.3.3
+  escaping). Builder setters for app-name / hostname / procid / facility
+  (`SyslogFacility`) / enterprise-id; `SyslogSink::stdout()`.
+
 ### Backpressure honesty (Phase C3)
 
 - `ChannelSink::bounded(capacity)` — drop-with-count via `try_send`, so

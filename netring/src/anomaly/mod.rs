@@ -38,6 +38,8 @@ pub mod key;
 #[cfg(feature = "metrics")]
 pub mod metrics_sink;
 mod rule;
+#[cfg(feature = "syslog")]
+pub mod syslog_sink;
 
 pub mod shipped_sinks;
 pub mod sink;
@@ -68,6 +70,11 @@ pub use flowscope::AnomalyFields;
 
 #[cfg(feature = "eve-sink")]
 pub use eve_sink::EveSink;
+
+/// 0.24 Phase D — `SyslogSink` RFC 5424 adapter. Gated on the `syslog`
+/// Cargo feature (no deps).
+#[cfg(feature = "syslog")]
+pub use syslog_sink::{SyslogFacility, SyslogSink};
 
 /// 0.21 B.3 — `MetricsSink` adapter over the `metrics`-rs facade.
 /// Gated on the same `metrics` Cargo feature that pulls the

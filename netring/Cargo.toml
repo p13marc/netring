@@ -121,7 +121,9 @@ metrics = ["dep:metrics"]
 emit = ["flow", "flowscope/emit"]
 # Suricata EVE JSON sink over `flowscope::emit::EveJsonWriter`.
 eve-sink = ["emit", "dep:serde_json", "flowscope/emit-eve"]
-# (0.24 Phase D adds `syslog` and `ipfix` here; OTLP/Kafka live in the
+# RFC 5424 syslog anomaly sink (hand-rolled, no deps).
+syslog = []
+# (0.24 Phase D will add `ipfix` here; OTLP/Kafka live in the
 #  `netring-exporters` companion crate, not as core features.)
 
 # ── Umbrellas ────────────────────────────────────────────────────────────────

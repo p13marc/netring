@@ -1343,6 +1343,28 @@ impl MonitorBuilder {
         self
     }
 
+    /// The classic-BPF **kernel prefilter** the registered packet-tier
+    /// subscriptions compile to (0.25 Phase A3): the conservative OR-union of
+    /// each sub's [kernel
+    /// approximation](subscription::Predicate::kernel_approx), lowered to
+    /// [`BpfFilter`](crate::config::BpfFilter). `None` when nothing useful can
+    /// be pushed (no packet subs, a sub that matches everything in-kernel, or
+    /// an unsupported shape such as a negation) — i.e. "leave the capture
+    /// unfiltered".
+    ///
+    /// Exposed for **inspection / debugging** (see what STAGE-0 would shed) and
+    /// for callers building a packet-only tap who want to apply it themselves
+    /// via [`AsyncCapture::set_filter`](crate::AsyncCapture::set_filter).
+    ///
+    /// The Monitor does **not** yet auto-apply this to its shared capture: the
+    /// ring also feeds the flow tracker, L7 parsers, and `on::<E>` handlers, so
+    /// a safe automatic pushdown needs the *full* traffic-interest union across
+    /// every handler (not just packet subs) to avoid starving them. That union
+    /// model is a follow-up; until then the prefilter is opt-in.
+    pub fn kernel_prefilter(&self) -> Option<crate::config::BpfFilter> {
+        subscription::kernel_filter::union_filter(&self.packet_subs)
+    }
+
     /// Pre-register a `T: Default` state slot. Optional —
     /// `Ctx::state_mut::<T>()` lazy-creates on first access; this
     /// call surfaces typos at build time and lets you set

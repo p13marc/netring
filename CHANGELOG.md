@@ -29,8 +29,25 @@ a strongly-typed tier with a filter [`Predicate`] and a handler:
   loop (dhat stays `Δ 0`); the run-loop future stays `Send`.
 - `IpNet::contains(&IpAddr)` (v4 + v6); dependency-free case-insensitive `Glob`.
 
-Flow/session tier handler dispatch (`.to()` for those tiers) and the A2 filter
-split + A3 kernel pushdown (cBPF / XDP map) follow.
+### Kernel filter split + cBPF compiler (Phase A2 / A3a)
+
+- `Predicate::kernel_approx()` — the conservative **split**: a predicate over
+  only kernel-pushable atoms that is a superset of the original (every frame
+  the filter wants still passes). Userspace atoms relax to `Always`; `Not` is
+  pushed only when fully kernel-pushable. The full predicate stays the
+  userspace filter; the kernel side is a pure prefilter.
+- A classic-BPF compiler lowers a kernel-approx predicate to a `BpfFilter`
+  (DNF → conjunctions of L2–L4 atoms, OR-unioned across packet subs), with a
+  safe fallback to "no filter" for shapes it can't express (negations, etc.).
+  Verified in-sandbox via the `BpfFilter::matches` software interpreter.
+- `MonitorBuilder::kernel_prefilter()` exposes the compiled union filter for
+  inspection / opt-in application. **Not** auto-applied yet: the shared capture
+  also feeds the flow tracker / L7 parsers / `on::<E>` handlers, so safe
+  automatic pushdown needs the full per-handler traffic-interest union (a
+  follow-up) to avoid starving them.
+
+Flow/session tier handler dispatch (`.to()` for those tiers), the auto-applied
+pushdown, and the table-driven AF_XDP map program follow.
 
 ### Async read + effect handlers (Phase B1)
 

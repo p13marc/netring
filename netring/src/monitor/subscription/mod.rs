@@ -21,6 +21,7 @@
 //! [`PacketView`]: flowscope::PacketView
 
 pub mod builder;
+pub(crate) mod kernel_filter;
 pub mod packet;
 pub mod predicate;
 

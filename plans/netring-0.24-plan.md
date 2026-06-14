@@ -40,7 +40,7 @@
 | A | perf-gate harness (pps/latency bench + baseline + live-alloc) | no | ✅ |
 | **B** | **borrowed zero-copy + Send run loop** (per-packet copy eliminated) | no | ✅ |
 | B | `AnyBackend` enum + AF_XDP + pcap unify (AF_XDP reaches the Monitor) | shim | ☐ |
-| B | resilience: backend/handler/panic policies | no | ☐ |
+| B | resilience: handler-isolation + backend-error policy | no | ✅ (panic-catch + Reopen → AnyBackend) |
 | B | AF_XDP UMEM hugepages + NUMA + ZC/cloud-fallback detect | no | ☐ |
 | B | io_uring ZC-RX seam (design only) | no | ✅ (`docs/BACKENDS.md`) |
 | C | `CaptureTelemetry` + run-loop sampling + `on_capture_stats` + `CaptureHealth` | minor | ☐ |

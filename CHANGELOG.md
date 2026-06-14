@@ -15,6 +15,19 @@ each packet's view straight to the flowscope driver — the per-packet
 borrow held across an `.await` is inside `readable()`, and all dispatch
 runs *after* the batch is dropped). dhat steady state stays `Δ 0 / 0`.
 
+### Backend abstraction — `AnyBackend` (Phase B)
+
+- The Monitor run loop is now **backend-agnostic**: every capture source is
+  an `AnyBackend` drained through one `drain_batch(impl FnMut(PacketView))`
+  path (a concrete enum, not a `dyn`/AFIT trait — keeps the run-loop future
+  `Send`). The borrowed zero-copy + Send + dhat-Δ0 contract is preserved.
+- `MonitorBuilder::xdp_interface(iface)` (feature `af-xdp`) — adds an AF_XDP
+  capture source alongside `.interface(...)`; the run loop opens an
+  `AnyBackend::Xdp` and drains it identically. This is the seam that lets
+  AF_XDP reach the high-level Monitor (an attached XDP redirect program is
+  still required to receive traffic; full in-Monitor loader integration is a
+  follow-up). Live AF_XDP capture needs hardware to exercise end to end.
+
 ### Resilience (Phase B)
 
 - `HandlerErrorPolicy { Propagate (default), Isolate }` +

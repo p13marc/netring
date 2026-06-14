@@ -39,7 +39,7 @@
 | A | docs consolidation (one tree) + `FEATURES.md` | no | ✅ |
 | A | perf-gate harness (pps/latency bench + baseline + live-alloc) | no | ✅ |
 | **B** | **borrowed zero-copy + Send run loop** (per-packet copy eliminated) | no | ✅ |
-| B | `AnyBackend` enum + AF_XDP + pcap unify (AF_XDP reaches the Monitor) | shim | ☐ |
+| B | `AnyBackend` enum + AF_XDP reaches the Monitor (`xdp_interface`) | shim | ✅ (AfPacket gated; AF_XDP compile+wired, live needs HW; pcap-unify→0.25) |
 | B | resilience: handler-isolation + backend-error policy | no | ✅ (panic-catch + Reopen → AnyBackend) |
 | B | AF_XDP UMEM hugepages + NUMA + ZC/cloud-fallback detect | no | ☐ |
 | B | io_uring ZC-RX seam (design only) | no | ✅ (`docs/BACKENDS.md`) |

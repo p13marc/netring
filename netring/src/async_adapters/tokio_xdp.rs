@@ -86,6 +86,18 @@ impl AsyncXdpSocket {
 
     // ── RX ──────────────────────────────────────────────────────────────
 
+    /// Poll-based readability check, mirroring
+    /// [`AsyncCapture::poll_read_ready_mut`]. Used by the Monitor run
+    /// loop's backend round-robin select.
+    #[doc(hidden)]
+    pub(crate) fn poll_read_ready_mut(
+        &mut self,
+        cx: &mut std::task::Context<'_>,
+    ) -> std::task::Poll<std::io::Result<tokio::io::unix::AsyncFdReadyMutGuard<'_, XdpSocket>>>
+    {
+        self.inner.poll_read_ready_mut(cx)
+    }
+
     /// Wait until readable and return a guard for zero-copy batch retrieval.
     ///
     /// Mirrors [`AsyncCapture::readable`](crate::AsyncCapture::readable)

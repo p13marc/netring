@@ -31,6 +31,7 @@ use crate::AsyncCapture;
 use crate::anomaly::sink::AnomalySink;
 use crate::ctx::{CounterRegistry, Ctx, SourceIdx, StateMap};
 use crate::error::Result;
+use crate::monitor::backend::AnyBackend;
 use crate::monitor::dispatcher::Dispatcher;
 use crate::monitor::{BackendErrorPolicy, HandlerErrorPolicy, Monitor};
 use crate::protocol::FlowKey;
@@ -62,6 +63,8 @@ pub(crate) enum StopCondition {
 pub(crate) async fn run_loop(monitor: Monitor, stop: StopCondition) -> Result<()> {
     let Monitor {
         interfaces,
+        #[cfg(feature = "af-xdp")]
+        xdp_interfaces,
         mut driver,
         mut dispatcher,
         mut protocol_slots,
@@ -98,12 +101,24 @@ pub(crate) async fn run_loop(monitor: Monitor, stop: StopCondition) -> Result<()
     // monitor (the common case) opens exactly one ring — the
     // round-robin select reduces to a one-armed select with the
     // same latency as the prior single-cap path.
-    // 0.24 Phase B: hold each `AsyncCapture` directly (not an owned
-    // `PacketStream`) so the run loop can drain **borrowed** zero-copy batches
-    // in place — no per-packet `to_owned` copy. The future stays `Send` because
-    // the only borrow held across an `.await` is inside `readable()`, and
-    // `AsyncCapture` is `Send`; all dispatch runs *after* the batch is dropped.
-    let mut caps: Vec<AsyncCapture<crate::Capture>> = Vec::with_capacity(interfaces.len());
+    // 0.24 Phase B: each capture source is an `AnyBackend` (AF_PACKET today,
+    // AF_XDP behind `af-xdp`), drained through one backend-agnostic path. The
+    // run loop holds the backend directly (not an owned `PacketStream`) so it
+    // can drain **borrowed** zero-copy batches in place — no per-packet
+    // `to_owned` copy. The future stays `Send` because the only borrow held
+    // across an `.await` lives inside `drain_batch`, and `AnyBackend` is
+    // `Send`; all dispatch runs *after* the batch is dropped.
+    let cap_count = {
+        #[cfg(feature = "af-xdp")]
+        {
+            interfaces.len() + xdp_interfaces.len()
+        }
+        #[cfg(not(feature = "af-xdp"))]
+        {
+            interfaces.len()
+        }
+    };
+    let mut caps: Vec<AnyBackend> = Vec::with_capacity(cap_count);
     for iface in &interfaces {
         // 0.21 C: when the user set a fanout (single-shard or
         // sharded via ShardedRunner), open each ring with the
@@ -119,7 +134,14 @@ pub(crate) async fn run_loop(monitor: Monitor, stop: StopCondition) -> Result<()
             }
             None => AsyncCapture::open(iface)?,
         };
-        caps.push(cap);
+        caps.push(AnyBackend::AfPacket(cap));
+    }
+    // 0.24 Phase B: AF_XDP backends (in builder-registration order, after the
+    // AF_PACKET ones). Needs an attached XDP redirect program to see traffic.
+    #[cfg(feature = "af-xdp")]
+    for iface in &xdp_interfaces {
+        let xdp = crate::AsyncXdpSocket::open(iface)?;
+        caps.push(AnyBackend::Xdp(xdp));
     }
     // 0.24 Phase C4: all sockets are open and the loop is about to run —
     // readiness flips true. `mark_started` stamps the uptime/liveness
@@ -274,20 +296,16 @@ pub(crate) async fn run_loop(monitor: Monitor, stop: StopCondition) -> Result<()
         // only the metadata it needs into the owned `events` buffer (and feeds
         // the L7 parsers, which buffer owned messages) — no packet-data copy.
         events.clear();
-        let mut last_ts: Option<flowscope::Timestamp> = None;
-        {
-            let mut guard = caps[i].readable().await?;
-            while let Some(batch) = guard.next_batch() {
-                for pkt in &batch {
-                    last_ts = Some(pkt.timestamp());
-                    let view = flowscope::PacketView::new(pkt.data(), pkt.timestamp());
-                    driver.track_into(view, &mut events);
-                }
-                // `batch` drops here → the kernel block is returned.
-            }
-            // `guard` drops here → the capture-ring borrow is released, *before*
-            // any dispatch `.await`, which is what keeps the future `Send`.
-        }
+        // IN-BORROW: drain the ready batches on this backend, feeding each
+        // packet's zero-copy view to the tracker. `drain_batch` holds the
+        // ring/UMEM borrow only across this synchronous callback loop and
+        // drops it before returning — no borrow crosses the dispatch
+        // `.await` below, which is what keeps the run loop's future `Send`.
+        // `track_into` copies only the metadata it needs into `events`; no
+        // packet-data copy.
+        let last_ts = caps[i]
+            .drain_batch(|view| driver.track_into(view, &mut events))
+            .await?;
 
         // A spurious wake (no retired block) leaves `last_ts == None`.
         let Some(ts) = last_ts else { continue };
@@ -382,6 +400,9 @@ pub(crate) async fn replay_loop(
 
     let Monitor {
         interfaces: _,
+        #[cfg(feature = "af-xdp")]
+            xdp_interfaces: _, // pcap replay has no live backend
+
         mut driver,
         mut dispatcher,
         mut protocol_slots,
@@ -627,10 +648,7 @@ async fn drain_phase(
 /// readiness guard from `poll_read_ready_mut` is dropped without clearing, so
 /// the level-triggered fd stays ready and the caller's `readable()` resolves
 /// immediately.
-async fn ready_capture<S>(caps: &mut [AsyncCapture<S>], anchor: &mut usize) -> Option<Result<usize>>
-where
-    S: crate::traits::PacketSource + std::os::unix::io::AsRawFd,
-{
+async fn ready_capture(caps: &mut [AnyBackend], anchor: &mut usize) -> Option<Result<usize>> {
     std::future::poll_fn(|cx: &mut Context<'_>| -> Poll<Option<Result<usize>>> {
         let n = caps.len();
         if n == 0 {
@@ -639,12 +657,12 @@ where
         let start = *anchor % n;
         for offset in 0..n {
             let i = (start + offset) % n;
-            match caps[i].poll_read_ready_mut(cx) {
-                Poll::Ready(Ok(_guard)) => {
+            match caps[i].poll_read_ready(cx) {
+                Poll::Ready(Ok(())) => {
                     *anchor = (i + 1) % n;
                     return Poll::Ready(Some(Ok(i)));
                 }
-                Poll::Ready(Err(e)) => return Poll::Ready(Some(Err(crate::error::Error::Io(e)))),
+                Poll::Ready(Err(e)) => return Poll::Ready(Some(Err(e))),
                 Poll::Pending => {}
             }
         }
@@ -710,7 +728,7 @@ async fn next_telemetry_sample(interval: &mut Option<tokio::time::Interval>) {
 /// telemetry is best-effort observability.
 #[allow(clippy::too_many_arguments)]
 fn sample_and_fire_capture_stats(
-    caps: &[AsyncCapture<crate::Capture>],
+    caps: &[AnyBackend],
     sampler: &mut crate::monitor::telemetry::TelemetrySampler,
     reg: &mut crate::monitor::telemetry::CaptureStatsRegistration,
     sink: &mut dyn AnomalySink,

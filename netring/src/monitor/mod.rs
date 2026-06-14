@@ -51,6 +51,7 @@ use crate::protocol::Protocol;
 use crate::protocol::event_typed::{Event, Tick};
 
 pub mod async_handler;
+pub(crate) mod backend;
 pub mod dispatcher;
 #[cfg(feature = "tls")]
 pub mod fingerprint;
@@ -95,6 +96,11 @@ pub use bandwidth::{BandwidthEntry, BandwidthReport, BandwidthSnapshot};
 /// came from (in builder-registration order).
 pub struct Monitor {
     pub(crate) interfaces: Vec<String>,
+    /// 0.24 Phase B: AF_XDP capture interfaces (feature `af-xdp`). The run
+    /// loop opens an `AnyBackend::Xdp` for each, alongside the AF_PACKET
+    /// `interfaces`. See [`MonitorBuilder::xdp_interface`].
+    #[cfg(feature = "af-xdp")]
+    pub(crate) xdp_interfaces: Vec<String>,
     pub(crate) driver: Driver<FiveTuple>,
     pub(crate) dispatcher: Dispatcher,
     pub(crate) protocol_slots: Vec<Box<dyn ProtocolSlot>>,
@@ -428,6 +434,9 @@ impl std::fmt::Debug for Monitor {
 #[derive(Default)]
 pub struct MonitorBuilder {
     interfaces: Vec<String>,
+    /// 0.24 Phase B: AF_XDP capture interfaces. See [`Self::xdp_interface`].
+    #[cfg(feature = "af-xdp")]
+    xdp_interfaces: Vec<String>,
     driver_builder: Option<DriverBuilder<FiveTuple>>,
     protocol_slots: Vec<Box<dyn ProtocolSlot>>,
     handlers: HandlerRegistry,
@@ -558,6 +567,26 @@ impl MonitorBuilder {
     /// Single-interface convenience.
     pub fn interface(self, iface: impl Into<String>) -> Self {
         self.interfaces([iface])
+    }
+
+    /// 0.24 Phase B: add an **AF_XDP** capture interface (feature
+    /// `af-xdp`).
+    ///
+    /// The run loop opens an AF_XDP socket on `iface` and drains it through
+    /// the same backend-agnostic path as AF_PACKET — composable with
+    /// `.interface(...)` (a monitor can mix AF_PACKET and AF_XDP sources).
+    ///
+    /// **Requires an attached XDP redirect program** to receive packets:
+    /// build the socket yourself with
+    /// [`XdpSocketBuilder::with_default_program`](crate::XdpSocketBuilder)
+    /// (feature `xdp-loader`) and attach it out of band, or run a custom
+    /// loader. A bare `xdp_interface` with no program bound sees no
+    /// traffic. Full in-Monitor loader integration is tracked for a
+    /// follow-up; this is the API seam that lets AF_XDP reach the Monitor.
+    #[cfg(feature = "af-xdp")]
+    pub fn xdp_interface(mut self, iface: impl Into<String>) -> Self {
+        self.xdp_interfaces.push(iface.into());
+        self
     }
 
     /// 0.21 D.4: tag this monitor with a human-readable name.
@@ -1467,7 +1496,13 @@ impl MonitorBuilder {
         let interface_required = self.pcap_source_path.is_none();
         #[cfg(not(all(feature = "pcap", feature = "tokio")))]
         let interface_required = true;
-        if interface_required && self.interfaces.is_empty() {
+        // 0.24 Phase B: an AF_XDP-only monitor (no AF_PACKET interface) is
+        // valid too — only error when *no* capture source of any kind is set.
+        #[cfg(feature = "af-xdp")]
+        let no_capture_source = self.interfaces.is_empty() && self.xdp_interfaces.is_empty();
+        #[cfg(not(feature = "af-xdp"))]
+        let no_capture_source = self.interfaces.is_empty();
+        if interface_required && no_capture_source {
             return Err(BuildError::NoInterface.into());
         }
         // 0.21 A.6: build-time validation — every counter type
@@ -1515,6 +1550,8 @@ impl MonitorBuilder {
         }
         Ok(Monitor {
             interfaces: self.interfaces,
+            #[cfg(feature = "af-xdp")]
+            xdp_interfaces: self.xdp_interfaces,
             driver,
             dispatcher,
             protocol_slots: self.protocol_slots,

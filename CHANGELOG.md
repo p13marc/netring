@@ -6,6 +6,25 @@
 > the 0.24 keystone: typed 3-tier subscriptions + kernel filter pushdown,
 > async read+effect handlers, and perf. Additive-with-shims over 0.24.
 
+### Async read + effect handlers (Phase B1)
+
+- New `MonitorBuilder::on_effect::<E>(handler)` — an **async** handler that
+  reads the `Ctx` **synchronously** (`Fn(&E::Payload, &Ctx<'_>)`) and returns
+  a `'static` future resolving to an `Effects` value: a deferred, owned
+  description of the writes to apply (today: `Effects::emit(anomaly)` /
+  `and_emit`; `set_state`/`counter`/`enqueue` are additive follow-ups). The
+  run loop awaits the future, then applies the effects to the sink under a
+  short `&mut Ctx` write phase. Because the handler never holds `&mut Ctx`
+  across `.await`, the run-loop future stays **`Send`** — unlike a
+  hypothetical `Fn(&mut Ctx) -> Future` shape. This closes the gap between
+  `on_async` (payload-only, can `.await` but can't read `Ctx`) and sync `on`
+  (reads `Ctx` but can't `.await`).
+- Effect handlers fire **after** the sync and async passes for the same
+  lifecycle event, in registration order. Monitors that register no effect
+  handlers pay nothing: the run loop gates the effect pass on
+  `effect_handler_count() > 0`, so the per-event `Ctx`-rebuilding translation
+  is skipped entirely. dhat steady state stays `Δ 0 / 0`.
+
 ### Dispatcher (Phase B2)
 
 - The per-monitor distinct-event-type cap is lifted (was a hard 16): the

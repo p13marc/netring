@@ -83,11 +83,9 @@ impl Effects {
         self.anomalies.extend(other.anomalies);
     }
 
-    /// Apply the effects to the monitor's anomaly sink. Called by the run
-    /// loop after the batch is drained (the `&mut Ctx` write phase).
-    // Allowed dead until the dispatcher/run-loop effect pass is wired (next
-    // B1 commit); the test below exercises it.
-    #[allow(dead_code)]
+    /// Apply the effects to the monitor's anomaly sink. Called by
+    /// `Dispatcher::dispatch_effects` after the batch is drained (the
+    /// `&mut Ctx` write phase).
     pub(crate) fn apply(self, sink: &mut dyn crate::anomaly::sink::AnomalySink) {
         for anomaly in self.anomalies {
             apply_owned_anomaly(sink, anomaly);
@@ -99,7 +97,6 @@ impl Effects {
 /// flattened owned form (post-`with_key`) back onto the sink's
 /// `write(kind, severity, ts, key, observations, metrics)` surface,
 /// reconstructing the 5-tuple key when the anomaly carries a complete one.
-#[allow(dead_code)] // used by Effects::apply (wired into the run loop next)
 fn apply_owned_anomaly(sink: &mut dyn crate::anomaly::sink::AnomalySink, a: OwnedAnomaly) {
     use std::borrow::Cow;
     use std::net::SocketAddr;
@@ -153,7 +150,6 @@ fn apply_owned_anomaly(sink: &mut dyn crate::anomaly::sink::AnomalySink, a: Owne
 
 /// Map an `OwnedAnomaly::proto` label back to an `L4Proto` for key
 /// reconstruction. Unknown → `None` (the key is then omitted).
-#[allow(dead_code)] // used by apply_owned_anomaly
 fn l4proto_from_str(p: &str) -> Option<flowscope::L4Proto> {
     use flowscope::L4Proto;
     match p {

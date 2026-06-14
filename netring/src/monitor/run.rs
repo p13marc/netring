@@ -586,7 +586,24 @@ async fn drain_phase(
             flow_states,
             label_table,
         ) {
-            Ok(()) => dispatch_lifecycle_async(dispatcher, evt).await,
+            Ok(()) => match dispatch_lifecycle_async(dispatcher, evt.clone()).await {
+                // 0.25-B1: effect pass (drain) — same gating as the live path.
+                Ok(()) if dispatcher.effect_handler_count() > 0 => {
+                    dispatch_lifecycle_effects(
+                        dispatcher,
+                        sink,
+                        state_map,
+                        counters,
+                        evt,
+                        SourceIdx(0),
+                        monitor_name,
+                        flow_states,
+                        label_table,
+                    )
+                    .await
+                }
+                other => other,
+            },
             Err(e) => Err(e),
         };
         if let Err(e) = res {
@@ -839,7 +856,25 @@ async fn dispatch_tracked_events(
             flow_states,
             label_table,
         ) {
-            Ok(()) => dispatch_lifecycle_async(dispatcher, evt).await,
+            Ok(()) => match dispatch_lifecycle_async(dispatcher, evt.clone()).await {
+                // 0.25-B1: effect pass — gated so no-effect monitors skip
+                // the whole `Ctx`-rebuilding translation (zero added cost).
+                Ok(()) if dispatcher.effect_handler_count() > 0 => {
+                    dispatch_lifecycle_effects(
+                        dispatcher,
+                        sink,
+                        state_map,
+                        counters,
+                        evt,
+                        source,
+                        monitor_name,
+                        flow_states,
+                        label_table,
+                    )
+                    .await
+                }
+                other => other,
+            },
             Err(e) => Err(e),
         };
         if let Err(e) = res {
@@ -1303,6 +1338,237 @@ fn dispatch_lifecycle(
             );
         }
         // 0.22 R2: one flat FlowPacket carrying `proto`.
+        FsEvent::FlowPacket {
+            key,
+            side,
+            len,
+            ts,
+            tcp,
+        } => {
+            dispatch_one!(
+                FlowPacket,
+                FlowPacket::new(key.proto, key, side, len, tcp, ts),
+                Some(key),
+                ts
+            );
+        }
+        FsEvent::FlowTick { key, stats, ts } => match key.proto {
+            L4Proto::Tcp => {
+                dispatch_one!(
+                    FlowTick<Tcp>,
+                    FlowTick::<Tcp>::new(key, stats, ts),
+                    Some(key),
+                    ts
+                );
+            }
+            L4Proto::Udp => {
+                dispatch_one!(
+                    FlowTick<Udp>,
+                    FlowTick::<Udp>::new(key, stats, ts),
+                    Some(key),
+                    ts
+                );
+            }
+            #[cfg(feature = "icmp")]
+            L4Proto::Icmp | L4Proto::IcmpV6 => {
+                dispatch_one!(
+                    FlowTick<Icmp>,
+                    FlowTick::<Icmp>::new(key, stats, ts),
+                    Some(key),
+                    ts
+                );
+            }
+            _ => {}
+        },
+        FsEvent::ParserClosed {
+            key,
+            parser_kind,
+            reason,
+            ts,
+        } => match key.proto {
+            L4Proto::Tcp => {
+                dispatch_one!(
+                    ParserClosed<Tcp>,
+                    ParserClosed::<Tcp>::new(key, parser_kind, reason, ts),
+                    Some(key),
+                    ts
+                );
+            }
+            L4Proto::Udp => {
+                dispatch_one!(
+                    ParserClosed<Udp>,
+                    ParserClosed::<Udp>::new(key, parser_kind, reason, ts),
+                    Some(key),
+                    ts
+                );
+            }
+            #[cfg(feature = "icmp")]
+            L4Proto::Icmp | L4Proto::IcmpV6 => {
+                dispatch_one!(
+                    ParserClosed<Icmp>,
+                    ParserClosed::<Icmp>::new(key, parser_kind, reason, ts),
+                    Some(key),
+                    ts
+                );
+            }
+            _ => {}
+        },
+        _ => {}
+    }
+    Ok(())
+}
+
+/// 0.25-B1: effect sibling of [`dispatch_lifecycle`]. Translates each
+/// `FsEvent` into the same typed payload, builds a `Ctx` per arm
+/// (mirroring the sync pass so handlers read the same state), and runs
+/// [`Dispatcher::dispatch_effects`] — the async read-`&Ctx` /
+/// write-`Effects` pass.
+///
+/// Fires **after** the sync ([`dispatch_lifecycle`]) and async
+/// ([`dispatch_lifecycle_async`]) passes for the same event. The caller
+/// gates this on `dispatcher.effect_handler_count() > 0` so monitors with
+/// no effect handlers pay nothing (not even this function call). Holds
+/// `&mut Ctx` across `.await`, which is `Send`-safe because every `Ctx`
+/// field is `Send` (notably `AnomalySink: Send`) — see
+/// `tests/monitor_send.rs`.
+#[allow(clippy::too_many_arguments)]
+async fn dispatch_lifecycle_effects(
+    dispatcher: &mut Dispatcher,
+    sink: &mut dyn AnomalySink,
+    state_map: &mut StateMap,
+    counters: &mut CounterRegistry,
+    evt: FsEvent<FlowKey>,
+    source: SourceIdx,
+    monitor_name: Option<&str>,
+    flow_states: &mut crate::ctx::FlowStateRegistry,
+    label_table: &flowscope::well_known::LabelTable,
+) -> Result<()> {
+    // Same per-arm `Ctx` construction as `dispatch_lifecycle`; the
+    // dispatch call is the async `dispatch_effects` instead of the sync
+    // `dispatch`. Macro inlines the borrow so each `&mut` is scoped to a
+    // single dispatch (hoisting into a closure trips HRTB inference).
+    macro_rules! dispatch_one {
+        ($ty:ty, $payload:expr, $flow:expr, $ts:expr) => {{
+            let mut ctx = Ctx {
+                flow: $flow,
+                ts: $ts,
+                source,
+                monitor_name,
+                state_map: &mut *state_map,
+                sink: &mut *sink,
+                counters: &mut *counters,
+                flow_states: &mut *flow_states,
+                label_table,
+                tracker: None,
+            };
+            dispatcher
+                .dispatch_effects::<$ty>(&$payload, &mut ctx)
+                .await?;
+        }};
+    }
+
+    match evt {
+        FsEvent::FlowStarted { key, ts, l4 } => match l4 {
+            Some(L4Proto::Tcp) => {
+                dispatch_one!(
+                    FlowStarted<Tcp>,
+                    FlowStarted::<Tcp>::new(key, l4, ts),
+                    Some(key),
+                    ts
+                );
+            }
+            Some(L4Proto::Udp) => {
+                dispatch_one!(
+                    FlowStarted<Udp>,
+                    FlowStarted::<Udp>::new(key, l4, ts),
+                    Some(key),
+                    ts
+                );
+            }
+            #[cfg(feature = "icmp")]
+            Some(L4Proto::Icmp) | Some(L4Proto::IcmpV6) => {
+                dispatch_one!(
+                    FlowStarted<Icmp>,
+                    FlowStarted::<Icmp>::new(key, l4, ts),
+                    Some(key),
+                    ts
+                );
+            }
+            _ => {}
+        },
+        FsEvent::FlowEnded {
+            key,
+            reason,
+            stats,
+            ts,
+            l4,
+            ..
+        } => match l4 {
+            Some(L4Proto::Tcp) => {
+                let is_rst = reason == flowscope::EndReason::Rst;
+                dispatch_one!(
+                    FlowEnded<Tcp>,
+                    FlowEnded::<Tcp>::new(key, reason, stats.clone(), l4, ts),
+                    Some(key),
+                    ts
+                );
+                if is_rst {
+                    dispatch_one!(TcpRst, TcpRst::new(key, stats, ts), Some(key), ts);
+                }
+            }
+            Some(L4Proto::Udp) => {
+                dispatch_one!(
+                    FlowEnded<Udp>,
+                    FlowEnded::<Udp>::new(key, reason, stats, l4, ts),
+                    Some(key),
+                    ts
+                );
+            }
+            #[cfg(feature = "icmp")]
+            Some(L4Proto::Icmp) | Some(L4Proto::IcmpV6) => {
+                dispatch_one!(
+                    FlowEnded<Icmp>,
+                    FlowEnded::<Icmp>::new(key, reason, stats, l4, ts),
+                    Some(key),
+                    ts
+                );
+            }
+            _ => {}
+        },
+        FsEvent::FlowEstablished { key, ts, l4 } => {
+            if matches!(l4, Some(L4Proto::Tcp)) {
+                dispatch_one!(
+                    FlowEstablished<Tcp>,
+                    FlowEstablished::<Tcp>::new(key, ts),
+                    Some(key),
+                    ts
+                );
+            }
+        }
+        FsEvent::FlowAnomaly { key, kind, ts } => {
+            dispatch_one!(
+                AnyFlowAnomaly,
+                AnyFlowAnomaly {
+                    key: Some(key),
+                    kind,
+                    ts,
+                },
+                Some(key),
+                ts
+            );
+        }
+        FsEvent::TrackerAnomaly { kind, ts } => {
+            dispatch_one!(
+                AnyFlowAnomaly,
+                AnyFlowAnomaly {
+                    key: None,
+                    kind,
+                    ts,
+                },
+                None,
+                ts
+            );
+        }
         FsEvent::FlowPacket {
             key,
             side,

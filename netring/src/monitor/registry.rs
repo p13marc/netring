@@ -22,9 +22,11 @@ use crate::error::Result as NetringResult;
 use crate::error::{BuildError, Result};
 use crate::monitor::async_handler::{AsyncHandler, BoxFuture};
 use crate::monitor::dispatcher::{
-    AsyncHandlerSlot, BoxedAsyncHandler, BoxedHandler, Dispatcher, DynAsyncHandler, HandlerSlot,
-    MAX_EVENT_TYPES, TypeSlotTable,
+    AsyncHandlerSlot, BoxedAsyncHandler, BoxedEffectHandler, BoxedHandler, Dispatcher,
+    DynAsyncHandler, DynEffectHandler, EffectHandlerSlot, HandlerSlot, MAX_EVENT_TYPES,
+    TypeSlotTable,
 };
+use crate::monitor::effect::{EffectHandler, Effects};
 use crate::monitor::handler::Handler;
 use crate::protocol::Protocol;
 use crate::protocol::event_typed::Event;
@@ -34,6 +36,8 @@ use crate::protocol::event_typed::Event;
 pub struct HandlerRegistry {
     by_type: FxHashMap<TypeId, Vec<BoxedHandler>>,
     async_by_type: FxHashMap<TypeId, Vec<BoxedAsyncHandler>>,
+    /// 0.25-B1 effect handlers, grouped by event-payload TypeId.
+    effect_by_type: FxHashMap<TypeId, Vec<BoxedEffectHandler>>,
     /// 0.21 D.1: for each registered event-payload TypeId, the
     /// `Protocol` marker TypeId + stable name that the event
     /// REQUIRES on the builder's `.protocol::<P>()` list — gathered
@@ -102,6 +106,26 @@ impl HandlerRegistry {
         }
     }
 
+    /// 0.25-B1: add an effect handler `H` for event type `E` — reads
+    /// `&Ctx` synchronously, returns a future resolving to
+    /// [`Effects`](crate::monitor::effect::Effects).
+    pub fn register_effect<E, H>(&mut self, handler: H)
+    where
+        E: Event,
+        H: EffectHandler<E>,
+    {
+        let boxed: BoxedEffectHandler = Arc::new(EffectHandlerWrapper::<E, H>::new(handler));
+        self.effect_by_type
+            .entry(TypeId::of::<E::Payload>())
+            .or_default()
+            .push(boxed);
+        if let Some(p_id) = E::protocol_marker() {
+            self.required_protocols
+                .entry(TypeId::of::<E::Payload>())
+                .or_insert((p_id, E::protocol_name()));
+        }
+    }
+
     /// 0.21 D.1: returns an iterator over `(protocol_TypeId, protocol_name)`
     /// pairs that handlers required during registration. Each unique
     /// (event_type → marker) pair appears once. Consumed by
@@ -117,6 +141,7 @@ impl HandlerRegistry {
         let mut ids: std::collections::HashSet<TypeId> = std::collections::HashSet::new();
         ids.extend(self.by_type.keys().copied());
         ids.extend(self.async_by_type.keys().copied());
+        ids.extend(self.effect_by_type.keys().copied());
         ids.len()
     }
 
@@ -142,6 +167,7 @@ impl HandlerRegistry {
             .keys()
             .copied()
             .chain(self.async_by_type.keys().copied())
+            .chain(self.effect_by_type.keys().copied())
             .collect();
         all_types.sort_unstable_by_key(|t| format!("{t:?}"));
         all_types.dedup();
@@ -159,6 +185,7 @@ impl HandlerRegistry {
         let mut slot_by_type = TypeSlotTable::new();
         let mut slots: Vec<Vec<HandlerSlot>> = Vec::with_capacity(all_types.len());
         let mut async_slots: Vec<Vec<AsyncHandlerSlot>> = Vec::with_capacity(all_types.len());
+        let mut effect_slots: Vec<Vec<EffectHandlerSlot>> = Vec::with_capacity(all_types.len());
         let mut slot_types: Vec<TypeId> = Vec::with_capacity(all_types.len());
 
         for (i, type_id) in all_types.into_iter().enumerate() {
@@ -180,11 +207,20 @@ impl HandlerRegistry {
                     .map(|h| AsyncHandlerSlot { handler: h })
                     .collect(),
             );
+            effect_slots.push(
+                self.effect_by_type
+                    .remove(&type_id)
+                    .unwrap_or_default()
+                    .into_iter()
+                    .map(|h| EffectHandlerSlot { handler: h })
+                    .collect(),
+            );
         }
         Ok(Dispatcher::new(
             slot_by_type,
             slots.into_boxed_slice(),
             async_slots.into_boxed_slice(),
+            effect_slots.into_boxed_slice(),
             slot_types.into_boxed_slice(),
         ))
     }
@@ -218,6 +254,37 @@ where
         // invokes a slot when the runtime payload type matches.
         let typed: &E::Payload = unsafe { &*(ptr as *const E::Payload) };
         self.handler.call(typed)
+    }
+}
+
+/// 0.25-B1 effect-handler wrapper — erases `(E, H)` so an effect handler
+/// can be stored as `Arc<dyn DynEffectHandler>`. Mirrors
+/// [`AsyncHandlerWrapper`], but `call` also forwards `&Ctx`.
+struct EffectHandlerWrapper<E, H> {
+    handler: H,
+    _marker: PhantomData<fn() -> E>,
+}
+
+impl<E, H> EffectHandlerWrapper<E, H> {
+    fn new(handler: H) -> Self {
+        Self {
+            handler,
+            _marker: PhantomData,
+        }
+    }
+}
+
+impl<E, H> DynEffectHandler for EffectHandlerWrapper<E, H>
+where
+    E: Event,
+    H: EffectHandler<E>,
+{
+    fn call(&self, ptr: *const (), ctx: &Ctx<'_>) -> BoxFuture<NetringResult<Effects>> {
+        // SAFETY: as for AsyncHandlerWrapper — the dispatcher only invokes
+        // this slot when the runtime payload type matches the registration
+        // key `TypeId::of::<E::Payload>()`.
+        let typed: &E::Payload = unsafe { &*(ptr as *const E::Payload) };
+        self.handler.call(typed, ctx)
     }
 }
 

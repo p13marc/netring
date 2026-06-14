@@ -1277,6 +1277,31 @@ impl MonitorBuilder {
         self
     }
 
+    /// Register an **async effect handler** for event type `E` (0.25-B1).
+    ///
+    /// The handler reads the [`Ctx`] **synchronously** (`&Ctx<'_>`) and
+    /// returns a `'static` future resolving to an [`Effects`] value —
+    /// a deferred, owned description of the writes (anomalies to emit,
+    /// …) to apply once the future completes. The run loop awaits the
+    /// future, then applies the effects to the sink under a short
+    /// `&mut Ctx` write phase. Because the handler never holds a
+    /// `&mut Ctx` across `.await`, the run-loop future stays `Send`
+    /// (it can be `tokio::spawn`'d), unlike a hypothetical
+    /// `Fn(&mut Ctx) -> Future` shape.
+    ///
+    /// Use this when an async body needs to *both* `.await`
+    /// (e.g. an enrichment lookup, an async I/O probe) *and* emit an
+    /// anomaly derived from the result — the case [`Self::on_async`]
+    /// (payload-only, no `Ctx`) and sync [`Self::on`] (`&mut Ctx` but
+    /// no `.await`) each cover only half of.
+    ///
+    /// Effect handlers fire **after** the sync and async passes for the
+    /// same event, in registration order.
+    pub fn on_effect<E: Event>(mut self, handler: impl EffectHandler<E>) -> Self {
+        self.handlers.register_effect::<E, _>(handler);
+        self
+    }
+
     /// Pre-register a `T: Default` state slot. Optional —
     /// `Ctx::state_mut::<T>()` lazy-creates on first access; this
     /// call surfaces typos at build time and lets you set

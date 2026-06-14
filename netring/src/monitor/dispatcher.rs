@@ -114,12 +114,34 @@ pub(crate) trait DynAsyncHandler: Send + Sync {
 /// per-shard cloning (Phase C).
 pub(crate) type BoxedAsyncHandler = Arc<dyn DynAsyncHandler>;
 
+/// 0.25-B1 effect dispatch trampoline. Erases `E` like
+/// [`DynAsyncHandler`], but the call **reads `&Ctx`** (synchronously, to
+/// build the future) and the future resolves to [`Effects`] the run loop
+/// applies after the batch.
+pub(crate) trait DynEffectHandler: Send + Sync {
+    /// `ptr` must point at a `E::Payload` of the same TypeId used at
+    /// registration. `ctx` is borrowed only for the synchronous prologue;
+    /// the returned future is `'static` and must not capture it.
+    fn call(
+        &self,
+        ptr: *const (),
+        ctx: &Ctx<'_>,
+    ) -> BoxFuture<Result<crate::monitor::effect::Effects>>;
+}
+
+/// Shared effect handler — Arc shape for per-shard cloning.
+pub(crate) type BoxedEffectHandler = Arc<dyn DynEffectHandler>;
+
 pub(crate) struct HandlerSlot {
     pub(crate) handler: BoxedHandler,
 }
 
 pub(crate) struct AsyncHandlerSlot {
     pub(crate) handler: BoxedAsyncHandler,
+}
+
+pub(crate) struct EffectHandlerSlot {
+    pub(crate) handler: BoxedEffectHandler,
 }
 
 /// The build-time-finalized dispatcher. Constructed via
@@ -138,6 +160,8 @@ pub struct Dispatcher {
     /// lockstep with `slots`. Both vectors are indexed by the same
     /// `slot_by_type` lookup.
     async_slots: Box<[Vec<AsyncHandlerSlot>]>,
+    /// Slot table — 0.25-B1 effect handlers, in lockstep with `slots`.
+    effect_slots: Box<[Vec<EffectHandlerSlot>]>,
     /// 0.25-B2 type-tag: `slot index → registered TypeId`, parallel to
     /// `slots`. Read only by the `debug_assertions` check in dispatch — it
     /// proves the `slot_by_type` → `slots` mapping stays consistent (a build
@@ -154,12 +178,14 @@ impl Dispatcher {
         slot_by_type: TypeSlotTable,
         slots: Box<[Vec<HandlerSlot>]>,
         async_slots: Box<[Vec<AsyncHandlerSlot>]>,
+        effect_slots: Box<[Vec<EffectHandlerSlot>]>,
         slot_types: Box<[TypeId]>,
     ) -> Self {
         Self {
             slot_by_type,
             slots,
             async_slots,
+            effect_slots,
             slot_types,
         }
     }
@@ -266,6 +292,57 @@ impl Dispatcher {
         }
     }
 
+    /// 0.25-B1: dispatch effect handlers for the typed payload `P`.
+    ///
+    /// Two phases, split at the batch boundary's mirror: build every
+    /// handler's future while holding only an **immutable** `&Ctx` (the
+    /// synchronous read), then await each and **apply its [`Effects`]**
+    /// with `&mut Ctx`. The futures are `'static` (they own what they
+    /// `move`d out of `Ctx`), so the `&Ctx` read borrow is released before
+    /// the first `.await` — no `&mut Ctx` (and no `!Send` payload pointer)
+    /// crosses an await, preserving the `Send` run loop.
+    ///
+    /// [`Effects`]: crate::monitor::effect::Effects
+    pub async fn dispatch_effects<P: 'static>(
+        &mut self,
+        payload: &P,
+        ctx: &mut Ctx<'_>,
+    ) -> Result<()> {
+        let target = TypeId::of::<P>();
+        let Some(slot_idx) = self.slot_by_type.get(target) else {
+            return Ok(());
+        };
+        #[cfg(debug_assertions)]
+        debug_assert_eq!(
+            self.slot_types[slot_idx as usize], target,
+            "dispatcher slot/type desync — type-erased cast would be UB"
+        );
+
+        if self.effect_slots[slot_idx as usize].is_empty() {
+            return Ok(());
+        }
+
+        // PHASE 1 (read): build the futures under an immutable `&ctx`
+        // borrow + the type-erased pointer, both confined to this block.
+        let mut futures: Vec<BoxFuture<Result<crate::monitor::effect::Effects>>> =
+            Vec::with_capacity(self.effect_slots[slot_idx as usize].len());
+        {
+            let ptr = payload as *const P as *const ();
+            for slot in &self.effect_slots[slot_idx as usize] {
+                futures.push(slot.handler.call(ptr, &*ctx));
+            }
+        }
+
+        // PHASE 2 (await + write): no `&ctx`/`ptr` borrow is live here.
+        for fut in futures {
+            let effects = fut.await?;
+            if !effects.is_empty() {
+                effects.apply(&mut *ctx.sink);
+            }
+        }
+        Ok(())
+    }
+
     /// Clone this dispatcher for use in a per-CPU shard (Phase C).
     /// Each handler slot stores `Arc<dyn Fn>` so cloning is a
     /// refcount bump per slot — O(slots × handlers), practically free.
@@ -302,6 +379,18 @@ impl Dispatcher {
                 })
                 .collect::<Vec<_>>()
                 .into_boxed_slice(),
+            effect_slots: self
+                .effect_slots
+                .iter()
+                .map(|v| {
+                    v.iter()
+                        .map(|s| EffectHandlerSlot {
+                            handler: Arc::clone(&s.handler),
+                        })
+                        .collect()
+                })
+                .collect::<Vec<_>>()
+                .into_boxed_slice(),
             slot_types: self.slot_types.clone(),
         }
     }
@@ -319,6 +408,11 @@ impl Dispatcher {
     /// Total async handler count across all slots.
     pub fn async_handler_count(&self) -> usize {
         self.async_slots.iter().map(|s| s.len()).sum()
+    }
+
+    /// Total effect handler count across all slots (0.25-B1).
+    pub fn effect_handler_count(&self) -> usize {
+        self.effect_slots.iter().map(|s| s.len()).sum()
     }
 }
 
@@ -379,8 +473,9 @@ mod tests {
         slot_by_type.insert(TypeId::of::<u32>(), 0);
         let slots = vec![vec![HandlerSlot { handler }]].into_boxed_slice();
         let async_slots = vec![vec![]].into_boxed_slice();
+        let effect_slots = vec![vec![]].into_boxed_slice();
         let slot_types = vec![TypeId::of::<u32>()].into_boxed_slice();
-        let primary = Dispatcher::new(slot_by_type, slots, async_slots, slot_types);
+        let primary = Dispatcher::new(slot_by_type, slots, async_slots, effect_slots, slot_types);
 
         // Clone for a hypothetical shard.
         let mut shard = primary.clone_for_shard();
@@ -469,6 +564,7 @@ mod tests {
             Vec::new().into_boxed_slice(),
             Vec::new().into_boxed_slice(),
             Vec::new().into_boxed_slice(),
+            Vec::new().into_boxed_slice(),
         );
         let mut s = StateMap::default();
         let mut k = NoopSink;
@@ -520,8 +616,10 @@ mod tests {
         .into_boxed_slice();
         let async_slots: Box<[Vec<AsyncHandlerSlot>]> =
             vec![Vec::new(), Vec::new()].into_boxed_slice();
+        let effect_slots: Box<[Vec<EffectHandlerSlot>]> =
+            vec![Vec::new(), Vec::new()].into_boxed_slice();
         let slot_types = vec![TypeId::of::<u32>(), TypeId::of::<u64>()].into_boxed_slice();
-        let mut d = Dispatcher::new(slot_by_type, slots, async_slots, slot_types);
+        let mut d = Dispatcher::new(slot_by_type, slots, async_slots, effect_slots, slot_types);
 
         let mut s = StateMap::default();
         let mut k = NoopSink;

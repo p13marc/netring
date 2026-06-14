@@ -263,6 +263,75 @@ async fn replay_propagates_handler_errors_by_default() {
     );
 }
 
+#[tokio::test(flavor = "current_thread")]
+async fn replay_on_effect_emits_anomaly_through_the_sink() {
+    // 0.25 B1: an async effect handler reads `&Ctx` synchronously, awaits
+    // (simulated I/O), and returns `Effects::emit(..)`; the run loop applies
+    // the effect to the monitor's sink AFTER the sync/async passes. This
+    // exercises the full wiring: on_effect → register_effect → dispatcher
+    // effect_slots → run-loop dispatch_lifecycle_effects → Effects::apply.
+    use std::borrow::Cow;
+    use std::sync::Mutex;
+
+    use netring::anomaly::sink::AnomalySink;
+    use netring::anomaly::{OwnedAnomaly, Severity};
+    use netring::ctx::Ctx;
+    use netring::monitor::Effects;
+
+    // A sink that records the `kind` slug of each anomaly written.
+    #[derive(Clone, Default)]
+    struct Recording(Arc<Mutex<Vec<&'static str>>>);
+    impl AnomalySink for Recording {
+        fn write(
+            &mut self,
+            kind: &'static str,
+            _severity: Severity,
+            _ts: flowscope::Timestamp,
+            _key: Option<&dyn netring::anomaly::key::Key>,
+            _observations: &[(&'static str, Cow<'_, str>)],
+            _metrics: &[(&'static str, f64)],
+        ) {
+            self.0.lock().unwrap().push(kind);
+        }
+    }
+
+    let pcap = write_synthetic_pcap();
+    let recorder = Recording::default();
+    let kinds = Arc::clone(&recorder.0);
+
+    Monitor::builder()
+        .pcap_source(pcap.path())
+        .protocol::<Udp>()
+        .sink(recorder)
+        .on_effect::<FlowStarted<Udp>>(|_evt: &FlowStarted<Udp>, ctx: &Ctx<'_>| {
+            // Synchronous read; move owned data into the 'static future.
+            let key = ctx.flow;
+            let ts = ctx.ts;
+            async move {
+                tokio::task::yield_now().await; // simulate async I/O
+                let mut a = OwnedAnomaly::new("effect_fired", Severity::Warning.into(), ts);
+                if let Some(k) = key {
+                    a = a.with_key(&k);
+                }
+                Ok(Effects::emit(a))
+            }
+        })
+        .build()
+        .expect("build with on_effect")
+        .replay()
+        .await
+        .expect("replay completes");
+
+    let recorded = kinds.lock().unwrap();
+    // The 3 UDP packets share one flow → one FlowStarted<Udp> → the effect
+    // handler fires once and emits exactly one "effect_fired" anomaly.
+    assert_eq!(
+        recorded.as_slice(),
+        &["effect_fired"],
+        "expected the effect handler's anomaly to reach the sink, got {recorded:?}"
+    );
+}
+
 #[test]
 fn builder_pcap_source_relaxes_no_interface_check() {
     let pcap = write_synthetic_pcap();

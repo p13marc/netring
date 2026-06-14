@@ -2,10 +2,13 @@
 
 ## 0.24.0 — zero-copy core + production trust
 
-> **Unreleased / in progress on `0.24-dev`.** Makes the `Monitor`
-> pipeline zero-copy + resilient + self-observable. Additive over 0.23
-> (the one planned break is reserved for 1.0). See
-> [`plans/netring-0.24-plan.md`](plans/netring-0.24-plan.md).
+> **Released 2026-06-14.** Makes the `Monitor` pipeline zero-copy +
+> resilient + self-observable, and brings AF_XDP to the high-level
+> Monitor. The previous published version was **0.22.0**; 0.24.0 folds in
+> the **0.23 `Send` run-loop** work (never released standalone) — see the
+> 0.23.0 section below + `docs/MIGRATING_0.22_TO_0.23.md` if upgrading
+> from 0.22. From 0.23 it is **additive** (`docs/MIGRATING_0.23_TO_0.24.md`);
+> the one planned break is reserved for 1.0. Depends on flowscope `0.15`.
 
 ### Zero-copy + `Send` borrowed run loop (Phase B keystone)
 
@@ -117,8 +120,8 @@ runs *after* the batch is dropped). dhat steady state stays `Δ 0 / 0`.
 
 ## 0.23.0 — spawnable run loop (breaking)
 
-> **Unreleased / in progress on `0.23-dev`.** A small, focused
-> **breaking** release: the `Monitor` run-loop future is now
+> **Folded into 0.24.0 — never released to crates.io standalone.** A
+> small, focused **breaking** change: the `Monitor` run-loop future is now
 > `Send + 'static`. Migration:
 > [`netring/docs/MIGRATING_0.22_TO_0.23.md`](netring/docs/MIGRATING_0.22_TO_0.23.md).
 

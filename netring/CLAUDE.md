@@ -20,9 +20,10 @@ built on AF_PACKET with TPACKET_V3 (block-based mmap ring buffers) and AF_XDP.
 
 ## Implementation Status
 
-**0.24.0 — in progress on `0.24-dev`** ("Zero-Copy Core + Production
-Trust"; additive over 0.23, draft PR #2 CI-green). Folds in the 0.23 `Send`
-run-loop work. Landed + validated: **Phase B** keystone (borrowed zero-copy
+**0.24.0 — RELEASED 2026-06-14** ("Zero-Copy Core + Production Trust";
+additive over 0.23, published to crates.io, tag `0.24.0`). Depends on
+flowscope `0.15`. Folds in the 0.23 `Send` run-loop work (never released
+standalone). Landed + validated: **Phase B** keystone (borrowed zero-copy
 + `Send` run loop — per-packet `to_owned` gone, dhat `Δ 0`), resilience
 (`HandlerErrorPolicy`/`BackendErrorPolicy`), and the **`AnyBackend`** run-loop
 seam + `MonitorBuilder::xdp_interface` (AF_XDP reaches the Monitor —

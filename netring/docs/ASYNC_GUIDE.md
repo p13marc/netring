@@ -345,6 +345,19 @@ Key async facts:
   `Send` futures (the same rule `tokio::spawn` imposes) — handlers
   that capture `Arc<…>` and do I/O already satisfy it. See
   `examples/monitor/multi_thread_default.rs`.
+- **Backpressure contract (the capture task never blocks).** When
+  you fan anomalies out to a downstream task, the capture task must
+  not stall on a slow consumer. Two `ChannelSink` shapes encode the
+  choice: `ChannelSink::channel()` is **unbounded** (never drops, but
+  a slow consumer grows memory without bound), while
+  `ChannelSink::bounded(cap)` returns `(sink, receiver, dropped)` and
+  **never blocks** — when the channel is full the anomaly is dropped
+  and the `Arc<AtomicU64>` `dropped` counter is incremented. Prefer
+  `bounded` in production and surface `dropped` through your metrics;
+  silent unbounded growth and silent drops are both failure modes a
+  trustworthy monitor makes visible. Broadcast subscribers
+  (`subscribe::<P>()`) have the same property via tokio-broadcast
+  `Lagged` (slow subscribers miss messages, they don't stall capture).
 - **Subscribers are `Stream`s.**
   `Monitor::subscribe::<P>() -> EventStream<P::Message>` returns
   a `futures_core::Stream + Unpin` backed by

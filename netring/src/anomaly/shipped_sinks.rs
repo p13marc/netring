@@ -13,6 +13,8 @@
 
 use std::borrow::Cow;
 use std::io::Write;
+use std::sync::Arc;
+use std::sync::atomic::{AtomicU64, Ordering};
 
 use flowscope::Timestamp;
 
@@ -249,17 +251,34 @@ impl AnomalySink for TracingSink {
 /// the consumer can still recover the human render via the
 /// `flowscope_kind` bridge or the originating handler context.
 pub struct ChannelSink {
-    tx: tokio::sync::mpsc::UnboundedSender<flowscope::OwnedAnomaly>,
+    tx: ChannelTx,
+}
+
+/// Backpressure backing for [`ChannelSink`]. The unbounded variant never drops
+/// but can grow without bound under a slow consumer; the bounded variant
+/// **never blocks the capture task** — when the channel is full the anomaly is
+/// dropped and a counter is incremented (the honest backpressure contract; see
+/// `docs/ASYNC_GUIDE.md`).
+enum ChannelTx {
+    Unbounded(tokio::sync::mpsc::UnboundedSender<flowscope::OwnedAnomaly>),
+    Bounded {
+        tx: tokio::sync::mpsc::Sender<flowscope::OwnedAnomaly>,
+        dropped: Arc<AtomicU64>,
+    },
 }
 
 impl ChannelSink {
-    /// Wrap an existing sender. The matching receiver typically
+    /// Wrap an existing unbounded sender. The matching receiver typically
     /// lives in a spawned task that drains and re-emits.
     pub fn new(tx: tokio::sync::mpsc::UnboundedSender<flowscope::OwnedAnomaly>) -> Self {
-        Self { tx }
+        Self {
+            tx: ChannelTx::Unbounded(tx),
+        }
     }
 
-    /// Convenience constructor — returns `(sink, receiver)`.
+    /// Convenience constructor — returns `(sink, receiver)` over an **unbounded**
+    /// channel. Prefer [`Self::bounded`] in production, where a slow consumer
+    /// would otherwise grow memory without bound.
     pub fn channel() -> (
         Self,
         tokio::sync::mpsc::UnboundedReceiver<flowscope::OwnedAnomaly>,
@@ -267,6 +286,60 @@ impl ChannelSink {
         let (tx, rx) = tokio::sync::mpsc::unbounded_channel();
         (Self::new(tx), rx)
     }
+
+    /// 0.24 Phase B: a **bounded** channel sink (drop-newest with a count).
+    ///
+    /// Returns `(sink, receiver, dropped)`. The capture task **never blocks**:
+    /// when the channel is full, `write` drops the anomaly and increments the
+    /// returned `dropped` counter (surface it through telemetry / metrics). The
+    /// caller drains the receiver in a spawned task.
+    pub fn bounded(
+        capacity: usize,
+    ) -> (
+        Self,
+        tokio::sync::mpsc::Receiver<flowscope::OwnedAnomaly>,
+        Arc<AtomicU64>,
+    ) {
+        let (tx, rx) = tokio::sync::mpsc::channel(capacity);
+        let dropped = Arc::new(AtomicU64::new(0));
+        (
+            Self {
+                tx: ChannelTx::Bounded {
+                    tx,
+                    dropped: Arc::clone(&dropped),
+                },
+            },
+            rx,
+            dropped,
+        )
+    }
+}
+
+fn build_owned(
+    kind: &'static str,
+    severity: Severity,
+    ts: Timestamp,
+    key: Option<&dyn crate::anomaly::Key>,
+    observations: &[(&'static str, Cow<'_, str>)],
+    metrics: &[(&'static str, f64)],
+) -> flowscope::OwnedAnomaly {
+    let mut owned = flowscope::OwnedAnomaly::new(kind, severity.into(), ts);
+    if let Some(k) = key {
+        // Structured 5-tuple flatten via KeyFields downcast.
+        if let Some(fkey) = k
+            .as_any()
+            .downcast_ref::<flowscope::extract::FiveTupleKey>()
+        {
+            owned = owned.with_key(fkey);
+        }
+    }
+    for (label, value) in observations {
+        owned = owned.with_observation(label, value.to_string());
+    }
+    for (label, value) in metrics {
+        owned = owned.with_metric(label, *value);
+    }
+    owned
 }
 
 impl AnomalySink for ChannelSink {
@@ -279,30 +352,59 @@ impl AnomalySink for ChannelSink {
         observations: &[(&'static str, Cow<'_, str>)],
         metrics: &[(&'static str, f64)],
     ) {
-        let mut owned = flowscope::OwnedAnomaly::new(kind, severity.into(), ts);
-        if let Some(k) = key {
-            // Structured 5-tuple flatten via KeyFields downcast.
-            if let Some(fkey) = k
-                .as_any()
-                .downcast_ref::<flowscope::extract::FiveTupleKey>()
-            {
-                owned = owned.with_key(fkey);
+        let owned = build_owned(kind, severity, ts, key, observations, metrics);
+        match &self.tx {
+            ChannelTx::Unbounded(tx) => {
+                let _ = tx.send(owned);
+            }
+            ChannelTx::Bounded { tx, dropped } => {
+                // try_send never blocks: a full (or closed) channel drops the
+                // anomaly and bumps the counter rather than stalling capture.
+                if tx.try_send(owned).is_err() {
+                    dropped.fetch_add(1, Ordering::Relaxed);
+                }
             }
         }
-        for (label, value) in observations {
-            owned = owned.with_observation(label, value.to_string());
-        }
-        for (label, value) in metrics {
-            owned = owned.with_metric(label, *value);
-        }
-        let _ = self.tx.send(owned);
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::anomaly::sink::AnomalySinkExt;
+    use crate::anomaly::sink::{AnomalySink, AnomalySinkExt};
+
+    #[test]
+    fn bounded_channel_sink_drops_with_count_when_full() {
+        // 0.24 Phase B backpressure contract: a full bounded channel drops the
+        // anomaly + counts it instead of blocking the capture task.
+        let (mut sink, _rx, dropped) = ChannelSink::bounded(2);
+        for _ in 0..5 {
+            sink.write(
+                "Test",
+                Severity::Warning,
+                Timestamp::new(0, 0),
+                None,
+                &[],
+                &[],
+            );
+        }
+        // Receiver never drained: 2 fit in the buffer, the other 3 are dropped.
+        assert_eq!(dropped.load(Ordering::Relaxed), 3);
+    }
+
+    #[test]
+    fn bounded_channel_sink_delivers_until_full() {
+        let (mut sink, mut rx, dropped) = ChannelSink::bounded(4);
+        for _ in 0..3 {
+            sink.write("T", Severity::Info, Timestamp::new(0, 0), None, &[], &[]);
+        }
+        assert_eq!(dropped.load(Ordering::Relaxed), 0);
+        let mut got = 0;
+        while rx.try_recv().is_ok() {
+            got += 1;
+        }
+        assert_eq!(got, 3);
+    }
 
     #[test]
     fn stdout_sink_default_uses_4kib_buffer() {

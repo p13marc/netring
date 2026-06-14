@@ -48,6 +48,10 @@ pub struct HandlerRegistry {
     /// declared-protocol set to surface
     /// `BuildError::HandlerForUnregisteredProtocol`.
     required_protocols: FxHashMap<TypeId, (TypeId, &'static str)>,
+    /// 0.25 S1: each registered handler's traffic-interest predicate, gathered
+    /// at register time via [`Event::traffic_class`]. Folded into the Monitor's
+    /// kernel-prefilter union (a handler can only widen it → no starvation).
+    traffic_interests: Vec<crate::monitor::subscription::Predicate>,
 }
 
 impl HandlerRegistry {
@@ -77,11 +81,7 @@ impl HandlerRegistry {
             .entry(TypeId::of::<E::Payload>())
             .or_default()
             .push(boxed);
-        if let Some(p_id) = E::protocol_marker() {
-            self.required_protocols
-                .entry(TypeId::of::<E::Payload>())
-                .or_insert((p_id, E::protocol_name()));
-        }
+        self.note_interest::<E>();
     }
 
     /// Add an async handler `H` for event type `E`.
@@ -99,11 +99,7 @@ impl HandlerRegistry {
             .entry(TypeId::of::<E::Payload>())
             .or_default()
             .push(boxed);
-        if let Some(p_id) = E::protocol_marker() {
-            self.required_protocols
-                .entry(TypeId::of::<E::Payload>())
-                .or_insert((p_id, E::protocol_name()));
-        }
+        self.note_interest::<E>();
     }
 
     /// 0.25-B1: add an effect handler `H` for event type `E` — reads
@@ -119,11 +115,27 @@ impl HandlerRegistry {
             .entry(TypeId::of::<E::Payload>())
             .or_default()
             .push(boxed);
+        self.note_interest::<E>();
+    }
+
+    /// Record the `required_protocols` entry and the
+    /// [traffic-interest](crate::monitor::subscription::Predicate) for a newly
+    /// registered event `E` — shared by all three `register*` paths.
+    fn note_interest<E: Event>(&mut self) {
         if let Some(p_id) = E::protocol_marker() {
             self.required_protocols
                 .entry(TypeId::of::<E::Payload>())
                 .or_insert((p_id, E::protocol_name()));
         }
+        self.traffic_interests
+            .push(crate::monitor::subscription::kernel_filter::class_interest(
+                &E::traffic_class(),
+            ));
+    }
+
+    /// 0.25 S1: the recorded per-handler traffic-interest predicates.
+    pub(crate) fn traffic_interests(&self) -> &[crate::monitor::subscription::Predicate] {
+        &self.traffic_interests
     }
 
     /// 0.21 D.1: returns an iterator over `(protocol_TypeId, protocol_name)`

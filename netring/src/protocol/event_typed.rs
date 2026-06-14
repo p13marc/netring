@@ -52,6 +52,17 @@ pub trait Event: Send + Sync + 'static {
     fn protocol_name() -> &'static str {
         "unknown"
     }
+
+    /// 0.25 S1: the [`TrafficClass`](crate::protocol::TrafficClass) this event
+    /// consumes — folded into the Monitor's kernel-prefilter union so a
+    /// narrow-traffic monitor pushes a narrow filter. Defaults to
+    /// [`TrafficClass::Any`] (conservative: forces capture-all), so an event
+    /// that doesn't override it can never cause a consumer to be starved.
+    /// Protocol-typed events (`FlowStarted<P>`, `on::<P>` messages) override
+    /// this to their protocol's [`Dispatch`](crate::protocol::Dispatch).
+    fn traffic_class() -> crate::protocol::TrafficClass {
+        crate::protocol::TrafficClass::Any
+    }
 }
 
 // ─── Raw protocol message events ────────────────────────────────
@@ -73,6 +84,10 @@ impl<P: MessageProtocol> Event for P {
 
     fn protocol_name() -> &'static str {
         P::NAME
+    }
+
+    fn traffic_class() -> crate::protocol::TrafficClass {
+        crate::protocol::TrafficClass::Dispatch(P::dispatch())
     }
 }
 
@@ -125,6 +140,10 @@ impl<P: Protocol> FlowStarted<P> {
 // `FlowStarted<Tcp>` and scope by parser with `on::<Http>`.
 impl<P: FlowProtocol> Event for FlowStarted<P> {
     type Payload = FlowStarted<P>;
+
+    fn traffic_class() -> crate::protocol::TrafficClass {
+        crate::protocol::TrafficClass::Dispatch(P::dispatch())
+    }
 }
 
 impl<P: Protocol> std::fmt::Debug for FlowStarted<P> {
@@ -178,6 +197,10 @@ impl<P: Protocol> FlowEnded<P> {
 
 impl<P: FlowProtocol> Event for FlowEnded<P> {
     type Payload = FlowEnded<P>;
+
+    fn traffic_class() -> crate::protocol::TrafficClass {
+        crate::protocol::TrafficClass::Dispatch(P::dispatch())
+    }
 }
 
 impl<P: Protocol> std::fmt::Debug for FlowEnded<P> {
@@ -218,6 +241,10 @@ impl<P: Protocol> FlowEstablished<P> {
 
 impl<P: FlowProtocol> Event for FlowEstablished<P> {
     type Payload = FlowEstablished<P>;
+
+    fn traffic_class() -> crate::protocol::TrafficClass {
+        crate::protocol::TrafficClass::Dispatch(P::dispatch())
+    }
 }
 
 impl<P: Protocol> std::fmt::Debug for FlowEstablished<P> {
@@ -329,6 +356,10 @@ impl TcpRst {
 
 impl Event for TcpRst {
     type Payload = TcpRst;
+
+    fn traffic_class() -> crate::protocol::TrafficClass {
+        crate::protocol::TrafficClass::Dispatch(crate::protocol::Dispatch::AllTcp)
+    }
 }
 
 // ─── ICMP error (0.22 §2.4) ─────────────────────────────────────
@@ -401,6 +432,10 @@ impl IcmpErrorKind {
 #[cfg(feature = "icmp")]
 impl Event for IcmpError {
     type Payload = IcmpError;
+
+    fn traffic_class() -> crate::protocol::TrafficClass {
+        crate::protocol::TrafficClass::Dispatch(crate::protocol::Dispatch::Icmp)
+    }
 }
 
 /// 0.22 §2.4: classify a parsed ICMP message into an [`IcmpErrorKind`],
@@ -455,6 +490,10 @@ impl<P: Protocol> FlowTick<P> {
 
 impl<P: FlowProtocol> Event for FlowTick<P> {
     type Payload = FlowTick<P>;
+
+    fn traffic_class() -> crate::protocol::TrafficClass {
+        crate::protocol::TrafficClass::Dispatch(P::dispatch())
+    }
 }
 
 impl<P: Protocol> std::fmt::Debug for FlowTick<P> {
@@ -507,6 +546,10 @@ impl<P: Protocol> ParserClosed<P> {
 
 impl<P: Protocol> Event for ParserClosed<P> {
     type Payload = ParserClosed<P>;
+
+    fn traffic_class() -> crate::protocol::TrafficClass {
+        crate::protocol::TrafficClass::Dispatch(P::dispatch())
+    }
 }
 
 impl<P: Protocol> std::fmt::Debug for ParserClosed<P> {

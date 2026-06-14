@@ -93,6 +93,7 @@ pub(crate) async fn run_loop(monitor: Monitor, stop: StopCondition) -> Result<()
         health,
         mut flow_exporters,
         packet_subs,
+        kernel_prefilter,
     } = monitor;
     // Borrow the monitor name as `&str` for the run loop's
     // dispatch sites. The owned `Box<str>` lives in this stack
@@ -142,6 +143,12 @@ pub(crate) async fn run_loop(monitor: Monitor, stop: StopCondition) -> Result<()
             }
             None => AsyncCapture::open(iface)?,
         };
+        // 0.25 S2: push the conservative kernel prefilter (fail-open union of
+        // every consumer's interest) into the AF_PACKET socket. It's a superset
+        // of what any consumer wants, so this only sheds traffic nobody needs.
+        if let Some(filter) = &kernel_prefilter {
+            cap.set_filter(filter)?;
+        }
         caps.push(AnyBackend::AfPacket(cap));
     }
     // 0.24 Phase B: AF_XDP backends (in builder-registration order, after the
@@ -468,6 +475,8 @@ pub(crate) async fn replay_loop(
         health,
         mut flow_exporters,
         packet_subs,
+        // pcap replay has no kernel filter to set (the source isn't a socket).
+        kernel_prefilter: _,
     } = monitor;
     let monitor_name_borrow: Option<&str> = monitor_name.as_deref();
 

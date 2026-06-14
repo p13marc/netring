@@ -17,27 +17,76 @@
 
 use flowscope::L4Proto;
 
-use super::packet::PacketSubscription;
 use super::predicate::{Atom, Predicate};
 use crate::config::bpf::BpfFilter;
 use crate::config::bpf_builder::BpfFilterBuilder;
+use crate::protocol::{Dispatch, TrafficClass};
 
-/// Compile the **union** kernel prefilter for a set of packet subscriptions:
-/// the OR of each sub's [`kernel_approx`](Predicate::kernel_approx). Returns
-/// `None` when no useful filter can be pushed (no subs, any sub matches
-/// everything in-kernel, or an unsupported shape) — the caller then leaves the
-/// capture unfiltered and relies on userspace evaluation.
-pub(crate) fn union_filter(subs: &[PacketSubscription]) -> Option<BpfFilter> {
+/// Map a consumer's [`TrafficClass`] to its [`Predicate`] traffic interest
+/// (0.25 S1). [`TrafficClass::Any`] → [`Predicate::Always`] (capture-all);
+/// a `Dispatch` → its proto (+ port) predicate.
+pub(crate) fn class_interest(class: &TrafficClass) -> Predicate {
+    match class {
+        TrafficClass::Any => Predicate::Always,
+        TrafficClass::Dispatch(d) => dispatch_interest(d),
+    }
+}
+
+/// Map a protocol's [`Dispatch`] to its traffic-interest predicate.
+pub(crate) fn dispatch_interest(d: &Dispatch) -> Predicate {
+    match d {
+        Dispatch::Tcp(ports) => proto_ports(L4Proto::Tcp, ports),
+        Dispatch::Udp(ports) => proto_ports(L4Proto::Udp, ports),
+        // ICMP interest spans v4 + v6 (the dispatch matches both).
+        Dispatch::Icmp => Predicate::Atom(Atom::Proto(L4Proto::Icmp))
+            .or(Predicate::Atom(Atom::Proto(L4Proto::IcmpV6))),
+        Dispatch::AllTcp => Predicate::Atom(Atom::Proto(L4Proto::Tcp)),
+        Dispatch::AllUdp => Predicate::Atom(Atom::Proto(L4Proto::Udp)),
+        // Port-agnostic signature dispatch can't be narrowed → capture-all.
+        Dispatch::Signature(_) => Predicate::Always,
+    }
+}
+
+/// `proto AND (port==p1 OR port==p2 …)`, or just `proto` if no ports. Ports use
+/// `AnyPort` (either endpoint) so both directions of the flow are captured.
+fn proto_ports(proto: L4Proto, ports: &[u16]) -> Predicate {
+    let base = Predicate::Atom(Atom::Proto(proto));
+    let mut port_pred: Option<Predicate> = None;
+    for &p in ports {
+        let atom = Predicate::Atom(Atom::AnyPort(p));
+        port_pred = Some(match port_pred {
+            None => atom,
+            Some(acc) => acc.or(atom),
+        });
+    }
+    match port_pred {
+        Some(pp) => base.and(pp),
+        None => base,
+    }
+}
+
+/// Cost cap (Zeek `max_filter_compile_time` analog): if the union's DNF has
+/// more than this many OR-clauses, **widen to no filter** (capture all) rather
+/// than push a huge/slow cBPF program. Fail-open — degrade toward over-capture,
+/// never toward dropping a wanted frame.
+const MAX_KERNEL_CLAUSES: usize = 64;
+
+/// Compile the conservative kernel prefilter for an arbitrary set of consumer
+/// **traffic-interest** predicates (0.25 S2): the OR-union of each interest's
+/// [`kernel_approx`](Predicate::kernel_approx). Returns `None` — meaning
+/// "capture everything, filter in userspace" — when there are no interests, any
+/// interest wants everything (`Always`), or the union can't be expressed within
+/// budget. The union is a superset of every interest, so **no consumer is ever
+/// starved**, and `None` is always safe (fail-open).
+pub(crate) fn compile_union(interests: impl IntoIterator<Item = Predicate>) -> Option<BpfFilter> {
     let mut union: Option<Predicate> = None;
-    for sub in subs {
-        let k = sub.predicate.kernel_approx();
+    for p in interests {
+        let k = p.kernel_approx();
         union = Some(match union {
             None => k,
             Some(acc) => acc.or(k),
         });
     }
-    // No subs, or the union relaxed to Always (some sub wants everything) →
-    // don't push a filter.
     match union {
         Some(Predicate::Always) | None => None,
         Some(p) => predicate_to_bpf(&p),
@@ -46,10 +95,11 @@ pub(crate) fn union_filter(subs: &[PacketSubscription]) -> Option<BpfFilter> {
 
 /// Lower a **kernel-only** predicate (already `kernel_approx`'d) to a
 /// [`BpfFilter`]. `None` if the shape can't be expressed (contains a `Not`,
-/// is `Always`, or the bytecode build fails) — a safe "pass all" fallback.
+/// is `Always`, exceeds [`MAX_KERNEL_CLAUSES`], or the bytecode build fails) —
+/// a safe "pass all" fallback.
 pub(crate) fn predicate_to_bpf(pred: &Predicate) -> Option<BpfFilter> {
     let dnf = to_dnf(pred)?;
-    if dnf.is_empty() {
+    if dnf.is_empty() || dnf.len() > MAX_KERNEL_CLAUSES {
         return None;
     }
     let mut clauses = dnf.into_iter();
@@ -192,13 +242,13 @@ mod tests {
     }
 
     #[test]
-    fn compiles_or_union_of_two_subs() {
-        // sub A: udp/53 ; sub B: tcp/80 → union matches either.
-        let subs = vec![
-            packet().udp().dst_port(53).to(|_v, _c| Ok(())),
-            packet().tcp().dst_port(80).to(|_v, _c| Ok(())),
-        ];
-        let bpf = union_filter(&subs).expect("union compiles");
+    fn compiles_or_union_of_two_interests() {
+        // interest A: udp/53 ; interest B: tcp/80 → union matches either.
+        let bpf = compile_union([
+            packet().udp().dst_port(53).into_predicate(),
+            packet().tcp().dst_port(80).into_predicate(),
+        ])
+        .expect("union compiles");
         assert!(bpf.matches(&frame(17, 53)), "udp/53 in union");
         assert!(bpf.matches(&frame(6, 80)), "tcp/80 in union");
         assert!(!bpf.matches(&frame(6, 53)), "tcp/53 not in union");
@@ -206,22 +256,22 @@ mod tests {
     }
 
     #[test]
-    fn unfiltered_sub_yields_no_kernel_filter() {
-        // A sub with only a userspace atom (sni) → kernel_approx is Always →
-        // union must be None (pass everything to userspace).
-        // (Use a session-less proxy: a packet sub with an empty filter.)
-        let subs = vec![packet().to(|_v, _c| Ok(()))];
-        assert!(union_filter(&subs).is_none());
+    fn unfiltered_interest_yields_no_kernel_filter() {
+        // An Always interest → union is Always → None (capture everything).
+        assert!(compile_union([packet().into_predicate()]).is_none());
     }
 
     #[test]
-    fn mixed_union_with_one_unfiltered_sub_is_none() {
-        // One narrow sub + one match-everything sub ⇒ union is everything.
-        let subs = vec![
-            packet().tcp().dst_port(443).to(|_v, _c| Ok(())),
-            packet().to(|_v, _c| Ok(())),
-        ];
-        assert!(union_filter(&subs).is_none());
+    fn mixed_union_with_one_unfiltered_interest_is_none() {
+        // One narrow interest + one match-everything interest ⇒ union is
+        // everything ⇒ capture all (a consumer can only widen).
+        assert!(
+            compile_union([
+                packet().tcp().dst_port(443).into_predicate(),
+                packet().into_predicate(),
+            ])
+            .is_none()
+        );
     }
 
     #[test]
@@ -232,7 +282,7 @@ mod tests {
     }
 
     #[test]
-    fn empty_subs_is_none() {
-        assert!(union_filter(&[]).is_none());
+    fn empty_interests_is_none() {
+        assert!(compile_union(Vec::<Predicate>::new()).is_none());
     }
 }

@@ -40,14 +40,30 @@ a strongly-typed tier with a filter [`Predicate`] and a handler:
   (DNF → conjunctions of L2–L4 atoms, OR-unioned across packet subs), with a
   safe fallback to "no filter" for shapes it can't express (negations, etc.).
   Verified in-sandbox via the `BpfFilter::matches` software interpreter.
-- `MonitorBuilder::kernel_prefilter()` exposes the compiled union filter for
-  inspection / opt-in application. **Not** auto-applied yet: the shared capture
-  also feeds the flow tracker / L7 parsers / `on::<E>` handlers, so safe
-  automatic pushdown needs the full per-handler traffic-interest union (a
-  follow-up) to avoid starving them.
+### Safe automatic kernel pushdown (Phase S1 / S2)
 
-Flow/session tier handler dispatch (`.to()` for those tiers), the auto-applied
-pushdown, and the table-driven AF_XDP map program follow.
+The kernel prefilter is now computed from **every** consumer's traffic interest
+and auto-applied to the AF_PACKET capture — safely.
+
+- Each consumer declares its traffic interest: handlers via a new
+  `Event::traffic_class()` (→ the protocol's `Dispatch`, default `Any`),
+  protocol parsers via their `Dispatch`, packet subs via their filter. The
+  Monitor folds them into the OR-union `kernel_prefilter()`.
+- Because the union is a **superset** of every consumer's interest, the pushed
+  filter can never drop a frame any consumer wants — **starvation-free by
+  construction**. It is **fail-open**: any "wants everything" consumer (a broad
+  handler, exporter, tick/report, broadcast, bandwidth), or a union exceeding
+  the cBPF clause budget, collapses it to "capture all" (no filter).
+- The run loop applies the union via `set_filter` on each AF_PACKET socket at
+  start. A narrow monitor (`protocol::<Tls>()`) pushes `tcp port 443/8443`;
+  adding `on::<FlowStarted<Udp>>` widens it to also pass UDP; adding
+  `on::<FlowPacket>` collapses it to capture-all. Verified end-to-end via the
+  `BpfFilter::matches` interpreter (`tests/monitor_kernel_prefilter.rs`).
+  `kernel_prefilter()` stays public for inspection. dhat `Δ 0` on the hot path.
+
+Flow/session tier handler dispatch (`.to()` for those tiers) and the
+table-driven AF_XDP map program follow. (Design:
+`plans/netring-0.25-subscription-engine-design.md`.)
 
 ### Async read + effect handlers (Phase B1)
 

@@ -197,6 +197,11 @@ pub struct Monitor {
     /// sub's filter. Empty (the common case) keeps the `track_into`-only
     /// hot loop — zero cost, dhat `Δ 0`.
     pub(crate) packet_subs: Vec<subscription::PacketSubscription>,
+    /// 0.25 S2: the conservative kernel prefilter (OR-union of every consumer's
+    /// traffic interest), or `None` for capture-all. Computed at build from the
+    /// full consumer set so it's a superset (no starvation); the run loop
+    /// applies it to each AF_PACKET capture via `set_filter`.
+    pub(crate) kernel_prefilter: Option<crate::config::BpfFilter>,
 }
 
 /// How the run loop reacts when a handler (detector / sink / async handler)
@@ -533,6 +538,13 @@ pub struct MonitorBuilder {
     /// zero-copy drain before flow tracking; moved into
     /// [`Monitor::packet_subs`] at build.
     packet_subs: Vec<subscription::PacketSubscription>,
+    /// 0.25 S1: per-consumer **traffic-interest** predicates, recorded as
+    /// handlers / protocols are registered (each event's
+    /// [`Event::traffic_class`](crate::protocol::event_typed::Event::traffic_class)
+    /// or a protocol's [`Dispatch`](crate::protocol::Dispatch)). Folded into the
+    /// kernel-prefilter union at [`Self::kernel_prefilter`] — a consumer can
+    /// only widen it, so the kernel filter is always a superset (no starvation).
+    traffic_interests: Vec<subscription::Predicate>,
 }
 
 impl MonitorBuilder {
@@ -878,6 +890,12 @@ impl MonitorBuilder {
         // called for symmetry.
         self.declared_protocols
             .insert(std::any::TypeId::of::<P>(), P::NAME);
+        // 0.25 S1: a registered parser only consumes the traffic its dispatch
+        // describes — record that interest for the kernel-prefilter union.
+        self.traffic_interests
+            .push(subscription::kernel_filter::dispatch_interest(
+                &P::dispatch(),
+            ));
         self
     }
 
@@ -1343,26 +1361,41 @@ impl MonitorBuilder {
         self
     }
 
-    /// The classic-BPF **kernel prefilter** the registered packet-tier
-    /// subscriptions compile to (0.25 Phase A3): the conservative OR-union of
-    /// each sub's [kernel
-    /// approximation](subscription::Predicate::kernel_approx), lowered to
-    /// [`BpfFilter`](crate::config::BpfFilter). `None` when nothing useful can
-    /// be pushed (no packet subs, a sub that matches everything in-kernel, or
-    /// an unsupported shape such as a negation) — i.e. "leave the capture
-    /// unfiltered".
+    /// The classic-BPF **kernel prefilter** this monitor compiles to (0.25
+    /// S2): the conservative OR-union of **every** consumer's traffic interest
+    /// — packet subs, registered handlers (via
+    /// [`Event::traffic_class`](crate::protocol::event_typed::Event::traffic_class)),
+    /// and protocol parsers (via their [`Dispatch`](crate::protocol::Dispatch))
+    /// — lowered to [`BpfFilter`](crate::config::BpfFilter).
     ///
-    /// Exposed for **inspection / debugging** (see what STAGE-0 would shed) and
-    /// for callers building a packet-only tap who want to apply it themselves
-    /// via [`AsyncCapture::set_filter`](crate::AsyncCapture::set_filter).
+    /// `None` means **capture everything** (filter in userspace): it's returned
+    /// when any consumer wants all traffic (a broad handler, an exporter, a
+    /// tick/report, broadcast, bandwidth), the union is empty, or it can't be
+    /// expressed within the cBPF budget. Because the union is a *superset* of
+    /// every consumer's interest, the filter never drops a frame any consumer
+    /// wants — **fail-open and starvation-free by construction**, which is what
+    /// makes it safe to auto-apply (see [`Monitor::run_*`](Monitor)).
     ///
-    /// The Monitor does **not** yet auto-apply this to its shared capture: the
-    /// ring also feeds the flow tracker, L7 parsers, and `on::<E>` handlers, so
-    /// a safe automatic pushdown needs the *full* traffic-interest union across
-    /// every handler (not just packet subs) to avoid starving them. That union
-    /// model is a follow-up; until then the prefilter is opt-in.
+    /// Also exposed for **inspection / debugging** (what STAGE-0 would shed).
     pub fn kernel_prefilter(&self) -> Option<crate::config::BpfFilter> {
-        subscription::kernel_filter::union_filter(&self.packet_subs)
+        // Broad consumers that need every flow regardless of L4: an exporter,
+        // a periodic tick/report, a broadcast subscriber, or bandwidth
+        // accounting. Any one forces capture-all (fail-open).
+        let wants_all = !self.flow_exporters.is_empty()
+            || !self.tick_handlers.is_empty()
+            || !self.broadcast_handles.is_empty()
+            || self.bandwidth_registered;
+
+        let interests = self
+            .handlers
+            .traffic_interests()
+            .iter()
+            .cloned()
+            .chain(self.traffic_interests.iter().cloned())
+            .chain(self.packet_subs.iter().map(|s| s.predicate.clone()))
+            .chain(wants_all.then_some(subscription::Predicate::Always));
+
+        subscription::kernel_filter::compile_union(interests)
     }
 
     /// Pre-register a `T: Default` state slot. Optional —
@@ -1595,6 +1628,9 @@ impl MonitorBuilder {
         if interface_required && no_capture_source {
             return Err(BuildError::NoInterface.into());
         }
+        // 0.25 S2: compute the kernel prefilter while the full consumer set is
+        // still on the builder (before fields are moved into the Monitor).
+        let kernel_prefilter = self.kernel_prefilter();
         // 0.21 A.6: build-time validation — every counter type
         // a detector declared via `detector! { counters: [K] }`
         // must have been registered via `.counter::<K>(...)` on
@@ -1677,6 +1713,7 @@ impl MonitorBuilder {
             health: health::HealthState::new(),
             flow_exporters: self.flow_exporters,
             packet_subs: self.packet_subs,
+            kernel_prefilter,
         })
     }
 }

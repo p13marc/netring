@@ -83,6 +83,57 @@ impl CaptureTelemetry {
     }
 }
 
+/// A built-in [`Report`](crate::report::Report) shape for capture health —
+/// the [`CaptureTelemetry`] fields flattened into a serde-friendly,
+/// per-source record that rides the periodic report stream.
+///
+/// Register via
+/// [`MonitorBuilder::capture_health`](crate::monitor::MonitorBuilder::capture_health),
+/// which ships one `CaptureHealth` per source per period to a
+/// [`ReportSink`](crate::report::ReportSink) (e.g.
+/// [`StdoutReportSink`](crate::report::StdoutReportSink) or
+/// [`JsonReportSink`](crate::report::JsonReportSink)). This is the
+/// no-code-required counterpart to a hand-written
+/// [`on_capture_stats`](crate::monitor::MonitorBuilder::on_capture_stats)
+/// handler.
+///
+/// `source` is the flat `u8` index (rather than the `SourceIdx` newtype)
+/// so the struct serializes cleanly to a JSON line without forcing
+/// `Serialize` onto internal types.
+#[derive(Debug, Clone, Copy, PartialEq)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize))]
+pub struct CaptureHealth {
+    /// Capture source index (interface registration order).
+    pub source: u8,
+    /// Cumulative packets delivered to userspace.
+    pub packets: u64,
+    /// Cumulative packets the kernel dropped (ring full).
+    pub drops: u64,
+    /// Cumulative ring freeze events.
+    pub freezes: u64,
+    /// Windowed drop rate over the most recent sample period, `[0.0, 1.0]`.
+    pub drop_rate: f64,
+    /// Cumulative drop rate over the whole run, `[0.0, 1.0]`.
+    pub lifetime_drop_rate: f64,
+}
+
+impl crate::report::Report for CaptureHealth {
+    const NAME: &'static str = "capture_health";
+}
+
+impl From<CaptureTelemetry> for CaptureHealth {
+    fn from(t: CaptureTelemetry) -> Self {
+        Self {
+            source: t.source.0,
+            packets: t.packets,
+            drops: t.drops,
+            freezes: t.freezes,
+            drop_rate: t.drop_rate,
+            lifetime_drop_rate: t.lifetime_drop_rate(),
+        }
+    }
+}
+
 /// Internal per-source accumulator that turns the monitor's cumulative
 /// [`CaptureStats`] into a [`CaptureTelemetry`] with a *windowed*
 /// `drop_rate`. One entry per capture source; remembers the last
@@ -224,6 +275,37 @@ mod tests {
         let t = s.sample(0, stats(10, 1, 0));
         assert_eq!(t.drop_rate, 0.0);
         assert_eq!(t.packets, 10);
+    }
+
+    #[test]
+    fn capture_health_flattens_telemetry_including_lifetime_rate() {
+        let mut s = TelemetrySampler::new(1);
+        let _ = s.sample(0, stats(1000, 0, 0));
+        let t = s.sample(0, stats(1100, 900, 3));
+        let h = CaptureHealth::from(t);
+        assert_eq!(h.source, 0);
+        assert_eq!(h.packets, 1100);
+        assert_eq!(h.drops, 900);
+        assert_eq!(h.freezes, 3);
+        assert!((h.drop_rate - 0.9).abs() < 1e-9);
+        assert!((h.lifetime_drop_rate - 0.45).abs() < 1e-9);
+    }
+
+    #[cfg(feature = "serde")]
+    #[test]
+    fn capture_health_serializes_to_a_json_line() {
+        let h = CaptureHealth {
+            source: 1,
+            packets: 42,
+            drops: 7,
+            freezes: 0,
+            drop_rate: 0.25,
+            lifetime_drop_rate: 0.14,
+        };
+        let line = serde_json::to_string(&h).expect("serialize");
+        assert!(line.contains("\"source\":1"));
+        assert!(line.contains("\"packets\":42"));
+        assert!(line.contains("\"drop_rate\":0.25"));
     }
 
     #[test]

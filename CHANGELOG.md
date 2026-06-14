@@ -34,6 +34,9 @@ runs *after* the batch is dropped). dhat steady state stays `Δ 0 / 0`.
   (so a current loss spike is visible even when lifetime totals dwarf
   it) plus `lifetime_drop_rate()` / `is_degraded(threshold)` helpers.
   Gated: a monitor without the hook never arms the sampler (zero cost).
+- `CaptureHealth` (a built-in `Report`) + `MonitorBuilder::capture_health(period, sink)`
+  — the no-code form: ships one per-source health record per period to any
+  `ReportSink<CaptureHealth>` (`StdoutReportSink` / `JsonReportSink` / custom).
 
 ### Backpressure honesty (Phase C3)
 

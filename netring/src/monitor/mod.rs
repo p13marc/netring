@@ -62,7 +62,7 @@ pub use async_handler::{AsyncHandler, BoxFuture};
 pub use dispatcher::{Dispatcher, MAX_EVENT_TYPES};
 pub use handler::{CtxOnly, Handler, PayloadCtx, PayloadOnly};
 pub use registry::{HandlerRegistry, ProtocolSlot, TypedBroadcastProtocolSlot, TypedProtocolSlot};
-pub use telemetry::CaptureTelemetry;
+pub use telemetry::{CaptureHealth, CaptureTelemetry};
 pub use tick::TickRegistration;
 
 pub mod subscribe;
@@ -616,6 +616,46 @@ impl MonitorBuilder {
             handler: Box::new(handler),
         });
         self
+    }
+
+    /// 0.24 Phase C: ship per-source capture health to a
+    /// [`ReportSink`](crate::report::ReportSink) every `period`.
+    ///
+    /// The no-code-required form of [`Self::on_capture_stats`]: each
+    /// period every capture source's [`CaptureTelemetry`] is flattened
+    /// into a [`CaptureHealth`] report and handed to `sink.record(..)`.
+    /// Pair with [`StdoutReportSink`](crate::report::StdoutReportSink)
+    /// for a quick health line, [`JsonReportSink`](crate::report::JsonReportSink)
+    /// for newline-delimited JSON (Vector / Loki), or any custom
+    /// `ReportSink<CaptureHealth>`.
+    ///
+    /// This is sugar over [`Self::on_capture_stats`] and shares its
+    /// single-handler slot — calling either after the other replaces the
+    /// previous registration.
+    ///
+    /// ```no_run
+    /// # use std::time::Duration;
+    /// # use netring::monitor::Monitor;
+    /// # use netring::protocol::builtin::Tcp;
+    /// # use netring::report::StdoutReportSink;
+    /// # fn _ex() -> Result<(), netring::Error> {
+    /// let monitor = Monitor::builder()
+    ///     .interface("eth0")
+    ///     .protocol::<Tcp>()
+    ///     .capture_health(Duration::from_secs(10), StdoutReportSink)
+    ///     .build()?;
+    /// # let _ = monitor;
+    /// # Ok(())
+    /// # }
+    /// ```
+    pub fn capture_health<S>(self, period: Duration, mut sink: S) -> Self
+    where
+        S: crate::report::ReportSink<CaptureHealth> + 'static,
+    {
+        self.on_capture_stats(period, move |t, _ctx| {
+            sink.record(&CaptureHealth::from(*t));
+            Ok(())
+        })
     }
 
     /// 0.21 D.2: maximum time the run loop spends draining

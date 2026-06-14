@@ -273,6 +273,7 @@ pub(crate) async fn run_loop(monitor: Monitor, stop: StopCondition) -> Result<()
                 BackendErrorPolicy::FailFast => return Err(e),
                 BackendErrorPolicy::SkipSource => {
                     backend_errors += 1;
+                    health.record_backend_error();
                     tracing::warn!(error = %e, count = backend_errors, "capture backend error (SkipSource)");
                     // Circuit breaker: a persistently-failing fd would otherwise
                     // spin the readiness select. Back off, and after many
@@ -323,6 +324,7 @@ pub(crate) async fn run_loop(monitor: Monitor, stop: StopCondition) -> Result<()
             &label_table,
             handler_error_policy,
             &mut flow_exporters,
+            &health,
         )
         .await?;
         drain_protocol_slots(
@@ -338,6 +340,7 @@ pub(crate) async fn run_loop(monitor: Monitor, stop: StopCondition) -> Result<()
             monitor_name_borrow,
             &label_table,
             handler_error_policy,
+            &health,
         )?;
 
         // 0.24 Phase C4: record progress for the health handle — a packet
@@ -366,6 +369,7 @@ pub(crate) async fn run_loop(monitor: Monitor, stop: StopCondition) -> Result<()
             &label_table,
             handler_error_policy,
             &mut flow_exporters,
+            &health,
         )
         .await?;
     }
@@ -463,6 +467,7 @@ pub(crate) async fn replay_loop(
             &label_table,
             handler_error_policy,
             &mut flow_exporters,
+            &health,
         )
         .await?;
 
@@ -479,6 +484,7 @@ pub(crate) async fn replay_loop(
             monitor_name_borrow,
             &label_table,
             handler_error_policy,
+            &health,
         )?;
 
         // 0.24 Phase C4: record replay progress for the health handle.
@@ -503,6 +509,7 @@ pub(crate) async fn replay_loop(
             &label_table,
             handler_error_policy,
             &mut flow_exporters,
+            &health,
         )
         .await?;
     }
@@ -547,6 +554,7 @@ async fn drain_phase(
     label_table: &flowscope::well_known::LabelTable,
     policy: HandlerErrorPolicy,
     flow_exporters: &mut [Box<dyn crate::export::FlowExporter>],
+    health: &crate::monitor::health::HealthState,
 ) -> Result<()> {
     // Step 1: drain the central tracker.
     let mut leftover: Vec<FsEvent<FlowKey>> = Vec::new();
@@ -585,6 +593,7 @@ async fn drain_phase(
             match policy {
                 HandlerErrorPolicy::Propagate => return Err(e),
                 HandlerErrorPolicy::Isolate => {
+                    health.record_handler_error();
                     tracing::warn!(error = %e, "handler error isolated (drain)")
                 }
             }
@@ -617,6 +626,7 @@ async fn drain_phase(
             match policy {
                 HandlerErrorPolicy::Propagate => return Err(e),
                 HandlerErrorPolicy::Isolate => {
+                    health.record_handler_error();
                     tracing::warn!(error = %e, "handler error isolated (drain slot)")
                 }
             }
@@ -798,6 +808,7 @@ async fn dispatch_tracked_events(
     label_table: &flowscope::well_known::LabelTable,
     policy: HandlerErrorPolicy,
     flow_exporters: &mut [Box<dyn crate::export::FlowExporter>],
+    health: &crate::monitor::health::HealthState,
 ) -> Result<()> {
     for evt in events.drain(..) {
         // 0.24 Phase D: a flow just ended → build a FlowRecord and fan it
@@ -835,6 +846,7 @@ async fn dispatch_tracked_events(
             match policy {
                 HandlerErrorPolicy::Propagate => return Err(e),
                 HandlerErrorPolicy::Isolate => {
+                    health.record_handler_error();
                     tracing::warn!(error = %e, "handler error isolated (per-event)")
                 }
             }
@@ -861,6 +873,7 @@ fn drain_protocol_slots(
     monitor_name: Option<&str>,
     label_table: &flowscope::well_known::LabelTable,
     policy: HandlerErrorPolicy,
+    health: &crate::monitor::health::HealthState,
 ) -> Result<()> {
     for slot in protocol_slots.iter_mut() {
         let mut ctx = Ctx::new(None, ts, source, state_map, sink, counters, flow_states);
@@ -871,6 +884,7 @@ fn drain_protocol_slots(
             match policy {
                 HandlerErrorPolicy::Propagate => return Err(e),
                 HandlerErrorPolicy::Isolate => {
+                    health.record_handler_error();
                     tracing::warn!(error = %e, "handler error isolated (per-slot)")
                 }
             }

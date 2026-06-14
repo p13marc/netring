@@ -49,6 +49,23 @@ kernel counters on read).
 the Phase C gauges for the same capture — pick the `Monitor` gauges
 (absolute) *or* the raw-`Capture` counters (deltas), not both.
 
+## Monitor resilience & health (Phase B/C)
+
+Emitted by
+[`MonitorHealth::record_metrics`](https://docs.rs/netring/latest/netring/monitor/struct.MonitorHealth.html#method.record_metrics)
+(call it from a `.tick(..)` handler or your own poll loop — the health
+handle has no built-in cadence). **Gauges.**
+
+| Metric | Type | Labels | Meaning |
+|--------|------|--------|---------|
+| `netring_monitor_handler_errors` | gauge | — | Cumulative handler errors swallowed under `HandlerErrorPolicy::Isolate`. |
+| `netring_monitor_backend_errors` | gauge | — | Cumulative capture-backend errors swallowed under `BackendErrorPolicy::SkipSource`. |
+| `netring_monitor_active_flows`   | gauge | — | Active flows in the tracker as of the last event. |
+
+> These are the "silent failure" signals: `Isolate` / `SkipSource` keep the
+> pipeline alive by swallowing errors, so a **rising** handler/backend error
+> count is what you alert on. Unlabeled — one series each. Safe.
+
 ## Anomalies
 
 Emitted by [`MetricsSink`](https://docs.rs/netring/latest/netring/anomaly/struct.MetricsSink.html)

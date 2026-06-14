@@ -48,6 +48,14 @@ pub(crate) struct HealthState {
     /// sample, which is independent of `record_event`).
     packets: AtomicU64,
     drops: AtomicU64,
+    /// 0.24 Phase B/C: resilience counters. Handler errors swallowed by
+    /// [`HandlerErrorPolicy::Isolate`](crate::monitor::HandlerErrorPolicy)
+    /// and backend errors swallowed by
+    /// [`BackendErrorPolicy::SkipSource`](crate::monitor::BackendErrorPolicy)
+    /// are silent by design — these counters make the silent-drop rate
+    /// observable so operators can alert on it.
+    handler_errors: AtomicU64,
+    backend_errors: AtomicU64,
 }
 
 impl HealthState {
@@ -60,7 +68,20 @@ impl HealthState {
             active_flows: AtomicUsize::new(0),
             packets: AtomicU64::new(0),
             drops: AtomicU64::new(0),
+            handler_errors: AtomicU64::new(0),
+            backend_errors: AtomicU64::new(0),
         })
+    }
+
+    /// Count one handler error swallowed under `HandlerErrorPolicy::Isolate`.
+    pub(crate) fn record_handler_error(&self) {
+        self.handler_errors.fetch_add(1, Ordering::Relaxed);
+    }
+
+    /// Count one capture-backend error swallowed under
+    /// `BackendErrorPolicy::SkipSource`.
+    pub(crate) fn record_backend_error(&self) {
+        self.backend_errors.fetch_add(1, Ordering::Relaxed);
     }
 
     /// Stamp the run-loop start instant (idempotent — the first call
@@ -158,6 +179,22 @@ impl MonitorHealth {
         self.inner.drops.load(Ordering::Relaxed)
     }
 
+    /// Cumulative handler errors swallowed under
+    /// [`HandlerErrorPolicy::Isolate`](crate::monitor::HandlerErrorPolicy).
+    /// `0` under the default `Propagate` policy (the first error stops the
+    /// monitor instead). A rising count means detectors/handlers are
+    /// silently failing — alert on it.
+    pub fn handler_errors(&self) -> u64 {
+        self.inner.handler_errors.load(Ordering::Relaxed)
+    }
+
+    /// Cumulative capture-backend errors swallowed under
+    /// [`BackendErrorPolicy::SkipSource`](crate::monitor::BackendErrorPolicy).
+    /// `0` under the default `FailFast` policy.
+    pub fn backend_errors(&self) -> u64 {
+        self.inner.backend_errors.load(Ordering::Relaxed)
+    }
+
     /// `true` once at least one event (packet or tick) has been
     /// processed. A weaker signal than [`is_ready`](Self::is_ready) — a
     /// quiet link can be ready without having seen traffic.
@@ -188,6 +225,22 @@ impl MonitorHealth {
         }
     }
 
+    /// Emit the resilience + flow gauges through the `metrics` facade
+    /// (feature `metrics`): `netring_monitor_handler_errors`,
+    /// `netring_monitor_backend_errors`, `netring_monitor_active_flows`.
+    ///
+    /// Call periodically (e.g. from a `.tick(..)` handler or your own
+    /// poll loop) — the health handle has no built-in emit cadence. The
+    /// per-source capture gauges live on
+    /// [`CaptureTelemetry::record_metrics`](crate::monitor::CaptureTelemetry::record_metrics).
+    /// A no-op until the host app installs a `metrics` recorder.
+    #[cfg(feature = "metrics")]
+    pub fn record_metrics(&self) {
+        metrics::gauge!(crate::metrics::GAUGE_HANDLER_ERRORS).set(self.handler_errors() as f64);
+        metrics::gauge!(crate::metrics::GAUGE_BACKEND_ERRORS).set(self.backend_errors() as f64);
+        metrics::gauge!(crate::metrics::GAUGE_ACTIVE_FLOWS).set(self.active_flows() as f64);
+    }
+
     /// A consistent point-in-time snapshot of the readable fields —
     /// handy for serializing one health record without N racy loads.
     pub fn snapshot(&self) -> MonitorHealthSnapshot {
@@ -197,6 +250,8 @@ impl MonitorHealth {
             active_flows: self.active_flows(),
             packets: self.packets(),
             drops: self.drops(),
+            handler_errors: self.handler_errors(),
+            backend_errors: self.backend_errors(),
             ready: self.is_ready(),
             seen_traffic: self.has_seen_traffic(),
         }
@@ -228,6 +283,10 @@ pub struct MonitorHealthSnapshot {
     pub packets: u64,
     /// Cumulative drops as of the last telemetry sample.
     pub drops: u64,
+    /// Handler errors swallowed under `HandlerErrorPolicy::Isolate`.
+    pub handler_errors: u64,
+    /// Backend errors swallowed under `BackendErrorPolicy::SkipSource`.
+    pub backend_errors: u64,
     /// Readiness (sockets open + loop servicing).
     pub ready: bool,
     /// Whether any traffic has been seen.
@@ -295,6 +354,19 @@ mod tests {
     }
 
     #[test]
+    fn resilience_counters_accumulate() {
+        let state = HealthState::new();
+        let h = MonitorHealth::new(state.clone());
+        assert_eq!(h.handler_errors(), 0);
+        assert_eq!(h.backend_errors(), 0);
+        state.record_handler_error();
+        state.record_handler_error();
+        state.record_backend_error();
+        assert_eq!(h.handler_errors(), 2);
+        assert_eq!(h.backend_errors(), 1);
+    }
+
+    #[test]
     fn snapshot_is_internally_consistent() {
         let state = HealthState::new();
         let h = MonitorHealth::new(state.clone());
@@ -302,12 +374,24 @@ mod tests {
         state.mark_sockets_open();
         state.record_event(7);
         state.record_totals(42, 1);
+        state.record_handler_error();
         let snap = h.snapshot();
         assert!(snap.ready);
         assert!(snap.seen_traffic);
         assert_eq!(snap.active_flows, 7);
         assert_eq!(snap.packets, 42);
         assert_eq!(snap.drops, 1);
+        assert_eq!(snap.handler_errors, 1);
+        assert_eq!(snap.backend_errors, 0);
         assert!(snap.last_event_age.is_some());
+    }
+
+    #[cfg(feature = "metrics")]
+    #[test]
+    fn record_metrics_is_a_noop_without_a_recorder() {
+        let state = HealthState::new();
+        let h = MonitorHealth::new(state.clone());
+        state.record_handler_error();
+        h.record_metrics(); // must not panic with no recorder installed
     }
 }

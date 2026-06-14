@@ -37,6 +37,11 @@ runs *after* the batch is dropped). dhat steady state stays `Δ 0 / 0`.
 - `BackendErrorPolicy { FailFast (default), SkipSource }` +
   `MonitorBuilder::backend_error_policy` — `SkipSource` keeps servicing
   the other capture sources, with a consecutive-error circuit breaker.
+- Errors swallowed by `Isolate` / `SkipSource` are silent by design, so
+  they're now counted and exposed: `MonitorHealth::handler_errors()` /
+  `backend_errors()` (+ in the snapshot), and `MonitorHealth::record_metrics()`
+  emits `netring_monitor_{handler_errors,backend_errors,active_flows}`
+  gauges (feature `metrics`). Alert on a rising count.
 
 ### Capture telemetry (Phase C1/C2)
 

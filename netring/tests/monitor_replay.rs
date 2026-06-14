@@ -211,6 +211,41 @@ async fn replay_isolates_handler_errors() {
 }
 
 #[tokio::test(flavor = "current_thread")]
+async fn replay_isolated_handler_errors_surface_on_health_counter() {
+    // 0.24 Phase B/C: errors swallowed by Isolate are silent by design, so
+    // MonitorHealth::handler_errors() makes the silent-drop rate observable.
+    let pcap = write_synthetic_pcap();
+
+    let monitor = Monitor::builder()
+        .pcap_source(pcap.path())
+        .handler_error_policy(HandlerErrorPolicy::Isolate)
+        .protocol::<Udp>()
+        .on::<FlowStarted<Udp>>(|_e: &FlowStarted<Udp>| Err(Error::Config("boom".into())))
+        .build()
+        .expect("build");
+
+    // Grab the health handle BEFORE replay consumes the monitor.
+    let health = monitor.health();
+    assert_eq!(health.handler_errors(), 0, "no errors before replay");
+
+    monitor
+        .replay()
+        .await
+        .expect("replay completes under Isolate");
+
+    assert!(
+        health.handler_errors() >= 1,
+        "isolated handler errors should be counted on the health handle (got {})",
+        health.handler_errors()
+    );
+    assert_eq!(
+        health.backend_errors(),
+        0,
+        "no backend errors in pcap replay"
+    );
+}
+
+#[tokio::test(flavor = "current_thread")]
 async fn replay_propagates_handler_errors_by_default() {
     // Default policy is Propagate: a handler error tears the monitor down.
     let pcap = write_synthetic_pcap();

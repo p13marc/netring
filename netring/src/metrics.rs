@@ -47,6 +47,18 @@ pub const GAUGE_FREEZES: &str = "netring_capture_freezes";
 /// Gauge name: windowed drop rate (`[0.0, 1.0]`), per capture source.
 pub const GAUGE_DROP_RATE: &str = "netring_capture_drop_rate";
 
+/// Gauge name: cumulative handler errors swallowed under
+/// `HandlerErrorPolicy::Isolate`. Emitted by
+/// [`MonitorHealth::record_metrics`](crate::monitor::MonitorHealth::record_metrics).
+pub const GAUGE_HANDLER_ERRORS: &str = "netring_monitor_handler_errors";
+
+/// Gauge name: cumulative backend errors swallowed under
+/// `BackendErrorPolicy::SkipSource`.
+pub const GAUGE_BACKEND_ERRORS: &str = "netring_monitor_backend_errors";
+
+/// Gauge name: active flows in the central tracker (last event).
+pub const GAUGE_ACTIVE_FLOWS: &str = "netring_monitor_active_flows";
+
 /// Record a capture-stats delta as `metrics` counters.
 ///
 /// Best paired with [`crate::Capture::stats`] (which returns the delta

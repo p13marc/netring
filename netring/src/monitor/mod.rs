@@ -53,6 +53,7 @@ use crate::protocol::event_typed::{Event, Tick};
 pub mod async_handler;
 pub(crate) mod backend;
 pub mod dispatcher;
+pub mod effect;
 #[cfg(feature = "tls")]
 pub mod fingerprint;
 pub mod handler;
@@ -64,6 +65,7 @@ pub mod tick;
 
 pub use async_handler::{AsyncHandler, BoxFuture};
 pub use dispatcher::{Dispatcher, MAX_EVENT_TYPES};
+pub use effect::{EffectHandler, Effects};
 #[cfg(feature = "tls")]
 pub use fingerprint::TlsFingerprint;
 pub use handler::{CtxOnly, Handler, PayloadCtx, PayloadOnly};

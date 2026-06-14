@@ -25,6 +25,7 @@ All netring documentation lives in this one tree (`netring/docs/`). The repo roo
 - [AF_XDP_EVALUATION.md](AF_XDP_EVALUATION.md) — AF_XDP design notes.
 
 ## Migration guides
+- [MIGRATING_0.23_TO_0.24.md](MIGRATING_0.23_TO_0.24.md) — telemetry/health, exporters, JA4/JA4S, AF_XDP-in-Monitor (additive).
 - [MIGRATING_0.22_TO_0.23.md](MIGRATING_0.22_TO_0.23.md) — `Send` run-loop future.
 - [MIGRATING_0.21_TO_0.22.md](MIGRATING_0.21_TO_0.22.md) — typed roles, flat `FlowPacket`, ops toolkit.
 - [MIGRATING_0.20_TO_0.21.md](MIGRATING_0.20_TO_0.21.md) — Send Monitor, sharding, subscribers.

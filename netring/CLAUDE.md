@@ -20,14 +20,30 @@ built on AF_PACKET with TPACKET_V3 (block-based mmap ring buffers) and AF_XDP.
 
 ## Implementation Status
 
-**0.23.0 — in progress on `0.23-dev`** (small breaking release; not yet
-tagged/published). Headline: the `Monitor` run-loop future
-(`run_for`/`run_until`/`run_until_signal`/`run_until_idle`) is now
-`Send + 'static`, so it can be `tokio::spawn`'d. Breaking: `on_async`
-handlers must return `Send` futures. Zero runtime cost (the mmap ring was
-already `Send`; only the async-dispatch path needed fixing — `BoxFuture:
-+ Send` + lexically-scoped `*const ()` in `dispatch_async`); dhat stays
-`Δ 0 / 0`. Migration: `docs/MIGRATING_0.22_TO_0.23.md`.
+**0.24.0 — in progress on `0.24-dev`** ("Zero-Copy Core + Production
+Trust"; additive over 0.23, draft PR #2 CI-green). Folds in the 0.23 `Send`
+run-loop work. Landed + validated: **Phase B** keystone (borrowed zero-copy
++ `Send` run loop — per-packet `to_owned` gone, dhat `Δ 0`), resilience
+(`HandlerErrorPolicy`/`BackendErrorPolicy`), and the **`AnyBackend`** run-loop
+seam + `MonitorBuilder::xdp_interface` (AF_XDP reaches the Monitor —
+`src/monitor/backend.rs`; AF_PACKET arm CI-validated on live capture, AF_XDP
+arm compile-wired + HW-gated). **Phase C** telemetry/health (`CaptureTelemetry`
++ `on_capture_stats`, `CaptureHealth`/`capture_health`, `capture_metrics`
+Prometheus gauges, `MonitorHealth` readiness/liveness, `docs/METRICS.md`).
+**Phase D** in-tree exporters (`FlowRecord`/`FlowExporter`/`export_flows`,
+`SyslogSink` RFC 5424, `IpfixExporter` RFC 7011). **Phase E** JA4/JA4S
+(`flowscope 0.15.0` PUBLISHED; `TlsFingerprint` + `on_fingerprint`,
+`docs/FINGERPRINTS.md`). Migration: `docs/MIGRATING_0.23_TO_0.24.md`.
+Remaining (hardware/post-0.24): live AF_XDP UMEM hugepages/NUMA + full
+xdp-loader-in-Monitor; `netring-exporters` (OTLP/Kafka) crate; EVE-tls-record.
+
+**0.23.0 — folded into 0.24-dev** (never released standalone). Headline: the
+`Monitor` run-loop future (`run_for`/`run_until`/`run_until_signal`/
+`run_until_idle`) became `Send + 'static`, so it can be `tokio::spawn`'d.
+Breaking: `on_async` handlers must return `Send` futures. Zero runtime cost
+(the mmap ring was already `Send`; only the async-dispatch path needed fixing
+— `BoxFuture: + Send` + lexically-scoped `*const ()` in `dispatch_async`);
+dhat stays `Δ 0 / 0`. Migration: `docs/MIGRATING_0.22_TO_0.23.md`.
 
 **0.22.0 — released** (a large breaking release). Depends on flowscope
 `0.14.1`. ~330 lib + integration tests, zero warnings, `cargo fmt --check`

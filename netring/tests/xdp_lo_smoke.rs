@@ -32,8 +32,11 @@ use netring::xdp::XdpFlags;
 #[test]
 fn afxdp_lo_redirect_all_captures_loopback_traffic() {
     // Attach the built-in redirect-all XDP program to `lo` in SKB/generic mode
-    // and open an AF_XDP socket registered in its XSKMAP. `force_replace` makes
-    // it robust to a leftover program from a prior (failed) run.
+    // and open an AF_XDP socket registered in its XSKMAP.
+    //
+    // NOTE: no `force_replace` — `XDP_FLAGS_REPLACE` is a netlink-only flag and
+    // is rejected by the link API (`bpf_link_create`) the loader uses. A fresh
+    // CI runner has a clean `lo`, so REPLACE isn't needed.
     let mut sock = XdpSocket::builder()
         .interface("lo")
         .queue_id(0)
@@ -41,7 +44,6 @@ fn afxdp_lo_redirect_all_captures_loopback_traffic() {
         .frame_count(4096)
         .with_default_program()
         .xdp_attach_flags(XdpFlags::SKB_MODE)
-        .force_replace(true)
         .build()
         .expect(
             "build AF_XDP socket on lo with the redirect-all program \

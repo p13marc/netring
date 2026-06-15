@@ -28,12 +28,17 @@
 - **Filters are typed builders** (reuse `BpfFilterBuilder` vocabulary); `.expr("…")` strings
   are the *runtime* escape hatch (arch §4), parsed by an **own dep-free recursive-descent
   parser** over the same `Predicate` AST — **not** `wirefilter` (dead on crates.io). ✅ shipped.
-- **Clean compat break in 0.25 (no shim half-life).** Remove the deprecated `interface()`
-  singular alias, `MultiInterfaceNotYetSupported`, and the payload-only `on_async` shim.
-  `on::<E>` stays as *ergonomic sugar* lowering to a subscription (it's the natural handler
-  spelling, not a deprecated wart). `on_async` is replaced outright by `on_effect`. Migration
-  guide carries every rename. Subscriptions are the front door; the old surface that was only
-  kept "for one more release" is gone now.
+- **Clean compat break in 0.25 — but only where there's a genuine wart.** Code audit
+  (2026-06-15) found the surface is **already clean**: no `#[deprecated]` items remain,
+  `MultiInterfaceNotYetSupported` was removed back in 0.22, and `interface()` is a legitimate
+  convenience over `interfaces([…])` (not a deprecated alias). The handler surface is an
+  **intentional, consistent gradient** — sync `on`(payload) / `on_ctx`(payload+`&mut Ctx`)
+  mirrored by async `on_async`(payload) / `on_effect`(payload+`&Ctx`→`Effects`). `on_async` is
+  the *simple async variant*, **not** a shim; it is kept. (Earlier plan text called it a shim —
+  that was based on stale `CLAUDE.md` notes about 0.22-era deprecations that were already
+  removed.) **No breaking removals are warranted in 0.25.** The break budget is spent on the
+  *additive-but-replacing* redesign (subscriptions as the front door), which leaves existing
+  spellings working.
 
 ## Cross-cutting invariants (carried from 0.24)
 clippy/fmt/**doc -D warnings** clean · dhat **Δ0** + **0 allocs/packet** (gated-off hot

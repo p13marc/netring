@@ -15,14 +15,18 @@
 - **0.25 =** subscriptions + pushdown (A) · async effects + dispatcher (B) · perf numbers (C)
   · TX symmetry (D, **trim-able → 1.0+**).
 - **Filters are typed builders** (reuse `BpfFilterBuilder` vocabulary); `.expr("…")` strings
-  → `wirefilter` (optional feature) are the *runtime* escape hatch (arch §4).
+  are the *runtime* escape hatch (arch §4), parsed by an **own dep-free recursive-descent
+  parser** over the same `Predicate` AST — **not** `wirefilter` (dead on crates.io). ✅ shipped.
 - **Compat shims** from 0.24 (`interface()`, payload-only `on_async`) remain through 0.25;
   `on::<E>` becomes sugar over subscriptions. **All shims removed at 1.0.**
 
 ## Cross-cutting invariants (carried from 0.24)
-clippy/fmt/doc clean · dhat **Δ0** + **0 allocs/packet** · run-loop **`Send`** · **miri** +
-**fuzz** + **loom** (new effect/subscription paths) green · **perf regression gate** vs the
-0.24 baseline · flowscope floor `>= 0.15`.
+clippy/fmt/**doc -D warnings** clean · dhat **Δ0** + **0 allocs/packet** (gated-off hot
+path) · run-loop **`Send`** (now incl. the effect path, `monitor_send`) · **miri** (now
+covers the `monitor::` type-erased casts) + **fuzz** (now incl. the `.expr()` parser) green
+· **perf regression gate** vs the 0.24 baseline (= Phase C, not yet) · flowscope floor
+`>= 0.16`. *(loom: N/A for the sequential effect/subscription dispatch — see the
+Verification-coverage note in the status section; was an overclaim.)*
 
 ## Status table
 > **Phase A design**: the subscription engine was redesigned research-grounded
@@ -30,32 +34,57 @@ clippy/fmt/doc clean · dhat **Δ0** + **0 allocs/packet** · run-loop **`Send`*
 > netring's primitives already match the validated architecture; the rest is the
 > S1–S5 phasing below. Landed pieces marked ✅.
 
+> **Audit 2026-06-15:** adversarial verification confirmed every ✅ item below is
+> implemented AND correctly wired (no MISSING/MIS-WIRED; the S2 union is provably
+> starvation-free). The differentiator (Phase A subscriptions + S1/S2 pushdown +
+> Phase B effects) is **complete + CI-validated**. Remaining for 0.25: Phase C
+> (perf numbers) + D (TX, trim-able) + the deferral backlog + Phase R release.
+
 | Phase | Item | Breaking | Status |
 |---|---|---|---|
-| **A** | 3 strongly-typed tiers: `packet()` / `flow::<P>()` / `session::<P>()` + per-sub typed filters | shim (`on::<E>`) | ✅ packet tier e2e (A1a/b/c); flow/session `.to()` = **S3** |
+| **A** | 3 strongly-typed tiers: `packet()` / `flow::<P>()` / `session::<P>()` + per-sub typed filters | shim (`on::<E>`) | ✅ all three tiers e2e (A1a/b/c + S3a/b) |
 | A | filter compiler **splits** AST → kernel conjunction + userspace remainder | additive | ✅ `kernel_approx` (A2) + cBPF compiler (A3a) |
-| A | STAGE-0 pushdown: cBPF (AF_PACKET) + **table-driven XDP map** (AF_XDP) | additive | ◑ compiler ✅; **safe auto-apply = S2**; XDP map = S5 |
-| A | `.expr()` runtime strings → own `pest`/`nom` parser over the AST (**not** dead `wirefilter` crate) | no | ☐ A4 |
-| **B** | async `on_async(|p, &Ctx| -> Future<Effects>)` — read sync + write deferred | shim | ✅ `on_effect` e2e (B1) |
+| A | STAGE-0 pushdown: cBPF (AF_PACKET) + **table-driven XDP map** (AF_XDP) | additive | ✅ cBPF + **safe auto-apply** (S2, live-validated `monitor_lo_kernel_pushdown`); ◑ XDP map = #38 (AF_XDP path now CI-validated, `xdp_lo_smoke`) |
+| A | `.expr()` runtime strings → own dep-free recursive-descent parser (**not** dead `wirefilter` crate) | no | ✅ A4 (`subscription/expr.rs`, fuzzed) |
+| **B** | async `on_effect(|p, &Ctx| -> Future<Effects>)` — read sync + write deferred | shim | ✅ `on_effect` e2e (B1) |
 | B | dispatcher: lift `MAX_EVENT_TYPES` (ArrayVec→spill) + debug type-tag | minor | ✅ (B2) |
-| **C** | CPU/NUMA pinning in `ShardedRunner` + `FanoutMode::SymmetricHash` | no | ☐ |
-| C | prefetch + batched AF_XDP refill + `#[cold]` (bench-gated) | no | ☐ |
-| C | published pps/Gbps/latency + CI perf gate + `docs/PERFORMANCE.md` | no | ☐ |
-| **D** | TX symmetry: stream injection · pacing · TX timestamps (**trim-able**) | no | ☐ |
-| R | CHANGELOG · migration · publish 0.25 → open community-test window | — | ☐ |
+| **C** | CPU/NUMA pinning in `ShardedRunner` + `FanoutMode::SymmetricHash` | no | ☐ not started |
+| C | prefetch + batched AF_XDP refill + `#[cold]` (bench-gated) | no | ☐ not started |
+| C | published pps/Gbps/latency + CI perf gate + `docs/PERFORMANCE.md` | no | ☐ not started |
+| **D** | TX symmetry: stream injection · pacing · TX timestamps (**trim-able**) | no | ☐ not started |
+| R | version bump · CHANGELOG · `MIGRATING_0.24_TO_0.25.md` · publish | — | ☐ (version still 0.24.0) |
 
 ### Subscription-engine phasing (supersedes the A rows above; see design doc)
-- **S1** — `TrafficInterest` model: every consumer (`on::<E>`, `protocol::<P>`,
-  exporters, tier subs) → a `Predicate` interest, collected in one set. *(bookkeeping)*
-- **S2** — **safe union pushdown**: fold the whole set, **fail-open** (any `Always`
-  interest / over-budget union → capture all), apply via `set_filter`. Closes #31
-  correctly (union = superset ⇒ no consumer starved).
-- **S3** — flow/session `.to()` dispatch, **deliver-at-completion** (flow→`FlowEnded`+stats,
-  session→on-parse). Closes #30.
-- **S4** — bounded async-effect channel + drop counter → `CaptureTelemetry`.
+- **S1** ✅ — `TrafficInterest` model: `Event::traffic_class()` + registry/protocol
+  interest recording, mapped via `kernel_filter::{class_interest,dispatch_interest}`.
+- **S2** ✅ — **safe union pushdown**: `compile_union` fail-open (any `Always` /
+  over-budget → None), `kernel_prefilter()` folds all consumers + `Always` for broad
+  ones, applied via `set_filter` (AF_PACKET). Live-validated (`monitor_lo_kernel_pushdown`
+  CI job: shed 64k noise frames at the kernel). Closes #31, starvation-free.
+- **S3** ✅ — flow (`FlowEnded`+stats) + session (on-parse) `.to()` dispatch (S3a/S3b).
+  Closes #30. *(Orientation caveat: bidirectional key ⇒ flow/session `src_*`/`dst_*`
+  are best-effort; use either-endpoint `port`/`host`. Documented.)*
+- **S4** ✅ — already shipped in 0.24-C: bounded `ChannelSink` + `dropped` counter.
 - **S5 (0.26+)** — staged early-shed (bounded L7 depth, per-flow bypass → AF_XDP map).
 
-**Order:** S1→S2 (correctness-closing, additive) → S3 → S4 → C → D. A4 any time.
+**Done:** S1→S2→S3→S4 + A4 (+ AF_XDP-path CI validation + 2 xdp-loader bug fixes).
+**Remaining:** Phase C (perf) → D (TX) → R (release). A4 ✅.
+
+### Verification coverage (audit 2026-06-15 — now enforced in CI)
+- **miri** (Tree Borrows) now covers the type-erased `*const ()` casts in
+  `monitor::dispatcher`/`registry`/`subscription` (was `config::`/`packet::` only).
+- **fuzz** has an `expr_parse` target over the `.expr()` parser + AST consumers.
+- **Send**: `monitor_send`'s spawnable assertion now registers an `on_effect`
+  handler (covers the `&mut Ctx`-across-`.await` effect path; Send rests on `Ctx: Send`).
+- **CI runs the cap-free 0.25 integration tests** (`monitor_replay` = B1 e2e + all
+  tiers, `monitor_kernel_prefilter` = S2 union, `monitor_send`, …) — previously dormant.
+- **loom: N/A for the effect/subscription dispatch** — it's sequential in the single
+  run loop (no shared-state concurrency). The genuinely concurrent path is the
+  `ShardedRunner` merge worker; a loom test there is a *separate* (optional) item, not
+  the "effect/subscription apply" the cross-cutting line implied. *(Correcting the
+  earlier overclaim — there is no loom test in-tree, and the effect path doesn't need one.)*
+- **dhat Δ0** bench covers the **unchanged hot path** (no subs/effects → gated off);
+  the gating preserves Δ0 for the common case. Per-tier allocation profiling is a Phase-C item.
 
 ## Deferred from 0.24 (backlog — fold into the phases above or do standalone)
 Items the 0.24 plan scoped but shipped without (0.24.0 released 2026-06-14, additive):
@@ -65,9 +94,17 @@ Items the 0.24 plan scoped but shipped without (0.24.0 released 2026-06-14, addi
   {handler,backend}_errors` counters + gauges already shipped in 0.24.
 - **B5 AF_XDP UMEM hugepages + NUMA + ZC/copy-mode detect** (`MAP_HUGETLB`/`mbind`,
   `tracing::warn!` on silent copy-mode fallback) — overlaps 0.25-C NUMA pinning; needs HW.
-- **AF_XDP live validation:** `xdp_interface` is compile-wired in 0.24 but never run on
-  real AF_XDP; full in-Monitor xdp-loader integration (attach redirect program) + an
-  end-to-end rig.
+- **◑ AF_XDP live validation (PARTIAL, 2026-06-15):** the AF_XDP *path* is now
+  CI-validated — `tests/xdp_lo_smoke.rs` loads the redirect-all program on `lo`
+  (SKB mode, root) and captures redirected frames; CI job `AF_XDP lo live (root)`.
+  This found + fixed **two real shipped `xdp-loader` bugs**: the vendored
+  `redirect_all.bpf.o` had no BTF (broke aya ≥ 0.13 loading) and `force_replace`'s
+  `XDP_FLAGS_REPLACE` is rejected by the link API (`bpf_link_create`). **Still TODO:**
+  (a) the `force_replace`/link-API loader fix (a user-facing bug — task #37); (b)
+  **full in-Monitor xdp-loader integration** — `MonitorBuilder::xdp_interface` still
+  opens a *bare* `AsyncXdpSocket::open` (run.rs) with no program attach/XSKMAP, so a
+  Monitor-on-AF_XDP captures nothing without an external redirect program. (c) the
+  A3c table-driven `filter_redirect.bpf` map program (task #38), now unblocked.
 - **pcap → `AnyBackend` unification:** fold `replay_loop` into the one generic loop
   (a Pcap arm); 0.24 kept `replay_loop` separate.
 - **D1 active-timeout flow export:** 0.24 emits a `FlowRecord` on `FlowEnded` (incl. idle
@@ -93,6 +130,29 @@ Items the 0.24 plan scoped but shipped without (0.24.0 released 2026-06-14, addi
 - **`netring-exporters` companion crate:** `OtlpAnomalySink` + `KafkaSink` (heavy async/C
   deps kept out of core).
 
+## 0.25 release readiness (audit 2026-06-15) — decision needed
+The **differentiator is done + CI-validated**: Phase A (3 tiers + filter split + cBPF
+compiler), S1/S2 safe fail-open pushdown (live-validated), Phase B (effects + dispatcher),
+A4 `.expr()`, JA4S gating, AF_XDP-path CI validation. The audit found **no MISSING/MIS-WIRED
+features** in any of it. What's genuinely outstanding splits into:
+
+**Hard release tasks (Phase R — do at publish time):**
+1. Bump `netring/Cargo.toml` `version` 0.24.0 → **0.25.0** (still 0.24.0).
+2. Write **`docs/MIGRATING_0.24_TO_0.25.md`** (subscriptions, `on_async`→`on_effect`, dispatcher).
+3. Finalize the `## 0.25.0` CHANGELOG (drop "Unreleased"; reconcile with what actually ships).
+
+**Scope decision (the plan headlines 0.25 as "+ perf numbers" but Phase C is unstarted):**
+- **Recommended:** ship 0.25 as **"Subscriptions, Async Effects & Safe Kernel Pushdown"** —
+  the differentiator — and **re-scope Phase C (perf numbers/gate/PERFORMANCE.md) + Phase D
+  (TX) to 0.26**, since C needs a real-NIC bench rig (in-sandbox only has lo) and D is already
+  marked trim-able. Update the title/CHANGELOG accordingly. *(Alternative: hold 0.25 until at
+  least C3 `docs/PERFORMANCE.md` + a pps gate land — but that blocks the validated
+  differentiator on hardware-gated perf work.)*
+- **Deferral backlog NOT in 0.25 either way** (all verified absent): B4 Reopen/panic-catch,
+  B5 hugepages/NUMA, in-Monitor xdp-loader, pcap→AnyBackend fold, D1 active-timeout export,
+  E2 EVE-tls-record, C5 example, netring-exporters crate, A3c XDP map. List them as "0.26+"
+  in the CHANGELOG's "not yet" section so their absence is intentional, not silent.
+
 ---
 
 ## Phase A — Subscription Engine & Multi-Stage Filtering — arch §4, §5
@@ -111,7 +171,7 @@ userspace). In-tree cBPF compiler exists (`config/bpf_compile.rs`); 0.24-B gave
   .subscribe(packet().tcp().dst_port(443).to(h))         // typed kernel-pushable
   .subscribe(flow::<Tcp>().bytes_over(1<<20).to(h))       // typed userspace
   .subscribe(session::<Tls>().sni_glob("*.bank").to(h))   // typed userspace
-  .subscribe(packet().expr("tcp port 443").to(h))         // runtime string (wirefilter)
+  .subscribe(packet().expr("tcp port 443").to(h))         // runtime string (own parser)
   ```
   **packet tier** = a new `dispatch_packet_tier(view, ctx, pending)` inside 0.24-B's
   `drain_batch` closure **before** `track_into`. flow/session tiers = sugar over existing
@@ -128,16 +188,15 @@ userspace). In-tree cBPF compiler exists (`config/bpf_compile.rs`); 0.24-B gave
     (`afxdp/loader/programs/filter_redirect.bpf.{c,o}`) reads a `BPF_MAP_TYPE_HASH`
     `{proto,port}→action` (+ LPM for host/net): `hit ? redirect→XSKMAP : XDP_PASS`; userspace
     populates the maps; reload = map update.
-- **A4 `wirefilter`** (optional feature) — netring field schema (5-tuple, proto, `tls.sni`/
-  `tls.ja4`, `http.host`, `dns.qname`, byte/pkt counts) → the same AST as A2, so `.expr()`
-  strings split identically. Compile-time typed path stays dep-free + inlined. **Verify
-  `wirefilter-engine` (Cloudflare; 0.6.1 on crates.io) is still maintained before depending;
-  it's an *optional* escape hatch so the blast radius is contained, but a hand-rolled
-  recursive-descent parser over the same AST is the fallback if it bit-rots.**
+- **A4 `.expr()` parser** ✅ — netring field schema (5-tuple, proto, `tls.sni`/`tls.ja4`,
+  `http.host`, `dns.qname`, byte/pkt counts) → the same `Predicate` AST as A2, so `.expr()`
+  strings split identically. **Decision made: own dep-free recursive-descent parser**
+  (`subscription/expr.rs`, fuzzed `fuzz/expr_parse`) — **`wirefilter-engine` NOT taken** (dead
+  on crates.io, 0.6.1/2019). The compile-time typed path was already dep-free + inlined.
 - **Tests:** each tier dispatches; **split** correctness (`tcp port 443 and tls.sni~…` →
   kernel=443, userspace=SNI); **pushdown** verified via 0.24-C `CaptureTelemetry.packets`
   (only the matching subset reaches userspace); conservative-union (sub X not dropped by sub Y);
-  AF_XDP map-driven program on a rig; `wirefilter` string ≡ typed equivalent.
+  AF_XDP map-driven program on a rig; `.expr()` string ≡ typed equivalent.
 
 ## Phase B — Async Effects & Dispatcher — arch §5
 *Fixes the two most-felt pain points. `on_async` signature changes (additive; payload-only shim).*
@@ -151,7 +210,10 @@ userspace). In-tree cBPF compiler exists (`config/bpf_compile.rs`); 0.24-B gave
   payload-only shim returns `Effects::none()`. **⚠ Validate the two-lifetime blanket impl
   `Fn(&P,&Ctx<'_>)->Fut where Fut:'static` with a compile probe FIRST** — if it doesn't unify
   in stable Rust, fall back to payload-only + a `Send` `CtxSnapshot` passed by value (same
-  ergonomic outcome). loom-test the apply path. (See the three idiomatic async paths, arch §5.)
+  ergonomic outcome). ✅ the blanket impl unified — no fallback needed. *(No loom: the apply
+  path is sequential, not concurrent — Send-safety is asserted at compile time by
+  `monitor_send.rs`, which now registers an `on_effect` handler.)* (Three idiomatic async
+  paths, arch §5.)
 - **B2 dispatcher** — lift `MAX_EVENT_TYPES=16` (`dispatcher.rs:23`): inline `ArrayVec` ≤16,
   spill to `FxHashMap` beyond (no ceiling, no hot-path cost). `#[cfg(debug_assertions)]`
   type-tag asserting registered `TypeId` == payload `TypeId` (silent type-confusion → loud

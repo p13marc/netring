@@ -16,20 +16,26 @@ at each minor release and update the "Last checked" line.
   async-effect bound (`Fut: Send`) — re-check when writing 0.25-B.
 - **Action**: none for 0.24; re-evaluate RTN ergonomics at 0.25-B kickoff.
 
-## JA4S / JA4+ licensing (FoxIO License 1.1, patent-pending)
-- **Status (checked 2026-06)**: JA3 + JA4(client) = **BSD-3 + no patent**; **JA4S and the
-  rest of JA4+ = FoxIO License 1.1 + patent-pending** — internal/academic use permitted,
-  commercial vendor use needs a FoxIO OEM license. JA4S shipped un-gated in flowscope 0.15 /
-  netring 0.24.
-- **Action**: flowscope 0.16 + netring 0.25 — split JA4S behind an opt-in `ja4plus`/`ja4s`
-  feature (off by default); keep the default fingerprint surface BSD-clean. See arch §9.6 +
-  0.25 plan "Deferred from 0.24" + `netring/docs/FINGERPRINTS.md`.
+## ✅ JA4S / JA4+ licensing (FoxIO License 1.1, patent-pending) — RESOLVED 2026-06-15
+- **Background**: JA3 + JA4(client) = **BSD-3 + no patent**; **JA4S and the rest of JA4+ =
+  FoxIO License 1.1 + patent-pending** — internal/academic use permitted, commercial vendor
+  use needs a FoxIO OEM license. JA4S shipped un-gated in flowscope 0.15 / netring 0.24.
+- **DONE**: split JA4S behind an opt-in `ja4plus` feature (off by default), the default
+  fingerprint surface stays BSD-clean. Shipped in **flowscope 0.16.0 (published)** +
+  **netring `ja4plus = ["tls", "flowscope/ja4plus"]`** passthrough (commit `27c6963`).
+  Both crates carry `LICENSE-FoxIO-1.1` + `NOTICE` (cargo gates compilation, not the tarball —
+  the license text must ship regardless). Same commit fixed `tls` to enable
+  `flowscope/tls-fingerprints` so JA3/JA4 actually populate. See arch §9.6 +
+  `netring/docs/FINGERPRINTS.md`.
 
-## `wirefilter-engine` (0.25-A `.expr()` escape hatch)
-- **Status (checked 2026-06)**: Cloudflare `wirefilter`, `wirefilter-engine` 0.6.1 on
-  crates.io; maintenance cadence unconfirmed. Only an **optional** feature in 0.25-A.
-- **Action**: verify maintenance before depending; fallback is a hand-rolled recursive-descent
-  parser over the same predicate AST (the typed builders already define it).
+## ✅ `.expr()` runtime filter parser (0.25-A4) — RESOLVED dep-free
+- **Background**: considered Cloudflare `wirefilter`/`wirefilter-engine` 0.6.1 for the
+  `.expr()` string escape hatch; maintenance cadence was unconfirmed and it would add a heavy
+  optional dep.
+- **DONE**: shipped a **hand-rolled recursive-descent parser** (`parse_expr` →
+  `monitor::subscription::Predicate`, the same AST the typed builders and kernel pushdown use)
+  — **no `wirefilter` dependency**. Fuzzed against arbitrary input (`fuzz/expr_parse`, 50k+
+  clean). The wirefilter dep is **not needed** and is not taken.
 
 ---
 

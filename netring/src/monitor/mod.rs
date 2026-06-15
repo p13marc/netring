@@ -1333,7 +1333,7 @@ impl MonitorBuilder {
 
     /// Register a **packet-tier subscription** (0.25 Phase A1).
     ///
-    /// Build one with the typed [`packet()`](subscription::packet) tier:
+    /// Build one with the typed [`packet()`](subscription::packet()) tier:
     ///
     /// ```no_run
     /// use netring::monitor::Monitor;
@@ -1373,8 +1373,7 @@ impl MonitorBuilder {
 
     /// The classic-BPF **kernel prefilter** this monitor compiles to (0.25
     /// S2): the conservative OR-union of **every** consumer's traffic interest
-    /// — packet subs, registered handlers (via
-    /// [`Event::traffic_class`](crate::protocol::event_typed::Event::traffic_class)),
+    /// — packet subs, registered handlers (via `Event::traffic_class`),
     /// and protocol parsers (via their [`Dispatch`](crate::protocol::Dispatch))
     /// — lowered to [`BpfFilter`](crate::config::BpfFilter).
     ///

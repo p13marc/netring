@@ -3,7 +3,7 @@
 //! A [`Predicate`] is one boolean expression over packet / flow / session
 //! fields. It is the **single AST** every subscription filter lowers to —
 //! whether built from the typed combinators
-//! ([`packet()`](crate::monitor::subscription::packet) etc.), or (Phase A4)
+//! ([`packet()`](crate::monitor::subscription::packet()) etc.), or (Phase A4)
 //! parsed from a `wirefilter` string. Two consumers read it:
 //!
 //! - **Userspace evaluation** ([`Predicate::eval`]) — gate a handler on the

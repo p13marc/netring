@@ -56,7 +56,8 @@ pub trait Event: Send + Sync + 'static {
     /// 0.25 S1: the [`TrafficClass`](crate::protocol::TrafficClass) this event
     /// consumes — folded into the Monitor's kernel-prefilter union so a
     /// narrow-traffic monitor pushes a narrow filter. Defaults to
-    /// [`TrafficClass::Any`] (conservative: forces capture-all), so an event
+    /// [`TrafficClass::Any`](crate::protocol::TrafficClass::Any) (conservative:
+    /// forces capture-all), so an event
     /// that doesn't override it can never cause a consumer to be starved.
     /// Protocol-typed events (`FlowStarted<P>`, `on::<P>` messages) override
     /// this to their protocol's [`Dispatch`](crate::protocol::Dispatch).

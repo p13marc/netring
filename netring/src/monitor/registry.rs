@@ -103,8 +103,7 @@ impl HandlerRegistry {
     }
 
     /// 0.25-B1: add an effect handler `H` for event type `E` — reads
-    /// `&Ctx` synchronously, returns a future resolving to
-    /// [`Effects`](crate::monitor::effect::Effects).
+    /// `&Ctx` synchronously, returns a future resolving to [`Effects`].
     pub fn register_effect<E, H>(&mut self, handler: H)
     where
         E: Event,

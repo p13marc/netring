@@ -32,6 +32,45 @@ use std::time::{Duration, Instant};
 use netring::XdpSocket;
 use netring::xdp::XdpFlags;
 
+/// Build an AF_XDP socket, retrying on transient failure for ~8s. These tests
+/// share `lo`'s queue 0; the kernel releases a dropped socket's bind + XDP
+/// attachment asynchronously, so a back-to-back test can hit
+/// `ResourceBusy` before the previous one's teardown completes. On a clean `lo`
+/// the first attempt succeeds.
+fn build_with_retry(
+    label: &str,
+    mut f: impl FnMut() -> Result<XdpSocket, netring::Error>,
+) -> XdpSocket {
+    let deadline = Instant::now() + Duration::from_secs(8);
+    loop {
+        match f() {
+            Ok(s) => return s,
+            Err(e) => {
+                if Instant::now() >= deadline {
+                    panic!("{label}: {e:?}");
+                }
+                std::thread::sleep(Duration::from_millis(150));
+            }
+        }
+    }
+}
+
+/// Wait until `lo`'s queue 0 is bindable (the prior test fully released it),
+/// then leave a short settle margin. Used before a test whose bind happens
+/// inside a run loop (and so can't itself be retried).
+fn wait_lo_free() {
+    let probe = build_with_retry("wait_lo_free", || {
+        XdpSocket::builder()
+            .interface("lo")
+            .queue_id(0)
+            .frame_size(2048)
+            .frame_count(64)
+            .build()
+    });
+    drop(probe);
+    std::thread::sleep(Duration::from_millis(300));
+}
+
 #[test]
 fn afxdp_lo_redirect_all_captures_loopback_traffic() {
     // Attach the built-in redirect-all XDP program to `lo` in SKB/generic mode
@@ -40,18 +79,16 @@ fn afxdp_lo_redirect_all_captures_loopback_traffic() {
     // NOTE: no `force_replace` — `XDP_FLAGS_REPLACE` is a netlink-only flag and
     // is rejected by the link API (`bpf_link_create`) the loader uses. A fresh
     // CI runner has a clean `lo`, so REPLACE isn't needed.
-    let mut sock = XdpSocket::builder()
-        .interface("lo")
-        .queue_id(0)
-        .frame_size(2048)
-        .frame_count(4096)
-        .with_default_program()
-        .xdp_attach_flags(XdpFlags::SKB_MODE)
-        .build()
-        .expect(
-            "build AF_XDP socket on lo with the redirect-all program \
-             (needs root / CAP_BPF+CAP_NET_ADMIN; generic XDP on lo)",
-        );
+    let mut sock = build_with_retry("redirect-all socket on lo", || {
+        XdpSocket::builder()
+            .interface("lo")
+            .queue_id(0)
+            .frame_size(2048)
+            .frame_count(4096)
+            .with_default_program()
+            .xdp_attach_flags(XdpFlags::SKB_MODE)
+            .build()
+    });
 
     // Generate loopback ingress: UDP to 127.0.0.1 is transmitted on `lo` and
     // received back on `lo`, where generic XDP redirects it to our socket
@@ -77,8 +114,10 @@ fn afxdp_lo_redirect_all_captures_loopback_traffic() {
          within 10s (XDP redirect on lo not delivering to the XSKMAP)",
     );
 
-    // Dropping the socket detaches the XDP program from `lo`.
+    // Dropping the socket detaches the XDP program from `lo`. Settle so the
+    // next test in this binary finds queue 0 free.
     drop(sock);
+    std::thread::sleep(Duration::from_millis(300));
 }
 
 /// 0.25 W1a: the **in-Monitor** AF_XDP loader path. `xdp_interface_loaded("lo")`
@@ -98,6 +137,10 @@ async fn monitor_xdp_interface_loaded_captures_loopback_flows() {
     use netring::monitor::Monitor;
     use netring::protocol::builtin::Udp;
     use netring::protocol::event_typed::FlowStarted;
+
+    // The Monitor binds (lo, queue 0) inside `run_for`, which can't be retried —
+    // make sure the previous test fully released the queue first.
+    wait_lo_free();
 
     let seen = Arc::new(AtomicU64::new(0));
     let seen_h = Arc::clone(&seen);
@@ -157,13 +200,14 @@ fn afxdp_lo_filter_program_redirects_configured_tuple() {
 
     // A bare AF_XDP socket (no auto-attached program) — we attach the
     // table-driven filter program to it manually.
-    let mut sock = XdpSocket::builder()
-        .interface("lo")
-        .queue_id(0)
-        .frame_size(2048)
-        .frame_count(4096)
-        .build()
-        .expect("build bare AF_XDP socket on lo (needs root / CAP_BPF+CAP_NET_ADMIN)");
+    let mut sock = build_with_retry("bare AF_XDP socket on lo", || {
+        XdpSocket::builder()
+            .interface("lo")
+            .queue_id(0)
+            .frame_size(2048)
+            .frame_count(4096)
+            .build()
+    });
 
     let mut prog = filter_program().expect("load filter_program");
     prog.register(0, &sock)
@@ -198,4 +242,6 @@ fn afxdp_lo_filter_program_redirects_configured_tuple() {
 
     drop(attach);
     drop(sock);
+    // Settle so the next test in this binary finds queue 0 free.
+    std::thread::sleep(Duration::from_millis(300));
 }

@@ -40,3 +40,9 @@ rdkafka = { version = "0.36", optional = true }
 serde_json = "1"
 # For the example's `#[tokio::main]` runtime.
 tokio = { version = "1", features = ["rt-multi-thread", "macros", "signal"] }
+
+# Gate the OTLP example so it's skipped when building with only the `kafka`
+# feature (it uses OtlpAnomalySink, which lives behind `otlp`).
+[[example]]
+name = "otlp_anomalies"
+required-features = ["otlp"]

@@ -73,8 +73,24 @@ impl Umem {
         // MAP_PRIVATE | MAP_ANONYMOUS — kernel pins pages via GUP regardless.
         // MAP_POPULATE faults pages in up front. MAP_HUGETLB (0.25 W4) backs the
         // region with hugepages; if that fails (none reserved) retry without it.
+        // `mapped_len` tracks the ACTUAL mapping length so Drop's `munmap` never
+        // exceeds it (a too-large munmap would unmap adjacent allocations →
+        // memory corruption / SIGSEGV).
         let base_flags = MapFlags::MAP_PRIVATE | MapFlags::MAP_POPULATE;
-        let base = if opts.hugepages {
+        let regular = |len: usize| -> Result<NonNull<libc::c_void>, Error> {
+            let nz = NonZeroUsize::new(len).unwrap();
+            // SAFETY: anonymous mmap, no aliasing of existing memory.
+            unsafe {
+                nix::sys::mman::mmap_anonymous(
+                    None,
+                    nz,
+                    ProtFlags::PROT_READ | ProtFlags::PROT_WRITE,
+                    base_flags,
+                )
+                .map_err(|e| Error::Mmap(e.into()))
+            }
+        };
+        let (base, mapped_len) = if opts.hugepages {
             // SAFETY: anonymous mmap, no aliasing of existing memory.
             match unsafe {
                 nix::sys::mman::mmap_anonymous(
@@ -84,38 +100,19 @@ impl Umem {
                     base_flags | MapFlags::MAP_HUGETLB,
                 )
             } {
-                Ok(b) => b,
+                Ok(b) => (b, alloc_size),
                 Err(e) => {
                     tracing::warn!(error = %e, "UMEM hugepage mmap failed (no hugepages reserved?); falling back to regular pages");
-                    let nz_regular = NonZeroUsize::new(size).unwrap();
-                    // SAFETY: same as above; regular-page fallback.
-                    unsafe {
-                        nix::sys::mman::mmap_anonymous(
-                            None,
-                            nz_regular,
-                            ProtFlags::PROT_READ | ProtFlags::PROT_WRITE,
-                            base_flags,
-                        )
-                        .map_err(|e| Error::Mmap(e.into()))?
-                    }
+                    (regular(size)?, size)
                 }
             }
         } else {
-            // SAFETY: anonymous mmap, no aliasing.
-            unsafe {
-                nix::sys::mman::mmap_anonymous(
-                    None,
-                    nz_size,
-                    ProtFlags::PROT_READ | ProtFlags::PROT_WRITE,
-                    base_flags,
-                )
-                .map_err(|e| Error::Mmap(e.into()))?
-            }
+            (regular(size)?, size)
         };
 
         // 0.25 W4: best-effort NUMA binding of the just-mapped region.
         if let Some(node) = opts.numa_node {
-            bind_numa(base.as_ptr() as usize, alloc_size, node);
+            bind_numa(base.as_ptr() as usize, mapped_len, node);
         }
 
         // Initialize free list: [0, frame_size, 2*frame_size, ...]
@@ -123,8 +120,10 @@ impl Umem {
 
         Ok(Self {
             base: base.cast(),
-            // Track the actual mapped length so Drop munmaps the right size.
-            size: if opts.hugepages { alloc_size } else { size },
+            // The actual mapping length (munmap'd on Drop; reported to the
+            // kernel via `as_reg`). On hugepage fallback this is `size`, not the
+            // rounded-up `alloc_size`.
+            size: mapped_len,
             frame_size,
             frame_count,
             free_list,

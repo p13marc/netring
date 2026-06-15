@@ -115,7 +115,7 @@ pub use afxdp::{XdpMode, XdpSocket, XdpSocketBuilder, XdpStats};
 #[cfg(feature = "xdp-loader")]
 pub mod xdp {
     pub use crate::afxdp::loader::{
-        LoaderError, XdpAttachment, XdpFlags, XdpProgram, default_program,
+        LoaderError, XdpAttachment, XdpFlags, XdpProgram, default_program, filter_program,
     };
 }
 

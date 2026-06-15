@@ -47,10 +47,27 @@ impl XdpFlags {
     }
 }
 
+/// Key for the table-driven filter program's `filter_map` (0.25 W1a). Layout
+/// must match `struct filter_key` in `filter_redirect.bpf.c`: a host-order L4
+/// port, the IP protocol byte, and an explicit zero pad so the 4-byte key has
+/// no uninitialised slack (HASH map keys are compared bytewise).
+#[repr(C)]
+#[derive(Clone, Copy)]
+pub(crate) struct FilterKey {
+    pub(crate) port: u16,
+    pub(crate) proto: u8,
+    pub(crate) pad: u8,
+}
+
+// SAFETY: `FilterKey` is plain-old-data — `#[repr(C)]`, 4 bytes with no padding
+// (the trailing `pad` field fills the slack), and valid for any bit pattern.
+unsafe impl aya::Pod for FilterKey {}
+
 /// A loaded XDP program plus its embedded `BPF_MAP_TYPE_XSKMAP`.
 ///
-/// Construct via [`super::default_program`]. The wrapped `Ebpf`
-/// instance keeps both the program and the map alive.
+/// Construct via [`super::default_program`] (redirect-all) or
+/// [`super::filter_program`] (table-driven). The wrapped `Ebpf` instance keeps
+/// the program and its maps alive.
 pub struct XdpProgram {
     bpf: Ebpf,
     /// Name of the program inside the loaded object. Used to look up
@@ -120,6 +137,41 @@ impl XdpProgram {
             .map_err(|e| LoaderError::Aya(e.to_string()).into())
     }
 
+    /// Insert or remove a `{proto, port}` entry in the table-driven filter
+    /// program's `filter_map` (0.25 W1a / S5).
+    ///
+    /// `on = true` marks the tuple as interesting — frames whose IP protocol is
+    /// `proto` (`6` TCP / `17` UDP) and whose source *or* destination L4 port is
+    /// `port` are redirected into the AF_XDP socket in-kernel; everything else
+    /// is `XDP_PASS`ed up the normal stack ("shed"). `on = false` removes the
+    /// entry. The `port` is the plain host-order number (e.g. `443`).
+    ///
+    /// Only meaningful for a program loaded via [`super::filter_program`] (which
+    /// embeds `filter_map`); on the redirect-all program this returns
+    /// [`LoaderError::MapMissing`].
+    pub fn set_filter(&mut self, proto: u8, port: u16, on: bool) -> Result<(), Error> {
+        use aya::maps::HashMap as AyaHashMap;
+        let map = self
+            .bpf
+            .map_mut("filter_map")
+            .ok_or(LoaderError::MapMissing("filter_map"))?;
+        let mut hm: AyaHashMap<_, FilterKey, u8> =
+            AyaHashMap::try_from(map).map_err(|e| LoaderError::Aya(e.to_string()))?;
+        let key = FilterKey {
+            port,
+            proto,
+            pad: 0,
+        };
+        if on {
+            hm.insert(key, 1u8, 0)
+                .map_err(|e| LoaderError::Aya(e.to_string()))?;
+        } else {
+            hm.remove(&key)
+                .map_err(|e| LoaderError::Aya(e.to_string()))?;
+        }
+        Ok(())
+    }
+
     /// Attach the program to interface `iface` with the given mode.
     /// On Drop of the returned [`XdpAttachment`], the program is
     /// detached.
@@ -170,6 +222,14 @@ impl XdpAttachment {
     /// additional sockets onto it.
     pub fn xsk_map(&mut self) -> Result<XskMap<&mut aya::maps::MapData>, Error> {
         self._program.xsk_map()
+    }
+
+    /// Update the table-driven filter program's `filter_map` after attach
+    /// (0.25 W1a). Delegates to [`XdpProgram::set_filter`] — see there for the
+    /// `{proto, port}` semantics. Lets a running capture add/remove kernel-side
+    /// `{proto,port}` interest without re-attaching the program.
+    pub fn set_filter(&mut self, proto: u8, port: u16, on: bool) -> Result<(), Error> {
+        self._program.set_filter(proto, port, on)
     }
 }
 

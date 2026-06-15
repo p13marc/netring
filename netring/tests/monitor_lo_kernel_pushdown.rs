@@ -66,15 +66,18 @@ async fn packet_tier_and_kernel_prefilter_on_live_lo() {
     let hits = Arc::new(AtomicU64::new(0));
     let h = Arc::clone(&hits);
 
-    // The packet sub is the ONLY consumer → kernel_prefilter == udp/MATCH_PORT,
-    // auto-applied to the AF_PACKET socket.
-    let builder =
-        Monitor::builder()
-            .interface("lo")
-            .subscribe(packet().udp().dst_port(MATCH_PORT).to(move |_view, _ctx| {
-                h.fetch_add(1, Ordering::Relaxed);
-                Ok(())
-            }));
+    // The packet sub is the ONLY traffic consumer → kernel_prefilter ==
+    // udp/MATCH_PORT, auto-applied to the AF_PACKET socket. `on_capture_stats`
+    // arms telemetry sampling (so `health.packets()` reflects the kernel
+    // socket's RX count) — it consumes no traffic, so it does NOT widen the
+    // kernel filter (the `kernel_prefilter().is_some()` assertion below holds).
+    let builder = Monitor::builder()
+        .interface("lo")
+        .on_capture_stats(Duration::from_millis(100), |_telemetry, _ctx| Ok(()))
+        .subscribe(packet().udp().dst_port(MATCH_PORT).to(move |_view, _ctx| {
+            h.fetch_add(1, Ordering::Relaxed);
+            Ok(())
+        }));
 
     // Sanity: a packet-sub-only monitor really does compile a narrow filter.
     assert!(
@@ -118,15 +121,28 @@ async fn packet_tier_and_kernel_prefilter_on_live_lo() {
         fired >= 1,
         "packet tier should fire on live udp/{MATCH_PORT} (sent {matched_sent})",
     );
-    // Kernel-narrowing signal: the socket received far fewer frames than the
-    // noise blast — the cBPF filter shed the non-matching UDP before userspace.
-    // Only assert when telemetry actually sampled (`delivered > 0`) so a
-    // sampling gap can't false-fail; the `eprintln!` above shows the raw counts.
-    if delivered > 0 && noise_sent > 50 {
-        assert!(
-            delivered < noise_sent,
-            "kernel filter should shed the noise: delivered {delivered} \
-             vs {noise_sent} noise frames sent",
-        );
+
+    // If the generator couldn't put traffic on the wire we can't judge the
+    // kernel filter — skip the narrowing check (e.g. a no-egress sandbox).
+    if noise_sent <= 50 {
+        eprintln!("generator sent too little ({noise_sent}); skipping narrowing check");
+        return;
     }
+
+    // Telemetry was armed via `on_capture_stats`, so `delivered` is the
+    // AF_PACKET socket's post-filter RX count. The proof of kernel pushdown:
+    // the socket delivered FEWER frames than just the non-matching blast — only
+    // possible if the cBPF `set_filter` shed the noise before userspace (with
+    // no filter, delivered would include all ~`matched + noise` frames, well
+    // above `noise_sent`).
+    assert!(
+        delivered > 0,
+        "on_capture_stats should have sampled the kernel RX count, got 0",
+    );
+    assert!(
+        delivered < noise_sent,
+        "kernel prefilter should shed non-matching UDP: kernel delivered \
+         {delivered} frames vs {noise_sent} noise frames sent — `set_filter` \
+         narrowed RX to matching traffic before userspace",
+    );
 }

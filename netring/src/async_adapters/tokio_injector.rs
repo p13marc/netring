@@ -203,6 +203,15 @@ impl AsyncInjector {
         Ok(sent)
     }
 
+    /// 0.25 W3: read the next egress timestamp from the error queue
+    /// (non-blocking). Forwards to [`Injector::read_tx_timestamp`]; requires
+    /// the injector to have been built with `tx_timestamps(true)`. Returns
+    /// `None` if no timestamp is queued yet — poll after `flush()` /
+    /// `wait_drained()`.
+    pub fn read_tx_timestamp(&self) -> Option<crate::Timestamp> {
+        self.inner.get_ref().read_tx_timestamp()
+    }
+
     /// Borrow the inner sink (e.g., for `cumulative_stats`-style accessors).
     pub fn get_ref(&self) -> &Injector {
         self.inner.get_ref()

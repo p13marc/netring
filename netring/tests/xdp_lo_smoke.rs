@@ -140,3 +140,62 @@ async fn monitor_xdp_interface_loaded_captures_loopback_flows() {
          redirected loopback traffic (in-Monitor XDP loader not delivering)",
     );
 }
+
+/// 0.25 W1a: the **table-driven** `filter_program` + `XdpProgram::set_filter`
+/// end-to-end. Loads the filter program on `lo`, registers the socket, populates
+/// the `{udp, PORT}` filter, and asserts that matching loopback frames are
+/// redirected into the socket — validating both the BPF program's map lookup
+/// and the userspace map-population path.
+///
+/// Root-gated (XDP load + BPF maps + XSKMAP). Same plumbing as the redirect-all
+/// smoke test above.
+#[test]
+fn afxdp_lo_filter_program_redirects_configured_tuple() {
+    use netring::xdp::{XdpFlags, filter_program};
+
+    const PORT: u16 = 65123;
+
+    // A bare AF_XDP socket (no auto-attached program) — we attach the
+    // table-driven filter program to it manually.
+    let mut sock = XdpSocket::builder()
+        .interface("lo")
+        .queue_id(0)
+        .frame_size(2048)
+        .frame_count(4096)
+        .build()
+        .expect("build bare AF_XDP socket on lo (needs root / CAP_BPF+CAP_NET_ADMIN)");
+
+    let mut prog = filter_program().expect("load filter_program");
+    prog.register(0, &sock)
+        .expect("register socket on the program's XSKMAP");
+    let mut attach = prog
+        .attach("lo", XdpFlags::SKB_MODE)
+        .expect("attach filter program to lo");
+
+    // Mark {UDP, PORT} as interesting → the program redirects those frames.
+    attach
+        .set_filter(17 /* IPPROTO_UDP */, PORT, true)
+        .expect("set_filter udp/PORT");
+
+    let tx = std::net::UdpSocket::bind("127.0.0.1:0").expect("bind udp tx");
+    let deadline = Instant::now() + Duration::from_secs(10);
+    let mut captured: u64 = 0;
+    while Instant::now() < deadline && captured == 0 {
+        for _ in 0..8 {
+            let _ = tx.send_to(b"filter-map-test", ("127.0.0.1", PORT));
+        }
+        captured += sock.recv().expect("AF_XDP recv").len() as u64;
+        if captured == 0 {
+            std::thread::sleep(Duration::from_millis(20));
+        }
+    }
+
+    assert!(
+        captured > 0,
+        "filter_program with a {{udp,{PORT}}} entry should redirect matching \
+         loopback frames into the AF_XDP socket",
+    );
+
+    drop(attach);
+    drop(sock);
+}

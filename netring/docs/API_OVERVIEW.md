@@ -456,7 +456,17 @@ runner.run_until_signal().await?;
 | `.need_wakeup(bool)` | true | `XDP_USE_NEED_WAKEUP` optimization |
 | `.hugepages(bool)` | false | **(0.25)** back the UMEM with `MAP_HUGETLB` (graceful fallback) |
 | `.numa_node(n)` | — | **(0.25)** `mbind` the UMEM to NUMA node `n` (best-effort) |
+| `.promiscuous(bool)` | false | put the interface in promiscuous mode for the socket's lifetime (issue #4); self-cleaning `PACKET_MR_PROMISC` guard. The Monitor exposes a backend-agnostic `MonitorBuilder::promiscuous(bool)` |
 | `.with_default_program()` / `.with_program(p)` | — | attach an XDP redirect program (feat `xdp-loader`); `filter_program()` is the table-driven variant |
+
+> **AF_XDP & promiscuous mode.** AF_XDP runs in the driver RX path *after* the
+> NIC's MAC filter, so on a non-promiscuous interface a socket only sees frames
+> addressed to that NIC (plus broadcast/multicast). Use `.promiscuous(true)` to
+> capture everything on the wire. Two gotchas: `PACKET_MR_PROMISC` does not set
+> the user-visible `IFF_PROMISC` flag (`ip link` won't show `PROMISC`, but the
+> interface *is* promiscuous), and on a multi-queue NIC one XSK still only sees
+> its bound queue's RSS share — force a single queue
+> (`ethtool -L <iface> combined 1`) or open one socket per queue for full capture.
 
 ## Error handling
 

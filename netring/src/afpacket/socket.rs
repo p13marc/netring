@@ -10,14 +10,17 @@ use crate::sockopt::raw_setsockopt;
 
 // ── Socket creation ────────────────────────────────────────────────────────
 
-/// Create an AF_PACKET raw socket with `SOCK_CLOEXEC`.
-pub(crate) fn create_packet_socket() -> Result<OwnedFd, Error> {
+/// Create an AF_PACKET raw socket with `SOCK_CLOEXEC`, bound to `protocol`
+/// (a host-order ethertype such as `ETH_P_ALL`). Pass `0` for a socket that
+/// receives no packets — useful when the socket is only a handle for a
+/// setsockopt (e.g. holding a promiscuity refcount).
+pub(crate) fn create_packet_socket_proto(protocol: u16) -> Result<OwnedFd, Error> {
     let fd = unsafe {
         // SAFETY: standard socket() syscall with valid constants.
         libc::socket(
             libc::AF_PACKET,
             libc::SOCK_RAW | libc::SOCK_CLOEXEC,
-            (ffi::ETH_P_ALL as u16).to_be() as libc::c_int,
+            protocol.to_be() as libc::c_int,
         )
     };
     if fd == -1 {
@@ -29,6 +32,11 @@ pub(crate) fn create_packet_socket() -> Result<OwnedFd, Error> {
     }
     // SAFETY: fd is valid, just returned by socket().
     Ok(unsafe { OwnedFd::from_raw_fd(fd) })
+}
+
+/// Create an AF_PACKET raw socket with `SOCK_CLOEXEC`, bound to `ETH_P_ALL`.
+pub(crate) fn create_packet_socket() -> Result<OwnedFd, Error> {
+    create_packet_socket_proto(ffi::ETH_P_ALL as u16)
 }
 
 // ── Interface resolution ───────────────────────────────────────────────────
@@ -113,6 +121,39 @@ pub(crate) fn set_promiscuous(fd: BorrowedFd<'_>, ifindex: i32) -> Result<(), Er
         &mreq,
         "PACKET_ADD_MEMBERSHIP",
     )
+}
+
+/// RAII guard that keeps an interface in **promiscuous mode** for as long as it
+/// is alive.
+///
+/// Promiscuity is a `netdev`-level property, not a socket option, so AF_XDP
+/// sockets (which have no promisc knob of their own) reach it through the same
+/// AF_PACKET mechanism the capture path uses: an auxiliary AF_PACKET socket
+/// joined to `PACKET_MR_PROMISC`. The kernel reference-counts
+/// `dev->promiscuity`, so when this guard's fd closes — on `Drop`, or when the
+/// kernel reaps fds on process exit — the interface leaves promiscuous mode
+/// automatically. No manual restore, no leak on crash, no race.
+///
+/// The guard socket is bound to protocol `0`, so the kernel never queues
+/// packets on it; it exists purely to hold the refcount.
+#[cfg(feature = "af-xdp")]
+#[derive(Debug)]
+pub(crate) struct PromiscGuard {
+    // Dropping this fd releases the `PACKET_MR_PROMISC` membership, which
+    // decrements `dev->promiscuity`.
+    _sock: OwnedFd,
+}
+
+#[cfg(feature = "af-xdp")]
+impl PromiscGuard {
+    /// Put the interface identified by `ifindex` into promiscuous mode,
+    /// returning a guard that restores it on drop.
+    pub(crate) fn enable(ifindex: i32) -> Result<Self, Error> {
+        use std::os::fd::AsFd;
+        let sock = create_packet_socket_proto(0)?;
+        set_promiscuous(sock.as_fd(), ifindex)?;
+        Ok(Self { _sock: sock })
+    }
 }
 
 /// Set `PACKET_IGNORE_OUTGOING` to skip outgoing packets.

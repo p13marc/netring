@@ -226,6 +226,10 @@ pub struct Monitor {
     /// full consumer set so it's a superset (no starvation); the run loop
     /// applies it to each AF_PACKET capture via `set_filter`.
     pub(crate) kernel_prefilter: Option<crate::config::BpfFilter>,
+    /// Issue #4: put every capture interface (AF_PACKET + AF_XDP) into
+    /// promiscuous mode for the run's lifetime. Set via
+    /// [`MonitorBuilder::promiscuous`].
+    pub(crate) promiscuous: bool,
 }
 
 /// How the run loop reacts when a handler (detector / sink / async handler)
@@ -582,6 +586,9 @@ pub struct MonitorBuilder {
     /// kernel-prefilter union at [`Self::kernel_prefilter`] — a consumer can
     /// only widen it, so the kernel filter is always a superset (no starvation).
     traffic_interests: Vec<subscription::Predicate>,
+    /// Issue #4: monitor-wide promiscuous mode for every capture interface.
+    /// Set via [`Self::promiscuous`]; defaults to `false`.
+    promiscuous: bool,
 }
 
 impl MonitorBuilder {
@@ -668,12 +675,47 @@ impl MonitorBuilder {
     /// when the Monitor's run loop ends. For native-driver zero-copy on a real
     /// NIC, build the socket yourself with `.xdp_attach_flags(XdpFlags::DRV_MODE)`
     /// and use [`Self::xdp_interface`].
+    ///
+    /// **Single queue.** The Monitor binds **queue 0** of the interface. On a
+    /// multi-queue NIC, RSS spreads traffic across queues, so this captures only
+    /// queue 0's share — even with [`Self::promiscuous`]. For full-NIC capture
+    /// either pin the NIC to one queue (`ethtool -L <iface> combined 1`) or use
+    /// the one-socket-per-queue pattern in `examples/xdp/xdp_multiqueue.rs`.
     #[cfg(all(feature = "af-xdp", feature = "xdp-loader"))]
     pub fn xdp_interface_loaded(mut self, iface: impl Into<String>) -> Self {
         self.xdp_interfaces.push(XdpIfaceSpec {
             iface: iface.into(),
             self_load: true,
         });
+        self
+    }
+
+    /// Put **every** capture interface into promiscuous mode for the run's
+    /// lifetime (issue #4). Default: `false`.
+    ///
+    /// Applies to both AF_PACKET (`interface`/`interfaces`) and AF_XDP
+    /// (`xdp_interface`/`xdp_interface_loaded`) sources — promiscuity is a
+    /// `netdev` property, so the monitor flag is backend-agnostic. Enable it
+    /// when the monitor is a passive observer that must see traffic not
+    /// addressed to the local MAC (SPAN/mirror ports, sniffing); leave it off
+    /// for host-local monitoring.
+    ///
+    /// ```ignore
+    /// Monitor::builder()
+    ///     .xdp_interface_loaded("eth0")
+    ///     .promiscuous(true)            // capture all traffic on eth0
+    ///     .protocol::<Tcp>()
+    ///     .build()?;
+    /// ```
+    ///
+    /// The Monitor holds promiscuity through a self-cleaning AF_PACKET
+    /// `PACKET_MR_PROMISC` guard tied to each socket's lifetime — see
+    /// [`XdpSocketBuilder::promiscuous`](crate::XdpSocketBuilder::promiscuous)
+    /// for the mechanism and the multi-queue / `IFF_PROMISC`-visibility caveats.
+    /// For per-interface control, or one AF_XDP socket per NIC queue, build the
+    /// sockets yourself with the low-level builders.
+    pub fn promiscuous(mut self, enable: bool) -> Self {
+        self.promiscuous = enable;
         self
     }
 
@@ -1829,6 +1871,7 @@ impl MonitorBuilder {
             flow_active_timeout: self.flow_active_timeout,
             packet_subs: self.packet_subs,
             kernel_prefilter,
+            promiscuous: self.promiscuous,
         })
     }
 }
@@ -1861,6 +1904,20 @@ mod tests {
             crate::error::Error::Build(BuildError::NoInterface) => {}
             other => panic!("expected NoInterface, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn promiscuous_defaults_off_and_flag_toggles() {
+        // Monitor-wide promiscuous is opt-in and backend-agnostic (issue #4).
+        let b = Monitor::builder();
+        assert!(!b.promiscuous, "default is off");
+
+        let b = Monitor::builder().interface("lo").promiscuous(true);
+        assert!(b.promiscuous);
+
+        // The flag survives into the built Monitor and reaches the run loop.
+        let m = b.build().expect("build monitor");
+        assert!(m.promiscuous);
     }
 
     #[test]

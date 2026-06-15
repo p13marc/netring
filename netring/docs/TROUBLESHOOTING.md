@@ -117,6 +117,43 @@ ulimit -l unlimited
 Fanout must be called **after** `bind()`. The builder handles this automatically,
 but if using the low-level socket API directly, ensure ordering.
 
+## AF_XDP Issues
+
+### AF_XDP only sees traffic addressed to my own MAC (issue #4)
+
+AF_XDP runs in the driver RX path **after** the NIC's MAC filter. On a
+non-promiscuous interface the driver only delivers frames addressed to the
+NIC's MAC (plus broadcast and subscribed multicast), so passive capture (a
+SPAN/mirror port, sniffing another host's traffic) sees nothing.
+
+Enable promiscuous mode:
+
+```rust,ignore
+let sock = XdpSocket::builder().interface("eth0").promiscuous(true).build()?;
+// or, on the Monitor:
+Monitor::builder().xdp_interface_loaded("eth0").promiscuous(true) /* … */;
+```
+
+netring holds promiscuity via a self-cleaning AF_PACKET `PACKET_MR_PROMISC`
+guard tied to the socket's lifetime, so it is released automatically on drop
+(or crash). Note: `PACKET_MR_PROMISC` does **not** set the user-visible
+`IFF_PROMISC` flag, so `ip link` / `ifconfig` will not display `PROMISC` even
+though the interface is promiscuous (check `dev->promiscuity` is raised by
+confirming capture works).
+
+### AF_XDP in promiscuous mode still misses traffic on a multi-queue NIC
+
+An AF_XDP socket binds to a **single** queue, and RSS spreads received traffic
+across all the NIC's RX queues — so one socket only sees the share hashed to
+its queue, even in promiscuous mode. Either reduce the NIC to a single queue:
+
+```sh
+ethtool -L <iface> combined 1
+```
+
+or open one AF_XDP socket per queue (shared-UMEM / fanout). On some Mellanox
+NICs you must create twice as many AF_XDP queues as `ethtool -L combined` sets.
+
 ## Testing Without a Network
 
 Use the loopback interface (`lo`) — it always exists:

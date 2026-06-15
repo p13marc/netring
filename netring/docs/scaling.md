@@ -162,6 +162,34 @@ for (label, stats) in stream.per_source_capture_stats() {
 }
 ```
 
+## AF_XDP: one socket per RX queue
+
+The fanout above is the **AF_PACKET** scaling model (`PACKET_FANOUT` — the kernel
+load-balances one logical capture across N worker sockets). **AF_XDP is
+different**: an `XdpSocket` binds to a *single* RX queue (`queue_id`), and the
+NIC's RSS hashing spreads inbound traffic across all its queues. So:
+
+- **Yes — full-NIC AF_XDP capture means N `XdpSocket`s, one per queue.** A single
+  socket on queue 0 only ever sees the traffic RSS hashed to queue 0, **even in
+  promiscuous mode** (promisc lifts the MAC filter; it does not collapse RSS).
+- Check the queue count with `ethtool -l <iface>` (the *Combined* row).
+
+Two ways to capture everything:
+
+| Approach | How | Trade-off |
+|---|---|---|
+| **One socket per queue** | load the redirect program once, open one `XdpSocket` per `queue_id`, register each at its queue index in the program's XSKMAP, poll them together | full line-rate; the canonical pattern — see `examples/xdp/xdp_multiqueue.rs` |
+| **Collapse to one queue** | `ethtool -L <iface> combined 1`, then a single socket | simplest; caps throughput at one core's worth |
+
+With per-queue sockets, **promiscuous mode only needs to be set once** — it's an
+interface-global, reference-counted property, so a single `PACKET_MR_PROMISC`
+guard (e.g. on the first socket) holds the whole NIC promiscuous. Each socket can
+own its own UMEM (simplest), or share one via `XdpSocketBuilder::shared_umem` to
+save memory at the cost of partitioning the frame space by hand.
+
+> Some NICs (notably Mellanox) require you to create **twice** as many AF_XDP
+> queues as `ethtool -L combined` reports to be sure of receiving every packet.
+
 ## Anti-patterns
 
 ### 1. `FanoutMode::Hash` on skewed traffic

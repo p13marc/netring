@@ -770,7 +770,10 @@ just ci-full         # setcap + full test suite
 - `src/afpacket/rx.rs` — AfPacketRx + builder (busy-poll trio added in 0.8)
 - `src/afpacket/tx.rs` — AfPacketTx + builder (V1 frame-based TX)
 - `src/afpacket/ring.rs` — MmapRing (NonNull, strict provenance, AtomicU32)
-- `src/afpacket/socket.rs` — All setsockopt wrappers (incl. busy-poll trio)
+- `src/afpacket/socket.rs` — All setsockopt wrappers (incl. busy-poll trio);
+  `PromiscGuard` (issue #4) — self-cleaning `PACKET_MR_PROMISC` guard reused by
+  AF_XDP's `XdpSocketBuilder::promiscuous` / `MonitorBuilder::promiscuous`
+  (monitor-wide, both backends; threaded through `open_backend`/`open_xdp_backend`)
 - `src/afpacket/ffi.rs` — libc re-exports + supplemental constants
 - `src/afpacket/fanout.rs` — `PACKET_FANOUT` plumbing (Hash/CPU/QM/EBPF/LB)
 - `src/afxdp/mod.rs` — XdpSocket + XdpSocketBuilder (AF_XDP public API)

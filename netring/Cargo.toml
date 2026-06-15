@@ -321,6 +321,11 @@ name = "async_xdp_custom_program"
 path = "examples/xdp/async_xdp_custom_program.rs"
 required-features = ["tokio", "af-xdp", "xdp-loader"]
 
+[[example]]
+name = "xdp_multiqueue"
+path = "examples/xdp/xdp_multiqueue.rs"
+required-features = ["af-xdp", "xdp-loader"]
+
 # flow/ — flow tracking (no L7 parsers)
 [[example]]
 name = "async_flow_keys"

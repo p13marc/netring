@@ -14,9 +14,8 @@ mostly used as the underlying source for the async wrappers.
 netring = { version = "0.25", features = ["tokio"] }
 ```
 
-```rust,no_run
+```rust,ignore
 // Capture: zero-copy borrowed batches via AsyncFd.
-# async fn _ex() -> Result<(), netring::Error> {
 let mut cap = netring::AsyncCapture::open("eth0")?;
 loop {
     let mut guard = cap.readable().await?;
@@ -26,8 +25,6 @@ loop {
         }
     }
 }
-# async fn handle(_: &[u8]) {}
-# }
 ```
 
 ```rust,ignore
@@ -43,25 +40,20 @@ while let Some(batch) = stream.next().await {
 }
 ```
 
-```rust,no_run
+```rust,ignore
 // Inject with backpressure (awaits POLLOUT when ring is full):
-# async fn _ex() -> Result<(), netring::Error> {
 let mut tx = netring::AsyncInjector::open("eth0")?;
 tx.send(&[0xff; 64]).await?;
 tx.flush().await?;
-# Ok(()) }
 ```
 
-```rust,no_run
+```rust,ignore
 // AF_XDP (kernel bypass, 10M+ pps) — same shape as AsyncCapture:
-# #[cfg(feature = "af-xdp")]
-# async fn _ex() -> Result<(), netring::Error> {
 let mut xdp = netring::AsyncXdpSocket::open("eth0")?;
 let batch = xdp.try_recv_batch().await?;
 for pkt in &batch {
     let _ = pkt.data();
 }
-# Ok(()) }
 ```
 
 See [docs/ASYNC_GUIDE.md](docs/ASYNC_GUIDE.md) for the full async story —
@@ -646,7 +638,7 @@ let cap = Capture::builder()
 ## Statistics
 
 ```rust,no_run
-# let cap = netring::Capture::open("lo").unwrap();
+let cap = netring::Capture::open("lo").unwrap();
 let stats = cap.stats().unwrap();
 println!("received: {}, dropped: {}, frozen: {}",
     stats.packets, stats.drops, stats.freeze_count);

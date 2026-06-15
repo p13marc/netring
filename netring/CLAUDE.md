@@ -20,6 +20,22 @@ built on AF_PACKET with TPACKET_V3 (block-based mmap ring buffers) and AF_XDP.
 
 ## Implementation Status
 
+**0.25.0 — RELEASE-READY on `0.25-dev`** ("Subscriptions, Async Effects,
+Performance & TX"). Version bumped to 0.25.0; CHANGELOG + `docs/MIGRATING_0.24_TO_0.25.md`
+written; depends on **flowscope 0.16**. The actual `cargo publish` + `git tag
+0.25.0` remain the maintainer's hands-on action. Landed on top of 0.24:
+the typed 3-tier **subscription engine** + kernel pushdown (S1/S2 live-validated),
+async read+effect handlers (`on_effect`), the `.expr()` parser, JA4S `ja4plus`
+gating; **in-Monitor AF_XDP loader** + table-driven filter map (W1a, incl. the
+`include_bytes_aligned!` fix that repaired the loader for every Monitor build);
+active-timeout flow export (W1c); EVE `tls` records (W1d); backend `Reopen` +
+handler panic-catch (W1e); `tracing_json` example (W1f); **Phase C** CPU pinning
++ dispatch-throughput bench + `docs/PERFORMANCE.md` (W2); **Phase D** TX
+`send_stream`/`TxPacer`/egress-timestamping (W3); AF_XDP UMEM hugepages/NUMA +
+copy-mode warn (W4); and the **`netring-exporters`** companion crate
+(OTLP + Kafka, W5). New companion crate is a workspace member. `netring-exporters`
+0.1.0.
+
 **0.24.0 — RELEASED 2026-06-14** ("Zero-Copy Core + Production Trust";
 additive over 0.23, published to crates.io, tag `0.24.0`). Depends on
 flowscope `0.15`. Folds in the 0.23 `Send` run-loop work (never released

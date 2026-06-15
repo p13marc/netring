@@ -220,9 +220,10 @@ validates the full enable→send→read path via software TX timestamps on `lo` 
 `MPOL_BIND` (best-effort) + post-bind `getsockopt(XDP_OPTIONS)` copy-mode warn. Cap-free
 tests for fallback/best-effort; full perf benefit HW-gated.
 
-**W5 — `netring-exporters` companion crate** — `OtlpAnomalySink` + `KafkaSink`. A *new
-workspace crate* (heavy async/C deps out of core) is the right home; "separate crate" is an
-architecture decision, not a deferral — it ships in this release cycle.
+**✅ W5 — `netring-exporters` companion crate** — new workspace member. `OtlpAnomalySink`
+(feature `otlp`, OTLP/HTTP-JSON logs via blocking `ureq`) + `KafkaSink` (feature `kafka`,
+`rdkafka`/librdkafka). Both implement `AnomalySink`; wire-format construction unit-tested;
+heavy deps stay out of core. CI `exporters` job builds+tests both features.
 
 **W6 — Phase R release prep:** bump `0.24.0 → 0.25.0`, `docs/MIGRATING_0.24_TO_0.25.md`,
 finalize `## 0.25.0` CHANGELOG. (The actual `cargo publish` + tag stay the maintainer's

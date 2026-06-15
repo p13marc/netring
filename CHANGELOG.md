@@ -1,10 +1,14 @@
 # Changelog
 
-## 0.25.0 — subscriptions, async effects & performance
+## 0.25.0 — subscriptions, async effects, performance & TX
 
-> **Unreleased / in progress on `0.25-dev`.** Builds the redesigned API on
-> the 0.24 keystone: typed 3-tier subscriptions + kernel filter pushdown,
-> async read+effect handlers, and perf. Additive-with-shims over 0.24.
+> **Release-ready on `0.25-dev`** (date stamped at tag/publish time). The
+> complete capability release on the 0.24 keystone: typed 3-tier subscriptions
+> + kernel filter pushdown, async read+effect handlers, perf & scaling (CPU
+> pinning, dispatch-throughput numbers), the symmetric TX stack, the in-Monitor
+> AF_XDP loader, UMEM hugepages/NUMA, and the `netring-exporters` companion
+> crate. Additive over 0.24 (existing code compiles unchanged). Depends on
+> **flowscope 0.16**.
 
 ### JA4S licensing fix + JA3/JA4 now actually populate
 
@@ -141,6 +145,88 @@ The table-driven AF_XDP map program (A3c, hardware-gated) and the runtime
 - Debug-only dispatcher type-tag asserts the `TypeId → slot` mapping stays
   consistent (turns a silent type-erasure desync into a loud test panic;
   zero release cost).
+
+### In-Monitor AF_XDP loader + table-driven filter map (W1a)
+
+- `MonitorBuilder::xdp_interface_loaded(iface)` (feature `xdp-loader`): the
+  Monitor attaches the built-in redirect-all XDP program and registers its
+  socket on the XSKMAP itself — one-call AF_XDP capture, no external loader.
+  (`xdp_interface(iface)` remains the bring-your-own-program form.)
+- Table-driven `filter_redirect.bpf` program + `loader::filter_program()` +
+  `XdpProgram::set_filter(proto, port, on)`: a `BPF_MAP_TYPE_HASH`-driven
+  XDP program that redirects only `{proto, port}`-matching frames (the
+  kernel-side early-shed), populated from the subscription union.
+- **Fix:** the loader now embeds bytecode with `aya::include_bytes_aligned!`
+  instead of `include_bytes!`. The zero-copy ELF parse requires alignment;
+  the plain macro loaded only when the static happened to land aligned and
+  failed (`"error parsing ELF data"`) in any build that also pulls `tokio`
+  (i.e. every Monitor build) — so redirect-all was already broken for
+  Monitor-on-AF_XDP. Guarded by a cap-free `vendored_programs_parse_under_aya`
+  test.
+- **Fix:** `XdpSocketBuilder::force_replace(true)` no longer crashes with
+  `EINVAL` — `XDP_FLAGS_REPLACE` is netlink-only and rejected by the link API
+  on kernel ≥ 5.9, so it's no longer OR'd into the link-create flags; a failed
+  attach returns an actionable error instead.
+
+### Active-timeout flow export (W1c)
+
+- `MonitorBuilder::export_active_timeout(period)`: emits interim `FlowRecord`s
+  for long-lived flows every `period` (NetFlow/IPFIX active-timeout semantics),
+  not just one at `FlowEnded`. **Breaking (additive type change):**
+  `FlowRecord.reason` is now `Option<EndReason>` — `None` marks an ongoing
+  active-timeout snapshot (`FlowRecord::is_ongoing()`); IPFIX maps it to
+  flowEndReason `0x02` (active timeout).
+
+### EVE `event_type:"tls"` records (W1d)
+
+- `netring::anomaly::{EveTlsSink, eve_tls_record}` (features `eve-sink` + `tls`):
+  Suricata-compatible `event_type:"tls"` EVE records (sni, ja3.hash, ja4,
+  ja4s under `ja4plus`, alpn, 5-tuple, ISO-8601 timestamp) — the protocol-record
+  companion to `EveSink`'s `event_type:"anomaly"`. Wire it via `on_fingerprint`.
+
+### Resilience: backend Reopen + handler panic catching (W1e)
+
+- `BackendErrorPolicy::Reopen`: rebuilds a failed capture source in place (same
+  kind + filter) so a transient fault (interface flap, driver reset) self-heals.
+- `MonitorBuilder::catch_handler_panics(true)`: wraps sync handlers in
+  `catch_unwind`, converting a panic into `Error::HandlerPanic` routed through
+  the configured `HandlerErrorPolicy` (pair with `Isolate` to log + count +
+  continue). Off by default; async handlers/effects are not covered.
+
+### Performance & scaling (Phase C)
+
+- `ShardedRunner::pin_cpus(true)`: pins each shard's OS thread to its core via
+  `sched_setaffinity` (keeps flow state + RX ring + worker core-local).
+- `benches/dispatch_throughput.rs`: a cap-free userspace pps proxy
+  (~4.7 Melem/s/core flow tracking on the dev box), run in CI. `docs/PERFORMANCE.md`
+  documents the capture-vs-dispatch split, the dhat-Δ0 enforced gate, tuning
+  levers (pushdown, sharding+pinning, fanout + symmetric-RSS pitfall, AF_XDP,
+  busy-poll, hugepages), and an honest real-NIC-pending methodology.
+- `monitor/tracing_json` example: structured JSON logging of anomalies +
+  telemetry via `tracing-subscriber`.
+
+### TX symmetry (Phase D)
+
+- `AsyncInjector::send_stream(stream, Option<TxPacer>)`: transmits every frame
+  from a `Stream<Item = impl AsRef<[u8]>>`, optionally paced. `TxPacer` is a
+  token-bucket pacer (`packets_per_second` / `bits_per_second`).
+- TX egress timestamping: `InjectorBuilder::tx_timestamps(true)` enables
+  `SO_TIMESTAMPING`; `Injector::read_tx_timestamp()` /
+  `AsyncInjector::read_tx_timestamp()` read the `SCM_TIMESTAMPING` egress
+  timestamp off the error queue (hardware-preferred-else-software).
+
+### AF_XDP UMEM hugepages + NUMA (W4)
+
+- `XdpSocketBuilder::hugepages(bool)` (`MAP_HUGETLB`, graceful fallback) +
+  `numa_node(u32)` (`mbind`/`MPOL_BIND`, best-effort). After bind, a
+  `getsockopt(XDP_OPTIONS)` check warns when the kernel fell back to COPY mode.
+
+### `netring-exporters` companion crate (W5)
+
+- New workspace crate keeping heavy OTLP/Kafka deps out of core.
+  `OtlpAnomalySink` (feature `otlp`, OTLP/HTTP-JSON logs via blocking `ureq`)
+  and `KafkaSink` (feature `kafka`, `rdkafka`/librdkafka) both implement
+  `AnomalySink`, so they drop into `MonitorBuilder::sink(...)`.
 
 ## 0.24.0 — zero-copy core + production trust
 

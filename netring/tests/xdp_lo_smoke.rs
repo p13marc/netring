@@ -120,6 +120,57 @@ fn afxdp_lo_redirect_all_captures_loopback_traffic() {
     std::thread::sleep(Duration::from_millis(300));
 }
 
+/// Issue #4: AF_XDP **promiscuous mode**. Building with `.promiscuous(true)`
+/// must install the AF_PACKET `PACKET_MR_PROMISC` guard on `lo` *and* leave
+/// capture working — enabling promisc must not interfere with the redirect
+/// path, and the guard must drop cleanly when the socket is dropped.
+///
+/// `lo` supports promiscuous mode (`ip link set lo promisc on`), so the guard's
+/// setsockopt succeeds under root here. On a real NIC this is what makes AF_XDP
+/// see traffic not addressed to the local MAC.
+#[test]
+fn afxdp_lo_promiscuous_guard_does_not_break_capture() {
+    wait_lo_free();
+
+    let mut sock = build_with_retry("promiscuous redirect-all socket on lo", || {
+        XdpSocket::builder()
+            .interface("lo")
+            .queue_id(0)
+            .frame_size(2048)
+            .frame_count(4096)
+            .promiscuous(true) // installs the PACKET_MR_PROMISC guard
+            .with_default_program()
+            .xdp_attach_flags(XdpFlags::SKB_MODE)
+            .build()
+    });
+
+    let tx = UdpSocket::bind("127.0.0.1:0").expect("bind udp tx");
+    let deadline = Instant::now() + Duration::from_secs(10);
+    let mut captured: u64 = 0;
+    while Instant::now() < deadline && captured == 0 {
+        for _ in 0..8 {
+            let _ = tx.send_to(b"netring-afxdp-promisc", "127.0.0.1:65124");
+        }
+        captured += sock.recv().expect("AF_XDP recv").len() as u64;
+        if captured == 0 {
+            std::thread::sleep(Duration::from_millis(20));
+        }
+    }
+
+    assert!(
+        captured > 0,
+        "AF_XDP socket built with promiscuous(true) should still capture \
+         redirected loopback frames (promisc guard must not disturb the \
+         redirect path)",
+    );
+
+    // Dropping the socket drops the promisc guard (its fd closes → kernel
+    // decrements lo's promiscuity) and detaches the program. Settle for the
+    // next test.
+    drop(sock);
+    std::thread::sleep(Duration::from_millis(300));
+}
+
 /// 0.25 W1a: the **in-Monitor** AF_XDP loader path. `xdp_interface_loaded("lo")`
 /// must make a high-level [`Monitor`] attach the redirect-all program itself,
 /// register its socket on the XSKMAP, and deliver redirected loopback frames

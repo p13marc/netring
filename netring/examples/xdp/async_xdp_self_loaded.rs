@@ -14,6 +14,13 @@
 //!     XDP_FLAGS=DRV cargo run --example async_xdp_self_loaded \
 //!         --features tokio,af-xdp,xdp-loader -- eth0
 //!
+//! On a real NIC, capturing traffic *not* addressed to the local MAC
+//! (SPAN/mirror ports, sniffing) needs **promiscuous mode** — AF_XDP runs after
+//! the NIC's MAC filter. Opt in with `PROMISC=1` (issue #4):
+//!
+//!     PROMISC=1 cargo run --example async_xdp_self_loaded \
+//!         --features tokio,af-xdp,xdp-loader -- eth0
+//!
 //! Usage:
 //!     cargo run --example async_xdp_self_loaded \
 //!         --features tokio,af-xdp,xdp-loader -- [iface] [seconds]
@@ -37,8 +44,12 @@ async fn main() -> Result<(), netring::Error> {
         _ => XdpFlags::SKB_MODE,
     };
 
+    // Issue #4: capture all traffic on the wire (not just frames addressed to
+    // the local MAC) by putting the interface in promiscuous mode.
+    let promiscuous = matches!(std::env::var("PROMISC").as_deref(), Ok("1") | Ok("true"));
+
     eprintln!(
-        "AF_XDP RX on {iface} for {seconds}s (mode={flags:?}); \
+        "AF_XDP RX on {iface} for {seconds}s (mode={flags:?}, promisc={promiscuous}); \
          loading built-in redirect-all XDP program"
     );
 
@@ -47,6 +58,7 @@ async fn main() -> Result<(), netring::Error> {
         .queue_id(0)
         .frame_size(2048)
         .frame_count(4096)
+        .promiscuous(promiscuous) //  ← issue #4: PACKET_MR_PROMISC guard, self-cleaning
         .with_default_program() //  ← plan 12: load+attach+register
         .xdp_attach_flags(flags)
         .force_replace(true) // robust to leftover programs from prior runs

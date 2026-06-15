@@ -148,6 +148,9 @@ pub struct XdpSocketBuilder {
     hugepages: bool,
     /// 0.25 W4: bind the UMEM to this NUMA node (`mbind`).
     numa_node: Option<u32>,
+    /// Put the interface into promiscuous mode for the socket's lifetime,
+    /// via an auxiliary AF_PACKET `PACKET_MR_PROMISC` guard (issue #4).
+    promiscuous: bool,
     #[cfg(feature = "xdp-loader")]
     attach_default: bool,
     #[cfg(feature = "xdp-loader")]
@@ -175,6 +178,7 @@ impl Default for XdpSocketBuilder {
             busy_poll_budget: None,
             hugepages: false,
             numa_node: None,
+            promiscuous: false,
             #[cfg(feature = "xdp-loader")]
             attach_default: false,
             #[cfg(feature = "xdp-loader")]
@@ -231,6 +235,36 @@ impl XdpSocketBuilder {
     /// logged at `warn` and ignored.
     pub fn numa_node(mut self, node: u32) -> Self {
         self.numa_node = Some(node);
+        self
+    }
+
+    /// Put the interface into **promiscuous mode** for the lifetime of the
+    /// returned [`XdpSocket`]. Default: `false`.
+    ///
+    /// AF_XDP runs in the driver RX path *after* the NIC's MAC filter, so on a
+    /// non-promiscuous interface the socket only sees frames addressed to that
+    /// NIC (plus broadcast and subscribed multicast). Enable this to capture
+    /// all traffic on the wire — the usual need for SPAN/mirror ports, passive
+    /// sniffing, or bridging.
+    ///
+    /// Promiscuity is a `netdev` property, not an AF_XDP socket option, so
+    /// netring holds it through an auxiliary AF_PACKET socket joined to
+    /// `PACKET_MR_PROMISC` — the same mechanism the AF_PACKET capture path
+    /// uses. The kernel reference-counts `dev->promiscuity` and releases it
+    /// automatically when the `XdpSocket` is dropped, including on crash (the
+    /// kernel closes fds on process exit). No manual restore, no leak.
+    ///
+    /// Requires `CAP_NET_RAW`, which AF_XDP capture already needs. Two gotchas
+    /// worth knowing:
+    /// - `PACKET_MR_PROMISC` does **not** set the user-visible `IFF_PROMISC`
+    ///   flag, so `ip link` / `ifconfig` will not display `PROMISC` even though
+    ///   the interface *is* in promiscuous mode (`dev->promiscuity` is raised).
+    /// - On a multi-queue NIC an XSK binds to a single queue, and RSS spreads
+    ///   traffic across queues, so one socket still only sees its queue's share
+    ///   even in promiscuous mode. For complete capture, force a single queue
+    ///   (`ethtool -L <iface> combined 1`) or open one socket per queue.
+    pub fn promiscuous(mut self, enable: bool) -> Self {
+        self.promiscuous = enable;
         self
     }
 
@@ -614,6 +648,17 @@ impl XdpSocketBuilder {
             }
         }
 
+        // Optionally hold the interface in promiscuous mode for the socket's
+        // lifetime (issue #4). AF_XDP has no promisc knob; an AF_PACKET
+        // `PACKET_MR_PROMISC` guard provides it and self-cleans on drop.
+        let promisc_guard = if self.promiscuous {
+            Some(crate::afpacket::socket::PromiscGuard::enable(
+                ifindex as i32,
+            )?)
+        } else {
+            None
+        };
+
         #[cfg_attr(not(feature = "xdp-loader"), allow(unused_mut))]
         let mut socket = XdpSocket {
             fd,
@@ -623,6 +668,7 @@ impl XdpSocketBuilder {
             tx,
             comp,
             need_wakeup_enabled: self.need_wakeup,
+            _promisc_guard: promisc_guard,
             #[cfg(feature = "xdp-loader")]
             _xdp_attachment: None,
         };
@@ -715,6 +761,12 @@ pub struct XdpSocket {
     /// whether `flush()` honors `tx.needs_wakeup()` or always kicks.
     #[cfg(feature = "af-xdp")]
     need_wakeup_enabled: bool,
+    /// RAII guard holding the interface in promiscuous mode (set when built
+    /// with [`XdpSocketBuilder::promiscuous`]). On drop, its fd closes and the
+    /// kernel decrements `dev->promiscuity`, so the interface leaves
+    /// promiscuous mode. `None` when promiscuous mode was not requested.
+    #[cfg(feature = "af-xdp")]
+    _promisc_guard: Option<crate::afpacket::socket::PromiscGuard>,
     /// RAII guard for an attached XDP program (if the socket was built
     /// with `with_default_program()`). Drops before the socket fd, so
     /// the program is detached from the interface before AF_XDP shuts
@@ -1130,6 +1182,20 @@ mod tests {
 
         let b = XdpSocketBuilder::default().mode(XdpMode::Custom { prefill: 256 });
         assert_eq!(b.mode, XdpMode::Custom { prefill: 256 });
+    }
+
+    #[test]
+    fn builder_promiscuous_defaults_off_and_setter_toggles() {
+        // Default is off — promiscuous mode is opt-in (issue #4).
+        let b = XdpSocketBuilder::default();
+        assert!(!b.promiscuous);
+
+        let b = XdpSocketBuilder::default().promiscuous(true);
+        assert!(b.promiscuous);
+
+        // Idempotent / re-settable.
+        let b = b.promiscuous(false);
+        assert!(!b.promiscuous);
     }
 
     #[cfg(feature = "xdp-loader")]

@@ -108,6 +108,9 @@ pub(crate) struct XdpIfaceSpec {
     /// `open_xdp_backend`); without that feature it's always `false` and unread.
     #[cfg_attr(not(feature = "xdp-loader"), allow(dead_code))]
     pub(crate) self_load: bool,
+    /// Put the interface into promiscuous mode for the capture's lifetime
+    /// (issue #4). Set via [`MonitorBuilder::xdp_promiscuous`].
+    pub(crate) promiscuous: bool,
 }
 
 /// The 0.20 top-level monitor — a fully-constructed graph of
@@ -650,6 +653,7 @@ impl MonitorBuilder {
         self.xdp_interfaces.push(XdpIfaceSpec {
             iface: iface.into(),
             self_load: false,
+            promiscuous: false,
         });
         self
     }
@@ -673,7 +677,39 @@ impl MonitorBuilder {
         self.xdp_interfaces.push(XdpIfaceSpec {
             iface: iface.into(),
             self_load: true,
+            promiscuous: false,
         });
+        self
+    }
+
+    /// Enable **promiscuous mode** on the most recently added AF_XDP capture
+    /// interface (feature `af-xdp`; issue #4).
+    ///
+    /// Chain it right after [`Self::xdp_interface`] or
+    /// [`Self::xdp_interface_loaded`] — it modifies that interface's spec:
+    ///
+    /// ```ignore
+    /// Monitor::builder()
+    ///     .xdp_interface_loaded("eth0")
+    ///     .xdp_promiscuous(true)        // capture all traffic on eth0
+    ///     .protocol::<Tcp>()
+    ///     .build()?;
+    /// ```
+    ///
+    /// AF_XDP runs after the NIC's MAC filter, so without this the socket only
+    /// sees frames addressed to the interface (plus broadcast/multicast). The
+    /// Monitor holds promiscuity via an AF_PACKET `PACKET_MR_PROMISC` guard
+    /// tied to the socket's lifetime — see
+    /// [`XdpSocketBuilder::promiscuous`](crate::XdpSocketBuilder::promiscuous)
+    /// for the mechanism and the multi-queue / `IFF_PROMISC`-visibility caveats.
+    ///
+    /// No-op (returns `self` unchanged) if no AF_XDP interface has been added
+    /// yet.
+    #[cfg(feature = "af-xdp")]
+    pub fn xdp_promiscuous(mut self, enable: bool) -> Self {
+        if let Some(spec) = self.xdp_interfaces.last_mut() {
+            spec.promiscuous = enable;
+        }
         self
     }
 
@@ -1861,6 +1897,31 @@ mod tests {
             crate::error::Error::Build(BuildError::NoInterface) => {}
             other => panic!("expected NoInterface, got {other:?}"),
         }
+    }
+
+    #[cfg(feature = "af-xdp")]
+    #[test]
+    fn xdp_promiscuous_targets_last_added_interface() {
+        // `xdp_promiscuous` modifies the most recently added AF_XDP interface;
+        // others keep their (default-off) setting. (issue #4)
+        let b = Monitor::builder()
+            .xdp_interface("eth0")
+            .xdp_interface("eth1")
+            .xdp_promiscuous(true);
+        assert!(!b.xdp_interfaces[0].promiscuous, "eth0 stays default-off");
+        assert!(b.xdp_interfaces[1].promiscuous, "eth1 was just toggled on");
+
+        // Default (no call) is off.
+        let b = Monitor::builder().xdp_interface("eth0");
+        assert!(!b.xdp_interfaces[0].promiscuous);
+    }
+
+    #[cfg(feature = "af-xdp")]
+    #[test]
+    fn xdp_promiscuous_before_any_interface_is_a_noop() {
+        // No AF_XDP interface added yet → no panic, nothing to toggle.
+        let b = Monitor::builder().xdp_promiscuous(true);
+        assert!(b.xdp_interfaces.is_empty());
     }
 
     #[test]

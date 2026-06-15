@@ -1,5 +1,23 @@
 # Changelog
 
+## Unreleased
+
+### Added
+
+- **AF_XDP promiscuous mode** ([#4](https://github.com/p13marc/netring/issues/4)).
+  `XdpSocketBuilder::promiscuous(bool)` and `MonitorBuilder::xdp_promiscuous(bool)`
+  put the interface into promiscuous mode for the socket's lifetime, so AF_XDP
+  capture can see traffic not addressed to the local MAC (SPAN/mirror ports,
+  passive sniffing). Promiscuity is a `netdev` property — AF_XDP has no socket
+  knob for it — so netring holds it through an auxiliary AF_PACKET socket joined
+  to `PACKET_MR_PROMISC` (the same mechanism the AF_PACKET path uses). The kernel
+  reference-counts `dev->promiscuity` and releases it automatically when the
+  socket is dropped, including on crash; no manual restore, no leak. Default off.
+  Two documented caveats: `PACKET_MR_PROMISC` does not raise the user-visible
+  `IFF_PROMISC` flag, and on a multi-queue NIC a single XSK still only sees its
+  bound queue's RSS share (force one queue with `ethtool -L <iface> combined 1`,
+  or open one socket per queue).
+
 ## 0.25.0 — 2026-06-15 — subscriptions, async effects, performance & TX
 
 > The complete capability release on the 0.24 keystone: typed 3-tier

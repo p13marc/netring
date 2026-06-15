@@ -123,11 +123,19 @@ fn open_xdp_backend(spec: &crate::monitor::XdpIfaceSpec) -> Result<crate::AsyncX
         let socket = crate::XdpSocketBuilder::default()
             .interface(&spec.iface)
             .mode(crate::XdpMode::Rx)
+            .promiscuous(spec.promiscuous)
             .with_default_program()
             .build()?;
         return crate::AsyncXdpSocket::new(socket);
     }
-    crate::AsyncXdpSocket::open(&spec.iface)
+    // Bare path (externally-attached redirect program). Build through the
+    // builder rather than `AsyncXdpSocket::open` so promiscuous mode can be
+    // applied; with `promiscuous = false` this is identical to `open`.
+    let socket = crate::XdpSocketBuilder::default()
+        .interface(&spec.iface)
+        .promiscuous(spec.promiscuous)
+        .build()?;
+    crate::AsyncXdpSocket::new(socket)
 }
 
 pub(crate) async fn run_loop(monitor: Monitor, stop: StopCondition) -> Result<()> {

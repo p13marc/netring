@@ -205,6 +205,11 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
       - run: cargo bench -p netring --no-run
+      # 0.25 C3: the dispatch-throughput pps proxy needs `flow`; build + run it
+      # briefly so a userspace-hot-path regression (or a build break) is caught.
+      # See docs/PERFORMANCE.md.
+      - name: Dispatch-throughput bench (smoke)
+        run: cargo bench -p netring --features flow --bench dispatch_throughput -- --warm-up-time 1 --measurement-time 2
 
   # ── Zero-alloc regression bench (dhat) ────────────────────────────────────
   # Locks in netring 0.20's Δ 0 bytes / Δ 0 blocks steady-state

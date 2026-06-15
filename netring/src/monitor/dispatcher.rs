@@ -150,7 +150,10 @@ fn call_handler_catching(handler: &BoxedHandler, ptr: *const (), ctx: &mut Ctx<'
     }
 }
 
-/// Best-effort extraction of a panic's message string.
+/// Best-effort extraction of a panic's message string. 0.25 C2: `#[cold]` —
+/// only reached when a handler actually panicked, so keep it off the hot path's
+/// icache.
+#[cold]
 fn panic_message(payload: &(dyn std::any::Any + Send)) -> String {
     if let Some(s) = payload.downcast_ref::<&str>() {
         (*s).to_string()

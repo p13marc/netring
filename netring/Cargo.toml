@@ -540,3 +540,9 @@ harness = false
 name = "zero_alloc"
 harness = false
 required-features = ["bench-zero-alloc"]
+
+# 0.25 C3: cap-free userspace dispatch-throughput pps proxy (docs/PERFORMANCE.md).
+[[bench]]
+name = "dispatch_throughput"
+harness = false
+required-features = ["flow"]

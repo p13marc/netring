@@ -19,7 +19,7 @@ Forward-looking implementation plans only. Historical record lives in `CHANGELOG
 | [`netring-architecture.md`](./netring-architecture.md) | **Design north-star — read first.** The coherent end-to-end design every release implements: the data path, the `AnyBackend` enum, typed multi-stage filtering, the handler/effect model, resilience, threading, and the SemVer strategy. Design values: **performance · strongly-typed · async-friendly (tokio) · idiomatic.** |
 | [`netring-strategic-review-2026-06.md`](./netring-strategic-review-2026-06.md) | The *why* — competitive landscape, pain points, differentiators, the M1–M4 roadmap. |
 | ~~`netring-0.24-plan.md`~~ | **Shipped — 0.24.0 released 2026-06-14** (Zero-Copy Core + Production Trust; keystone `AnyBackend`). Plan deleted on ship; deferrals carried into the 0.25 plan's "Deferred from 0.24" section. |
-| [`netring-0.25-plan.md`](./netring-0.25-plan.md) | **Next release** — Subscriptions, Async Effects & Performance (Phases A–D) + the 0.24 deferral backlog. |
+| ~~`netring-0.25-plan.md`~~ | **Shipped — 0.25.0 released 2026-06-15** (tag `0.25.0` + `netring-exporters` 0.1.0). Subscriptions, Async Effects, Performance & TX — the complete capability release; nothing deferred. Plan + subscription-engine design deleted on ship. |
 | [`upstream-tracking.md`](./upstream-tracking.md) | Live: rustc / kernel / flowscope features being watched. |
 | *(this)* `INDEX.md` | Roadmap overview, decisions, invariants, history. |
 
@@ -38,11 +38,12 @@ design).
   │     enum + borrowed zero-copy + Send loop · AF_XDP reaches the Monitor (xdp_interface;
   │     live-XDP→0.25) · resilience + error counters · telemetry/health · syslog/IPFIX ·
   │     JA4/JA4S (flowscope 0.15.0) · miri/fuzz/perf-gate.  Deferrals → 0.25 backlog.
-0.25  Subscriptions, Effects & Performance  ── NEXT: typed 3-tier subscriptions · filter
-  │     pushdown → cBPF / table-driven XDP map (differentiator) · async read+effect
-  │     handlers · NUMA pinning + symmetric fanout · published pps/Gbps · TX
-  │     + the 0.24 deferral backlog (live AF_XDP, UMEM/NUMA, Reopen/panic-catch,
-  │     JA4S license-gating, pcap→AnyBackend, OTLP/Kafka crate, EVE-tls-record)
+0.25  Subscriptions, Effects & Performance  ── ✅ PUBLISHED 2026-06-15 (tag 0.25.0 +
+  │     netring-exporters 0.1.0): typed 3-tier subscriptions · filter pushdown → cBPF /
+  │     table-driven XDP map (differentiator) · async read+effect handlers · NUMA/CPU
+  │     pinning · published pps/Gbps · symmetric TX · in-Monitor AF_XDP loader · UMEM
+  │     hugepages/NUMA · Reopen/panic-catch · JA4S license-gating · OTLP/Kafka crate ·
+  │     EVE-tls-record. The complete capability release — nothing deferred.
   ▼   community test window → feedback incorporated → shims removed
 1.0   Stabilization (SemVer promise; plan written once feedback is in)
 ```
@@ -86,6 +87,7 @@ seam everything else (incl. 0.25's subscriptions) builds on.
 
 | Release | Status |
 |---|---|
+| netring **0.25** | **Published 2026-06-15** (tag `0.25.0`) + **netring-exporters 0.1.0**. Subscriptions, Async Effects, Performance & TX: typed 3-tier subscriptions + kernel filter pushdown (cBPF / XDP map) · async read+effect handlers · CPU/NUMA pinning + dispatch-throughput numbers · symmetric TX stack · in-Monitor AF_XDP loader · UMEM hugepages/NUMA · Reopen/panic-catch · JA4S `ja4plus` license-gating · OTLP/Kafka companion crate · EVE-tls-record. Depends on flowscope 0.16.0. Additive over 0.24. |
 | netring **0.24** | **Published 2026-06-14** (tag `0.24.0`). Zero-Copy Core + Production Trust: `AnyBackend` + borrowed zero-copy + `Send` loop · AF_XDP-in-Monitor · resilience + error counters · telemetry/health · syslog/IPFIX exporters · JA4/JA4S. Depends on flowscope 0.15.0. Additive over 0.23. |
 | netring **0.23** | `Send` run-loop future (spawnable). **Folded into 0.24 — never published standalone.** |
 | netring **0.22** | **Published 2026-06-13** (tag `0.22.0`). Operations toolkit + typed protocol model (breaking). Depends on flowscope 0.14.1 (also published 2026-06-13). |

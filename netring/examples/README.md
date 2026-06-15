@@ -113,12 +113,17 @@ the declarative `Monitor::builder()` API (see `monitor/` below).
 ## monitor/ — declarative Monitor API (0.21+)
 
 The `Monitor::builder()` API. Each example targets a single
-aspect of the 0.21 surface; compose them as needed for your own
+aspect of the surface; compose them as needed for your own
 code. All examples use plain `#[tokio::main]` (multi-thread
 runtime) — `Monitor` is `Send` since 0.21.
 
+**Start here for 0.25:** `monitor_subscriptions` — the typed subscription
+engine (`packet()` / `flow::<P>()` / `session::<P>()` + `.expr("…")`), the
+headline API with kernel filter pushdown.
+
 | Example | What it shows |
 |---|---|
+| `monitor_subscriptions` | **the 0.25 subscription engine** — `packet()` / `flow::<P>()` / `session::<P>()` tiers + `.expr("…")` runtime filters + kernel pushdown |
 | `monitor_basic` | `Monitor::builder()` + `.on::<FlowStarted<Tcp>>(...)` + StdoutSink |
 | `monitor_detector_macro` | `detector!` macro for 3 stateless detectors (SshAttempt / HttpRequest / DnsQuery) |
 | `monitor_layered_sinks` | `MinSeverity` + `DedupeAnomalies` + `RateLimitAnomalies` + `Tee::factory` over `StdoutSink` |

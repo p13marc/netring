@@ -494,6 +494,11 @@ path = "examples/monitor/health_endpoint.rs"
 required-features = ["tokio", "flow"]
 
 [[example]]
+name = "monitor_subscriptions"
+path = "examples/monitor/subscriptions.rs"
+required-features = ["monitor"]
+
+[[example]]
 name = "monitor_tracing_json"
 path = "examples/monitor/tracing_json.rs"
 required-features = ["monitor"]

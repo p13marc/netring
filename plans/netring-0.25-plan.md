@@ -195,9 +195,19 @@ examples/tests/docs. (`error.rs`, `monitor/mod.rs`, `monitor/async_handler.rs`.)
 - **✅ W1f C5 tracing-JSON example** — `examples/monitor/tracing_json.rs` (TracingSink +
   per-flow + `on_capture_stats` → NDJSON via `tracing-subscriber`).
 
-**W2 — Phase C performance & scaling (code always; numbers on `lo` now + real-NIC note):**
-C1 CPU pinning + symmetric eBPF fanout; C2 prefetch + batched refill + `#[cold]`; C3 perf
-harness (pps/Gbps/latency, pushdown on/off) + CI regression gate + `docs/PERFORMANCE.md`.
+**✅ W2 — Phase C performance & scaling.**
+- **C1 ✅ CPU pinning** — `ShardedRunner::pin_cpus(true)` (`sched_setaffinity`, dep-free,
+  cap-free test). **Symmetric fanout:** documented, not a new vendored eBPF program — the
+  mechanism already exists (`FanoutMode::Ebpf` + `attach_fanout_ebpf`, an XOR-of-sorted-
+  endpoints hash is symmetric); the asymmetric-RSS pitfall + the recipe are in
+  `PERFORMANCE.md`/`scaling.md`. (A bundled symmetric program is genuinely HW-dependent;
+  shipping the recipe over a half-validatable binary is the honest call.)
+- **C2 ◑** — `#[cold]` on the panic path; blind per-frame micro-opts (prefetch, batched
+  refill) NOT landed — they need a real-NIC pps delta the sandbox can't produce, so they're
+  documented as harness candidates (the plan's own "must show pps delta or doesn't land" gate).
+- **C3 ✅** — `benches/dispatch_throughput.rs` (cap-free userspace pps proxy, ~4.7 Melem/s/core,
+  CI-run) + `docs/PERFORMANCE.md` (capture-vs-dispatch split, dhat-Δ0 enforced gate, tuning
+  levers, honest real-NIC-pending methodology — no fabricated figures).
 
 **W3 — Phase D TX symmetry:** `AsyncInjector::send_stream`, `TxPacer` token bucket, TX
 hardware timestamping. Full stack, not trimmed.

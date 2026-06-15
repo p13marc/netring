@@ -169,11 +169,25 @@ examples/tests/docs. (`error.rs`, `monitor/mod.rs`, `monitor/async_handler.rs`.)
   zero-copy ELF parse needs alignment; plain `include_bytes!` failed ("error parsing ELF
   data") in any tokio/Monitor build (feature-unification misalignment), so redirect-all was
   already broken for Monitor-on-AF_XDP. Guarded by cap-free `vendored_programs_parse_under_aya`.
-- **W1b pcap → `AnyBackend` fold** — collapse `replay_loop` into the one generic drain loop
-  (Pcap arm). Removes a whole parallel code path.
-- **W1c D1 active-timeout flow export** — emit `FlowRecord` on a configurable active timeout,
-  not only `FlowEnded` (`monitor/exporter` + flow state).
-- **W1d E2 EVE tls-record** — Suricata `event_type:"tls"` record in `EveSink`.
+- **W1b pcap → `AnyBackend` fold — EVALUATED, deliberately NOT done.** The premise ("removes
+  a whole parallel code path") doesn't hold on inspection: the per-packet logic
+  (`dispatch_packet_subs`, `dispatch_tracked_events`, `drain_protocol_slots`) is **already
+  shared** between `run_loop` and `replay_loop` (3 call sites each). `replay_loop` is ~151
+  lines of *glue* — the `Monitor` destructure + a stream-poll loop + the EOF flush. A real
+  fold means adding a `Pcap` arm whose `drain_batch` pulls from the spawn-blocking stream AND
+  teaching the **Send-critical `tokio::select!` run loop** a new "backend exhausted → stop"
+  condition (EOF), plus reconciling pacing and the EOF sweep with `drain_timeout`. That's
+  added complexity in the crate's most delicate, `Send`-sensitive code for **zero user-facing
+  benefit** and real regression risk to a well-tested replay path. Net LoC ≈ neutral. Decision:
+  keep `replay_loop` — the shared helpers already capture the dedup that matters. *(This is a
+  within-release scoping call on an internal refactor, not a deferred feature.)*
+- **✅ W1c D1 active-timeout flow export** — `MonitorBuilder::export_active_timeout(period)`;
+  run loop walks `tracker().iter_active()` each period, emits ongoing `FlowRecord`
+  (`reason: Option<EndReason>` = `None`) per long-lived flow with per-flow dedup. IPFIX maps
+  `None`→`0x02` (active timeout). Cap-free tests.
+- **✅ W1d E2 EVE tls-record** — netring-owned `eve_tls_record` + `EveTlsSink`
+  (`event_type:"tls"`, Suricata-compatible; flowscope's EVE writer scopes out protocol
+  records). Wire via `on_fingerprint`. Cap-free test.
 - **W1e B4 reopen/panic policy** — `BackendErrorPolicy::Reopen` + per-handler
   `catch_unwind` option so one panicking handler doesn't kill the loop.
 - **W1f C5 tracing-JSON example.**

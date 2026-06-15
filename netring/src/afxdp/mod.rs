@@ -144,6 +144,10 @@ pub struct XdpSocketBuilder {
     busy_poll_us: Option<u32>,
     prefer_busy_poll: Option<bool>,
     busy_poll_budget: Option<u16>,
+    /// 0.25 W4: back the UMEM with hugepages (`MAP_HUGETLB`).
+    hugepages: bool,
+    /// 0.25 W4: bind the UMEM to this NUMA node (`mbind`).
+    numa_node: Option<u32>,
     #[cfg(feature = "xdp-loader")]
     attach_default: bool,
     #[cfg(feature = "xdp-loader")]
@@ -169,6 +173,8 @@ impl Default for XdpSocketBuilder {
             busy_poll_us: None,
             prefer_busy_poll: None,
             busy_poll_budget: None,
+            hugepages: false,
+            numa_node: None,
             #[cfg(feature = "xdp-loader")]
             attach_default: false,
             #[cfg(feature = "xdp-loader")]
@@ -203,6 +209,28 @@ impl XdpSocketBuilder {
     /// Number of UMEM frames. Default: 4096.
     pub fn frame_count(mut self, count: usize) -> Self {
         self.frame_count = count;
+        self
+    }
+
+    /// 0.25 W4: back the UMEM with **hugepages** (`MAP_HUGETLB`, 2 MiB) to cut
+    /// TLB misses on the per-frame DMA path. Default: false.
+    ///
+    /// Requires hugepages reserved on the host
+    /// (`sysctl vm.nr_hugepages` / `hugeadm`). Best-effort: if the hugepage
+    /// mapping fails (none reserved), `build()` falls back to regular pages with
+    /// a `warn` rather than failing. The UMEM region is rounded up to a
+    /// hugepage multiple.
+    pub fn hugepages(mut self, enable: bool) -> Self {
+        self.hugepages = enable;
+        self
+    }
+
+    /// 0.25 W4: bind the UMEM's pages to NUMA `node` (`mbind` / `MPOL_BIND`) —
+    /// set this to the NIC's NUMA node to avoid cross-node DMA + cache traffic.
+    /// Best-effort: a binding failure (single-node host, missing privilege) is
+    /// logged at `warn` and ignored.
+    pub fn numa_node(mut self, node: u32) -> Self {
+        self.numa_node = Some(node);
         self
     }
 
@@ -330,9 +358,20 @@ impl XdpSocketBuilder {
         self
     }
 
-    /// If `true`, attach with `XDP_FLAGS_REPLACE` so an existing
-    /// program on the interface is replaced. Default: false (build
-    /// fails with `EBUSY` if a program is already attached).
+    /// Request replacement of an existing XDP program on the interface.
+    ///
+    /// **Kernel ≥ 5.9 caveat:** netring (via aya) attaches through the
+    /// `bpf_link_create` link API, which does **not** support
+    /// `XDP_FLAGS_REPLACE` — that flag is only honoured by the legacy netlink
+    /// attach path. So on modern kernels atomic replacement of a *foreign*
+    /// incumbent program is not reachable here. Setting this flag therefore no
+    /// longer forces a replace; instead it makes a failed attach return an
+    /// actionable [`Error::Loader`] explaining how to clear the incumbent
+    /// (`ip link set dev <iface> xdp off`). (Previously this OR'd in
+    /// `XDP_FLAGS_REPLACE` and crashed with `EINVAL`.)
+    ///
+    /// Default: false (build fails with the raw attach error if a program is
+    /// already attached).
     #[cfg(feature = "xdp-loader")]
     pub fn force_replace(mut self, force: bool) -> Self {
         self.force_replace = force;
@@ -405,7 +444,14 @@ impl XdpSocketBuilder {
         let ifindex = crate::afpacket::socket::resolve_interface(iface)? as u32;
 
         // 1. Allocate UMEM (MAP_PRIVATE | MAP_ANONYMOUS | MAP_POPULATE)
-        let mut umem = Umem::new(self.frame_size, self.frame_count)?;
+        let mut umem = Umem::new_with_options(
+            self.frame_size,
+            self.frame_count,
+            &umem::UmemOptions {
+                hugepages: self.hugepages,
+                numa_node: self.numa_node,
+            },
+        )?;
 
         // 2. Create AF_XDP socket
         let fd = socket::create_xdp_socket()?;
@@ -544,6 +590,30 @@ impl XdpSocketBuilder {
             self.shared_umem_fd,
         )?;
 
+        // 0.25 W4: warn if the kernel fell back to COPY mode. On a fast NIC the
+        // per-frame copy dominates; the operator should know to switch to a
+        // native-XDP driver + DRV_MODE for true zero-copy. Best-effort read.
+        if self.shared_umem_fd == 0 {
+            let mut opts: u32 = 0;
+            let mut len = std::mem::size_of::<u32>() as libc::socklen_t;
+            // SAFETY: getsockopt writes a u32 into `opts`; `len` matches.
+            let rc = unsafe {
+                libc::getsockopt(
+                    fd.as_raw_fd(),
+                    libc::SOL_XDP,
+                    libc::XDP_OPTIONS,
+                    &mut opts as *mut u32 as *mut libc::c_void,
+                    &mut len,
+                )
+            };
+            if rc == 0 && opts & libc::XDP_OPTIONS_ZEROCOPY == 0 {
+                tracing::warn!(
+                    "AF_XDP bound in COPY mode (not zero-copy); for line-rate use a \
+                     native-XDP-capable driver with XdpFlags::DRV_MODE"
+                );
+            }
+        }
+
         #[cfg_attr(not(feature = "xdp-loader"), allow(unused_mut))]
         let mut socket = XdpSocket {
             fd,
@@ -571,16 +641,31 @@ impl XdpSocketBuilder {
             };
             if let Some(mut prog) = prog {
                 let iface = self.interface.as_deref().unwrap_or("");
-                let flags = if self.force_replace {
-                    self.attach_flags | loader::XdpFlags::REPLACE
-                } else {
-                    self.attach_flags
-                };
+                // NOTE: `XDP_FLAGS_REPLACE` is **not** OR'd in here even when
+                // `force_replace` is set. On kernels ≥ 5.9 aya attaches via
+                // `bpf_link_create`, which rejects `XDP_FLAGS_REPLACE` (that flag
+                // is only honoured by the legacy netlink `IFLA_XDP_FLAGS` path).
+                // Passing it caused `EINVAL` ("bpf_link_create failed"). Atomic
+                // replacement of a *foreign* incumbent program isn't reachable
+                // through the link API, so `force_replace` now only enriches the
+                // attach error with a remediation hint (see below).
+                let flags = self.attach_flags;
                 // Register *before* attach: the kernel program reads
                 // map[queue_id] on the very first packet, so any race
                 // in the other order risks dropping the first batch.
                 prog.register(self.queue_id, &socket)?;
-                let attachment = prog.attach(iface, flags)?;
+                let attachment = prog.attach(iface, flags).map_err(|e| {
+                    if self.force_replace {
+                        Error::Loader(format!(
+                            "XDP attach to '{iface}' failed and atomic replacement of an \
+                             existing program is not supported through the link API on this \
+                             kernel (≥ 5.9). Remove the incumbent first \
+                             (`ip link set dev {iface} xdp off`), then retry. Underlying: {e}"
+                        ))
+                    } else {
+                        e
+                    }
+                })?;
                 socket._xdp_attachment = Some(attachment);
             }
         }

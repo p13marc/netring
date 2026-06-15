@@ -110,14 +110,15 @@ default (a per-packet-async mode, which costs a copy, can come later).
 
 **Filters are typed builders, not strings** (idiomatic Rust; reuse the existing typed
 `BpfFilterBuilder` vocabulary — pf-rs / typed-builder precedent). A `.expr("…")` string
-escape hatch exists for *runtime/operator-supplied* filters only (Cloudflare `wirefilter`,
-optional feature). Both lower to the **same predicate AST**, so they split identically:
+escape hatch exists for *runtime/operator-supplied* filters only — parsed by netring's **own
+dep-free recursive-descent parser** (shipped; `wirefilter` was evaluated and rejected as dead
+on crates.io). Both lower to the **same predicate AST**, so they split identically:
 
 ```rust
 .subscribe(packet().tcp().dst_port(443).to(h))             // typed, kernel-pushable
 .subscribe(flow::<Tcp>().bytes_over(1 << 20).to(h))         // typed, userspace
 .subscribe(session::<Tls>().sni_glob("*.bank").to(h))       // typed, userspace
-.subscribe(packet().expr("tcp port 443 and not host 10.0.0.1").to(h)) // runtime string (wirefilter)
+.subscribe(packet().expr("tcp port 443 and not host 10.0.0.1").to(h)) // runtime string (own parser)
 ```
 
 The compiler **splits** each predicate AST:
@@ -224,5 +225,7 @@ compiling."
    rest of JA4+) is FoxIO License 1.1 + patent-pending** — internal/academic use is fine but
    commercial vendors need a FoxIO OEM license (even without exposing the fingerprint). Keep
    the *default* fingerprint surface BSD-clean: JA4S must be an **opt-in feature** (flowscope
-   + netring), off by default, with a license notice. (Shipped un-gated in 0.24 / flowscope
-   0.15 — gating is on the 0.25 backlog; `docs/FINGERPRINTS.md` carries the warning.)
+   + netring), off by default, with a license notice. **✅ DONE 2026-06-15:** opt-in `ja4plus`
+   feature, off by default, in flowscope 0.16.0 (published) + netring passthrough (commit
+   `27c6963`); both ship `LICENSE-FoxIO-1.1` + `NOTICE`; `docs/FINGERPRINTS.md` warns. (Was
+   shipped un-gated in 0.24 / flowscope 0.15.)

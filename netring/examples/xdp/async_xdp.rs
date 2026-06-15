@@ -31,6 +31,10 @@ async fn main() -> Result<(), netring::Error> {
         .frame_size(2048)
         .frame_count(64)
         .mode(XdpMode::Tx)
+        // 0.25 W4: on a real NIC, back the UMEM with hugepages and bind it to the
+        // NIC's NUMA node to cut TLB misses + cross-node DMA (both best-effort):
+        //     .hugepages(true)
+        //     .numa_node(0)
         .build()?;
     let mut xdp = AsyncXdpSocket::new(socket)?;
 

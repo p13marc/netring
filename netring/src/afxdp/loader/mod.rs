@@ -38,7 +38,7 @@
 mod default_program;
 mod program;
 
-pub use default_program::default_program;
+pub use default_program::{default_program, filter_program};
 pub use program::{XdpAttachment, XdpFlags, XdpProgram};
 
 /// Returns `Err(ExclusiveBuilderOptions)` if both the built-in and a
@@ -87,6 +87,8 @@ mod tests {
 
     /// Vendored bytecode bytes (re-imported for the integrity test).
     const REDIRECT_ALL_BYTECODE: &[u8] = include_bytes!("programs/redirect_all.bpf.o");
+    /// Table-driven filter+redirect program bytes (0.25 W1a).
+    const FILTER_REDIRECT_BYTECODE: &[u8] = include_bytes!("programs/filter_redirect.bpf.o");
 
     #[test]
     fn vendored_bytecode_is_elf_bpf() {
@@ -128,6 +130,68 @@ mod tests {
         }
         assert!(found_prog, "vendored .bpf.o missing `xdp_sock_prog` symbol");
         assert!(found_map, "vendored .bpf.o missing `xsks_map` symbol");
+    }
+
+    #[test]
+    fn filter_redirect_bytecode_is_elf_with_expected_symbols() {
+        // ELF + EM_BPF, same shape check as redirect_all.
+        assert_eq!(&FILTER_REDIRECT_BYTECODE[0..4], b"\x7fELF");
+        assert_eq!(FILTER_REDIRECT_BYTECODE[4], 2, "ELFCLASS64");
+        assert_eq!(FILTER_REDIRECT_BYTECODE[5], 1, "ELFDATA2LSB");
+        assert_eq!(
+            u16::from_le_bytes([
+                FILTER_REDIRECT_BYTECODE[0x12],
+                FILTER_REDIRECT_BYTECODE[0x13]
+            ]),
+            247,
+            "EM_BPF"
+        );
+        // The program symbol + both maps must be present.
+        for needle in [
+            &b"xdp_filter_prog\0"[..],
+            &b"xsks_map\0"[..],
+            &b"filter_map\0"[..],
+        ] {
+            let found = FILTER_REDIRECT_BYTECODE
+                .windows(needle.len())
+                .any(|w| w == needle);
+            assert!(
+                found,
+                "filter_redirect.bpf.o missing symbol {:?}",
+                std::str::from_utf8(needle).unwrap()
+            );
+        }
+    }
+
+    #[test]
+    fn vendored_programs_parse_under_aya() {
+        // Both vendored objects must parse cleanly through aya's ELF/BTF loader
+        // (the step that returns "error parsing ELF data" on a misaligned
+        // `include_bytes!`). This is the regression guard for the alignment fix
+        // — it runs in the default `cargo test` build, which pulls `tokio` and
+        // so reproduces the feature-unification misalignment that plain
+        // `include_bytes!` failed under. Loading stops at map creation (which
+        // needs privileges); reaching that proves the parse succeeded.
+        //
+        // We assert the error, if any, is *not* a parse error: a privileged CI
+        // runner gets `Ok`, an unprivileged one gets a map-creation `EPERM` —
+        // both mean the ELF parsed.
+        // Go through the production constructors so the test exercises the
+        // *aligned* embedding in `default_program.rs` (not a test-local
+        // `include_bytes!`, which would have no alignment guarantee).
+        for (name, res) in [
+            ("redirect_all", super::default_program(256)),
+            ("filter_redirect", super::filter_program()),
+        ] {
+            if let Err(e) = res {
+                let msg = e.to_string();
+                assert!(
+                    !msg.contains("parsing ELF") && !msg.contains("parsing BPF object"),
+                    "{name}: aya failed to PARSE the vendored object \
+                     (alignment regression?): {msg}"
+                );
+            }
+        }
     }
 
     #[test]

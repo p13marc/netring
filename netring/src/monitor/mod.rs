@@ -53,6 +53,7 @@ use crate::protocol::event_typed::{Event, Tick};
 pub mod async_handler;
 pub(crate) mod backend;
 pub mod dispatcher;
+pub mod effect;
 #[cfg(feature = "tls")]
 pub mod fingerprint;
 pub mod handler;
@@ -64,6 +65,7 @@ pub mod tick;
 
 pub use async_handler::{AsyncHandler, BoxFuture};
 pub use dispatcher::{Dispatcher, MAX_EVENT_TYPES};
+pub use effect::{EffectHandler, Effects};
 #[cfg(feature = "tls")]
 pub use fingerprint::TlsFingerprint;
 pub use handler::{CtxOnly, Handler, PayloadCtx, PayloadOnly};
@@ -75,6 +77,8 @@ pub use tick::TickRegistration;
 pub mod subscribe;
 pub use subscribe::EventStream;
 
+pub mod subscription;
+
 pub mod shard;
 pub use shard::ShardedRunner;
 
@@ -85,6 +89,26 @@ pub(crate) mod merge;
 // monitor API on `flow + tokio`).
 pub mod bandwidth;
 pub use bandwidth::{BandwidthEntry, BandwidthReport, BandwidthSnapshot};
+
+/// How an AF_XDP capture interface obtains its redirect program (0.25 W1a).
+///
+/// A bare AF_XDP socket receives no packets until an XDP program redirects
+/// traffic into its XSKMAP. `self_load` distinguishes the two ways a Monitor
+/// gets one:
+/// - `false` ([`MonitorBuilder::xdp_interface`]): the caller attaches a
+///   redirect program out of band; the Monitor opens a plain socket.
+/// - `true` ([`MonitorBuilder::xdp_interface_loaded`], requires `xdp-loader`):
+///   the Monitor itself attaches the built-in redirect-all program and
+///   registers the socket on its XSKMAP, so no external loader is needed.
+#[cfg(feature = "af-xdp")]
+#[derive(Clone, Debug)]
+pub(crate) struct XdpIfaceSpec {
+    pub(crate) iface: String,
+    /// Only consulted on the `xdp-loader` path (the run loop's
+    /// `open_xdp_backend`); without that feature it's always `false` and unread.
+    #[cfg_attr(not(feature = "xdp-loader"), allow(dead_code))]
+    pub(crate) self_load: bool,
+}
 
 /// The 0.20 top-level monitor — a fully-constructed graph of
 /// (driver, dispatcher, parser-slots, state) that runs to a
@@ -100,7 +124,7 @@ pub struct Monitor {
     /// loop opens an `AnyBackend::Xdp` for each, alongside the AF_PACKET
     /// `interfaces`. See [`MonitorBuilder::xdp_interface`].
     #[cfg(feature = "af-xdp")]
-    pub(crate) xdp_interfaces: Vec<String>,
+    pub(crate) xdp_interfaces: Vec<XdpIfaceSpec>,
     pub(crate) driver: Driver<FiveTuple>,
     pub(crate) dispatcher: Dispatcher,
     pub(crate) protocol_slots: Vec<Box<dyn ProtocolSlot>>,
@@ -188,6 +212,20 @@ pub struct Monitor {
     /// [`crate::export::FlowRecord`] for every `FlowEnded` and hands it
     /// to each. Empty (the common case) is zero cost.
     pub(crate) flow_exporters: Vec<Box<dyn crate::export::FlowExporter>>,
+    /// 0.25 W1c: active-timeout period for interim flow-record export. When
+    /// `Some` (and exporters exist), the run loop emits ongoing `FlowRecord`s
+    /// for long-lived flows every period. See [`MonitorBuilder::export_active_timeout`].
+    pub(crate) flow_active_timeout: Option<std::time::Duration>,
+    /// 0.25 A1: packet-tier subscriptions. Dispatched inside the zero-copy
+    /// drain (before flow tracking) for every captured frame matching the
+    /// sub's filter. Empty (the common case) keeps the `track_into`-only
+    /// hot loop — zero cost, dhat `Δ 0`.
+    pub(crate) packet_subs: Vec<subscription::PacketSubscription>,
+    /// 0.25 S2: the conservative kernel prefilter (OR-union of every consumer's
+    /// traffic interest), or `None` for capture-all. Computed at build from the
+    /// full consumer set so it's a superset (no starvation); the run loop
+    /// applies it to each AF_PACKET capture via `set_filter`.
+    pub(crate) kernel_prefilter: Option<crate::config::BpfFilter>,
 }
 
 /// How the run loop reacts when a handler (detector / sink / async handler)
@@ -211,6 +249,13 @@ pub enum BackendErrorPolicy {
     FailFast,
     /// Log + count the error and keep servicing the other capture sources.
     SkipSource,
+    /// Log + count the error and **re-open** the failed source in place (0.25
+    /// W1e) — same kind/filter as the original — so a transient backend fault
+    /// (interface flap, driver reset) self-heals without tearing down the
+    /// monitor. If the re-open itself fails, the source is left out (like
+    /// [`Self::SkipSource`]) and retried on its next error; after many
+    /// consecutive failures the monitor gives up (circuit breaker).
+    Reopen,
 }
 
 impl Monitor {
@@ -436,7 +481,7 @@ pub struct MonitorBuilder {
     interfaces: Vec<String>,
     /// 0.24 Phase B: AF_XDP capture interfaces. See [`Self::xdp_interface`].
     #[cfg(feature = "af-xdp")]
-    xdp_interfaces: Vec<String>,
+    xdp_interfaces: Vec<XdpIfaceSpec>,
     driver_builder: Option<DriverBuilder<FiveTuple>>,
     protocol_slots: Vec<Box<dyn ProtocolSlot>>,
     handlers: HandlerRegistry,
@@ -471,6 +516,10 @@ pub struct MonitorBuilder {
     /// [`Self::backend_error_policy`].
     handler_error_policy: HandlerErrorPolicy,
     backend_error_policy: BackendErrorPolicy,
+    /// 0.25 W1e: catch panics from **sync** handlers and convert them to
+    /// `Error::HandlerPanic` (then handled by `handler_error_policy`). Off by
+    /// default. Set via [`Self::catch_handler_panics`].
+    catch_handler_panics: bool,
     /// 0.24 Phase C1/C2: optional capture-telemetry sampling hook.
     /// `None` until [`Self::on_capture_stats`] is called. Moved into
     /// [`Monitor::capture_stats`] at [`Self::build`].
@@ -478,6 +527,8 @@ pub struct MonitorBuilder {
     /// 0.24 Phase D1: flow exporters registered via
     /// [`Self::export_flows`]. Moved into [`Monitor::flow_exporters`].
     flow_exporters: Vec<Box<dyn crate::export::FlowExporter>>,
+    /// 0.25 W1c: active-timeout period set via [`Self::export_active_timeout`].
+    flow_active_timeout: Option<std::time::Duration>,
     /// 0.21 D.1: TypeIds of protocol markers registered via
     /// `.protocol::<P>()`, paired with each marker's stable
     /// `Protocol::NAME` slug. Consulted at `build()` time against
@@ -520,6 +571,17 @@ pub struct MonitorBuilder {
     /// (e.g. `on_bandwidth` after an explicit `bandwidth_windowed`)
     /// don't double-register the per-packet handler and double-count.
     bandwidth_registered: bool,
+    /// 0.25 A1: packet-tier subscriptions (`packet()…​.to(h)`). Run in the
+    /// zero-copy drain before flow tracking; moved into
+    /// [`Monitor::packet_subs`] at build.
+    packet_subs: Vec<subscription::PacketSubscription>,
+    /// 0.25 S1: per-consumer **traffic-interest** predicates, recorded as
+    /// handlers / protocols are registered (each event's
+    /// [`Event::traffic_class`](crate::protocol::event_typed::Event::traffic_class)
+    /// or a protocol's [`Dispatch`](crate::protocol::Dispatch)). Folded into the
+    /// kernel-prefilter union at [`Self::kernel_prefilter`] — a consumer can
+    /// only widen it, so the kernel filter is always a superset (no starvation).
+    traffic_interests: Vec<subscription::Predicate>,
 }
 
 impl MonitorBuilder {
@@ -581,11 +643,37 @@ impl MonitorBuilder {
     /// [`XdpSocketBuilder::with_default_program`](crate::XdpSocketBuilder)
     /// (feature `xdp-loader`) and attach it out of band, or run a custom
     /// loader. A bare `xdp_interface` with no program bound sees no
-    /// traffic. Full in-Monitor loader integration is tracked for a
-    /// follow-up; this is the API seam that lets AF_XDP reach the Monitor.
+    /// traffic — use [`Self::xdp_interface_loaded`] (feature `xdp-loader`)
+    /// to have the Monitor attach the built-in redirect program for you.
     #[cfg(feature = "af-xdp")]
     pub fn xdp_interface(mut self, iface: impl Into<String>) -> Self {
-        self.xdp_interfaces.push(iface.into());
+        self.xdp_interfaces.push(XdpIfaceSpec {
+            iface: iface.into(),
+            self_load: false,
+        });
+        self
+    }
+
+    /// 0.25 W1a: add an **AF_XDP** capture interface and have the Monitor
+    /// **load + attach the built-in redirect-all XDP program** itself
+    /// (feature `xdp-loader`).
+    ///
+    /// Unlike [`Self::xdp_interface`] (which needs an externally-attached
+    /// redirect program), this is the one-call AF_XDP recipe: on run, the
+    /// Monitor builds the socket via
+    /// [`XdpSocketBuilder::with_default_program`](crate::XdpSocketBuilder),
+    /// which attaches the vendored `redirect_all` program in `SKB_MODE` (works
+    /// on `lo` and unprivileged interfaces) and registers the socket on the
+    /// program's XSKMAP. The attachment is RAII-tied to the socket and detaches
+    /// when the Monitor's run loop ends. For native-driver zero-copy on a real
+    /// NIC, build the socket yourself with `.xdp_attach_flags(XdpFlags::DRV_MODE)`
+    /// and use [`Self::xdp_interface`].
+    #[cfg(all(feature = "af-xdp", feature = "xdp-loader"))]
+    pub fn xdp_interface_loaded(mut self, iface: impl Into<String>) -> Self {
+        self.xdp_interfaces.push(XdpIfaceSpec {
+            iface: iface.into(),
+            self_load: true,
+        });
         self
     }
 
@@ -635,9 +723,29 @@ impl MonitorBuilder {
     /// Default [`BackendErrorPolicy::FailFast`] stops the monitor on a backend
     /// error. [`BackendErrorPolicy::SkipSource`] logs + counts and keeps
     /// servicing the other capture sources (useful for multi-interface monitors
-    /// where one NIC can fail independently).
+    /// where one NIC can fail independently). [`BackendErrorPolicy::Reopen`]
+    /// (0.25 W1e) additionally tries to **re-open** the failed source so a
+    /// transient error (e.g. an interface flap) self-heals.
     pub fn backend_error_policy(mut self, policy: BackendErrorPolicy) -> Self {
         self.backend_error_policy = policy;
+        self
+    }
+
+    /// 0.25 W1e: catch panics from **synchronous** handlers (`on` / `on_ctx` /
+    /// detectors / sinks) and convert them into `Error::HandlerPanic`, then
+    /// route that through the configured
+    /// [`handler_error_policy`](Self::handler_error_policy) — so pairing this
+    /// with [`HandlerErrorPolicy::Isolate`] means one panicking handler is
+    /// logged + counted and the capture pipeline keeps running instead of
+    /// unwinding.
+    ///
+    /// Off by default (a panic is a bug; the default is to surface it). The
+    /// default panic hook still prints the panic to stderr, so nothing is
+    /// silently swallowed. **Async** handlers / effect futures are not covered
+    /// (their panics propagate) — keep async bodies panic-free or guard them
+    /// internally.
+    pub fn catch_handler_panics(mut self, on: bool) -> Self {
+        self.catch_handler_panics = on;
         self
     }
 
@@ -786,6 +894,26 @@ impl MonitorBuilder {
         self
     }
 
+    /// Emit interim [`FlowRecord`](crate::export::FlowRecord)s for **long-lived
+    /// flows** on an active timeout (0.25 W1c) — the NetFlow/IPFIX behaviour
+    /// where a flow alive longer than the active-timeout interval gets periodic
+    /// snapshots, not just one record when it finally ends.
+    ///
+    /// Every `period`, each live flow that has been active for at least
+    /// `period` since its last record gets a `FlowRecord` with
+    /// [`reason`](crate::export::FlowRecord::reason) `= None`
+    /// ([`is_ongoing`](crate::export::FlowRecord::is_ongoing) `== true`)
+    /// dispatched to every registered [`export_flows`](Self::export_flows)
+    /// exporter. The final end-of-flow record (reason `Some(_)`) still fires on
+    /// `FlowEnded` as before. No-op unless at least one exporter is registered.
+    ///
+    /// Counters in interim records are cumulative-to-date (not per-interval
+    /// deltas), matching IPFIX active-timeout semantics.
+    pub fn export_active_timeout(mut self, period: std::time::Duration) -> Self {
+        self.flow_active_timeout = Some(period);
+        self
+    }
+
     /// 0.21 D.2: maximum time the run loop spends draining
     /// residual events after the stop condition fires.
     ///
@@ -865,6 +993,12 @@ impl MonitorBuilder {
         // called for symmetry.
         self.declared_protocols
             .insert(std::any::TypeId::of::<P>(), P::NAME);
+        // 0.25 S1: a registered parser only consumes the traffic its dispatch
+        // describes — record that interest for the kernel-prefilter union.
+        self.traffic_interests
+            .push(subscription::kernel_filter::dispatch_interest(
+                &P::dispatch(),
+            ));
         self
     }
 
@@ -1275,6 +1409,108 @@ impl MonitorBuilder {
         self
     }
 
+    /// Register an **async effect handler** for event type `E` (0.25-B1).
+    ///
+    /// The handler reads the [`Ctx`] **synchronously** (`&Ctx<'_>`) and
+    /// returns a `'static` future resolving to an [`Effects`] value —
+    /// a deferred, owned description of the writes (anomalies to emit,
+    /// …) to apply once the future completes. The run loop awaits the
+    /// future, then applies the effects to the sink under a short
+    /// `&mut Ctx` write phase. The **handler** never captures `Ctx` (its
+    /// future is `'static`); the run-loop future stays `Send` because every
+    /// `Ctx` field is `Send` (see `effect.rs`), unlike a hypothetical
+    /// `Fn(&mut Ctx) -> Future` shape where the user's future would borrow
+    /// `Ctx` across the await.
+    ///
+    /// Use this when an async body needs to *both* `.await`
+    /// (e.g. an enrichment lookup, an async I/O probe) *and* emit an
+    /// anomaly derived from the result — the case [`Self::on_async`]
+    /// (payload-only, no `Ctx`) and sync [`Self::on`] (`&mut Ctx` but
+    /// no `.await`) each cover only half of.
+    ///
+    /// Effect handlers fire **after** the sync and async passes for the
+    /// same event, in registration order.
+    pub fn on_effect<E: Event>(mut self, handler: impl EffectHandler<E>) -> Self {
+        self.handlers.register_effect::<E, _>(handler);
+        self
+    }
+
+    /// Register a **packet-tier subscription** (0.25 Phase A1).
+    ///
+    /// Build one with the typed [`packet()`](subscription::packet()) tier:
+    ///
+    /// ```no_run
+    /// use netring::monitor::Monitor;
+    /// use netring::monitor::subscription::packet;
+    ///
+    /// let _m = Monitor::builder()
+    ///     .interface("eth0")
+    ///     .subscribe(packet().tcp().dst_port(443).to(|view, _ctx| {
+    ///         // sees every TCP/443 frame as a borrowed PacketView, pre-tracking
+    ///         let _ = view.frame.len();
+    ///         Ok(())
+    ///     }))
+    ///     .build();
+    /// ```
+    ///
+    /// The handler runs synchronously inside the zero-copy drain, **before**
+    /// flow tracking, for every frame matching the filter. Monitors that
+    /// register no packet subs keep the `track_into`-only hot loop (zero cost).
+    ///
+    /// Accepts any tier (0.25 S3): a [`PacketSubscription`] (every frame,
+    /// pre-tracking), or a [`FlowSubscription`] (`flow::<P>()…​.to(h)` —
+    /// delivered once per flow at its end, with final stats). Session-tier
+    /// `.to()` lands next.
+    ///
+    /// [`PacketSubscription`]: subscription::PacketSubscription
+    /// [`FlowSubscription`]: subscription::FlowSubscription
+    pub fn subscribe<S: subscription::Subscribable>(self, sub: S) -> Self {
+        sub.install(self)
+    }
+
+    /// Push a packet-tier subscription onto the zero-copy drain. The
+    /// installation hook for [`subscription::PacketSubscription`].
+    pub(crate) fn add_packet_sub(mut self, sub: subscription::PacketSubscription) -> Self {
+        self.packet_subs.push(sub);
+        self
+    }
+
+    /// The classic-BPF **kernel prefilter** this monitor compiles to (0.25
+    /// S2): the conservative OR-union of **every** consumer's traffic interest
+    /// — packet subs, registered handlers (via `Event::traffic_class`),
+    /// and protocol parsers (via their [`Dispatch`](crate::protocol::Dispatch))
+    /// — lowered to [`BpfFilter`](crate::config::BpfFilter).
+    ///
+    /// `None` means **capture everything** (filter in userspace): it's returned
+    /// when any consumer wants all traffic (a broad handler, an exporter, a
+    /// tick/report, broadcast, bandwidth), the union is empty, or it can't be
+    /// expressed within the cBPF budget. Because the union is a *superset* of
+    /// every consumer's interest, the filter never drops a frame any consumer
+    /// wants — **fail-open and starvation-free by construction**, which is what
+    /// makes it safe to auto-apply (see [`Monitor::run_*`](Monitor)).
+    ///
+    /// Also exposed for **inspection / debugging** (what STAGE-0 would shed).
+    pub fn kernel_prefilter(&self) -> Option<crate::config::BpfFilter> {
+        // Broad consumers that need every flow regardless of L4: an exporter,
+        // a periodic tick/report, a broadcast subscriber, or bandwidth
+        // accounting. Any one forces capture-all (fail-open).
+        let wants_all = !self.flow_exporters.is_empty()
+            || !self.tick_handlers.is_empty()
+            || !self.broadcast_handles.is_empty()
+            || self.bandwidth_registered;
+
+        let interests = self
+            .handlers
+            .traffic_interests()
+            .iter()
+            .cloned()
+            .chain(self.traffic_interests.iter().cloned())
+            .chain(self.packet_subs.iter().map(|s| s.predicate.clone()))
+            .chain(wants_all.then_some(subscription::Predicate::Always));
+
+        subscription::kernel_filter::compile_union(interests)
+    }
+
     /// Pre-register a `T: Default` state slot. Optional —
     /// `Ctx::state_mut::<T>()` lazy-creates on first access; this
     /// call surfaces typos at build time and lets you set
@@ -1505,6 +1741,9 @@ impl MonitorBuilder {
         if interface_required && no_capture_source {
             return Err(BuildError::NoInterface.into());
         }
+        // 0.25 S2: compute the kernel prefilter while the full consumer set is
+        // still on the builder (before fields are moved into the Monitor).
+        let kernel_prefilter = self.kernel_prefilter();
         // 0.21 A.6: build-time validation — every counter type
         // a detector declared via `detector! { counters: [K] }`
         // must have been registered via `.counter::<K>(...)` on
@@ -1539,7 +1778,8 @@ impl MonitorBuilder {
             .driver_builder
             .unwrap_or_else(|| Driver::builder(FiveTuple::bidirectional()))
             .build();
-        let dispatcher = self.handlers.into_dispatcher()?;
+        let mut dispatcher = self.handlers.into_dispatcher()?;
+        dispatcher.set_catch_panics(self.catch_handler_panics);
         let base_sink: Box<dyn AnomalySink> = self.sink.unwrap_or_else(|| Box::new(NoopSink));
         // Apply layers innermost-first so the first .layer(X)
         // call ends up outermost in the runtime chain. See the
@@ -1586,6 +1826,9 @@ impl MonitorBuilder {
             capture_stats: self.capture_stats,
             health: health::HealthState::new(),
             flow_exporters: self.flow_exporters,
+            flow_active_timeout: self.flow_active_timeout,
+            packet_subs: self.packet_subs,
+            kernel_prefilter,
         })
     }
 }

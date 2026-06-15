@@ -1,5 +1,232 @@
 # Changelog
 
+## 0.25.0 — 2026-06-15 — subscriptions, async effects, performance & TX
+
+> The complete capability release on the 0.24 keystone: typed 3-tier
+> subscriptions + kernel filter pushdown, async read+effect handlers, perf &
+> scaling (CPU pinning, dispatch-throughput numbers), the symmetric TX stack,
+> the in-Monitor AF_XDP loader, UMEM hugepages/NUMA, and the `netring-exporters`
+> companion crate. Additive over 0.24 (existing code compiles unchanged).
+> Depends on **flowscope 0.16**.
+
+### JA4S licensing fix + JA3/JA4 now actually populate
+
+- **JA4S moved behind the opt-in `ja4plus` feature** (off by default; excluded
+  from the `monitor` / `all-parsers` umbrellas). JA4S is part of the JA4+ suite
+  and is **FoxIO License 1.1** (non-commercial; patent pending), not MIT/Apache.
+  `TlsFingerprint.ja4s` only exists under `ja4plus`, which pulls flowscope's
+  `ja4plus` (≥ 0.16). The default TLS fingerprint surface (JA3 + JA4 client)
+  stays royalty-free / BSD. Commercial use of `ja4plus` requires a FoxIO OEM
+  license — see `docs/FINGERPRINTS.md`. Depends on **flowscope 0.16**, which
+  did the same gating upstream (`LICENSE-FoxIO-1.1` + `NOTICE`).
+- **Fix:** the `tls` feature now enables `flowscope/tls-fingerprints`, so JA3 +
+  JA4 client fingerprints actually compute (they were silently always-`None`
+  before — the passthrough was missing). The `monitor_ja4_fingerprint` example
+  now requires `ja4plus` (it demonstrates JA4S).
+
+### Runtime filter strings — `.expr()` (Phase A4)
+
+- `packet()/flow::<P>()/session::<P>().expr("tcp and dst port 443")` — a small,
+  **dependency-free** recursive-descent parser from a Wireshark-ish filter
+  string to the **same** `Predicate` AST the typed combinators produce. One AST,
+  two frontends: `packet().expr("tcp and dst port 443")` and
+  `packet().tcp().dst_port(443)` are identical (a test pins this), so a runtime
+  string lowers to the same userspace eval *and* kernel pushdown. This is the
+  path for filters from config / CLI / a control plane.
+- Grammar: `and`/`or`/`not` (+ `&&`/`||`/`!`), parens, `tcp`/`udp`/`icmp`,
+  `[src|dst] port|host|net`, `vlan`, `bytes > N` / `packets > N`, and
+  `tls.sni`/`http.host`/`dns.qname ~ GLOB`. We deliberately do **not** depend on
+  the dead `wirefilter-engine` crate (0.6.1/2019). `parse()` returns a
+  `ParseError` (no panics) on malformed input.
+
+### Subscription engine — typed tiers + filter predicates (Phase A1)
+
+The new front door (additive; `on::<E>` unaffected). A **subscription** pairs
+a strongly-typed tier with a filter [`Predicate`] and a handler:
+
+- Three tier constructors in `netring::monitor::subscription`: `packet()`
+  (every frame), `flow::<P: FlowProtocol>()`, `session::<P: MessageProtocol>()`.
+  Invalid combinations are compile errors — `flow::<Http>()` and
+  `session::<Tcp>()` don't compile; L7 glob filters are gated per protocol
+  (`session::<Tls>().sni_glob`, `session::<Dns>().qname_glob`).
+- Typed filter combinators AND into one `Predicate` AST (proto / ports /
+  host / net / vlan — kernel-pushable — plus byte/packet counts and L7
+  sni/host/qname globs). The AST is shared by userspace evaluation
+  (`Predicate::eval` over a `FieldSource`) and, in A2/A3, kernel pushdown;
+  `Atom::is_kernel_pushable()` is the split classifier.
+- **Packet tier wired end-to-end**: `MonitorBuilder::subscribe(packet()…​.to(h))`
+  runs the handler on every matching frame as a borrowed `PacketView`,
+  synchronously **inside the zero-copy drain before flow tracking** — so the
+  handler sees raw frames pre-tracking with no copy. Works on live capture and
+  pcap replay. Monitors with no packet subs keep the `track_into`-only hot
+  loop (dhat stays `Δ 0`); the run-loop future stays `Send`.
+- `IpNet::contains(&IpAddr)` (v4 + v6); dependency-free case-insensitive `Glob`.
+
+### Kernel filter split + cBPF compiler (Phase A2 / A3a)
+
+- `Predicate::kernel_approx()` — the conservative **split**: a predicate over
+  only kernel-pushable atoms that is a superset of the original (every frame
+  the filter wants still passes). Userspace atoms relax to `Always`; `Not` is
+  pushed only when fully kernel-pushable. The full predicate stays the
+  userspace filter; the kernel side is a pure prefilter.
+- A classic-BPF compiler lowers a kernel-approx predicate to a `BpfFilter`
+  (DNF → conjunctions of L2–L4 atoms, OR-unioned across packet subs), with a
+  safe fallback to "no filter" for shapes it can't express (negations, etc.).
+  Verified in-sandbox via the `BpfFilter::matches` software interpreter.
+### Safe automatic kernel pushdown (Phase S1 / S2)
+
+The kernel prefilter is now computed from **every** consumer's traffic interest
+and auto-applied to the AF_PACKET capture — safely.
+
+- Each consumer declares its traffic interest: handlers via a new
+  `Event::traffic_class()` (→ the protocol's `Dispatch`, default `Any`),
+  protocol parsers via their `Dispatch`, packet subs via their filter. The
+  Monitor folds them into the OR-union `kernel_prefilter()`.
+- Because the union is a **superset** of every consumer's interest, the pushed
+  filter can never drop a frame any consumer wants — **starvation-free by
+  construction**. It is **fail-open**: any "wants everything" consumer (a broad
+  handler, exporter, tick/report, broadcast, bandwidth), or a union exceeding
+  the cBPF clause budget, collapses it to "capture all" (no filter).
+- The run loop applies the union via `set_filter` on each AF_PACKET socket at
+  start. A narrow monitor (`protocol::<Tls>()`) pushes `tcp port 443/8443`;
+  adding `on::<FlowStarted<Udp>>` widens it to also pass UDP; adding
+  `on::<FlowPacket>` collapses it to capture-all. Verified end-to-end via the
+  `BpfFilter::matches` interpreter (`tests/monitor_kernel_prefilter.rs`).
+  `kernel_prefilter()` stays public for inspection. dhat `Δ 0` on the hot path.
+
+### Flow & session tier dispatch (Phase S3)
+
+The flow and session tiers now deliver, at each tier's **natural completion
+point** (Retina `on_terminate` semantics):
+
+- `flow::<P>().bytes_over(N).to(handler)` — fires once per flow, at `FlowEnded`,
+  with the accumulated stats (so byte/packet-count filters are meaningful).
+- `session::<P>().sni_glob("*.bank").to(handler)` — fires with each parsed
+  `P::Message` whose L7 fields (SNI / HTTP host / DNS qname, via a new
+  `L7Fields` trait per message type) and flow 5-tuple match the filter.
+
+Both are sugar over the existing typed dispatch: `.to()` installs a
+predicate-gated `on::<…>` handler. A new `Subscribable` trait lets the one
+`MonitorBuilder::subscribe` accept any tier (packet / flow / session). The
+tier's traffic interest is recorded automatically (a superset of the filter),
+so it composes with the S1/S2 kernel-prefilter union safely. Verified end-to-end
+via pcap replay (`replay_flow_tier_delivers_once_at_flow_end_gated_by_stats`,
+`replay_session_tier_dns_qname_glob_gates_delivery`). dhat `Δ 0`.
+
+The table-driven AF_XDP map program (A3c, hardware-gated) and the runtime
+`.expr()` string frontend (A4) follow. (Design:
+`plans/netring-0.25-subscription-engine-design.md`.)
+
+### Async read + effect handlers (Phase B1)
+
+- New `MonitorBuilder::on_effect::<E>(handler)` — an **async** handler that
+  reads the `Ctx` **synchronously** (`Fn(&E::Payload, &Ctx<'_>)`) and returns
+  a `'static` future resolving to an `Effects` value: a deferred, owned
+  description of the writes to apply (today: `Effects::emit(anomaly)` /
+  `and_emit`; `set_state`/`counter`/`enqueue` are additive follow-ups). The
+  run loop awaits the future, then applies the effects to the sink under a
+  short `&mut Ctx` write phase. Because the handler never holds `&mut Ctx`
+  across `.await`, the run-loop future stays **`Send`** — unlike a
+  hypothetical `Fn(&mut Ctx) -> Future` shape. This closes the gap between
+  `on_async` (payload-only, can `.await` but can't read `Ctx`) and sync `on`
+  (reads `Ctx` but can't `.await`).
+- Effect handlers fire **after** the sync and async passes for the same
+  lifecycle event, in registration order. Monitors that register no effect
+  handlers pay nothing: the run loop gates the effect pass on
+  `effect_handler_count() > 0`, so the per-event `Ctx`-rebuilding translation
+  is skipped entirely. dhat steady state stays `Δ 0 / 0`.
+
+### Dispatcher (Phase B2)
+
+- The per-monitor distinct-event-type cap is lifted (was a hard 16): the
+  lookup table is inline (no hashing) for the first 16 types and spills to
+  a hash map beyond, so there's no practical ceiling. dhat stays `Δ 0`.
+- Debug-only dispatcher type-tag asserts the `TypeId → slot` mapping stays
+  consistent (turns a silent type-erasure desync into a loud test panic;
+  zero release cost).
+
+### In-Monitor AF_XDP loader + table-driven filter map (W1a)
+
+- `MonitorBuilder::xdp_interface_loaded(iface)` (feature `xdp-loader`): the
+  Monitor attaches the built-in redirect-all XDP program and registers its
+  socket on the XSKMAP itself — one-call AF_XDP capture, no external loader.
+  (`xdp_interface(iface)` remains the bring-your-own-program form.)
+- Table-driven `filter_redirect.bpf` program + `loader::filter_program()` +
+  `XdpProgram::set_filter(proto, port, on)`: a `BPF_MAP_TYPE_HASH`-driven
+  XDP program that redirects only `{proto, port}`-matching frames (the
+  kernel-side early-shed), populated from the subscription union.
+- **Fix:** the loader now embeds bytecode with `aya::include_bytes_aligned!`
+  instead of `include_bytes!`. The zero-copy ELF parse requires alignment;
+  the plain macro loaded only when the static happened to land aligned and
+  failed (`"error parsing ELF data"`) in any build that also pulls `tokio`
+  (i.e. every Monitor build) — so redirect-all was already broken for
+  Monitor-on-AF_XDP. Guarded by a cap-free `vendored_programs_parse_under_aya`
+  test.
+- **Fix:** `XdpSocketBuilder::force_replace(true)` no longer crashes with
+  `EINVAL` — `XDP_FLAGS_REPLACE` is netlink-only and rejected by the link API
+  on kernel ≥ 5.9, so it's no longer OR'd into the link-create flags; a failed
+  attach returns an actionable error instead.
+
+### Active-timeout flow export (W1c)
+
+- `MonitorBuilder::export_active_timeout(period)`: emits interim `FlowRecord`s
+  for long-lived flows every `period` (NetFlow/IPFIX active-timeout semantics),
+  not just one at `FlowEnded`. **Breaking (additive type change):**
+  `FlowRecord.reason` is now `Option<EndReason>` — `None` marks an ongoing
+  active-timeout snapshot (`FlowRecord::is_ongoing()`); IPFIX maps it to
+  flowEndReason `0x02` (active timeout).
+
+### EVE `event_type:"tls"` records (W1d)
+
+- `netring::anomaly::{EveTlsSink, eve_tls_record}` (features `eve-sink` + `tls`):
+  Suricata-compatible `event_type:"tls"` EVE records (sni, ja3.hash, ja4,
+  ja4s under `ja4plus`, alpn, 5-tuple, ISO-8601 timestamp) — the protocol-record
+  companion to `EveSink`'s `event_type:"anomaly"`. Wire it via `on_fingerprint`.
+
+### Resilience: backend Reopen + handler panic catching (W1e)
+
+- `BackendErrorPolicy::Reopen`: rebuilds a failed capture source in place (same
+  kind + filter) so a transient fault (interface flap, driver reset) self-heals.
+- `MonitorBuilder::catch_handler_panics(true)`: wraps sync handlers in
+  `catch_unwind`, converting a panic into `Error::HandlerPanic` routed through
+  the configured `HandlerErrorPolicy` (pair with `Isolate` to log + count +
+  continue). Off by default; async handlers/effects are not covered.
+
+### Performance & scaling (Phase C)
+
+- `ShardedRunner::pin_cpus(true)`: pins each shard's OS thread to its core via
+  `sched_setaffinity` (keeps flow state + RX ring + worker core-local).
+- `benches/dispatch_throughput.rs`: a cap-free userspace pps proxy
+  (~4.7 Melem/s/core flow tracking on the dev box), run in CI. `docs/PERFORMANCE.md`
+  documents the capture-vs-dispatch split, the dhat-Δ0 enforced gate, tuning
+  levers (pushdown, sharding+pinning, fanout + symmetric-RSS pitfall, AF_XDP,
+  busy-poll, hugepages), and an honest real-NIC-pending methodology.
+- `monitor/tracing_json` example: structured JSON logging of anomalies +
+  telemetry via `tracing-subscriber`.
+
+### TX symmetry (Phase D)
+
+- `AsyncInjector::send_stream(stream, Option<TxPacer>)`: transmits every frame
+  from a `Stream<Item = impl AsRef<[u8]>>`, optionally paced. `TxPacer` is a
+  token-bucket pacer (`packets_per_second` / `bits_per_second`).
+- TX egress timestamping: `InjectorBuilder::tx_timestamps(true)` enables
+  `SO_TIMESTAMPING`; `Injector::read_tx_timestamp()` /
+  `AsyncInjector::read_tx_timestamp()` read the `SCM_TIMESTAMPING` egress
+  timestamp off the error queue (hardware-preferred-else-software).
+
+### AF_XDP UMEM hugepages + NUMA (W4)
+
+- `XdpSocketBuilder::hugepages(bool)` (`MAP_HUGETLB`, graceful fallback) +
+  `numa_node(u32)` (`mbind`/`MPOL_BIND`, best-effort). After bind, a
+  `getsockopt(XDP_OPTIONS)` check warns when the kernel fell back to COPY mode.
+
+### `netring-exporters` companion crate (W5)
+
+- New workspace crate keeping heavy OTLP/Kafka deps out of core.
+  `OtlpAnomalySink` (feature `otlp`, OTLP/HTTP-JSON logs via blocking `ureq`)
+  and `KafkaSink` (feature `kafka`, `rdkafka`/librdkafka) both implement
+  `AnomalySink`, so they drop into `MonitorBuilder::sink(...)`.
+
 ## 0.24.0 — zero-copy core + production trust
 
 > **Released 2026-06-14.** Makes the `Monitor` pipeline zero-copy +

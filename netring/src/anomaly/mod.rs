@@ -70,6 +70,9 @@ pub use flowscope::AnomalyFields;
 
 #[cfg(feature = "eve-sink")]
 pub use eve_sink::EveSink;
+/// 0.25 W1d: Suricata `event_type: "tls"` EVE protocol records.
+#[cfg(all(feature = "eve-sink", feature = "tls"))]
+pub use eve_sink::{EveTlsSink, eve_tls_record};
 
 /// 0.24 Phase D — `SyslogSink` RFC 5424 adapter. Gated on the `syslog`
 /// Cargo feature (no deps).

@@ -76,6 +76,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 .build()
         },
     )
+    // 0.25 C1: pin each shard's OS thread to its core (shard i → core i) so
+    // flow state + RX ring + worker stay core-local. Pairs with FanoutMode::Cpu
+    // + matching NIC IRQ affinity. See docs/PERFORMANCE.md.
+    .pin_cpus(true)
     // 0.22 §5.1: fold every shard's ConnCount into a global running total
     // each second, and print it.
     .state_auto_merge::<ConnCount>(Duration::from_secs(1))

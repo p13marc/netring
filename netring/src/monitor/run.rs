@@ -24,6 +24,7 @@ use std::task::{Context, Poll};
 use std::time::{Duration, Instant};
 
 use flowscope::L4Proto;
+use flowscope::PacketView;
 use flowscope::driver::Event as FsEvent;
 use flowscope::extract::FiveTuple;
 
@@ -33,6 +34,8 @@ use crate::ctx::{CounterRegistry, Ctx, SourceIdx, StateMap};
 use crate::error::Result;
 use crate::monitor::backend::AnyBackend;
 use crate::monitor::dispatcher::Dispatcher;
+use crate::monitor::subscription::PacketSubscription;
+use crate::monitor::subscription::packet::{PacketFields, packet_field_extractor};
 use crate::monitor::{BackendErrorPolicy, HandlerErrorPolicy, Monitor};
 use crate::protocol::FlowKey;
 #[cfg(feature = "icmp")]
@@ -58,6 +61,73 @@ pub(crate) enum StopCondition {
     /// Useful for pcap replay (auto-stop after EOF + grace) and
     /// one-shot scans where the upstream traffic stops cleanly.
     Idle(Duration),
+}
+
+/// 0.25 W1e: how to (re)open a capture backend, kept parallel to the run loop's
+/// `caps` so `BackendErrorPolicy::Reopen` can rebuild a failed source with the
+/// same kind + filter as the original.
+enum BackendSpec {
+    /// AF_PACKET on the named interface.
+    AfPacket(String),
+    /// AF_XDP per its interface spec (bare vs self-loaded program).
+    #[cfg(feature = "af-xdp")]
+    Xdp(crate::monitor::XdpIfaceSpec),
+}
+
+/// Open (or re-open) one capture backend from its [`BackendSpec`], applying the
+/// shared fanout group + kernel prefilter for AF_PACKET. Used both for the
+/// initial open and for `BackendErrorPolicy::Reopen`.
+fn open_backend(
+    spec: &BackendSpec,
+    fanout: Option<(crate::config::FanoutMode, u16)>,
+    kernel_prefilter: &Option<crate::config::BpfFilter>,
+) -> Result<AnyBackend> {
+    match spec {
+        // 0.21 C: with a fanout set (single-shard or ShardedRunner) open the
+        // ring in the configured fanout group; otherwise plain open.
+        BackendSpec::AfPacket(iface) => {
+            let cap = match fanout {
+                Some((mode, group_id)) => {
+                    let rx = crate::Capture::builder()
+                        .interface(iface)
+                        .fanout(mode, group_id)
+                        .build()?;
+                    AsyncCapture::new(rx)?
+                }
+                None => AsyncCapture::open(iface)?,
+            };
+            // 0.25 S2: push the conservative fail-open kernel prefilter (union of
+            // every consumer's interest) into the socket — a superset, so it only
+            // sheds traffic nobody needs.
+            if let Some(filter) = kernel_prefilter {
+                cap.set_filter(filter)?;
+            }
+            Ok(AnyBackend::AfPacket(cap))
+        }
+        #[cfg(feature = "af-xdp")]
+        BackendSpec::Xdp(xspec) => Ok(AnyBackend::Xdp(open_xdp_backend(xspec)?)),
+    }
+}
+
+/// Open the AF_XDP backend for one capture interface (0.25 W1a).
+///
+/// A bare spec (`self_load = false`) opens a plain socket and relies on an
+/// externally-attached redirect program. A self-loading spec (requires
+/// `xdp-loader`) builds the socket through [`crate::XdpSocketBuilder`] with the
+/// built-in redirect-all program attached in `SKB_MODE` + the socket registered
+/// on its XSKMAP, so it captures with no external loader.
+#[cfg(feature = "af-xdp")]
+fn open_xdp_backend(spec: &crate::monitor::XdpIfaceSpec) -> Result<crate::AsyncXdpSocket> {
+    #[cfg(feature = "xdp-loader")]
+    if spec.self_load {
+        let socket = crate::XdpSocketBuilder::default()
+            .interface(&spec.iface)
+            .mode(crate::XdpMode::Rx)
+            .with_default_program()
+            .build()?;
+        return crate::AsyncXdpSocket::new(socket);
+    }
+    crate::AsyncXdpSocket::open(&spec.iface)
 }
 
 pub(crate) async fn run_loop(monitor: Monitor, stop: StopCondition) -> Result<()> {
@@ -89,11 +159,18 @@ pub(crate) async fn run_loop(monitor: Monitor, stop: StopCondition) -> Result<()
         mut capture_stats,
         health,
         mut flow_exporters,
+        flow_active_timeout,
+        packet_subs,
+        kernel_prefilter,
     } = monitor;
     // Borrow the monitor name as `&str` for the run loop's
     // dispatch sites. The owned `Box<str>` lives in this stack
     // frame so the borrow is valid for the run loop's lifetime.
     let monitor_name_borrow: Option<&str> = monitor_name.as_deref();
+
+    // 0.25 A1: directional extractor for packet-tier field evaluation (a=src,
+    // b=dst). Stateless; only consulted per frame when packet subs exist.
+    let pkt_extractor = packet_field_extractor();
 
     // Phase F.1: open one AsyncCapture per interface. The order
     // matches the builder's `.interfaces([...])` order; each event
@@ -108,40 +185,22 @@ pub(crate) async fn run_loop(monitor: Monitor, stop: StopCondition) -> Result<()
     // `to_owned` copy. The future stays `Send` because the only borrow held
     // across an `.await` lives inside `drain_batch`, and `AnyBackend` is
     // `Send`; all dispatch runs *after* the batch is dropped.
-    let cap_count = {
-        #[cfg(feature = "af-xdp")]
-        {
-            interfaces.len() + xdp_interfaces.len()
-        }
-        #[cfg(not(feature = "af-xdp"))]
-        {
-            interfaces.len()
-        }
-    };
-    let mut caps: Vec<AnyBackend> = Vec::with_capacity(cap_count);
+    // 0.25 W1e: record how to (re)open each backend so
+    // `BackendErrorPolicy::Reopen` can rebuild a failed source in place. Built
+    // in the exact order the run loop indexes `caps`: AF_PACKET interfaces
+    // first, then AF_XDP (matching the prior two-loop open order).
+    let mut specs: Vec<BackendSpec> = Vec::new();
     for iface in &interfaces {
-        // 0.21 C: when the user set a fanout (single-shard or
-        // sharded via ShardedRunner), open each ring with the
-        // configured fanout group. Plain `.interface(iface)` with
-        // no fanout falls back to `AsyncCapture::open`.
-        let cap = match fanout {
-            Some((mode, group_id)) => {
-                let rx = crate::Capture::builder()
-                    .interface(iface)
-                    .fanout(mode, group_id)
-                    .build()?;
-                AsyncCapture::new(rx)?
-            }
-            None => AsyncCapture::open(iface)?,
-        };
-        caps.push(AnyBackend::AfPacket(cap));
+        specs.push(BackendSpec::AfPacket(iface.clone()));
     }
-    // 0.24 Phase B: AF_XDP backends (in builder-registration order, after the
-    // AF_PACKET ones). Needs an attached XDP redirect program to see traffic.
     #[cfg(feature = "af-xdp")]
-    for iface in &xdp_interfaces {
-        let xdp = crate::AsyncXdpSocket::open(iface)?;
-        caps.push(AnyBackend::Xdp(xdp));
+    for spec in &xdp_interfaces {
+        specs.push(BackendSpec::Xdp(spec.clone()));
+    }
+
+    let mut caps: Vec<AnyBackend> = Vec::with_capacity(specs.len());
+    for spec in &specs {
+        caps.push(open_backend(spec, fanout, &kernel_prefilter)?);
     }
     // 0.24 Phase C4: all sockets are open and the loop is about to run —
     // readiness flips true. `mark_started` stamps the uptime/liveness
@@ -195,6 +254,21 @@ pub(crate) async fn run_loop(monitor: Monitor, stop: StopCondition) -> Result<()
         } else {
             0
         });
+
+    // 0.25 W1c: active-timeout flow export. Armed only when a period is set AND
+    // at least one exporter is registered — otherwise the `Option` is `None`
+    // and the `select!` branch is gated off at zero cost (same pattern as the
+    // tick / telemetry branches). `last_active_export` dedups per flow so a
+    // long-lived flow gets one interim record per active-timeout window.
+    let mut active_export = flow_active_timeout
+        .filter(|_| !flow_exporters.is_empty())
+        .map(|period| {
+            let mut int = tokio::time::interval_at(tokio::time::Instant::now() + period, period);
+            int.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+            (int, period)
+        });
+    let mut last_active_export: std::collections::HashMap<FlowKey, flowscope::Timestamp> =
+        std::collections::HashMap::new();
 
     loop {
         // tokio::select! waits on shutdown, the next packet, OR
@@ -266,10 +340,24 @@ pub(crate) async fn run_loop(monitor: Monitor, stop: StopCondition) -> Result<()
                 }
                 continue;
             }
+            // 0.25 W1c: active-timeout flow export. Out-of-band like telemetry —
+            // emitting interim flow records is observability, not traffic, so it
+            // must NOT reset the idle timer.
+            _ = next_active_export(&mut active_export), if active_export.is_some() => {
+                if let Some((_, period)) = active_export.as_ref() {
+                    emit_active_flow_records(
+                        &driver,
+                        &mut flow_exporters,
+                        &mut last_active_export,
+                        *period,
+                    );
+                }
+                continue;
+            }
         };
         let i = match ready {
-            Some(Ok(i)) => i,
-            Some(Err(e)) => match backend_error_policy {
+            Some((i, Ok(()))) => i,
+            Some((i, Err(e))) => match backend_error_policy {
                 BackendErrorPolicy::FailFast => return Err(e),
                 BackendErrorPolicy::SkipSource => {
                     backend_errors += 1;
@@ -278,6 +366,28 @@ pub(crate) async fn run_loop(monitor: Monitor, stop: StopCondition) -> Result<()
                     // Circuit breaker: a persistently-failing fd would otherwise
                     // spin the readiness select. Back off, and after many
                     // consecutive failures give up rather than burn a core.
+                    if backend_errors > 64 {
+                        return Err(e);
+                    }
+                    tokio::time::sleep(Duration::from_millis(50)).await;
+                    continue;
+                }
+                // 0.25 W1e: try to rebuild the failed source in place from its
+                // recorded spec. A failed re-open leaves the (still-broken)
+                // backend as-is so the next error retries it; same circuit
+                // breaker as SkipSource bounds a hard-down source.
+                BackendErrorPolicy::Reopen => {
+                    backend_errors += 1;
+                    health.record_backend_error();
+                    match open_backend(&specs[i], fanout, &kernel_prefilter) {
+                        Ok(b) => {
+                            caps[i] = b;
+                            tracing::warn!(error = %e, idx = i, count = backend_errors, "capture backend error (Reopen) — source reopened");
+                        }
+                        Err(e2) => {
+                            tracing::warn!(error = %e, reopen_error = %e2, idx = i, count = backend_errors, "capture backend error (Reopen) — reopen failed, will retry");
+                        }
+                    }
                     if backend_errors > 64 {
                         return Err(e);
                     }
@@ -304,9 +414,39 @@ pub(crate) async fn run_loop(monitor: Monitor, stop: StopCondition) -> Result<()
         // `.await` below, which is what keeps the run loop's future `Send`.
         // `track_into` copies only the metadata it needs into `events`; no
         // packet-data copy.
+        // 0.25 A1: when packet-tier subs exist, dispatch them per frame
+        // *inside* the synchronous drain (before `track_into`), so a borrowed
+        // `PacketView` reaches the handler with no copy. The dispatch is
+        // synchronous — its borrows drop before the `.await` below, preserving
+        // `Send`. A `Propagate` error is stashed and surfaced after the drain.
+        let mut packet_err: Option<crate::error::Error> = None;
         let last_ts = caps[i]
-            .drain_batch(|view| driver.track_into(view, &mut events))
+            .drain_batch(|view| {
+                if !packet_subs.is_empty()
+                    && packet_err.is_none()
+                    && let Err(e) = dispatch_packet_subs(
+                        &packet_subs,
+                        view,
+                        &pkt_extractor,
+                        sink.as_mut(),
+                        &mut state_map,
+                        &mut counters,
+                        &mut flow_states,
+                        &label_table,
+                        source,
+                        monitor_name_borrow,
+                        handler_error_policy,
+                        &health,
+                    )
+                {
+                    packet_err = Some(e);
+                }
+                driver.track_into(view, &mut events)
+            })
             .await?;
+        if let Some(e) = packet_err {
+            return Err(e);
+        }
 
         // A spurious wake (no retired block) leaves `last_ts == None`.
         let Some(ts) = last_ts else { continue };
@@ -429,11 +569,17 @@ pub(crate) async fn replay_loop(
         capture_stats: _,        // pcap replay has no kernel ring to sample
         health,
         mut flow_exporters,
+        flow_active_timeout: _, // active-timeout export is a live-loop concern
+        packet_subs,
+        // pcap replay has no kernel filter to set (the source isn't a socket).
+        kernel_prefilter: _,
     } = monitor;
     let monitor_name_borrow: Option<&str> = monitor_name.as_deref();
 
     let mut source = crate::pcap_source::AsyncPcapSource::open_with_config(&path, config).await?;
     let mut events: Vec<FsEvent<FlowKey>> = Vec::with_capacity(64);
+    // 0.25 A1: packet-tier dispatch also runs on offline replay.
+    let pkt_extractor = packet_field_extractor();
 
     // 0.24 Phase C4: the pcap source is open and replay is starting — the
     // same readiness/liveness handle works for offline replay.
@@ -452,6 +598,24 @@ pub(crate) async fn replay_loop(
         };
 
         let view = flowscope::PacketView::new(&pkt.data, pkt.timestamp);
+
+        // 0.25 A1: packet-tier subs fire before tracking, as on the live path.
+        if !packet_subs.is_empty() {
+            dispatch_packet_subs(
+                &packet_subs,
+                view,
+                &pkt_extractor,
+                sink.as_mut(),
+                &mut state_map,
+                &mut counters,
+                &mut flow_states,
+                &label_table,
+                SourceIdx(0),
+                monitor_name_borrow,
+                handler_error_policy,
+                &health,
+            )?;
+        }
 
         events.clear();
         driver.track_into(view, &mut events);
@@ -586,7 +750,24 @@ async fn drain_phase(
             flow_states,
             label_table,
         ) {
-            Ok(()) => dispatch_lifecycle_async(dispatcher, evt).await,
+            Ok(()) => match dispatch_lifecycle_async(dispatcher, evt.clone()).await {
+                // 0.25-B1: effect pass (drain) — same gating as the live path.
+                Ok(()) if dispatcher.effect_handler_count() > 0 => {
+                    dispatch_lifecycle_effects(
+                        dispatcher,
+                        sink,
+                        state_map,
+                        counters,
+                        evt,
+                        SourceIdx(0),
+                        monitor_name,
+                        flow_states,
+                        label_table,
+                    )
+                    .await
+                }
+                other => other,
+            },
             Err(e) => Err(e),
         };
         if let Err(e) = res {
@@ -658,26 +839,34 @@ async fn drain_phase(
 /// readiness guard from `poll_read_ready_mut` is dropped without clearing, so
 /// the level-triggered fd stays ready and the caller's `readable()` resolves
 /// immediately.
-async fn ready_capture(caps: &mut [AnyBackend], anchor: &mut usize) -> Option<Result<usize>> {
-    std::future::poll_fn(|cx: &mut Context<'_>| -> Poll<Option<Result<usize>>> {
-        let n = caps.len();
-        if n == 0 {
-            return Poll::Ready(None);
-        }
-        let start = *anchor % n;
-        for offset in 0..n {
-            let i = (start + offset) % n;
-            match caps[i].poll_read_ready(cx) {
-                Poll::Ready(Ok(())) => {
-                    *anchor = (i + 1) % n;
-                    return Poll::Ready(Some(Ok(i)));
-                }
-                Poll::Ready(Err(e)) => return Poll::Ready(Some(Err(e))),
-                Poll::Pending => {}
+async fn ready_capture(caps: &mut [AnyBackend], anchor: &mut usize) -> Option<(usize, Result<()>)> {
+    std::future::poll_fn(
+        |cx: &mut Context<'_>| -> Poll<Option<(usize, Result<()>)>> {
+            let n = caps.len();
+            if n == 0 {
+                return Poll::Ready(None);
             }
-        }
-        Poll::Pending
-    })
+            let start = *anchor % n;
+            for offset in 0..n {
+                let i = (start + offset) % n;
+                match caps[i].poll_read_ready(cx) {
+                    Poll::Ready(Ok(())) => {
+                        *anchor = (i + 1) % n;
+                        return Poll::Ready(Some((i, Ok(()))));
+                    }
+                    // 0.25 W1e: surface the failing index too, so a `Reopen` policy
+                    // knows which backend to rebuild. Advance the anchor past it so a
+                    // persistently-failing source doesn't monopolise the scan.
+                    Poll::Ready(Err(e)) => {
+                        *anchor = (i + 1) % n;
+                        return Poll::Ready(Some((i, Err(e))));
+                    }
+                    Poll::Pending => {}
+                }
+            }
+            Poll::Pending
+        },
+    )
     .await
 }
 
@@ -725,6 +914,57 @@ async fn next_telemetry_sample(interval: &mut Option<tokio::time::Interval>) {
         }
         None => std::future::pending().await,
     }
+}
+
+/// 0.25 W1c: await the next active-timeout export tick. `None` → never fires
+/// (gated off in the `select!`).
+async fn next_active_export(slot: &mut Option<(tokio::time::Interval, Duration)>) {
+    match slot {
+        Some((int, _)) => {
+            int.tick().await;
+        }
+        None => std::future::pending().await,
+    }
+}
+
+/// 0.25 W1c: emit an interim [`crate::export::FlowRecord`] for every live flow
+/// that has been active for at least `period` since its last record, to each
+/// registered exporter. Dedups per flow via `last_export` and prunes ended
+/// flows from that map. Counters are cumulative-to-date (IPFIX active-timeout
+/// semantics). Not on the per-packet hot path — runs once per `period`.
+fn emit_active_flow_records(
+    driver: &flowscope::driver::Driver<FiveTuple>,
+    exporters: &mut [Box<dyn crate::export::FlowExporter>],
+    last_export: &mut std::collections::HashMap<FlowKey, flowscope::Timestamp>,
+    period: Duration,
+) {
+    use crate::export::FlowRecord;
+
+    let now = flowscope::Timestamp::from_system_time(std::time::SystemTime::now());
+    // Snapshot live flows first so the immutable tracker borrow is released
+    // before we take `&mut exporters`. Cloning `FlowStats` per live flow once
+    // per `period` is negligible (not the hot path).
+    let snapshot: Vec<(FlowKey, flowscope::FlowStats)> = driver
+        .tracker()
+        .iter_active()
+        .map(|af| (*af.key, af.stats.clone()))
+        .collect();
+
+    let mut live: std::collections::HashSet<FlowKey> =
+        std::collections::HashSet::with_capacity(snapshot.len());
+    for (key, stats) in &snapshot {
+        live.insert(*key);
+        let last = last_export.get(key).copied().unwrap_or(stats.started);
+        if now.saturating_sub(last) >= period {
+            let rec = FlowRecord::from_active(key, stats);
+            for ex in exporters.iter_mut() {
+                ex.export(&rec);
+            }
+            last_export.insert(*key, now);
+        }
+    }
+    // Drop dedup entries for flows that have since ended.
+    last_export.retain(|k, _| live.contains(k));
 }
 
 /// 0.24 Phase C: read each capture source's cumulative kernel counters,
@@ -839,7 +1079,25 @@ async fn dispatch_tracked_events(
             flow_states,
             label_table,
         ) {
-            Ok(()) => dispatch_lifecycle_async(dispatcher, evt).await,
+            Ok(()) => match dispatch_lifecycle_async(dispatcher, evt.clone()).await {
+                // 0.25-B1: effect pass — gated so no-effect monitors skip
+                // the whole `Ctx`-rebuilding translation (zero added cost).
+                Ok(()) if dispatcher.effect_handler_count() > 0 => {
+                    dispatch_lifecycle_effects(
+                        dispatcher,
+                        sink,
+                        state_map,
+                        counters,
+                        evt,
+                        source,
+                        monitor_name,
+                        flow_states,
+                        label_table,
+                    )
+                    .await
+                }
+                other => other,
+            },
             Err(e) => Err(e),
         };
         if let Err(e) = res {
@@ -1162,6 +1420,67 @@ async fn dispatch_lifecycle_async(
     Ok(())
 }
 
+/// 0.25 A1: dispatch the packet-tier subscriptions for one frame.
+///
+/// Extracts the 5-tuple once (directional — `a`=src, `b`=dst), builds one
+/// `Ctx`, and invokes every sub whose [`Predicate`](crate::monitor::subscription::Predicate)
+/// matches the frame's fields. Synchronous — called from inside the zero-copy
+/// drain (or the replay packet loop) before flow tracking, so the borrowed
+/// `PacketView` reaches the handler with no copy. Returns `Err` only under
+/// [`HandlerErrorPolicy::Propagate`]; `Isolate` records the error on the
+/// health handle and continues.
+///
+/// Frames the extractor skips (ARP / non-IP / malformed) match no sub and
+/// return `Ok(())` immediately.
+#[allow(clippy::too_many_arguments)]
+fn dispatch_packet_subs(
+    subs: &[PacketSubscription],
+    view: PacketView<'_>,
+    extractor: &FiveTuple,
+    sink: &mut dyn AnomalySink,
+    state_map: &mut StateMap,
+    counters: &mut CounterRegistry,
+    flow_states: &mut crate::ctx::FlowStateRegistry,
+    label_table: &flowscope::well_known::LabelTable,
+    source: SourceIdx,
+    monitor_name: Option<&str>,
+    policy: HandlerErrorPolicy,
+    health: &crate::monitor::health::HealthState,
+) -> Result<()> {
+    let Some((key, fields)) = PacketFields::extract(view, extractor) else {
+        return Ok(());
+    };
+    // Build the Ctx once and reuse it across subs (sequential dispatch). The
+    // packet tier is pre-flow, so `tracker` is `None` (no flow correlation
+    // before this frame is tracked).
+    let mut ctx = Ctx {
+        flow: Some(key),
+        ts: view.timestamp,
+        source,
+        monitor_name,
+        state_map,
+        sink,
+        counters,
+        flow_states,
+        label_table,
+        tracker: None,
+    };
+    for sub in subs {
+        if sub.predicate.eval(&fields)
+            && let Err(e) = (sub.handler)(&view, &mut ctx)
+        {
+            match policy {
+                HandlerErrorPolicy::Propagate => return Err(e),
+                HandlerErrorPolicy::Isolate => {
+                    health.record_handler_error();
+                    tracing::warn!(error = %e, "packet-sub handler error isolated");
+                }
+            }
+        }
+    }
+    Ok(())
+}
+
 #[allow(clippy::too_many_arguments)]
 fn dispatch_lifecycle(
     dispatcher: &mut Dispatcher,
@@ -1381,4 +1700,308 @@ fn dispatch_lifecycle(
         _ => {}
     }
     Ok(())
+}
+
+/// 0.25-B1: effect sibling of [`dispatch_lifecycle`]. Translates each
+/// `FsEvent` into the same typed payload, builds a `Ctx` per arm
+/// (mirroring the sync pass so handlers read the same state), and runs
+/// [`Dispatcher::dispatch_effects`] — the async read-`&Ctx` /
+/// write-`Effects` pass.
+///
+/// Fires **after** the sync ([`dispatch_lifecycle`]) and async
+/// ([`dispatch_lifecycle_async`]) passes for the same event. The caller
+/// gates this on `dispatcher.effect_handler_count() > 0` so monitors with
+/// no effect handlers pay nothing (not even this function call). Holds
+/// `&mut Ctx` across `.await`, which is `Send`-safe because every `Ctx`
+/// field is `Send` (notably `AnomalySink: Send`) — see
+/// `tests/monitor_send.rs`.
+#[allow(clippy::too_many_arguments)]
+async fn dispatch_lifecycle_effects(
+    dispatcher: &mut Dispatcher,
+    sink: &mut dyn AnomalySink,
+    state_map: &mut StateMap,
+    counters: &mut CounterRegistry,
+    evt: FsEvent<FlowKey>,
+    source: SourceIdx,
+    monitor_name: Option<&str>,
+    flow_states: &mut crate::ctx::FlowStateRegistry,
+    label_table: &flowscope::well_known::LabelTable,
+) -> Result<()> {
+    // Same per-arm `Ctx` construction as `dispatch_lifecycle`; the
+    // dispatch call is the async `dispatch_effects` instead of the sync
+    // `dispatch`. Macro inlines the borrow so each `&mut` is scoped to a
+    // single dispatch (hoisting into a closure trips HRTB inference).
+    macro_rules! dispatch_one {
+        ($ty:ty, $payload:expr, $flow:expr, $ts:expr) => {{
+            let mut ctx = Ctx {
+                flow: $flow,
+                ts: $ts,
+                source,
+                monitor_name,
+                state_map: &mut *state_map,
+                sink: &mut *sink,
+                counters: &mut *counters,
+                flow_states: &mut *flow_states,
+                label_table,
+                tracker: None,
+            };
+            dispatcher
+                .dispatch_effects::<$ty>(&$payload, &mut ctx)
+                .await?;
+        }};
+    }
+
+    match evt {
+        FsEvent::FlowStarted { key, ts, l4 } => match l4 {
+            Some(L4Proto::Tcp) => {
+                dispatch_one!(
+                    FlowStarted<Tcp>,
+                    FlowStarted::<Tcp>::new(key, l4, ts),
+                    Some(key),
+                    ts
+                );
+            }
+            Some(L4Proto::Udp) => {
+                dispatch_one!(
+                    FlowStarted<Udp>,
+                    FlowStarted::<Udp>::new(key, l4, ts),
+                    Some(key),
+                    ts
+                );
+            }
+            #[cfg(feature = "icmp")]
+            Some(L4Proto::Icmp) | Some(L4Proto::IcmpV6) => {
+                dispatch_one!(
+                    FlowStarted<Icmp>,
+                    FlowStarted::<Icmp>::new(key, l4, ts),
+                    Some(key),
+                    ts
+                );
+            }
+            _ => {}
+        },
+        FsEvent::FlowEnded {
+            key,
+            reason,
+            stats,
+            ts,
+            l4,
+            ..
+        } => match l4 {
+            Some(L4Proto::Tcp) => {
+                let is_rst = reason == flowscope::EndReason::Rst;
+                dispatch_one!(
+                    FlowEnded<Tcp>,
+                    FlowEnded::<Tcp>::new(key, reason, stats.clone(), l4, ts),
+                    Some(key),
+                    ts
+                );
+                if is_rst {
+                    dispatch_one!(TcpRst, TcpRst::new(key, stats, ts), Some(key), ts);
+                }
+            }
+            Some(L4Proto::Udp) => {
+                dispatch_one!(
+                    FlowEnded<Udp>,
+                    FlowEnded::<Udp>::new(key, reason, stats, l4, ts),
+                    Some(key),
+                    ts
+                );
+            }
+            #[cfg(feature = "icmp")]
+            Some(L4Proto::Icmp) | Some(L4Proto::IcmpV6) => {
+                dispatch_one!(
+                    FlowEnded<Icmp>,
+                    FlowEnded::<Icmp>::new(key, reason, stats, l4, ts),
+                    Some(key),
+                    ts
+                );
+            }
+            _ => {}
+        },
+        FsEvent::FlowEstablished { key, ts, l4 } => {
+            if matches!(l4, Some(L4Proto::Tcp)) {
+                dispatch_one!(
+                    FlowEstablished<Tcp>,
+                    FlowEstablished::<Tcp>::new(key, ts),
+                    Some(key),
+                    ts
+                );
+            }
+        }
+        FsEvent::FlowAnomaly { key, kind, ts } => {
+            dispatch_one!(
+                AnyFlowAnomaly,
+                AnyFlowAnomaly {
+                    key: Some(key),
+                    kind,
+                    ts,
+                },
+                Some(key),
+                ts
+            );
+        }
+        FsEvent::TrackerAnomaly { kind, ts } => {
+            dispatch_one!(
+                AnyFlowAnomaly,
+                AnyFlowAnomaly {
+                    key: None,
+                    kind,
+                    ts,
+                },
+                None,
+                ts
+            );
+        }
+        FsEvent::FlowPacket {
+            key,
+            side,
+            len,
+            ts,
+            tcp,
+        } => {
+            dispatch_one!(
+                FlowPacket,
+                FlowPacket::new(key.proto, key, side, len, tcp, ts),
+                Some(key),
+                ts
+            );
+        }
+        FsEvent::FlowTick { key, stats, ts } => match key.proto {
+            L4Proto::Tcp => {
+                dispatch_one!(
+                    FlowTick<Tcp>,
+                    FlowTick::<Tcp>::new(key, stats, ts),
+                    Some(key),
+                    ts
+                );
+            }
+            L4Proto::Udp => {
+                dispatch_one!(
+                    FlowTick<Udp>,
+                    FlowTick::<Udp>::new(key, stats, ts),
+                    Some(key),
+                    ts
+                );
+            }
+            #[cfg(feature = "icmp")]
+            L4Proto::Icmp | L4Proto::IcmpV6 => {
+                dispatch_one!(
+                    FlowTick<Icmp>,
+                    FlowTick::<Icmp>::new(key, stats, ts),
+                    Some(key),
+                    ts
+                );
+            }
+            _ => {}
+        },
+        FsEvent::ParserClosed {
+            key,
+            parser_kind,
+            reason,
+            ts,
+        } => match key.proto {
+            L4Proto::Tcp => {
+                dispatch_one!(
+                    ParserClosed<Tcp>,
+                    ParserClosed::<Tcp>::new(key, parser_kind, reason, ts),
+                    Some(key),
+                    ts
+                );
+            }
+            L4Proto::Udp => {
+                dispatch_one!(
+                    ParserClosed<Udp>,
+                    ParserClosed::<Udp>::new(key, parser_kind, reason, ts),
+                    Some(key),
+                    ts
+                );
+            }
+            #[cfg(feature = "icmp")]
+            L4Proto::Icmp | L4Proto::IcmpV6 => {
+                dispatch_one!(
+                    ParserClosed<Icmp>,
+                    ParserClosed::<Icmp>::new(key, parser_kind, reason, ts),
+                    Some(key),
+                    ts
+                );
+            }
+            _ => {}
+        },
+        _ => {}
+    }
+    Ok(())
+}
+
+#[cfg(test)]
+mod active_export_tests {
+    use std::sync::{Arc, Mutex};
+    use std::time::Duration;
+
+    use flowscope::driver::Driver;
+    use flowscope::extract::FiveTuple;
+
+    use super::*;
+    use crate::export::{FlowExporter, FlowRecord};
+
+    /// Collects every exported record (`FlowRecord` is `Copy`).
+    struct Collect(Arc<Mutex<Vec<FlowRecord>>>);
+    impl FlowExporter for Collect {
+        fn export(&mut self, r: &FlowRecord) {
+            self.0.lock().unwrap().push(*r);
+        }
+    }
+
+    fn tcp_frame() -> Vec<u8> {
+        use etherparse::PacketBuilder;
+        let b = PacketBuilder::ethernet2([1, 2, 3, 4, 5, 6], [6, 5, 4, 3, 2, 1])
+            .ipv4([10, 0, 0, 1], [10, 0, 0, 2], 64)
+            .tcp(1234, 80, 0, 1024);
+        let mut frame = Vec::new();
+        b.write(&mut frame, &[]).unwrap();
+        frame
+    }
+
+    #[test]
+    fn emit_active_records_one_per_window_with_dedup() {
+        // A live flow whose `started` is far in the past (1970+1000s) so the
+        // active window has trivially elapsed against the wall clock.
+        let mut driver = Driver::builder(FiveTuple::bidirectional()).build();
+        let frame = tcp_frame();
+        let ts = flowscope::Timestamp::from_unix_f64(1000.0);
+        let mut events = Vec::new();
+        driver.track_into(flowscope::PacketView::new(&frame, ts), &mut events);
+        assert!(driver.tracker().flow_count() >= 1, "flow should be tracked");
+
+        let sink = Arc::new(Mutex::new(Vec::new()));
+        let mut exporters: Vec<Box<dyn FlowExporter>> = vec![Box::new(Collect(sink.clone()))];
+        let mut last_export = std::collections::HashMap::new();
+
+        // First sweep: the flow is older than the 1s window -> one ongoing record.
+        emit_active_flow_records(
+            &driver,
+            &mut exporters,
+            &mut last_export,
+            Duration::from_secs(1),
+        );
+        {
+            let recs = sink.lock().unwrap();
+            assert_eq!(recs.len(), 1, "one interim record for the live flow");
+            assert!(recs[0].is_ongoing(), "interim record has reason == None");
+        }
+
+        // Second sweep right after: dedup -- `last_export` was just stamped, so
+        // less than the 1s window has elapsed -> no new record.
+        emit_active_flow_records(
+            &driver,
+            &mut exporters,
+            &mut last_export,
+            Duration::from_secs(1),
+        );
+        assert_eq!(
+            sink.lock().unwrap().len(),
+            1,
+            "dedup: no second record within the active window"
+        );
+    }
 }

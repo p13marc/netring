@@ -29,9 +29,7 @@ netring = { version = "0.21", features = ["tokio"] }
 ```
 
 ```rust,no_run
-# async fn _ex() -> Result<(), netring::Error> {
 let mut cap = netring::AsyncCapture::open("eth0")?;
-# Ok(()) }
 ```
 
 `AsyncCapture::open(iface)` is shorthand for
@@ -39,7 +37,6 @@ let mut cap = netring::AsyncCapture::open("eth0")?;
 the builder:
 
 ```rust,no_run
-# async fn _ex() -> Result<(), netring::Error> {
 use netring::{AsyncCapture, Capture, FanoutMode, RingProfile};
 let cap = Capture::builder()
     .interface("eth0")
@@ -48,7 +45,6 @@ let cap = Capture::builder()
     .fanout(FanoutMode::Cpu, 42)
     .build()?;
 let mut acap = AsyncCapture::new(cap)?;
-# Ok(()) }
 ```
 
 ### Three reception modes
@@ -59,7 +55,6 @@ ergonomics and `Send`-ness.
 #### 1. Guarded (recommended)
 
 ```rust,no_run
-# async fn _ex() -> Result<(), netring::Error> {
 let mut cap = netring::AsyncCapture::open("eth0")?;
 loop {
     let mut guard = cap.readable().await?;
@@ -71,7 +66,6 @@ loop {
     }
     // guard drops, releasing tokio's readiness flag iff next_batch was None
 }
-# }
 ```
 
 The guard manages tokio's readiness flag for you: it clears ready only
@@ -81,13 +75,11 @@ when `next_batch` returned `None`, eliminating the
 #### 2. Single-call zero-copy
 
 ```rust,no_run
-# async fn _ex() -> Result<(), netring::Error> {
 let mut cap = netring::AsyncCapture::open("eth0")?;
 let batch = cap.try_recv_batch().await?;  // retries on spurious wakeup
 for pkt in &batch {
     let _ = pkt.data();
 }
-# Ok(()) }
 ```
 
 Convenient sugar over `readable().await?.next_batch()` plus the
@@ -97,13 +89,11 @@ spurious-wakeup retry loop. Returns `PacketBatch<'_>` borrowing from
 #### 3. Owned (`Send`-friendly)
 
 ```rust,no_run
-# async fn _ex() -> Result<(), netring::Error> {
 let mut cap = netring::AsyncCapture::open("eth0")?;
 let packets: Vec<netring::OwnedPacket> = cap.recv().await?;
 for pkt in &packets {
     let _ = pkt.data.len();
 }
-# Ok(()) }
 ```
 
 Returns `Vec<OwnedPacket>` — copies data out of the ring before the
@@ -117,7 +107,6 @@ region (which is `!Sync` because of cached cursor state). Holding one
 across an `.await` makes the surrounding future `!Send`:
 
 ```rust,compile_fail
-# async fn _ex(mut cap: netring::AsyncCapture<netring::Capture>) {
 tokio::spawn(async move {
     let batch = cap.try_recv_batch().await.unwrap();
     // Compile error: future is !Send because PacketBatch is !Send.
@@ -126,7 +115,6 @@ tokio::spawn(async move {
         let _ = pkt.data();
     }
 });
-# }
 ```
 
 When you need `Send`:
@@ -138,12 +126,10 @@ When you need `Send`:
 ## AsyncInjector
 
 ```rust,no_run
-# async fn _ex() -> Result<(), netring::Error> {
 let mut tx = netring::AsyncInjector::open("eth0")?;
 tx.send(&[0xff; 64]).await?;     // awaits POLLOUT if ring is full
 tx.flush().await?;
 tx.wait_drained(std::time::Duration::from_secs(1)).await?;
-# Ok(()) }
 ```
 
 `send()` is the headline feature: when the TX ring is saturated it
@@ -158,8 +144,6 @@ AF_XDP wrapper. Same three reception modes as `AsyncCapture`, plus
 both directions, so a single wrapper covers both.
 
 ```rust,no_run
-# #[cfg(feature = "af-xdp")]
-# async fn _ex() -> Result<(), netring::Error> {
 use netring::{AsyncXdpSocket, XdpMode, XdpSocket};
 
 // Default mode is RxTx (50/50 UMEM split). For TX-only or RX-only
@@ -176,7 +160,6 @@ xdp.flush().await?;
 
 // RX side (requires an XDP program redirecting to this queue):
 // let batch = xdp.try_recv_batch().await?;
-# Ok(()) }
 ```
 
 AF_XDP RX still requires an external XDP program attached to the NIC
@@ -186,7 +169,6 @@ this — it just makes the userland half await-friendly.
 ## Bridge
 
 ```rust,no_run
-# async fn _ex() -> Result<(), netring::Error> {
 use netring::bridge::{Bridge, BridgeAction};
 
 let mut bridge = Bridge::builder()
@@ -195,7 +177,6 @@ let mut bridge = Bridge::builder()
     .build()?;
 
 bridge.run_async(|_pkt, _dir| BridgeAction::Forward).await?;
-# Ok(()) }
 ```
 
 `run_async` uses `tokio::select!` over `AsyncFd::readable()` on both RX
@@ -203,15 +184,11 @@ fds — no manual `poll(2)`, the tokio reactor drives the loop. Combine
 with `tokio::signal::ctrl_c()` for graceful shutdown:
 
 ```rust,no_run
-# async fn _ex() -> Result<(), netring::Error> {
-# use netring::bridge::{Bridge, BridgeAction};
 let mut bridge = Bridge::open_pair("eth0", "eth1")?;
 tokio::select! {
     res = bridge.run_async(|_, _| BridgeAction::Forward) => res?,
     _ = tokio::signal::ctrl_c() => eprintln!("shutdown"),
 }
-# Ok(()) }
-# // (Bridge::open_pair is shorthand for builder().interface_a().interface_b().build())
 ```
 
 ## Stream adapter
@@ -227,7 +204,6 @@ futures = "0.3"
 ```
 
 ```rust,no_run
-# async fn _ex() -> Result<(), netring::Error> {
 use futures::StreamExt;
 
 let mut stream = netring::AsyncCapture::open("eth0")?.into_stream();
@@ -240,7 +216,6 @@ let total: usize = stream
     .await;
 
 println!("captured {total} packets across 100 batches");
-# Ok(()) }
 ```
 
 Stream items are `Vec<OwnedPacket>`, so the future is `Send` —
@@ -260,7 +235,6 @@ task uses `cap.recv().await` (returns owned packets) so the future is
 ### Graceful shutdown
 
 ```rust,no_run
-# async fn _ex() -> Result<(), netring::Error> {
 let mut cap = netring::AsyncCapture::open("eth0")?;
 loop {
     tokio::select! {
@@ -275,7 +249,6 @@ loop {
 }
 let stats = cap.cumulative_stats()?;
 println!("done: {stats}");
-# Ok(()) }
 ```
 
 Both arms are cancel-safe.
@@ -283,8 +256,6 @@ Both arms are cancel-safe.
 ### Stats + metrics integration
 
 ```rust,no_run
-# #[cfg(feature = "metrics")]
-# async fn _ex() -> Result<(), netring::Error> {
 let mut cap = netring::AsyncCapture::open("eth0")?;
 let mut tick = tokio::time::interval(std::time::Duration::from_secs(1));
 
@@ -303,7 +274,6 @@ loop {
         }
     }
 }
-# }
 ```
 
 Pair with `metrics-exporter-prometheus` and the counters surface as

@@ -92,6 +92,17 @@ jobs:
       - uses: Swatinem/rust-cache@v2
       - name: Monitor lib tests (flow surface)
         run: cargo test -p netring --features "tokio,channel,flow,parse,http,dns,tls,icmp" --lib
+      # 0.25: the flow-gated *integration* tests that validate the new surface
+      # but open NO live socket (pcap replay / build-time filter checks /
+      # compile-time Send assertions) — these were never run in CI before. They
+      # exercise the B1 effect end-to-end path, all three subscription tiers,
+      # the S2 kernel-prefilter union, and the `Send` run-loop assertion
+      # (incl. the effect path). Cap-free, so they run here, not in the root job.
+      - name: Monitor integration tests (cap-free)
+        run: |
+          cargo test -p netring --features "tokio,channel,flow,parse,pcap,http,dns,tls,ja4plus" \
+            --test monitor_replay --test monitor_kernel_prefilter --test monitor_send \
+            --test monitor_run_until_idle --test monitor_drain_timeout --test monitor_name_in_ctx
 
   # ── Integration tests (need CAP_NET_RAW) ──────────────────────────────────
   test-integration:
@@ -119,6 +130,83 @@ jobs:
       - name: Run integration tests
         run: cargo test -p netring --features "integration-tests,tokio,channel,af-xdp" -- --test-threads=1
 
+  # ── AF_XDP-on-lo live test (root) ─────────────────────────────────────────
+  # The first live AF_XDP validation: loads the built-in redirect-all XDP
+  # program on `lo` in SKB/generic mode and asserts the AF_XDP socket captures
+  # redirected loopback traffic. Proven green on hosted runners (kernel 6.17,
+  # ubuntu-24.04). Runs the test binary as ROOT (XDP load + BPF maps + XSKMAP).
+  # Promoted from a 0.25 A3c spike — it found + fixed two real xdp-loader bugs
+  # (BTF-less vendored object; XDP_FLAGS_REPLACE rejected by the link API).
+  xdp-smoke:
+    name: AF_XDP lo live (root)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+
+      - name: Kernel / capability info
+        run: |
+          uname -a
+          echo "kernel.unprivileged_bpf_disabled=$(cat /proc/sys/kernel/unprivileged_bpf_disabled 2>/dev/null || echo '?')"
+          ip link show lo
+
+      - name: Build the AF_XDP smoke test
+        # flow,tokio,monitor enable the W1a in-Monitor loader test
+        # (monitor_xdp_interface_loaded_captures_loopback_flows) alongside the
+        # bare-socket smoke test.
+        run: cargo test -p netring --features "integration-tests,af-xdp,xdp-loader,flow,tokio,monitor" --test xdp_lo_smoke --no-run
+
+      - name: Run as root
+        run: |
+          bin=$(cargo test -p netring --features "integration-tests,af-xdp,xdp-loader,flow,tokio,monitor" \
+              --test xdp_lo_smoke --no-run --message-format=json 2>/dev/null \
+              | jq -r 'select(.executable != null and (.target.kind[] == "test")) | .executable' \
+              | head -n1)
+          echo "test binary: $bin"
+          test -n "$bin" && test -f "$bin" || { echo "no test binary"; exit 1; }
+          sudo "$bin" --nocapture --test-threads=1
+
+  # ── Monitor live capture on lo (root) ─────────────────────────────────────
+  # The flow-gated Monitor live tests need `flow` (the main integration job
+  # doesn't enable it, so they were dormant). This runs the CI-robust one:
+  # `monitor_lo_kernel_pushdown` generates its own loopback traffic, gracefully
+  # skips without CAP_NET_RAW, and doesn't assume a perfectly quiet `lo`. It's
+  # the live validation of the 0.25 packet tier + S2 kernel prefilter
+  # (previously only pcap-replay + BpfFilter::matches software-tested).
+  # (The brittle multi_capture/fanout-stats suite stays local-only for now.)
+  monitor-live:
+    name: Monitor live (lo, root)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+
+      - name: Build the live monitor test
+        run: cargo test -p netring --features "integration-tests,tokio,channel,flow,parse" --test monitor_lo_kernel_pushdown --no-run
+
+      - name: Run as root
+        run: |
+          bin=$(cargo test -p netring --features "integration-tests,tokio,channel,flow,parse" \
+              --test monitor_lo_kernel_pushdown --no-run --message-format=json 2>/dev/null \
+              | jq -r 'select(.executable != null and (.target.kind[] == "test")) | .executable' \
+              | head -n1)
+          echo "test binary: $bin"
+          test -n "$bin" && test -f "$bin" || { echo "no test binary"; exit 1; }
+          sudo "$bin" --nocapture --test-threads=1
+
+      # 0.25 W3: TX timestamping round-trip on lo (software SO_TIMESTAMPING).
+      - name: TX-timestamp lo test (root)
+        run: |
+          cargo test -p netring --features "integration-tests,tokio" --test tx_timestamp_lo --no-run
+          bin=$(cargo test -p netring --features "integration-tests,tokio" \
+              --test tx_timestamp_lo --no-run --message-format=json 2>/dev/null \
+              | jq -r 'select(.executable != null and (.target.kind[] == "test")) | .executable' \
+              | head -n1)
+          test -n "$bin" && test -f "$bin" || { echo "no test binary"; exit 1; }
+          sudo "$bin" --nocapture --test-threads=1
+
   # ── Benchmarks compile ────────────────────────────────────────────────────
   bench:
     name: Benchmarks compile
@@ -128,6 +216,11 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
       - run: cargo bench -p netring --no-run
+      # 0.25 C3: the dispatch-throughput pps proxy needs `flow`; build + run it
+      # briefly so a userspace-hot-path regression (or a build break) is caught.
+      # See docs/PERFORMANCE.md.
+      - name: Dispatch-throughput bench (smoke)
+        run: cargo bench -p netring --features flow --bench dispatch_throughput -- --warm-up-time 1 --measurement-time 2
 
   # ── Zero-alloc regression bench (dhat) ────────────────────────────────────
   # Locks in netring 0.20's Δ 0 bytes / Δ 0 blocks steady-state
@@ -197,6 +290,13 @@ jobs:
         run: |
           cargo +nightly miri test -p netring --lib config::
           cargo +nightly miri test -p netring --lib packet:: -- --skip afpacket
+          # 0.25: the type-erased `*const ()` casts that make the dispatcher /
+          # effect / packet-tier dispatch sound (registry.rs + dispatcher.rs)
+          # live in `monitor::`/`subscription::` — miri them under Tree Borrows.
+          # (These modules need `flow`; their tests are sync, so no tokio rt.)
+          cargo +nightly miri test -p netring --features "tokio,flow,http,dns,tls" --lib monitor::dispatcher
+          cargo +nightly miri test -p netring --features "tokio,flow,http,dns,tls" --lib monitor::registry
+          cargo +nightly miri test -p netring --features "tokio,flow,http,dns,tls" --lib monitor::subscription
 
   # ── cargo-fuzz smoke: BPF compiler + interpreter against adversarial input ─
   fuzz:
@@ -213,3 +313,23 @@ jobs:
         run: |
           cargo +nightly fuzz run bpf_matches -- -runs=200000 -max_total_time=60
           cargo +nightly fuzz run bpf_builder -- -runs=200000 -max_total_time=60
+          cargo +nightly fuzz run expr_parse -- -runs=200000 -max_total_time=60
+
+  # ── netring-exporters companion crate (OTLP + Kafka) ──────────────────────
+  exporters:
+    name: netring-exporters
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      # The `kafka` feature builds bundled librdkafka via cmake.
+      - run: sudo apt-get update && sudo apt-get install -y cmake
+      - name: OTLP (default) — clippy + test
+        run: |
+          cargo clippy -p netring-exporters --all-targets -- --deny warnings
+          cargo test -p netring-exporters
+      - name: Kafka feature — clippy + test
+        run: |
+          cargo clippy -p netring-exporters --no-default-features --features kafka --all-targets -- --deny warnings
+          cargo test -p netring-exporters --no-default-features --features kafka

@@ -37,7 +37,6 @@ handshake:
 
 ```rust,no_run
 use netring::prelude::*;
-# fn _ex() -> Result<(), netring::Error> {
 let monitor = Monitor::builder()
     .interface("eth0")
     // auto-registers the TlsHandshake protocol
@@ -48,9 +47,6 @@ let monitor = Monitor::builder()
         Ok(())
     })
     .build()?;
-# let _ = monitor;
-# Ok(())
-# }
 ```
 
 For the lower-level view, `on::<TlsHandshake>(|hs| …)` hands you the full
@@ -76,20 +72,28 @@ algorithm, but that **does not** exempt downstream commercial users from
 FoxIO's license + patent-pending terms. If you ship a product that uses
 JA4S, get an OEM license. Read the FoxIO [License FAQ] first.
 
-**Staying BSD-clean:** if you only need royalty-free fingerprints, use JA3 +
-JA4 (client) and don't read `.ja4s`. (A future release will move JA4S behind
-its own opt-in feature so the default fingerprint surface is BSD-only — see
-the 0.25 plan's "Deferred from 0.24" backlog.)
+**Staying BSD-clean (the default):** since 0.25, JA4S lives behind the opt-in
+**`ja4plus`** cargo feature (off by default, and excluded from the `monitor` /
+`all-parsers` umbrellas). The default TLS fingerprint surface — JA3 + JA4
+(client), enabled by the `tls` feature — is BSD-only / royalty-free, and the
+`TlsFingerprint.ja4s` field doesn't even exist without `ja4plus`. You opt into
+the FoxIO-licensed JA4S consciously; enabling `ja4plus` pulls flowscope's
+`ja4plus` (FoxIO License 1.1) into your build.
 
 [FoxIO License 1.1]: https://github.com/FoxIO-LLC/ja4
 [License FAQ]: https://github.com/FoxIO-LLC/ja4/blob/main/License%20FAQ.md
 
 ## Enabling
 
-Fingerprinting needs the `tls` feature (which pulls flowscope's
-`tls-fingerprints`). The `TlsHandshakeParser` enables JA3/JA4/JA4S
-computation by default; without the feature, the fingerprint fields are
-all `None`.
+- **JA3 + JA4 (client)** — enable the **`tls`** feature (which pulls flowscope's
+  `tls-fingerprints`). Royalty-free / BSD.
+- **JA4S (server)** — additionally enable the opt-in **`ja4plus`** feature
+  (FoxIO License 1.1; pulls `flowscope/ja4plus`). This is what makes the
+  `TlsFingerprint.ja4s` field exist. Off by default — read the licensing
+  section above before enabling it commercially.
+
+The `TlsHandshakeParser` computes the fingerprints its features allow; without
+the feature, the corresponding fields are `None` (or, for `ja4s`, absent).
 
 [`TlsFingerprint`]: https://docs.rs/netring/latest/netring/monitor/struct.TlsFingerprint.html
 [`flowscope::tls::TlsHandshake`]: https://docs.rs/flowscope/latest/flowscope/tls/struct.TlsHandshake.html

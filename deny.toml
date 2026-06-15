@@ -24,6 +24,10 @@ allow = [
     # Permissive; OSI-approved. Used by `xxhash-rust` (our content
     # hash for dedup).
     "BSL-1.0",
+    # Community Data License Agreement – Permissive 2.0. Permissive; used by
+    # `webpki-roots` (the Mozilla CA bundle) pulled in via `ureq`'s TLS stack
+    # in the `netring-exporters` OTLP sink.
+    "CDLA-Permissive-2.0",
 ]
 confidence-threshold = 0.8
 

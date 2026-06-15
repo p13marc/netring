@@ -13,7 +13,9 @@ cargo-fuzz = true
 [dependencies]
 libfuzzer-sys = "0.4"
 arbitrary = { version = "1", features = ["derive"] }
-netring = { path = ".." }
+# `tokio,flow` enable the `monitor::subscription` module (the `.expr()` parser);
+# the BPF targets only need `config`, which is always available.
+netring = { path = "..", features = ["tokio", "flow"] }
 
 # Detach from the parent workspace.
 [workspace]
@@ -31,6 +33,13 @@ bench = false
 [[bin]]
 name = "bpf_builder"
 path = "fuzz_targets/bpf_builder.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "expr_parse"
+path = "fuzz_targets/expr_parse.rs"
 test = false
 doc = false
 bench = false

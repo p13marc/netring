@@ -203,6 +203,27 @@ pub enum Dispatch {
     Signature(fn(&[u8]) -> SignatureMatch),
 }
 
+/// 0.25 S1: the **traffic interest** of one consumer (a handler, a registered
+/// protocol parser, an exporter). The Monitor folds every consumer's class
+/// into the OR-union it pushes to the kernel as a conservative prefilter
+/// (see the subscription-engine design). A consumer can only ever *widen* the
+/// union, never narrow it — so the kernel filter is always a superset of what
+/// some consumer wants, and no consumer is starved.
+///
+/// Kept in the `protocol` module (no `Predicate` dependency) so the [`Event`]
+/// trait can declare it; the Monitor maps it to a
+/// [`Predicate`](crate::monitor::subscription::Predicate) at build time.
+#[derive(Debug, Clone)]
+pub enum TrafficClass {
+    /// Wants **all** traffic — the conservative default. Forces capture-all
+    /// (no kernel narrowing) when any consumer needs it.
+    Any,
+    /// Wants exactly the traffic this [`Dispatch`] describes (a proto, or a
+    /// proto + port set). `Dispatch::Signature` is treated as `Any` by the
+    /// mapper (port-agnostic ⇒ can't narrow).
+    Dispatch(Dispatch),
+}
+
 /// Result of a signature function. `Match` pins the flow to this
 /// protocol's parser; `NoMatch` skips it; `NeedMoreData` says
 /// "I need more bytes" — the dispatcher keeps probing until budget

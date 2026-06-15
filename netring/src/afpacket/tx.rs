@@ -222,6 +222,75 @@ impl Injector {
             .count()
     }
 
+    /// 0.25 W3: read the next **egress timestamp** from the socket's error
+    /// queue (non-blocking). Requires the injector to have been built with
+    /// [`InjectorBuilder::tx_timestamps(true)`](InjectorBuilder::tx_timestamps).
+    ///
+    /// Returns `None` when no timestamp is currently queued (call again after
+    /// the kernel has transmitted — i.e. after [`flush`](Self::flush) /
+    /// `wait_drained`). The value is the hardware TX timestamp when the NIC
+    /// populates one, else the software timestamp (which works on `lo`).
+    pub fn read_tx_timestamp(&self) -> Option<crate::Timestamp> {
+        use std::os::fd::AsRawFd;
+
+        // Error-queue messages with OPT_TSONLY carry no payload; a zero-length
+        // iov is fine. The control buffer holds the SCM_TIMESTAMPING cmsg.
+        let mut ctrl = [0u8; 256];
+        let mut iov = libc::iovec {
+            iov_base: std::ptr::null_mut(),
+            iov_len: 0,
+        };
+        let mut msg: libc::msghdr = unsafe { std::mem::zeroed() };
+        msg.msg_iov = &mut iov;
+        msg.msg_iovlen = 1;
+        msg.msg_control = ctrl.as_mut_ptr() as *mut libc::c_void;
+        msg.msg_controllen = ctrl.len() as _;
+
+        // SAFETY: `msg` is fully initialised; recvmsg writes only into `ctrl`
+        // and (for OPT_TSONLY, nothing into) the zero-length `iov`.
+        let n = unsafe {
+            libc::recvmsg(
+                self.fd.as_raw_fd(),
+                &mut msg,
+                libc::MSG_ERRQUEUE | libc::MSG_DONTWAIT,
+            )
+        };
+        if n < 0 {
+            return None; // EAGAIN (queue empty) or timestamping not enabled
+        }
+
+        // Walk the control messages for SOL_SOCKET / SCM_TIMESTAMPING, whose
+        // data is `struct scm_timestamping { struct timespec ts[3]; }`:
+        // ts[0] = software, ts[1] = deprecated, ts[2] = raw hardware.
+        // SAFETY: cmsg pointers come from the kernel-filled `msg`; we read a
+        // POD `[timespec; 3]` unaligned from the cmsg data.
+        unsafe {
+            let mut cmsg = libc::CMSG_FIRSTHDR(&msg);
+            while !cmsg.is_null() {
+                let c = &*cmsg;
+                if c.cmsg_level == libc::SOL_SOCKET && c.cmsg_type == libc::SCM_TIMESTAMPING {
+                    let data = libc::CMSG_DATA(cmsg) as *const [libc::timespec; 3];
+                    let ts = std::ptr::read_unaligned(data);
+                    let hw = ts[2];
+                    let sw = ts[0];
+                    let pick = if hw.tv_sec != 0 || hw.tv_nsec != 0 {
+                        hw
+                    } else {
+                        sw
+                    };
+                    if pick.tv_sec != 0 || pick.tv_nsec != 0 {
+                        return Some(crate::Timestamp::new(
+                            pick.tv_sec as u32,
+                            pick.tv_nsec as u32,
+                        ));
+                    }
+                }
+                cmsg = libc::CMSG_NXTHDR(&msg, cmsg);
+            }
+        }
+        None
+    }
+
     /// Block until [`pending_count`](Self::pending_count) reaches zero or
     /// `timeout` elapses.
     ///
@@ -409,6 +478,7 @@ pub struct InjectorBuilder {
     frame_size: usize,
     frame_count: usize,
     qdisc_bypass: bool,
+    tx_timestamps: bool,
 }
 
 impl Default for InjectorBuilder {
@@ -418,6 +488,7 @@ impl Default for InjectorBuilder {
             frame_size: 2048,
             frame_count: 256,
             qdisc_bypass: false,
+            tx_timestamps: false,
         }
     }
 }
@@ -444,6 +515,22 @@ impl InjectorBuilder {
     /// Bypass qdisc layer for lower TX latency. Default: false.
     pub fn qdisc_bypass(mut self, enable: bool) -> Self {
         self.qdisc_bypass = enable;
+        self
+    }
+
+    /// 0.25 W3: request **egress timestamps** (`SO_TIMESTAMPING`) for sent
+    /// frames. Default: false.
+    ///
+    /// Enables software *and* (where the NIC supports it) hardware TX
+    /// timestamps. After a frame is transmitted the kernel queues its timestamp
+    /// on the socket's error queue; read it with
+    /// [`Injector::read_tx_timestamp`] (or
+    /// [`AsyncInjector::read_tx_timestamp`](crate::AsyncInjector::read_tx_timestamp)).
+    /// Enabling is best-effort: if the kernel rejects the option (very old
+    /// kernel) the build still succeeds without timestamps. Software TX
+    /// timestamps work on `lo`; hardware timestamps need a capable NIC.
+    pub fn tx_timestamps(mut self, enable: bool) -> Self {
+        self.tx_timestamps = enable;
         self
     }
 
@@ -499,6 +586,29 @@ impl InjectorBuilder {
                 &val,
                 "PACKET_QDISC_BYPASS",
             )?;
+        }
+
+        if self.tx_timestamps {
+            // SOF_TIMESTAMPING_TX_SOFTWARE/HARDWARE generate the egress
+            // timestamps; *_SOFTWARE/RAW_HARDWARE report them; OPT_TSONLY makes
+            // the error-queue message carry just the timestamp (no payload),
+            // and OPT_ID tags each so the caller can correlate. Best-effort —
+            // a rejection (e.g. ancient kernel) is logged, not fatal.
+            let flags: u32 = libc::SOF_TIMESTAMPING_TX_SOFTWARE
+                | libc::SOF_TIMESTAMPING_TX_HARDWARE
+                | libc::SOF_TIMESTAMPING_SOFTWARE
+                | libc::SOF_TIMESTAMPING_RAW_HARDWARE
+                | libc::SOF_TIMESTAMPING_OPT_TSONLY
+                | libc::SOF_TIMESTAMPING_OPT_ID;
+            if let Err(e) = crate::sockopt::raw_setsockopt(
+                fd.as_fd(),
+                libc::SOL_SOCKET,
+                libc::SO_TIMESTAMPING,
+                &flags,
+                "SO_TIMESTAMPING",
+            ) {
+                tracing::warn!(error = %e, "TX timestamping not enabled (SO_TIMESTAMPING rejected)");
+            }
         }
 
         let data_offset = ffi::tpacket_align(std::mem::size_of::<libc::tpacket_hdr>());

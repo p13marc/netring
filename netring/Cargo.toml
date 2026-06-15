@@ -1,6 +1,6 @@
 [package]
 name = "netring"
-version = "0.24.0"
+version = "0.25.0"
 edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
@@ -23,7 +23,7 @@ exclude = ["CLAUDE.md", "SPEC.md"]
 # pulls only `bitflags` + `thiserror` — both already in netring's tree.
 # The `parse` feature additionally enables `flowscope/extractors`,
 # `flow` enables `tracker`/`reassembler`/`session`.
-flowscope = { version = "0.15", default-features = false }
+flowscope = { version = "0.16", default-features = false }
 
 libc = { workspace = true }
 nix = { workspace = true }
@@ -72,6 +72,8 @@ etherparse = "0.16"
 core_affinity = "0.8"
 futures = "0.3"
 proptest = "1"
+# 0.25 W1f: structured JSON logging example (monitor/tracing_json).
+tracing-subscriber = { version = "0.3", features = ["json", "env-filter"] }
 
 # ── Feature graph ───────────────────────────────────────────────────────────
 # Features are organized as ORTHOGONAL AXES. See `docs/FEATURES.md` for the
@@ -107,9 +109,17 @@ flow = ["parse", "flowscope/tracker", "flowscope/reassembler", "flowscope/sessio
 # L7 parser pass-through — pull flowscope's HTTP/DNS/TLS/ICMP modules.
 http = ["flow", "flowscope/http"]
 dns = ["flow", "flowscope/dns"]
-tls = ["flow", "flowscope/tls"]
+tls = ["flow", "flowscope/tls", "flowscope/tls-fingerprints"]
 icmp = ["flow", "flowscope/icmp"]
 all-parsers = ["http", "dns", "tls", "icmp"]
+
+# JA4S server fingerprint (`TlsFingerprint.ja4s`). Part of the JA4+ suite,
+# licensed under the FoxIO License 1.1 (source-available, non-commercial;
+# patent pending) — NOT MIT/Apache like the rest of netring. OFF BY DEFAULT
+# (excluded from `monitor`/`all-parsers`). The default TLS fingerprint surface
+# (JA3 + JA4 client) stays royalty-free. Commercial use requires a FoxIO OEM
+# license. See `docs/FINGERPRINTS.md` and flowscope's LICENSE-FoxIO-1.1.
+ja4plus = ["tls", "flowscope/ja4plus"]
 # Pass-through for flowscope's `detect::file` (Sha256Sink / FileType).
 file-hash = ["flowscope/file-hash"]
 
@@ -169,6 +179,11 @@ path = "examples/basic/capture.rs"
 [[example]]
 name = "inject"
 path = "examples/basic/inject.rs"
+
+[[example]]
+name = "tx_replay"
+path = "examples/basic/tx_replay.rs"
+required-features = ["tokio"]
 
 [[example]]
 name = "bridge"
@@ -479,9 +494,36 @@ path = "examples/monitor/health_endpoint.rs"
 required-features = ["tokio", "flow"]
 
 [[example]]
+name = "monitor_subscriptions"
+path = "examples/monitor/subscriptions.rs"
+required-features = ["monitor"]
+
+[[example]]
+name = "monitor_tracing_json"
+path = "examples/monitor/tracing_json.rs"
+required-features = ["monitor"]
+
+[[example]]
+name = "monitor_flow_export"
+path = "examples/monitor/flow_export.rs"
+required-features = ["monitor"]
+
+[[example]]
+name = "monitor_resilience"
+path = "examples/monitor/resilience.rs"
+required-features = ["monitor"]
+
+[[example]]
+name = "monitor_eve_tls"
+path = "examples/monitor/eve_tls.rs"
+required-features = ["monitor", "eve-sink"]
+
+[[example]]
 name = "monitor_ja4_fingerprint"
 path = "examples/monitor/ja4_fingerprint.rs"
-required-features = ["tokio", "flow", "tls"]
+# Demonstrates JA4S (server fingerprint) → requires the opt-in `ja4plus`
+# feature (FoxIO License 1.1). JA3 + JA4 client alone need only `tls`.
+required-features = ["tokio", "flow", "ja4plus"]
 
 [[example]]
 name = "monitor_beacon_detector"
@@ -523,3 +565,9 @@ harness = false
 name = "zero_alloc"
 harness = false
 required-features = ["bench-zero-alloc"]
+
+# 0.25 C3: cap-free userspace dispatch-throughput pps proxy (docs/PERFORMANCE.md).
+[[bench]]
+name = "dispatch_throughput"
+harness = false
+required-features = ["flow"]

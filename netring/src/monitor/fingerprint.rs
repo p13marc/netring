@@ -12,10 +12,12 @@ use crate::protocol::FlowKey;
 /// A completed TLS handshake's fingerprint bundle. Built from
 /// [`flowscope::tls::TlsHandshake`] + the flow key.
 ///
-/// `ja4s` is populated only against flowscope ≥ 0.15 with the
-/// `tls-fingerprints` feature; the others follow the same feature/config
-/// gating as the underlying handshake fields (all `None` if fingerprinting
-/// wasn't enabled).
+/// JA3 + JA4 (client) are royalty-free (BSD) and present with the `tls`
+/// feature. `ja4s` (the JA4S **server** fingerprint) is **FoxIO License 1.1**
+/// (non-commercial; patent pending) and exists only under the opt-in
+/// [`ja4plus`](index.html#features) feature — commercial use requires a FoxIO
+/// OEM license (see `docs/FINGERPRINTS.md`). All are `None` if fingerprinting
+/// wasn't enabled/configured.
 #[derive(Debug, Clone, Default, PartialEq)]
 #[cfg_attr(feature = "serde", derive(serde::Serialize))]
 pub struct TlsFingerprint {
@@ -26,9 +28,11 @@ pub struct TlsFingerprint {
     pub alpn: Option<String>,
     /// JA3 client fingerprint (MD5 hex).
     pub ja3: Option<String>,
-    /// JA4 client fingerprint (FoxIO format).
+    /// JA4 client fingerprint (FoxIO format, BSD-licensed).
     pub ja4: Option<String>,
-    /// JA4S server fingerprint (FoxIO format).
+    /// JA4S server fingerprint — **FoxIO License 1.1** (opt-in `ja4plus`
+    /// feature; commercial use requires a FoxIO OEM license).
+    #[cfg(feature = "ja4plus")]
     pub ja4s: Option<String>,
     /// The flow's 5-tuple key (from the dispatch context), if available.
     #[cfg_attr(feature = "serde", serde(skip_serializing_if = "Option::is_none"))]
@@ -46,6 +50,7 @@ impl TlsFingerprint {
                 .or_else(|| hs.client_alpn.first().cloned()),
             ja3: hs.ja3.clone(),
             ja4: hs.ja4.clone(),
+            #[cfg(feature = "ja4plus")]
             ja4s: hs.ja4s.clone(),
             key,
         }
@@ -54,7 +59,10 @@ impl TlsFingerprint {
     /// `true` when at least one fingerprint (JA3 / JA4 / JA4S) is present.
     /// Cheap guard for handlers that only act on fingerprinted handshakes.
     pub fn has_fingerprint(&self) -> bool {
-        self.ja3.is_some() || self.ja4.is_some() || self.ja4s.is_some()
+        let any = self.ja3.is_some() || self.ja4.is_some();
+        #[cfg(feature = "ja4plus")]
+        let any = any || self.ja4s.is_some();
+        any
     }
 }
 
@@ -72,11 +80,15 @@ mod tests {
         hs.server_alpn = Some("h2".to_string());
         hs.ja3 = Some("abc".to_string());
         hs.ja4 = Some("t13d…".to_string());
-        hs.ja4s = Some("t130200_1301_…".to_string());
+        #[cfg(feature = "ja4plus")]
+        {
+            hs.ja4s = Some("t130200_1301_…".to_string());
+        }
 
         let fp = TlsFingerprint::from_handshake(&hs, None);
         assert_eq!(fp.sni.as_deref(), Some("example.com"));
         assert_eq!(fp.alpn.as_deref(), Some("h2")); // server's pick
+        #[cfg(feature = "ja4plus")]
         assert_eq!(fp.ja4s.as_deref(), Some("t130200_1301_…"));
         assert!(fp.has_fingerprint());
     }

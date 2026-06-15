@@ -45,11 +45,27 @@ fn event_stream_is_send() {
 /// compile-time assertion — the body is type-checked but never run.
 #[allow(dead_code)]
 fn run_loop_future_is_spawnable() {
+    use netring::ctx::Ctx;
+    use netring::monitor::Effects;
+    use netring::protocol::event_typed::FlowStarted;
+
     fn assert_spawnable<F: std::future::Future + Send + 'static>(_: F) {}
+    // 0.25-B1: register an `on_effect` handler so the assertion actually covers
+    // the effect path, where the dispatcher holds `&mut Ctx` across `.await`
+    // (Send-safe only because every `Ctx` field is `Send` — see effect.rs). A
+    // `!Send` Ctx field would break this and fail compilation here.
     let build = || {
         Monitor::builder()
             .interface("lo")
             .protocol::<Tcp>()
+            .on_effect::<FlowStarted<Tcp>>(|_evt: &FlowStarted<Tcp>, ctx: &Ctx<'_>| {
+                let key = ctx.flow;
+                async move {
+                    tokio::task::yield_now().await;
+                    let _ = key;
+                    Ok::<Effects, netring::error::Error>(Effects::none())
+                }
+            })
             .build()
             .unwrap()
     };

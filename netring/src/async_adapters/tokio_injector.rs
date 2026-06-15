@@ -161,6 +161,57 @@ impl AsyncInjector {
         }
     }
 
+    /// 0.25 W3: transmit every frame yielded by `stream`, optionally
+    /// rate-limited by a [`TxPacer`]. The TX-side counterpart to the RX
+    /// streaming adapters (`flow_stream` et al.) — feed it any
+    /// `Stream<Item = impl AsRef<[u8]>>` (an `mpsc` of frames, a replayed
+    /// pcap, a generator) and it sends + flushes each, pacing between frames
+    /// when a pacer is supplied. Returns the number of frames sent.
+    ///
+    /// ```no_run
+    /// # async fn _ex() -> Result<(), netring::Error> {
+    /// use netring::{AsyncInjector, TxPacer};
+    /// let frames = futures::stream::iter((0..1000).map(|_| vec![0xffu8; 64]));
+    /// let mut tx = AsyncInjector::open("eth0")?;
+    /// // Cap to 10k packets/sec.
+    /// tx.send_stream(frames, Some(TxPacer::packets_per_second(10_000.0))).await?;
+    /// # Ok(()) }
+    /// ```
+    pub async fn send_stream<S, B>(
+        &mut self,
+        stream: S,
+        mut pacer: Option<TxPacer>,
+    ) -> Result<usize, Error>
+    where
+        S: futures_core::Stream<Item = B>,
+        B: AsRef<[u8]>,
+    {
+        let mut stream = std::pin::pin!(stream);
+        let mut sent = 0usize;
+        while let Some(frame) = std::future::poll_fn(|cx| stream.as_mut().poll_next(cx)).await {
+            let bytes = frame.as_ref();
+            if let Some(p) = pacer.as_mut() {
+                let wait = p.acquire(bytes.len(), std::time::Instant::now());
+                if !wait.is_zero() {
+                    tokio::time::sleep(wait).await;
+                }
+            }
+            self.send(bytes).await?;
+            self.flush().await?;
+            sent += 1;
+        }
+        Ok(sent)
+    }
+
+    /// 0.25 W3: read the next egress timestamp from the error queue
+    /// (non-blocking). Forwards to [`Injector::read_tx_timestamp`]; requires
+    /// the injector to have been built with `tx_timestamps(true)`. Returns
+    /// `None` if no timestamp is queued yet — poll after `flush()` /
+    /// `wait_drained()`.
+    pub fn read_tx_timestamp(&self) -> Option<crate::Timestamp> {
+        self.inner.get_ref().read_tx_timestamp()
+    }
+
     /// Borrow the inner sink (e.g., for `cumulative_stats`-style accessors).
     pub fn get_ref(&self) -> &Injector {
         self.inner.get_ref()
@@ -224,5 +275,137 @@ impl AsFd for AsyncInjector {
 impl AsRawFd for AsyncInjector {
     fn as_raw_fd(&self) -> std::os::fd::RawFd {
         self.inner.get_ref().as_raw_fd()
+    }
+}
+
+/// 0.25 W3: token-bucket transmit pacer for [`AsyncInjector::send_stream`].
+///
+/// Caps the send rate to a target in **packets/sec**
+/// ([`packets_per_second`](Self::packets_per_second)) or **bits/sec**
+/// ([`bits_per_second`](Self::bits_per_second)), smoothing short bursts up to
+/// the bucket depth. Pure virtual-time logic — no I/O — so it's unit-tested by
+/// feeding it timestamps; `send_stream` drives it with the wall clock.
+#[derive(Debug, Clone)]
+pub struct TxPacer {
+    /// Refill rate in tokens/sec (tokens are packets or bits per `cost_bits`).
+    rate: f64,
+    /// Bucket capacity (tokens).
+    burst: f64,
+    /// Current tokens.
+    tokens: f64,
+    /// Last refill instant (`None` until the first `acquire`).
+    last: Option<std::time::Instant>,
+    /// When true a frame costs `len*8` tokens (bits/sec); else 1 token (pps).
+    cost_bits: bool,
+}
+
+impl TxPacer {
+    fn new(rate: f64, burst: f64, cost_bits: bool) -> Self {
+        let burst = burst.max(1.0);
+        Self {
+            rate: rate.max(f64::MIN_POSITIVE),
+            burst,
+            tokens: burst,
+            last: None,
+            cost_bits,
+        }
+    }
+
+    /// Pace to `pps` packets per second (burst defaults to one second's worth).
+    pub fn packets_per_second(pps: f64) -> Self {
+        Self::new(pps, pps, false)
+    }
+
+    /// Pace to `bps` bits per second (burst defaults to one second's worth).
+    pub fn bits_per_second(bps: f64) -> Self {
+        Self::new(bps, bps, true)
+    }
+
+    /// Override the bucket depth (max tokens that can accrue while idle).
+    pub fn with_burst(mut self, burst: f64) -> Self {
+        self.burst = burst.max(1.0);
+        self.tokens = self.burst;
+        self
+    }
+
+    /// Token cost of a `len`-byte frame under this pacer's unit.
+    fn cost(&self, len: usize) -> f64 {
+        if self.cost_bits {
+            (len as f64) * 8.0
+        } else {
+            1.0
+        }
+    }
+
+    /// How long to wait before a `len`-byte frame may be sent, consuming its
+    /// tokens. `Duration::ZERO` when the bucket already has enough. `now` is
+    /// injected so the logic is deterministic under test.
+    pub fn acquire(&mut self, len: usize, now: std::time::Instant) -> Duration {
+        if let Some(last) = self.last {
+            let elapsed = now.saturating_duration_since(last).as_secs_f64();
+            self.tokens = (self.tokens + elapsed * self.rate).min(self.burst);
+        }
+        self.last = Some(now);
+        let cost = self.cost(len);
+        if self.tokens >= cost {
+            self.tokens -= cost;
+            Duration::ZERO
+        } else {
+            // Pre-spend: drain the bucket and wait out the deficit. The next
+            // `acquire`'s refill (measured from this same `now`) makes the
+            // accounting self-consistent.
+            let deficit = cost - self.tokens;
+            self.tokens = 0.0;
+            Duration::from_secs_f64(deficit / self.rate)
+        }
+    }
+}
+
+#[cfg(test)]
+mod pacer_tests {
+    use super::TxPacer;
+    use std::time::{Duration, Instant};
+
+    #[test]
+    fn first_burst_is_free_then_paces() {
+        let t0 = Instant::now();
+        // 100 pps, burst 1 → first frame free, next must wait ~10ms.
+        let mut p = TxPacer::packets_per_second(100.0).with_burst(1.0);
+        assert_eq!(
+            p.acquire(64, t0),
+            Duration::ZERO,
+            "first frame within burst"
+        );
+        let wait = p.acquire(64, t0);
+        assert!(wait > Duration::ZERO, "second back-to-back frame must wait");
+        // ~10ms at 100pps; allow slack for float.
+        assert!(
+            (wait.as_secs_f64() - 0.01).abs() < 1e-3,
+            "expected ~10ms, got {wait:?}"
+        );
+    }
+
+    #[test]
+    fn refills_over_time_no_wait_after_interval() {
+        let t0 = Instant::now();
+        let mut p = TxPacer::packets_per_second(100.0).with_burst(1.0);
+        let _ = p.acquire(64, t0);
+        // 20ms later, ≥1 token has refilled → no wait.
+        let t1 = t0 + Duration::from_millis(20);
+        assert_eq!(p.acquire(64, t1), Duration::ZERO);
+    }
+
+    #[test]
+    fn bits_per_second_costs_scale_with_frame_size() {
+        let t0 = Instant::now();
+        // 8000 bps, burst 8000 bits = 1000 bytes. A 1000-byte frame (8000 bits)
+        // drains the bucket; the next same-size frame waits ~1s.
+        let mut p = TxPacer::bits_per_second(8000.0).with_burst(8000.0);
+        assert_eq!(p.acquire(1000, t0), Duration::ZERO);
+        let wait = p.acquire(1000, t0);
+        assert!(
+            (wait.as_secs_f64() - 1.0).abs() < 1e-2,
+            "expected ~1s, got {wait:?}"
+        );
     }
 }

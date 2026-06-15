@@ -14,7 +14,6 @@ use std::any::TypeId;
 use std::marker::PhantomData;
 use std::sync::Arc;
 
-use arrayvec::ArrayVec;
 use flowscope::driver::{BroadcastSlotHandle, SlotHandle, SlotMessage};
 use rustc_hash::FxHashMap;
 
@@ -23,9 +22,11 @@ use crate::error::Result as NetringResult;
 use crate::error::{BuildError, Result};
 use crate::monitor::async_handler::{AsyncHandler, BoxFuture};
 use crate::monitor::dispatcher::{
-    AsyncHandlerSlot, BoxedAsyncHandler, BoxedHandler, Dispatcher, DynAsyncHandler, HandlerSlot,
-    MAX_EVENT_TYPES,
+    AsyncHandlerSlot, BoxedAsyncHandler, BoxedEffectHandler, BoxedHandler, Dispatcher,
+    DynAsyncHandler, DynEffectHandler, EffectHandlerSlot, HandlerSlot, MAX_EVENT_TYPES,
+    TypeSlotTable,
 };
+use crate::monitor::effect::{EffectHandler, Effects};
 use crate::monitor::handler::Handler;
 use crate::protocol::Protocol;
 use crate::protocol::event_typed::Event;
@@ -35,6 +36,8 @@ use crate::protocol::event_typed::Event;
 pub struct HandlerRegistry {
     by_type: FxHashMap<TypeId, Vec<BoxedHandler>>,
     async_by_type: FxHashMap<TypeId, Vec<BoxedAsyncHandler>>,
+    /// 0.25-B1 effect handlers, grouped by event-payload TypeId.
+    effect_by_type: FxHashMap<TypeId, Vec<BoxedEffectHandler>>,
     /// 0.21 D.1: for each registered event-payload TypeId, the
     /// `Protocol` marker TypeId + stable name that the event
     /// REQUIRES on the builder's `.protocol::<P>()` list — gathered
@@ -45,6 +48,10 @@ pub struct HandlerRegistry {
     /// declared-protocol set to surface
     /// `BuildError::HandlerForUnregisteredProtocol`.
     required_protocols: FxHashMap<TypeId, (TypeId, &'static str)>,
+    /// 0.25 S1: each registered handler's traffic-interest predicate, gathered
+    /// at register time via [`Event::traffic_class`]. Folded into the Monitor's
+    /// kernel-prefilter union (a handler can only widen it → no starvation).
+    traffic_interests: Vec<crate::monitor::subscription::Predicate>,
 }
 
 impl HandlerRegistry {
@@ -74,11 +81,7 @@ impl HandlerRegistry {
             .entry(TypeId::of::<E::Payload>())
             .or_default()
             .push(boxed);
-        if let Some(p_id) = E::protocol_marker() {
-            self.required_protocols
-                .entry(TypeId::of::<E::Payload>())
-                .or_insert((p_id, E::protocol_name()));
-        }
+        self.note_interest::<E>();
     }
 
     /// Add an async handler `H` for event type `E`.
@@ -96,11 +99,42 @@ impl HandlerRegistry {
             .entry(TypeId::of::<E::Payload>())
             .or_default()
             .push(boxed);
+        self.note_interest::<E>();
+    }
+
+    /// 0.25-B1: add an effect handler `H` for event type `E` — reads
+    /// `&Ctx` synchronously, returns a future resolving to [`Effects`].
+    pub fn register_effect<E, H>(&mut self, handler: H)
+    where
+        E: Event,
+        H: EffectHandler<E>,
+    {
+        let boxed: BoxedEffectHandler = Arc::new(EffectHandlerWrapper::<E, H>::new(handler));
+        self.effect_by_type
+            .entry(TypeId::of::<E::Payload>())
+            .or_default()
+            .push(boxed);
+        self.note_interest::<E>();
+    }
+
+    /// Record the `required_protocols` entry and the
+    /// [traffic-interest](crate::monitor::subscription::Predicate) for a newly
+    /// registered event `E` — shared by all three `register*` paths.
+    fn note_interest<E: Event>(&mut self) {
         if let Some(p_id) = E::protocol_marker() {
             self.required_protocols
                 .entry(TypeId::of::<E::Payload>())
                 .or_insert((p_id, E::protocol_name()));
         }
+        self.traffic_interests
+            .push(crate::monitor::subscription::kernel_filter::class_interest(
+                &E::traffic_class(),
+            ));
+    }
+
+    /// 0.25 S1: the recorded per-handler traffic-interest predicates.
+    pub(crate) fn traffic_interests(&self) -> &[crate::monitor::subscription::Predicate] {
+        &self.traffic_interests
     }
 
     /// 0.21 D.1: returns an iterator over `(protocol_TypeId, protocol_name)`
@@ -118,6 +152,7 @@ impl HandlerRegistry {
         let mut ids: std::collections::HashSet<TypeId> = std::collections::HashSet::new();
         ids.extend(self.by_type.keys().copied());
         ids.extend(self.async_by_type.keys().copied());
+        ids.extend(self.effect_by_type.keys().copied());
         ids.len()
     }
 
@@ -143,6 +178,7 @@ impl HandlerRegistry {
             .keys()
             .copied()
             .chain(self.async_by_type.keys().copied())
+            .chain(self.effect_by_type.keys().copied())
             .collect();
         all_types.sort_unstable_by_key(|t| format!("{t:?}"));
         all_types.dedup();
@@ -154,12 +190,18 @@ impl HandlerRegistry {
             });
         }
 
-        let mut slot_by_type: ArrayVec<(TypeId, u8), MAX_EVENT_TYPES> = ArrayVec::new();
+        // 0.25-B2: TypeSlotTable is inline (no-hash) for the first 16 types,
+        // spilling to a hash map beyond — so no hard cap short of the u16
+        // slot-index width.
+        let mut slot_by_type = TypeSlotTable::new();
         let mut slots: Vec<Vec<HandlerSlot>> = Vec::with_capacity(all_types.len());
         let mut async_slots: Vec<Vec<AsyncHandlerSlot>> = Vec::with_capacity(all_types.len());
+        let mut effect_slots: Vec<Vec<EffectHandlerSlot>> = Vec::with_capacity(all_types.len());
+        let mut slot_types: Vec<TypeId> = Vec::with_capacity(all_types.len());
 
         for (i, type_id) in all_types.into_iter().enumerate() {
-            slot_by_type.push((type_id, i as u8));
+            slot_by_type.insert(type_id, i as u16);
+            slot_types.push(type_id);
             slots.push(
                 self.by_type
                     .remove(&type_id)
@@ -176,11 +218,21 @@ impl HandlerRegistry {
                     .map(|h| AsyncHandlerSlot { handler: h })
                     .collect(),
             );
+            effect_slots.push(
+                self.effect_by_type
+                    .remove(&type_id)
+                    .unwrap_or_default()
+                    .into_iter()
+                    .map(|h| EffectHandlerSlot { handler: h })
+                    .collect(),
+            );
         }
         Ok(Dispatcher::new(
             slot_by_type,
             slots.into_boxed_slice(),
             async_slots.into_boxed_slice(),
+            effect_slots.into_boxed_slice(),
+            slot_types.into_boxed_slice(),
         ))
     }
 }
@@ -213,6 +265,37 @@ where
         // invokes a slot when the runtime payload type matches.
         let typed: &E::Payload = unsafe { &*(ptr as *const E::Payload) };
         self.handler.call(typed)
+    }
+}
+
+/// 0.25-B1 effect-handler wrapper — erases `(E, H)` so an effect handler
+/// can be stored as `Arc<dyn DynEffectHandler>`. Mirrors
+/// [`AsyncHandlerWrapper`], but `call` also forwards `&Ctx`.
+struct EffectHandlerWrapper<E, H> {
+    handler: H,
+    _marker: PhantomData<fn() -> E>,
+}
+
+impl<E, H> EffectHandlerWrapper<E, H> {
+    fn new(handler: H) -> Self {
+        Self {
+            handler,
+            _marker: PhantomData,
+        }
+    }
+}
+
+impl<E, H> DynEffectHandler for EffectHandlerWrapper<E, H>
+where
+    E: Event,
+    H: EffectHandler<E>,
+{
+    fn call(&self, ptr: *const (), ctx: &Ctx<'_>) -> BoxFuture<NetringResult<Effects>> {
+        // SAFETY: as for AsyncHandlerWrapper — the dispatcher only invokes
+        // this slot when the runtime payload type matches the registration
+        // key `TypeId::of::<E::Payload>()`.
+        let typed: &E::Payload = unsafe { &*(ptr as *const E::Payload) };
+        self.handler.call(typed, ctx)
     }
 }
 
@@ -557,11 +640,14 @@ mod tests {
     }
 
     #[test]
-    fn too_many_event_types_errors_at_build() {
-        // Synthesize >MAX_EVENT_TYPES distinct event types by
-        // registering with distinct wrapper struct types. Each
-        // unit struct is auto-Send + auto-Sync, so the Event impl
-        // just needs `type Payload`.
+    fn more_than_inline_event_types_spill_and_still_dispatch() {
+        // 0.25-B2: the old hard cap of 16 is gone — registering >16 distinct
+        // event types now spills the lookup table to a hash map and builds
+        // fine. Synthesize 17 distinct unit-struct event types and prove the
+        // 17th (the spilled one) still dispatches.
+        use std::sync::Arc;
+        use std::sync::atomic::{AtomicU32, Ordering};
+
         macro_rules! synth {
             ($($name:ident),+ $(,)?) => {
                 $(
@@ -574,6 +660,9 @@ mod tests {
         synth!(
             E0, E1, E2, E3, E4, E5, E6, E7, E8, E9, E10, E11, E12, E13, E14, E15, E16
         );
+
+        let fired = Arc::new(AtomicU32::new(0));
+        let f = Arc::clone(&fired);
 
         let mut reg = HandlerRegistry::default();
         reg.register::<E0, _, _>(|_: &E0| Ok(()));
@@ -592,16 +681,30 @@ mod tests {
         reg.register::<E13, _, _>(|_: &E13| Ok(()));
         reg.register::<E14, _, _>(|_: &E14| Ok(()));
         reg.register::<E15, _, _>(|_: &E15| Ok(()));
-        reg.register::<E16, _, _>(|_: &E16| Ok(()));
+        // The 17th type — lives past the inline table, in the spilled map.
+        reg.register::<E16, _, _>(move |_: &E16| {
+            f.fetch_add(1, Ordering::Relaxed);
+            Ok(())
+        });
 
-        let err = reg.into_dispatcher().unwrap_err();
-        match err {
-            BuildError::TooManyEventTypes { limit, actual } => {
-                assert_eq!(limit, MAX_EVENT_TYPES);
-                assert_eq!(actual, MAX_EVENT_TYPES + 1);
-            }
-            other => panic!("expected TooManyEventTypes, got {other:?}"),
-        }
+        assert_eq!(reg.type_count(), 17);
+        let mut disp = reg
+            .into_dispatcher()
+            .expect("17 event types build (no cap at 16 anymore)");
+        assert_eq!(disp.type_count(), 17);
+
+        let mut s = StateMap::default();
+        let mut sink = NoopSink;
+        let mut cr = CounterRegistry::default();
+        let mut fs = crate::ctx::FlowStateRegistry::default();
+        let mut ctx = fresh_ctx(&mut s, &mut sink, &mut cr, &mut fs);
+
+        disp.dispatch::<E16>(&E16, &mut ctx).unwrap();
+        assert_eq!(
+            fired.load(Ordering::Relaxed),
+            1,
+            "the spilled (17th) event type must still dispatch"
+        );
     }
 
     /// 0.22 §2.5: end-to-end through a real flowscope driver — feed an

@@ -61,7 +61,9 @@ seam everything else (incl. 0.25's subscriptions) builds on.
   async-effect redesign + perf numbers + TX.
 - **0.23 (Send):** ships first as a small interim; 0.24 builds on it.
 - **OTLP/Kafka:** `netring-exporters` companion crate; **syslog + IPFIX in-tree**.
-- **Filters:** typed builders first; `.expr()` strings → `wirefilter` are the runtime escape hatch.
+- **Filters:** typed builders first; `.expr()` strings are the runtime escape hatch — parsed
+  by an **own dep-free recursive-descent parser** over the same `Predicate` AST (**not**
+  `wirefilter`; that crate is dead on crates.io — see `upstream-tracking.md`).
 - **`Packets` miri:** if flagged, ship the safer borrowed `for_each`/closure surface (0.24-B).
 - **Health endpoint:** netring exposes `MonitorHealth`; the embedder serves HTTP.
 - **Compat shims** live through 0.24/0.25, **removed at 1.0**.
@@ -92,9 +94,11 @@ seam everything else (incl. 0.25's subscriptions) builds on.
 | netring **0.17–0.19** | flowscope 0.10→0.13 absorption (`Driver<E>: Send` unconditional). |
 
 **Companion flowscope:** 0.12.0 (plans 122–127), 0.13.0 (147–156), 0.14.1 (ICMP routing fix),
-**0.15.0 (PUBLISHED 2026-06-14** — JA4S + ServerHello `extension_types` + FoxIO-correct JA4
-ALPN; companion to netring 0.24 Phase E). **Watch:** flowscope 0.16 should split JA4S behind
-an opt-in `ja4plus`/`ja4s` feature (FoxIO License 1.1 — see Design correction 6).
+0.15.0 (JA4S + ServerHello `extension_types` + FoxIO-correct JA4 ALPN; companion to netring
+0.24 Phase E), **0.16.0 (PUBLISHED 2026-06-15** — JA4S split behind opt-in `ja4plus`, FoxIO
+License 1.1 + `NOTICE`; companion to netring 0.25). **✅ Done (was a "watch"):** the JA4S
+license-gating split landed in flowscope 0.16 + netring `ja4plus` passthrough (commit
+`27c6963`) — see Design correction 6 + `upstream-tracking.md`.
 
 ---
 
@@ -103,9 +107,12 @@ an opt-in `ja4plus`/`ja4s` feature (FoxIO License 1.1 — see Design correction 
 2. `benches/zero_alloc.rs` **Δ 0 / 0** **and (0.24+)** a live-capture test reads **0 heap
    allocs/packet** in the run loop.
 3. Run-loop future stays **`Send + 'static`** (`tests/monitor_send.rs`).
-4. **(0.24+)** miri green on the pure-logic suite; cargo-fuzz smoke green; **(0.25)** loom on
-   the effect/subscription paths; perf regression gate vs the 0.24 baseline.
-5. flowscope dep floor `>= 0.15.0`.
+4. **(0.24+)** miri green on the pure-logic suite **(0.25: now also covers `monitor::`
+   type-erased casts)**; cargo-fuzz smoke green **(0.25: now also the `.expr()` parser)**.
+   *(loom: N/A — the effect/subscription dispatch is sequential, not concurrent; the earlier
+   "loom on the effect/subscription paths" line was an overclaim. perf regression gate = Phase
+   C, not yet landed.)*
+5. flowscope dep floor `>= 0.16.0`.
 
 ### Backward-compat breaks (history + planned)
 0.21 `AnomalySink::write` key `→ &dyn Key` · 0.22 typed roles + flat `FlowPacket` + 0.19

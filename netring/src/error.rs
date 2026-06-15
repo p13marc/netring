@@ -55,6 +55,13 @@ pub enum Error {
     /// `Monitor` builder rejected the configuration (0.20+).
     #[error("monitor build: {0}")]
     Build(#[from] BuildError),
+
+    /// A handler panicked and `MonitorBuilder::catch_handler_panics(true)` was
+    /// set (0.25 W1e) — the panic was caught and converted to this error so the
+    /// configured [`HandlerErrorPolicy`](crate::monitor::HandlerErrorPolicy)
+    /// (e.g. `Isolate`) decides whether to continue or tear down.
+    #[error("handler panicked: {0}")]
+    HandlerPanic(String),
 }
 
 /// Convenience alias used throughout the crate.

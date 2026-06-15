@@ -115,7 +115,7 @@ pub use afxdp::{XdpMode, XdpSocket, XdpSocketBuilder, XdpStats};
 #[cfg(feature = "xdp-loader")]
 pub mod xdp {
     pub use crate::afxdp::loader::{
-        LoaderError, XdpAttachment, XdpFlags, XdpProgram, default_program,
+        LoaderError, XdpAttachment, XdpFlags, XdpProgram, default_program, filter_program,
     };
 }
 
@@ -127,7 +127,7 @@ pub use async_adapters::dedup_stream::DedupStream;
 #[cfg(feature = "tokio")]
 pub use async_adapters::tokio_adapter::{AsyncCapture, PacketStream, ReadableGuard};
 #[cfg(feature = "tokio")]
-pub use async_adapters::tokio_injector::AsyncInjector;
+pub use async_adapters::tokio_injector::{AsyncInjector, TxPacer};
 #[cfg(all(feature = "tokio", feature = "af-xdp"))]
 pub use async_adapters::tokio_xdp::{AsyncXdpSocket, XdpReadableGuard, XdpStream};
 #[cfg(feature = "tokio")]

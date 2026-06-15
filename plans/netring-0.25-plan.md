@@ -188,9 +188,12 @@ examples/tests/docs. (`error.rs`, `monitor/mod.rs`, `monitor/async_handler.rs`.)
 - **✅ W1d E2 EVE tls-record** — netring-owned `eve_tls_record` + `EveTlsSink`
   (`event_type:"tls"`, Suricata-compatible; flowscope's EVE writer scopes out protocol
   records). Wire via `on_fingerprint`. Cap-free test.
-- **W1e B4 reopen/panic policy** — `BackendErrorPolicy::Reopen` + per-handler
-  `catch_unwind` option so one panicking handler doesn't kill the loop.
-- **W1f C5 tracing-JSON example.**
+- **✅ W1e B4 reopen/panic policy** — `BackendErrorPolicy::Reopen` rebuilds a failed source
+  in place from a recorded `BackendSpec` (unified `open_backend`); `catch_handler_panics(true)`
+  wraps sync handlers in `catch_unwind` → `Error::HandlerPanic` (routed through
+  `HandlerErrorPolicy`). Cap-free panic test.
+- **✅ W1f C5 tracing-JSON example** — `examples/monitor/tracing_json.rs` (TracingSink +
+  per-flow + `on_capture_stats` → NDJSON via `tracing-subscriber`).
 
 **W2 — Phase C performance & scaling (code always; numbers on `lo` now + real-NIC note):**
 C1 CPU pinning + symmetric eBPF fanout; C2 prefetch + batched refill + `#[cold]`; C3 perf

@@ -1,21 +1,24 @@
-//! Root-gated AF_XDP-on-`lo` smoke test (0.25 A3c spike).
+//! Root-gated AF_XDP-on-`lo` live test (0.25; the first live AF_XDP
+//! validation, and the A3c de-risk).
 //!
-//! De-risks the AF_XDP STAGE-0 pushdown (A3c) by answering the one real
-//! unknown before investing in a map-driven filter program: **does AF_XDP plus
-//! an attached XDP redirect program work on a GitHub Actions runner at all?**
+//! Loads the built-in redirect-all program (plan 12) in **SKB / generic mode**
+//! on `lo` — the realistic CI configuration (no NIC, no native driver) —
+//! opens an AF_XDP socket registered in its `XSKMAP`, and asserts the socket
+//! captures redirected loopback frames. Loopback ingress traverses `lo`'s rx
+//! path, where generic XDP redirects each frame into the socket. The A3c
+//! `{proto,port}`-map filter program builds on exactly this plumbing.
 //!
-//! It uses the *existing* built-in redirect-all program (plan 12) in
-//! **SKB / generic mode** on `lo` — the only realistic CI configuration (no
-//! NIC, no native driver). Loopback ingress traverses `lo`'s rx path, where
-//! generic XDP redirects each frame into the AF_XDP socket's `XSKMAP`. If this
-//! is green on the runner, A3c's `{proto,port}`-map filter program builds on
-//! exactly this plumbing; if it flakes, the project goes the qemu/`vmtest`
-//! route instead.
+//! **Proven green on GitHub-hosted runners** (ubuntu-24.04, kernel 6.17). Two
+//! real `xdp-loader` bugs were found + fixed getting here:
+//! 1. the vendored `redirect_all.bpf.o` had **no BTF** → aya ≥ 0.13 can't load
+//!    the BTF-style `.maps` def (regenerated with `clang -g | llvm-strip -g`);
+//! 2. **`XDP_FLAGS_REPLACE` is rejected by the link API** (`bpf_link_create`),
+//!    so `force_replace(true)` breaks the attach — see the note below.
 //!
 //! Gated behind `integration-tests` + `af-xdp` + `xdp-loader` so it only
 //! compiles in the privileged CI job (never in a normal/sandbox build). Needs
-//! **root** (or `CAP_BPF`+`CAP_NET_ADMIN`+`CAP_NET_RAW`) — the CI `xdp-smoke`
-//! job runs the test binary under `sudo`.
+//! **root** (or `CAP_BPF`+`CAP_NET_ADMIN`+`CAP_NET_RAW`) — the CI job runs the
+//! test binary under `sudo`.
 
 #![cfg(all(
     feature = "integration-tests",
@@ -71,8 +74,7 @@ fn afxdp_lo_redirect_all_captures_loopback_traffic() {
     assert!(
         captured > 0,
         "AF_XDP socket should capture at least one redirected loopback frame \
-         in 10s — if 0, AF_XDP/XDP-redirect on lo is unsupported on this \
-         kernel/runner and A3c CI needs a qemu/vmtest VM instead",
+         within 10s (XDP redirect on lo not delivering to the XSKMAP)",
     );
 
     // Dropping the socket detaches the XDP program from `lo`.

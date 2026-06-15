@@ -119,18 +119,16 @@ jobs:
       - name: Run integration tests
         run: cargo test -p netring --features "integration-tests,tokio,channel,af-xdp" -- --test-threads=1
 
-  # ── AF_XDP-on-lo smoke (root; spike — non-blocking) ───────────────────────
-  # 0.25 A3c spike: does AF_XDP + an attached XDP redirect program work on a
-  # GitHub runner at all? Loads the built-in redirect-all program on `lo` in
-  # SKB/generic mode and asserts the AF_XDP socket captures redirected loopback
-  # traffic. Runs the test binary as ROOT (XDP load + BPF maps + XSKMAP are most
-  # reliable as root). `continue-on-error` while we learn whether the hosted
-  # runner cooperates — flip to required once it's proven green, or move to a
-  # qemu/vmtest VM if it flakes.
+  # ── AF_XDP-on-lo live test (root) ─────────────────────────────────────────
+  # The first live AF_XDP validation: loads the built-in redirect-all XDP
+  # program on `lo` in SKB/generic mode and asserts the AF_XDP socket captures
+  # redirected loopback traffic. Proven green on hosted runners (kernel 6.17,
+  # ubuntu-24.04). Runs the test binary as ROOT (XDP load + BPF maps + XSKMAP).
+  # Promoted from a 0.25 A3c spike — it found + fixed two real xdp-loader bugs
+  # (BTF-less vendored object; XDP_FLAGS_REPLACE rejected by the link API).
   xdp-smoke:
-    name: AF_XDP lo smoke (spike)
+    name: AF_XDP lo live (root)
     runs-on: ubuntu-latest
-    continue-on-error: true
     steps:
       - uses: actions/checkout@v5
       - uses: dtolnay/rust-toolchain@stable

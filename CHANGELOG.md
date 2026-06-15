@@ -21,6 +21,21 @@
   before — the passthrough was missing). The `monitor_ja4_fingerprint` example
   now requires `ja4plus` (it demonstrates JA4S).
 
+### Runtime filter strings — `.expr()` (Phase A4)
+
+- `packet()/flow::<P>()/session::<P>().expr("tcp and dst port 443")` — a small,
+  **dependency-free** recursive-descent parser from a Wireshark-ish filter
+  string to the **same** `Predicate` AST the typed combinators produce. One AST,
+  two frontends: `packet().expr("tcp and dst port 443")` and
+  `packet().tcp().dst_port(443)` are identical (a test pins this), so a runtime
+  string lowers to the same userspace eval *and* kernel pushdown. This is the
+  path for filters from config / CLI / a control plane.
+- Grammar: `and`/`or`/`not` (+ `&&`/`||`/`!`), parens, `tcp`/`udp`/`icmp`,
+  `[src|dst] port|host|net`, `vlan`, `bytes > N` / `packets > N`, and
+  `tls.sni`/`http.host`/`dns.qname ~ GLOB`. We deliberately do **not** depend on
+  the dead `wirefilter-engine` crate (0.6.1/2019). `parse()` returns a
+  `ParseError` (no panics) on malformed input.
+
 ### Subscription engine — typed tiers + filter predicates (Phase A1)
 
 The new front door (additive; `on::<E>` unaffected). A **subscription** pairs

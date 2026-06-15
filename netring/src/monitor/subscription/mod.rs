@@ -20,6 +20,7 @@
 //! [`PacketView`]: flowscope::PacketView
 
 pub mod builder;
+pub mod expr;
 pub mod flow;
 pub(crate) mod kernel_filter;
 pub mod packet;
@@ -30,6 +31,7 @@ pub use builder::{
     FlowTier, HasHttpHost, HasQname, HasSni, PacketTier, SessionTier, SubscriptionBuilder, flow,
     packet, session,
 };
+pub use expr::{ParseError, parse as parse_expr};
 pub use flow::{FlowHandler, FlowSubscription};
 pub use packet::{PacketHandler, PacketSubscription};
 pub use predicate::{Atom, FieldSource, Glob, Predicate};

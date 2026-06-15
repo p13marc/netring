@@ -78,6 +78,23 @@ impl<T> SubscriptionBuilder<T> {
     pub fn into_predicate(self) -> Predicate {
         self.predicate
     }
+
+    /// AND a **runtime filter string** into this builder (0.25 A4) — the same
+    /// `Predicate` AST as the typed combinators, parsed from e.g. config / CLI:
+    ///
+    /// ```
+    /// use netring::monitor::subscription::packet;
+    /// let _ = packet().expr("tcp and dst port 443").unwrap();
+    /// ```
+    ///
+    /// Returns [`ParseError`](super::expr::ParseError) on a malformed string.
+    /// Grammar: [`super::expr`]. Tier-inappropriate fields parse but never
+    /// match at eval (mirroring `Predicate::eval`'s absent-field rule).
+    pub fn expr(mut self, filter: &str) -> Result<Self, super::expr::ParseError> {
+        let parsed = super::expr::parse(filter)?;
+        self.predicate = self.predicate.and(parsed);
+        Ok(self)
+    }
 }
 
 /// Subscribe to **every captured frame** (`PacketView`). The new packet tier:

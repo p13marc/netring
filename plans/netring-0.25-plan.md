@@ -160,11 +160,15 @@ The rest below is **committed 0.25 scope**, ordered for execution. Each lands wi
 examples/tests/docs. (`error.rs`, `monitor/mod.rs`, `monitor/async_handler.rs`.)
 
 **W1 — backlog code (pure, `lo`/cap-free testable):**
-- **W1a in-Monitor AF_XDP loader** (closes #37+#38) — `xdp_interface` must attach the loader
-  program + register the socket in XSKMAP, not open a bare socket (`monitor/run.rs`,
-  `monitor/backend.rs`). Fix the `force_replace`/`XDP_FLAGS_REPLACE`-vs-link-API bug
-  (`afxdp/loader/`). Add the **table-driven `filter_redirect.bpf`** map program (#38) so the
-  S5 early-shed has a home. CI: extend `xdp_lo_smoke` to drive a Monitor.
+- **✅ W1a in-Monitor AF_XDP loader** (closed #37+#38) — `MonitorBuilder::xdp_interface_loaded`
+  attaches the loader program + registers the socket in XSKMAP (`run.rs::open_xdp_backend`).
+  `force_replace` no longer crashes (REPLACE kept out of the link-create flags; actionable
+  error). Table-driven `filter_redirect.bpf` + `XdpProgram::set_filter` shipped.
+  CI `xdp_lo_smoke` drives a Monitor (`monitor_xdp_interface_loaded_captures_loopback_flows`).
+  **Bonus bug fix:** `include_bytes!` → `aya::include_bytes_aligned!` — the loader's
+  zero-copy ELF parse needs alignment; plain `include_bytes!` failed ("error parsing ELF
+  data") in any tokio/Monitor build (feature-unification misalignment), so redirect-all was
+  already broken for Monitor-on-AF_XDP. Guarded by cap-free `vendored_programs_parse_under_aya`.
 - **W1b pcap → `AnyBackend` fold** — collapse `replay_loop` into the one generic drain loop
   (Pcap arm). Removes a whole parallel code path.
 - **W1c D1 active-timeout flow export** — emit `FlowRecord` on a configurable active timeout,

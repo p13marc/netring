@@ -225,9 +225,19 @@ tests for fallback/best-effort; full perf benefit HW-gated.
 `rdkafka`/librdkafka). Both implement `AnomalySink`; wire-format construction unit-tested;
 heavy deps stay out of core. CI `exporters` job builds+tests both features.
 
-**W6 — Phase R release prep:** bump `0.24.0 → 0.25.0`, `docs/MIGRATING_0.24_TO_0.25.md`,
-finalize `## 0.25.0` CHANGELOG. (The actual `cargo publish` + tag stay the maintainer's
-hands-on-keyboard action; everything up to it is prepared.)
+**✅ W6 — Phase R release prep:** version bumped `0.24.0 → 0.25.0` (+ exporters dep);
+`docs/MIGRATING_0.24_TO_0.25.md` written; `## 0.25.0` CHANGELOG finalized (banner dropped,
+all W-work documented); CLAUDE.md status → release-ready. **The actual `cargo publish` +
+`git tag 0.25.0` remain the maintainer's hands-on action** (irreversible, outward-facing);
+everything up to them is done.
+
+---
+## ✅ 0.25 COMPLETE (2026-06-15)
+All committed scope landed: A+B (differentiator) + W0 (audit) + W1a–W1f + W2 (Phase C) + W3
+(Phase D) + W4 (UMEM) + W5 (exporters crate) + W6 (release prep). Branch `0.25-dev`, PR #3.
+Pre-push gate green throughout (fmt · clippy --all-features --all-targets -D warnings ·
+doc -D warnings · 351 lib tests · cap-free integration tests · dhat Δ0). Remaining =
+maintainer publish actions only.
 
 ---
 

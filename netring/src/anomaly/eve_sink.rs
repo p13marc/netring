@@ -126,6 +126,137 @@ impl<W: Write + Send> AnomalySink for EveSink<W> {
     }
 }
 
+/// Build a Suricata-compatible `event_type: "tls"` EVE record from a
+/// [`TlsFingerprint`](crate::monitor::TlsFingerprint) (0.25 W1d / E2).
+///
+/// Emits the `tls` sub-object (`sni`, `ja3`/`ja3.hash`, `ja4`, `ja4s` when the
+/// `ja4plus` feature is on, `alpn`) plus the flow 5-tuple
+/// (`src_ip`/`src_port`/`dest_ip`/`dest_port`/`proto`) when the fingerprint
+/// carries its key, the ISO-8601 `timestamp`, and `in_iface`. Drop the line
+/// into any Suricata-aware pipeline alongside the `event_type: "anomaly"`
+/// records [`EveSink`] produces.
+///
+/// `src`/`dest` follow the key's `a`/`b` endpoints — canonically ordered under
+/// the default bidirectional extractor, not connection direction.
+#[cfg(feature = "tls")]
+pub fn eve_tls_record(
+    fp: &crate::monitor::TlsFingerprint,
+    ts: Timestamp,
+    in_iface: &str,
+) -> serde_json::Value {
+    use serde_json::json;
+
+    let mut tls = serde_json::Map::new();
+    if let Some(sni) = &fp.sni {
+        tls.insert("sni".into(), json!(sni));
+    }
+    if let Some(alpn) = &fp.alpn {
+        tls.insert("alpn".into(), json!(alpn));
+    }
+    if let Some(ja3) = &fp.ja3 {
+        // Suricata nests JA3 as `ja3.hash` (string `ja3` kept too for
+        // tools that read the flat field).
+        tls.insert("ja3".into(), json!({ "hash": ja3 }));
+    }
+    if let Some(ja4) = &fp.ja4 {
+        tls.insert("ja4".into(), json!(ja4));
+    }
+    #[cfg(feature = "ja4plus")]
+    if let Some(ja4s) = &fp.ja4s {
+        tls.insert("ja4s".into(), json!(ja4s));
+    }
+
+    let mut obj = serde_json::Map::new();
+    obj.insert("timestamp".into(), json!(ts.to_iso8601()));
+    obj.insert("event_type".into(), json!("tls"));
+    if !in_iface.is_empty() {
+        obj.insert("in_iface".into(), json!(in_iface));
+    }
+    if let Some(key) = &fp.key {
+        obj.insert("src_ip".into(), json!(key.a.ip().to_string()));
+        obj.insert("src_port".into(), json!(key.a.port()));
+        obj.insert("dest_ip".into(), json!(key.b.ip().to_string()));
+        obj.insert("dest_port".into(), json!(key.b.port()));
+        obj.insert("proto".into(), json!(l4_proto_str(key.proto)));
+    }
+    obj.insert("tls".into(), serde_json::Value::Object(tls));
+    serde_json::Value::Object(obj)
+}
+
+/// Suricata `proto` string for an L4 protocol.
+#[cfg(feature = "tls")]
+fn l4_proto_str(proto: flowscope::L4Proto) -> &'static str {
+    use flowscope::L4Proto::*;
+    match proto {
+        Tcp => "TCP",
+        Udp => "UDP",
+        Icmp => "ICMP",
+        IcmpV6 => "IPv6-ICMP",
+        _ => "TCP",
+    }
+}
+
+/// Writes Suricata `event_type: "tls"` EVE records — the protocol-record
+/// companion to [`EveSink`] (which carries `event_type: "anomaly"`), since
+/// flowscope's EVE writer scopes out per-protocol records (0.25 W1d / E2).
+///
+/// Wire it through [`on_fingerprint`](crate::monitor::MonitorBuilder::on_fingerprint)
+/// — e.g. behind an `Arc<Mutex<EveTlsSink<W>>>` — to log every TLS handshake:
+///
+/// ```no_run
+/// # #[cfg(all(feature = "eve-sink", feature = "tls"))]
+/// # fn _ex() {
+/// use std::sync::{Arc, Mutex};
+/// use netring::anomaly::EveTlsSink;
+/// use netring::monitor::Monitor;
+///
+/// let sink = Arc::new(Mutex::new(EveTlsSink::new(std::io::stdout(), "eth0")));
+/// let s = Arc::clone(&sink);
+/// let _m = Monitor::builder()
+///     .interface("eth0")
+///     .on_fingerprint(move |fp, ctx| {
+///         let _ = s.lock().unwrap().write_tls(fp, ctx.ts);
+///         Ok(())
+///     });
+/// # }
+/// ```
+#[cfg(feature = "tls")]
+pub struct EveTlsSink<W: Write + Send> {
+    writer: W,
+    in_iface: String,
+}
+
+#[cfg(feature = "tls")]
+impl<W: Write + Send> EveTlsSink<W> {
+    /// Wrap a writer; `in_iface` is stamped on each record (empty = omitted).
+    pub fn new(writer: W, in_iface: impl Into<String>) -> Self {
+        Self {
+            writer,
+            in_iface: in_iface.into(),
+        }
+    }
+
+    /// Write one `event_type: "tls"` NDJSON line for `fp` at time `ts`.
+    pub fn write_tls(
+        &mut self,
+        fp: &crate::monitor::TlsFingerprint,
+        ts: Timestamp,
+    ) -> std::io::Result<()> {
+        let rec = eve_tls_record(fp, ts, &self.in_iface);
+        writeln!(self.writer, "{rec}")
+    }
+
+    /// Flush the underlying writer.
+    pub fn flush(&mut self) -> std::io::Result<()> {
+        self.writer.flush()
+    }
+
+    /// Recover the inner writer (tests read back the bytes).
+    pub fn into_inner(self) -> W {
+        self.writer
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -136,6 +267,45 @@ mod tests {
         let mut o = EveOptions::default();
         o.in_iface = "eth0".into();
         o
+    }
+
+    #[cfg(feature = "tls")]
+    #[test]
+    fn eve_tls_record_carries_event_type_fivetuple_and_fingerprint() {
+        use crate::monitor::TlsFingerprint;
+
+        let mut hs = flowscope::tls::TlsHandshake::default();
+        hs.sni = Some("example.com".into());
+        hs.server_alpn = Some("h2".into());
+        hs.ja3 = Some("deadbeef".into());
+        hs.ja4 = Some("t13d1516h2_test".into());
+        let key = flowscope::extract::FiveTupleKey {
+            proto: flowscope::L4Proto::Tcp,
+            a: SocketAddr::new(IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1)), 1234),
+            b: SocketAddr::new(IpAddr::V4(Ipv4Addr::new(10, 0, 0, 2)), 443),
+        };
+        let fp = TlsFingerprint::from_handshake(&hs, Some(key));
+
+        let v = eve_tls_record(&fp, Timestamp::from_unix_f64(1000.0), "eth0");
+        assert_eq!(v["event_type"], "tls");
+        assert_eq!(v["in_iface"], "eth0");
+        assert_eq!(v["src_ip"], "10.0.0.1");
+        assert_eq!(v["dest_port"], 443);
+        assert_eq!(v["proto"], "TCP");
+        assert_eq!(v["tls"]["sni"], "example.com");
+        assert_eq!(v["tls"]["ja3"]["hash"], "deadbeef");
+        assert_eq!(v["tls"]["ja4"], "t13d1516h2_test");
+        assert_eq!(v["tls"]["alpn"], "h2");
+        assert!(v["timestamp"].is_string());
+
+        // The sink writes one NDJSON line ending in a newline.
+        let mut sink = EveTlsSink::new(Vec::<u8>::new(), "eth0");
+        sink.write_tls(&fp, Timestamp::from_unix_f64(1000.0))
+            .unwrap();
+        let out = String::from_utf8(sink.into_inner()).unwrap();
+        assert_eq!(out.lines().count(), 1);
+        assert!(out.ends_with('\n'));
+        assert!(out.contains("\"event_type\":\"tls\""), "out = {out}");
     }
 
     #[test]

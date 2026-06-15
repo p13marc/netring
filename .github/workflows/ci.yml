@@ -119,6 +119,42 @@ jobs:
       - name: Run integration tests
         run: cargo test -p netring --features "integration-tests,tokio,channel,af-xdp" -- --test-threads=1
 
+  # ── AF_XDP-on-lo smoke (root; spike — non-blocking) ───────────────────────
+  # 0.25 A3c spike: does AF_XDP + an attached XDP redirect program work on a
+  # GitHub runner at all? Loads the built-in redirect-all program on `lo` in
+  # SKB/generic mode and asserts the AF_XDP socket captures redirected loopback
+  # traffic. Runs the test binary as ROOT (XDP load + BPF maps + XSKMAP are most
+  # reliable as root). `continue-on-error` while we learn whether the hosted
+  # runner cooperates — flip to required once it's proven green, or move to a
+  # qemu/vmtest VM if it flakes.
+  xdp-smoke:
+    name: AF_XDP lo smoke (spike)
+    runs-on: ubuntu-latest
+    continue-on-error: true
+    steps:
+      - uses: actions/checkout@v5
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+
+      - name: Kernel / capability info
+        run: |
+          uname -a
+          echo "kernel.unprivileged_bpf_disabled=$(cat /proc/sys/kernel/unprivileged_bpf_disabled 2>/dev/null || echo '?')"
+          ip link show lo
+
+      - name: Build the AF_XDP smoke test
+        run: cargo test -p netring --features "integration-tests,af-xdp,xdp-loader" --test xdp_lo_smoke --no-run
+
+      - name: Run as root
+        run: |
+          bin=$(cargo test -p netring --features "integration-tests,af-xdp,xdp-loader" \
+              --test xdp_lo_smoke --no-run --message-format=json 2>/dev/null \
+              | jq -r 'select(.executable != null and (.target.kind[] == "test")) | .executable' \
+              | head -n1)
+          echo "test binary: $bin"
+          test -n "$bin" && test -f "$bin" || { echo "no test binary"; exit 1; }
+          sudo "$bin" --nocapture --test-threads=1
+
   # ── Benchmarks compile ────────────────────────────────────────────────────
   bench:
     name: Benchmarks compile

@@ -249,6 +249,13 @@ pub enum BackendErrorPolicy {
     FailFast,
     /// Log + count the error and keep servicing the other capture sources.
     SkipSource,
+    /// Log + count the error and **re-open** the failed source in place (0.25
+    /// W1e) — same kind/filter as the original — so a transient backend fault
+    /// (interface flap, driver reset) self-heals without tearing down the
+    /// monitor. If the re-open itself fails, the source is left out (like
+    /// [`Self::SkipSource`]) and retried on its next error; after many
+    /// consecutive failures the monitor gives up (circuit breaker).
+    Reopen,
 }
 
 impl Monitor {
@@ -509,6 +516,10 @@ pub struct MonitorBuilder {
     /// [`Self::backend_error_policy`].
     handler_error_policy: HandlerErrorPolicy,
     backend_error_policy: BackendErrorPolicy,
+    /// 0.25 W1e: catch panics from **sync** handlers and convert them to
+    /// `Error::HandlerPanic` (then handled by `handler_error_policy`). Off by
+    /// default. Set via [`Self::catch_handler_panics`].
+    catch_handler_panics: bool,
     /// 0.24 Phase C1/C2: optional capture-telemetry sampling hook.
     /// `None` until [`Self::on_capture_stats`] is called. Moved into
     /// [`Monitor::capture_stats`] at [`Self::build`].
@@ -712,9 +723,29 @@ impl MonitorBuilder {
     /// Default [`BackendErrorPolicy::FailFast`] stops the monitor on a backend
     /// error. [`BackendErrorPolicy::SkipSource`] logs + counts and keeps
     /// servicing the other capture sources (useful for multi-interface monitors
-    /// where one NIC can fail independently).
+    /// where one NIC can fail independently). [`BackendErrorPolicy::Reopen`]
+    /// (0.25 W1e) additionally tries to **re-open** the failed source so a
+    /// transient error (e.g. an interface flap) self-heals.
     pub fn backend_error_policy(mut self, policy: BackendErrorPolicy) -> Self {
         self.backend_error_policy = policy;
+        self
+    }
+
+    /// 0.25 W1e: catch panics from **synchronous** handlers (`on` / `on_ctx` /
+    /// detectors / sinks) and convert them into `Error::HandlerPanic`, then
+    /// route that through the configured
+    /// [`handler_error_policy`](Self::handler_error_policy) — so pairing this
+    /// with [`HandlerErrorPolicy::Isolate`] means one panicking handler is
+    /// logged + counted and the capture pipeline keeps running instead of
+    /// unwinding.
+    ///
+    /// Off by default (a panic is a bug; the default is to surface it). The
+    /// default panic hook still prints the panic to stderr, so nothing is
+    /// silently swallowed. **Async** handlers / effect futures are not covered
+    /// (their panics propagate) — keep async bodies panic-free or guard them
+    /// internally.
+    pub fn catch_handler_panics(mut self, on: bool) -> Self {
+        self.catch_handler_panics = on;
         self
     }
 
@@ -1747,7 +1778,8 @@ impl MonitorBuilder {
             .driver_builder
             .unwrap_or_else(|| Driver::builder(FiveTuple::bidirectional()))
             .build();
-        let dispatcher = self.handlers.into_dispatcher()?;
+        let mut dispatcher = self.handlers.into_dispatcher()?;
+        dispatcher.set_catch_panics(self.catch_handler_panics);
         let base_sink: Box<dyn AnomalySink> = self.sink.unwrap_or_else(|| Box::new(NoopSink));
         // Apply layers innermost-first so the first .layer(X)
         // call ends up outermost in the runtime chain. See the

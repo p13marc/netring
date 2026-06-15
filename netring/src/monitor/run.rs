@@ -63,6 +63,52 @@ pub(crate) enum StopCondition {
     Idle(Duration),
 }
 
+/// 0.25 W1e: how to (re)open a capture backend, kept parallel to the run loop's
+/// `caps` so `BackendErrorPolicy::Reopen` can rebuild a failed source with the
+/// same kind + filter as the original.
+enum BackendSpec {
+    /// AF_PACKET on the named interface.
+    AfPacket(String),
+    /// AF_XDP per its interface spec (bare vs self-loaded program).
+    #[cfg(feature = "af-xdp")]
+    Xdp(crate::monitor::XdpIfaceSpec),
+}
+
+/// Open (or re-open) one capture backend from its [`BackendSpec`], applying the
+/// shared fanout group + kernel prefilter for AF_PACKET. Used both for the
+/// initial open and for `BackendErrorPolicy::Reopen`.
+fn open_backend(
+    spec: &BackendSpec,
+    fanout: Option<(crate::config::FanoutMode, u16)>,
+    kernel_prefilter: &Option<crate::config::BpfFilter>,
+) -> Result<AnyBackend> {
+    match spec {
+        // 0.21 C: with a fanout set (single-shard or ShardedRunner) open the
+        // ring in the configured fanout group; otherwise plain open.
+        BackendSpec::AfPacket(iface) => {
+            let cap = match fanout {
+                Some((mode, group_id)) => {
+                    let rx = crate::Capture::builder()
+                        .interface(iface)
+                        .fanout(mode, group_id)
+                        .build()?;
+                    AsyncCapture::new(rx)?
+                }
+                None => AsyncCapture::open(iface)?,
+            };
+            // 0.25 S2: push the conservative fail-open kernel prefilter (union of
+            // every consumer's interest) into the socket — a superset, so it only
+            // sheds traffic nobody needs.
+            if let Some(filter) = kernel_prefilter {
+                cap.set_filter(filter)?;
+            }
+            Ok(AnyBackend::AfPacket(cap))
+        }
+        #[cfg(feature = "af-xdp")]
+        BackendSpec::Xdp(xspec) => Ok(AnyBackend::Xdp(open_xdp_backend(xspec)?)),
+    }
+}
+
 /// Open the AF_XDP backend for one capture interface (0.25 W1a).
 ///
 /// A bare spec (`self_load = false`) opens a plain socket and relies on an
@@ -139,49 +185,22 @@ pub(crate) async fn run_loop(monitor: Monitor, stop: StopCondition) -> Result<()
     // `to_owned` copy. The future stays `Send` because the only borrow held
     // across an `.await` lives inside `drain_batch`, and `AnyBackend` is
     // `Send`; all dispatch runs *after* the batch is dropped.
-    let cap_count = {
-        #[cfg(feature = "af-xdp")]
-        {
-            interfaces.len() + xdp_interfaces.len()
-        }
-        #[cfg(not(feature = "af-xdp"))]
-        {
-            interfaces.len()
-        }
-    };
-    let mut caps: Vec<AnyBackend> = Vec::with_capacity(cap_count);
+    // 0.25 W1e: record how to (re)open each backend so
+    // `BackendErrorPolicy::Reopen` can rebuild a failed source in place. Built
+    // in the exact order the run loop indexes `caps`: AF_PACKET interfaces
+    // first, then AF_XDP (matching the prior two-loop open order).
+    let mut specs: Vec<BackendSpec> = Vec::new();
     for iface in &interfaces {
-        // 0.21 C: when the user set a fanout (single-shard or
-        // sharded via ShardedRunner), open each ring with the
-        // configured fanout group. Plain `.interface(iface)` with
-        // no fanout falls back to `AsyncCapture::open`.
-        let cap = match fanout {
-            Some((mode, group_id)) => {
-                let rx = crate::Capture::builder()
-                    .interface(iface)
-                    .fanout(mode, group_id)
-                    .build()?;
-                AsyncCapture::new(rx)?
-            }
-            None => AsyncCapture::open(iface)?,
-        };
-        // 0.25 S2: push the conservative kernel prefilter (fail-open union of
-        // every consumer's interest) into the AF_PACKET socket. It's a superset
-        // of what any consumer wants, so this only sheds traffic nobody needs.
-        if let Some(filter) = &kernel_prefilter {
-            cap.set_filter(filter)?;
-        }
-        caps.push(AnyBackend::AfPacket(cap));
+        specs.push(BackendSpec::AfPacket(iface.clone()));
     }
-    // 0.24 Phase B: AF_XDP backends (in builder-registration order, after the
-    // AF_PACKET ones). A bare `xdp_interface` needs an externally-attached XDP
-    // redirect program to see traffic; an `xdp_interface_loaded` (0.25 W1a,
-    // feature `xdp-loader`) has the Monitor attach the built-in redirect-all
-    // program + register the socket on its XSKMAP here.
     #[cfg(feature = "af-xdp")]
     for spec in &xdp_interfaces {
-        let xdp = open_xdp_backend(spec)?;
-        caps.push(AnyBackend::Xdp(xdp));
+        specs.push(BackendSpec::Xdp(spec.clone()));
+    }
+
+    let mut caps: Vec<AnyBackend> = Vec::with_capacity(specs.len());
+    for spec in &specs {
+        caps.push(open_backend(spec, fanout, &kernel_prefilter)?);
     }
     // 0.24 Phase C4: all sockets are open and the loop is about to run —
     // readiness flips true. `mark_started` stamps the uptime/liveness
@@ -337,8 +356,8 @@ pub(crate) async fn run_loop(monitor: Monitor, stop: StopCondition) -> Result<()
             }
         };
         let i = match ready {
-            Some(Ok(i)) => i,
-            Some(Err(e)) => match backend_error_policy {
+            Some((i, Ok(()))) => i,
+            Some((i, Err(e))) => match backend_error_policy {
                 BackendErrorPolicy::FailFast => return Err(e),
                 BackendErrorPolicy::SkipSource => {
                     backend_errors += 1;
@@ -347,6 +366,28 @@ pub(crate) async fn run_loop(monitor: Monitor, stop: StopCondition) -> Result<()
                     // Circuit breaker: a persistently-failing fd would otherwise
                     // spin the readiness select. Back off, and after many
                     // consecutive failures give up rather than burn a core.
+                    if backend_errors > 64 {
+                        return Err(e);
+                    }
+                    tokio::time::sleep(Duration::from_millis(50)).await;
+                    continue;
+                }
+                // 0.25 W1e: try to rebuild the failed source in place from its
+                // recorded spec. A failed re-open leaves the (still-broken)
+                // backend as-is so the next error retries it; same circuit
+                // breaker as SkipSource bounds a hard-down source.
+                BackendErrorPolicy::Reopen => {
+                    backend_errors += 1;
+                    health.record_backend_error();
+                    match open_backend(&specs[i], fanout, &kernel_prefilter) {
+                        Ok(b) => {
+                            caps[i] = b;
+                            tracing::warn!(error = %e, idx = i, count = backend_errors, "capture backend error (Reopen) — source reopened");
+                        }
+                        Err(e2) => {
+                            tracing::warn!(error = %e, reopen_error = %e2, idx = i, count = backend_errors, "capture backend error (Reopen) — reopen failed, will retry");
+                        }
+                    }
                     if backend_errors > 64 {
                         return Err(e);
                     }
@@ -798,26 +839,34 @@ async fn drain_phase(
 /// readiness guard from `poll_read_ready_mut` is dropped without clearing, so
 /// the level-triggered fd stays ready and the caller's `readable()` resolves
 /// immediately.
-async fn ready_capture(caps: &mut [AnyBackend], anchor: &mut usize) -> Option<Result<usize>> {
-    std::future::poll_fn(|cx: &mut Context<'_>| -> Poll<Option<Result<usize>>> {
-        let n = caps.len();
-        if n == 0 {
-            return Poll::Ready(None);
-        }
-        let start = *anchor % n;
-        for offset in 0..n {
-            let i = (start + offset) % n;
-            match caps[i].poll_read_ready(cx) {
-                Poll::Ready(Ok(())) => {
-                    *anchor = (i + 1) % n;
-                    return Poll::Ready(Some(Ok(i)));
-                }
-                Poll::Ready(Err(e)) => return Poll::Ready(Some(Err(e))),
-                Poll::Pending => {}
+async fn ready_capture(caps: &mut [AnyBackend], anchor: &mut usize) -> Option<(usize, Result<()>)> {
+    std::future::poll_fn(
+        |cx: &mut Context<'_>| -> Poll<Option<(usize, Result<()>)>> {
+            let n = caps.len();
+            if n == 0 {
+                return Poll::Ready(None);
             }
-        }
-        Poll::Pending
-    })
+            let start = *anchor % n;
+            for offset in 0..n {
+                let i = (start + offset) % n;
+                match caps[i].poll_read_ready(cx) {
+                    Poll::Ready(Ok(())) => {
+                        *anchor = (i + 1) % n;
+                        return Poll::Ready(Some((i, Ok(()))));
+                    }
+                    // 0.25 W1e: surface the failing index too, so a `Reopen` policy
+                    // knows which backend to rebuild. Advance the anchor past it so a
+                    // persistently-failing source doesn't monopolise the scan.
+                    Poll::Ready(Err(e)) => {
+                        *anchor = (i + 1) % n;
+                        return Poll::Ready(Some((i, Err(e))));
+                    }
+                    Poll::Pending => {}
+                }
+            }
+            Poll::Pending
+        },
+    )
     .await
 }
 

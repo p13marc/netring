@@ -132,6 +132,35 @@ pub(crate) trait DynEffectHandler: Send + Sync {
 /// Shared effect handler — Arc shape for per-shard cloning.
 pub(crate) type BoxedEffectHandler = Arc<dyn DynEffectHandler>;
 
+/// 0.25 W1e: invoke a sync handler inside `catch_unwind`, converting a panic
+/// into [`Error::HandlerPanic`] so the run loop's `HandlerErrorPolicy` decides
+/// the outcome (rather than the panic unwinding the whole run loop). The
+/// default panic hook still prints to stderr, so panics stay visible.
+fn call_handler_catching(handler: &BoxedHandler, ptr: *const (), ctx: &mut Ctx<'_>) -> Result<()> {
+    use std::panic::{AssertUnwindSafe, catch_unwind};
+    // `ptr`/`ctx` aren't `UnwindSafe`; asserting is sound because on a panic we
+    // discard them and surface an error — we don't observe broken invariants
+    // through them afterwards (the caller stops dispatching this event).
+    match catch_unwind(AssertUnwindSafe(|| handler(ptr, ctx))) {
+        Ok(res) => res,
+        // `&*payload` derefs the `Box<dyn Any>` to the *inner* value; passing
+        // `&payload` would re-erase the Box itself as the `dyn Any` and both
+        // downcasts would miss.
+        Err(payload) => Err(crate::error::Error::HandlerPanic(panic_message(&*payload))),
+    }
+}
+
+/// Best-effort extraction of a panic's message string.
+fn panic_message(payload: &(dyn std::any::Any + Send)) -> String {
+    if let Some(s) = payload.downcast_ref::<&str>() {
+        (*s).to_string()
+    } else if let Some(s) = payload.downcast_ref::<String>() {
+        s.clone()
+    } else {
+        "handler panicked (non-string payload)".to_string()
+    }
+}
+
 pub(crate) struct HandlerSlot {
     pub(crate) handler: BoxedHandler,
 }
@@ -171,6 +200,12 @@ pub struct Dispatcher {
     /// keep the constructor signature cfg-free.
     #[allow(dead_code)] // read only under debug_assertions
     slot_types: Box<[TypeId]>,
+    /// 0.25 W1e: when true, each **sync** handler call is wrapped in
+    /// `catch_unwind` and a panic is converted into [`Error::HandlerPanic`]
+    /// (which the run loop's `HandlerErrorPolicy` then handles) rather than
+    /// unwinding the run loop. Off by default; the read is a cheap branch on
+    /// the (cold relative to the handler body) per-handler path.
+    catch_panics: bool,
 }
 
 impl Dispatcher {
@@ -187,7 +222,14 @@ impl Dispatcher {
             async_slots,
             effect_slots,
             slot_types,
+            catch_panics: false,
         }
+    }
+
+    /// 0.25 W1e: enable/disable sync-handler panic catching. Set from
+    /// `MonitorBuilder::catch_handler_panics`.
+    pub(crate) fn set_catch_panics(&mut self, on: bool) {
+        self.catch_panics = on;
     }
 
     /// Dispatch the typed payload `P` through all registered
@@ -213,8 +255,13 @@ impl Dispatcher {
         );
 
         let ptr = payload as *const P as *const ();
+        let catch = self.catch_panics;
         for slot in &mut self.slots[slot_idx as usize] {
-            (slot.handler)(ptr, ctx)?;
+            if catch {
+                call_handler_catching(&slot.handler, ptr, ctx)?;
+            } else {
+                (slot.handler)(ptr, ctx)?;
+            }
         }
         Ok(())
     }
@@ -395,6 +442,7 @@ impl Dispatcher {
                 .collect::<Vec<_>>()
                 .into_boxed_slice(),
             slot_types: self.slot_types.clone(),
+            catch_panics: self.catch_panics,
         }
     }
 
@@ -642,5 +690,41 @@ mod tests {
 
         assert_eq!(d.type_count(), 2);
         assert_eq!(d.handler_count(), 2);
+    }
+
+    #[test]
+    fn catch_panics_converts_a_handler_panic_into_handler_panic_error() {
+        // 0.25 W1e: with catch_panics on, a panicking sync handler yields
+        // `Error::HandlerPanic` instead of unwinding the caller.
+        let handler: BoxedHandler = Arc::new(|_ptr, _ctx| panic!("boom in handler"));
+        let mut slot_by_type = TypeSlotTable::new();
+        slot_by_type.insert(TypeId::of::<u32>(), 0);
+        let slots = vec![vec![HandlerSlot { handler }]].into_boxed_slice();
+        let async_slots = vec![vec![]].into_boxed_slice();
+        let effect_slots = vec![vec![]].into_boxed_slice();
+        let slot_types = vec![TypeId::of::<u32>()].into_boxed_slice();
+        let mut d = Dispatcher::new(slot_by_type, slots, async_slots, effect_slots, slot_types);
+        d.set_catch_panics(true);
+
+        let mut s = StateMap::default();
+        let mut sink = NoopSink;
+        let mut c = CounterRegistry::default();
+        let mut fs = crate::ctx::FlowStateRegistry::default();
+        let mut ctx = fresh_ctx(&mut s, &mut sink, &mut c, &mut fs);
+
+        let payload: u32 = 1;
+        // Silence the default panic hook for the brief catch window so the test
+        // output stays clean; restore it immediately after.
+        let prev = std::panic::take_hook();
+        std::panic::set_hook(Box::new(|_| {}));
+        let res = d.dispatch::<u32>(&payload, &mut ctx);
+        std::panic::set_hook(prev);
+
+        match res {
+            Err(crate::error::Error::HandlerPanic(msg)) => {
+                assert!(msg.contains("boom in handler"), "msg = {msg}");
+            }
+            other => panic!("expected HandlerPanic, got {other:?}"),
+        }
     }
 }

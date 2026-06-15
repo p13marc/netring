@@ -215,8 +215,10 @@ examples/tests/docs. (`error.rs`, `monitor/mod.rs`, `monitor/async_handler.rs`.)
 `SCM_TIMESTAMPING` off the error queue, hw-preferred-else-sw). Root-gated `tx_timestamp_lo`
 validates the full enable→send→read path via software TX timestamps on `lo` (CI).
 
-**W4 — B5 AF_XDP UMEM hugepages + NUMA** (`MAP_HUGETLB`/`mbind`, copy-mode warn). Code +
-CI build; numbers HW-gated.
+**✅ W4 — B5 AF_XDP UMEM hugepages + NUMA.** `UmemOptions`/`Umem::new_with_options` +
+`XdpSocketBuilder::{hugepages, numa_node}`: `MAP_HUGETLB` (graceful fallback) + `mbind`
+`MPOL_BIND` (best-effort) + post-bind `getsockopt(XDP_OPTIONS)` copy-mode warn. Cap-free
+tests for fallback/best-effort; full perf benefit HW-gated.
 
 **W5 — `netring-exporters` companion crate** — `OtlpAnomalySink` + `KafkaSink`. A *new
 workspace crate* (heavy async/C deps out of core) is the right home; "separate crate" is an

@@ -1,5 +1,5 @@
 [workspace]
-members = ["netring"]
+members = ["netring", "netring-exporters"]
 resolver = "2"
 
 [workspace.package]

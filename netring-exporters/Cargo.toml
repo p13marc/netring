@@ -1,0 +1,40 @@
+[package]
+name = "netring-exporters"
+version = "0.1.0"
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+description = "Heavyweight anomaly exporters for netring (OTLP, Kafka) — kept out of the core crate"
+keywords = ["netring", "otlp", "kafka", "opentelemetry", "exporter"]
+categories = ["network-programming"]
+readme = "README.md"
+
+# 0.25 W5: companion crate so netring's core stays free of the heavy
+# OTLP/Kafka dependency trees. Each exporter implements netring's
+# `AnomalySink`, so it drops into `MonitorBuilder::sink(...)` unchanged.
+
+[features]
+default = ["otlp"]
+# OTLP/HTTP-JSON log export over a blocking HTTP client (ureq + rustls).
+otlp = ["dep:ureq", "dep:serde_json"]
+# Kafka producer (librdkafka via rdkafka — pulls a C dependency).
+kafka = ["dep:rdkafka", "dep:serde_json"]
+
+[dependencies]
+# `flow` + `tokio` expose the Monitor's anomaly-sink surface the exporters
+# implement (netring::anomaly::{sink::AnomalySink, Severity, key::Key}).
+netring = { path = "../netring", version = "0.24", default-features = false, features = [
+    "flow",
+    "tokio",
+] }
+serde_json = { version = "1", optional = true }
+tracing = { workspace = true }
+# Blocking HTTP for the OTLP sink — sync, matches AnomalySink::flush.
+ureq = { version = "2", optional = true, default-features = false, features = ["tls"] }
+# Kafka producer (heavy C dep, opt-in).
+rdkafka = { version = "0.36", optional = true }
+
+[dev-dependencies]
+serde_json = "1"

@@ -314,3 +314,22 @@ jobs:
           cargo +nightly fuzz run bpf_matches -- -runs=200000 -max_total_time=60
           cargo +nightly fuzz run bpf_builder -- -runs=200000 -max_total_time=60
           cargo +nightly fuzz run expr_parse -- -runs=200000 -max_total_time=60
+
+  # ── netring-exporters companion crate (OTLP + Kafka) ──────────────────────
+  exporters:
+    name: netring-exporters
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      # The `kafka` feature builds bundled librdkafka via cmake.
+      - run: sudo apt-get update && sudo apt-get install -y cmake
+      - name: OTLP (default) — clippy + test
+        run: |
+          cargo clippy -p netring-exporters --all-targets -- --deny warnings
+          cargo test -p netring-exporters
+      - name: Kafka feature — clippy + test
+        run: |
+          cargo clippy -p netring-exporters --no-default-features --features kafka --all-targets -- --deny warnings
+          cargo test -p netring-exporters --no-default-features --features kafka

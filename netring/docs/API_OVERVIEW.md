@@ -456,7 +456,7 @@ runner.run_until_signal().await?;
 | `.need_wakeup(bool)` | true | `XDP_USE_NEED_WAKEUP` optimization |
 | `.hugepages(bool)` | false | **(0.25)** back the UMEM with `MAP_HUGETLB` (graceful fallback) |
 | `.numa_node(n)` | — | **(0.25)** `mbind` the UMEM to NUMA node `n` (best-effort) |
-| `.promiscuous(bool)` | false | put the interface in promiscuous mode for the socket's lifetime (issue #4); self-cleaning `PACKET_MR_PROMISC` guard. On the Monitor: `.xdp_promiscuous(bool)` |
+| `.promiscuous(bool)` | false | put the interface in promiscuous mode for the socket's lifetime (issue #4); self-cleaning `PACKET_MR_PROMISC` guard. The Monitor exposes a backend-agnostic `MonitorBuilder::promiscuous(bool)` |
 | `.with_default_program()` / `.with_program(p)` | — | attach an XDP redirect program (feat `xdp-loader`); `filter_program()` is the table-driven variant |
 
 > **AF_XDP & promiscuous mode.** AF_XDP runs in the driver RX path *after* the

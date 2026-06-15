@@ -108,9 +108,6 @@ pub(crate) struct XdpIfaceSpec {
     /// `open_xdp_backend`); without that feature it's always `false` and unread.
     #[cfg_attr(not(feature = "xdp-loader"), allow(dead_code))]
     pub(crate) self_load: bool,
-    /// Put the interface into promiscuous mode for the capture's lifetime
-    /// (issue #4). Set via [`MonitorBuilder::xdp_promiscuous`].
-    pub(crate) promiscuous: bool,
 }
 
 /// The 0.20 top-level monitor — a fully-constructed graph of
@@ -229,6 +226,10 @@ pub struct Monitor {
     /// full consumer set so it's a superset (no starvation); the run loop
     /// applies it to each AF_PACKET capture via `set_filter`.
     pub(crate) kernel_prefilter: Option<crate::config::BpfFilter>,
+    /// Issue #4: put every capture interface (AF_PACKET + AF_XDP) into
+    /// promiscuous mode for the run's lifetime. Set via
+    /// [`MonitorBuilder::promiscuous`].
+    pub(crate) promiscuous: bool,
 }
 
 /// How the run loop reacts when a handler (detector / sink / async handler)
@@ -585,6 +586,9 @@ pub struct MonitorBuilder {
     /// kernel-prefilter union at [`Self::kernel_prefilter`] — a consumer can
     /// only widen it, so the kernel filter is always a superset (no starvation).
     traffic_interests: Vec<subscription::Predicate>,
+    /// Issue #4: monitor-wide promiscuous mode for every capture interface.
+    /// Set via [`Self::promiscuous`]; defaults to `false`.
+    promiscuous: bool,
 }
 
 impl MonitorBuilder {
@@ -653,7 +657,6 @@ impl MonitorBuilder {
         self.xdp_interfaces.push(XdpIfaceSpec {
             iface: iface.into(),
             self_load: false,
-            promiscuous: false,
         });
         self
     }
@@ -672,44 +675,47 @@ impl MonitorBuilder {
     /// when the Monitor's run loop ends. For native-driver zero-copy on a real
     /// NIC, build the socket yourself with `.xdp_attach_flags(XdpFlags::DRV_MODE)`
     /// and use [`Self::xdp_interface`].
+    ///
+    /// **Single queue.** The Monitor binds **queue 0** of the interface. On a
+    /// multi-queue NIC, RSS spreads traffic across queues, so this captures only
+    /// queue 0's share — even with [`Self::promiscuous`]. For full-NIC capture
+    /// either pin the NIC to one queue (`ethtool -L <iface> combined 1`) or use
+    /// the one-socket-per-queue pattern in `examples/xdp/xdp_multiqueue.rs`.
     #[cfg(all(feature = "af-xdp", feature = "xdp-loader"))]
     pub fn xdp_interface_loaded(mut self, iface: impl Into<String>) -> Self {
         self.xdp_interfaces.push(XdpIfaceSpec {
             iface: iface.into(),
             self_load: true,
-            promiscuous: false,
         });
         self
     }
 
-    /// Enable **promiscuous mode** on the most recently added AF_XDP capture
-    /// interface (feature `af-xdp`; issue #4).
+    /// Put **every** capture interface into promiscuous mode for the run's
+    /// lifetime (issue #4). Default: `false`.
     ///
-    /// Chain it right after [`Self::xdp_interface`] or
-    /// [`Self::xdp_interface_loaded`] — it modifies that interface's spec:
+    /// Applies to both AF_PACKET (`interface`/`interfaces`) and AF_XDP
+    /// (`xdp_interface`/`xdp_interface_loaded`) sources — promiscuity is a
+    /// `netdev` property, so the monitor flag is backend-agnostic. Enable it
+    /// when the monitor is a passive observer that must see traffic not
+    /// addressed to the local MAC (SPAN/mirror ports, sniffing); leave it off
+    /// for host-local monitoring.
     ///
     /// ```ignore
     /// Monitor::builder()
     ///     .xdp_interface_loaded("eth0")
-    ///     .xdp_promiscuous(true)        // capture all traffic on eth0
+    ///     .promiscuous(true)            // capture all traffic on eth0
     ///     .protocol::<Tcp>()
     ///     .build()?;
     /// ```
     ///
-    /// AF_XDP runs after the NIC's MAC filter, so without this the socket only
-    /// sees frames addressed to the interface (plus broadcast/multicast). The
-    /// Monitor holds promiscuity via an AF_PACKET `PACKET_MR_PROMISC` guard
-    /// tied to the socket's lifetime — see
+    /// The Monitor holds promiscuity through a self-cleaning AF_PACKET
+    /// `PACKET_MR_PROMISC` guard tied to each socket's lifetime — see
     /// [`XdpSocketBuilder::promiscuous`](crate::XdpSocketBuilder::promiscuous)
     /// for the mechanism and the multi-queue / `IFF_PROMISC`-visibility caveats.
-    ///
-    /// No-op (returns `self` unchanged) if no AF_XDP interface has been added
-    /// yet.
-    #[cfg(feature = "af-xdp")]
-    pub fn xdp_promiscuous(mut self, enable: bool) -> Self {
-        if let Some(spec) = self.xdp_interfaces.last_mut() {
-            spec.promiscuous = enable;
-        }
+    /// For per-interface control, or one AF_XDP socket per NIC queue, build the
+    /// sockets yourself with the low-level builders.
+    pub fn promiscuous(mut self, enable: bool) -> Self {
+        self.promiscuous = enable;
         self
     }
 
@@ -1865,6 +1871,7 @@ impl MonitorBuilder {
             flow_active_timeout: self.flow_active_timeout,
             packet_subs: self.packet_subs,
             kernel_prefilter,
+            promiscuous: self.promiscuous,
         })
     }
 }
@@ -1899,29 +1906,18 @@ mod tests {
         }
     }
 
-    #[cfg(feature = "af-xdp")]
     #[test]
-    fn xdp_promiscuous_targets_last_added_interface() {
-        // `xdp_promiscuous` modifies the most recently added AF_XDP interface;
-        // others keep their (default-off) setting. (issue #4)
-        let b = Monitor::builder()
-            .xdp_interface("eth0")
-            .xdp_interface("eth1")
-            .xdp_promiscuous(true);
-        assert!(!b.xdp_interfaces[0].promiscuous, "eth0 stays default-off");
-        assert!(b.xdp_interfaces[1].promiscuous, "eth1 was just toggled on");
+    fn promiscuous_defaults_off_and_flag_toggles() {
+        // Monitor-wide promiscuous is opt-in and backend-agnostic (issue #4).
+        let b = Monitor::builder();
+        assert!(!b.promiscuous, "default is off");
 
-        // Default (no call) is off.
-        let b = Monitor::builder().xdp_interface("eth0");
-        assert!(!b.xdp_interfaces[0].promiscuous);
-    }
+        let b = Monitor::builder().interface("lo").promiscuous(true);
+        assert!(b.promiscuous);
 
-    #[cfg(feature = "af-xdp")]
-    #[test]
-    fn xdp_promiscuous_before_any_interface_is_a_noop() {
-        // No AF_XDP interface added yet → no panic, nothing to toggle.
-        let b = Monitor::builder().xdp_promiscuous(true);
-        assert!(b.xdp_interfaces.is_empty());
+        // The flag survives into the built Monitor and reaches the run loop.
+        let m = b.build().expect("build monitor");
+        assert!(m.promiscuous);
     }
 
     #[test]

@@ -81,21 +81,20 @@ fn open_backend(
     spec: &BackendSpec,
     fanout: Option<(crate::config::FanoutMode, u16)>,
     kernel_prefilter: &Option<crate::config::BpfFilter>,
+    promiscuous: bool,
 ) -> Result<AnyBackend> {
     match spec {
         // 0.21 C: with a fanout set (single-shard or ShardedRunner) open the
-        // ring in the configured fanout group; otherwise plain open.
+        // ring in the configured fanout group; otherwise plain open. Either way
+        // the AF_PACKET ring honors the monitor-wide promiscuous flag (issue #4).
         BackendSpec::AfPacket(iface) => {
-            let cap = match fanout {
-                Some((mode, group_id)) => {
-                    let rx = crate::Capture::builder()
-                        .interface(iface)
-                        .fanout(mode, group_id)
-                        .build()?;
-                    AsyncCapture::new(rx)?
-                }
-                None => AsyncCapture::open(iface)?,
-            };
+            let mut builder = crate::Capture::builder()
+                .interface(iface)
+                .promiscuous(promiscuous);
+            if let Some((mode, group_id)) = fanout {
+                builder = builder.fanout(mode, group_id);
+            }
+            let cap = AsyncCapture::new(builder.build()?)?;
             // 0.25 S2: push the conservative fail-open kernel prefilter (union of
             // every consumer's interest) into the socket — a superset, so it only
             // sheds traffic nobody needs.
@@ -105,7 +104,7 @@ fn open_backend(
             Ok(AnyBackend::AfPacket(cap))
         }
         #[cfg(feature = "af-xdp")]
-        BackendSpec::Xdp(xspec) => Ok(AnyBackend::Xdp(open_xdp_backend(xspec)?)),
+        BackendSpec::Xdp(xspec) => Ok(AnyBackend::Xdp(open_xdp_backend(xspec, promiscuous)?)),
     }
 }
 
@@ -116,14 +115,21 @@ fn open_backend(
 /// `xdp-loader`) builds the socket through [`crate::XdpSocketBuilder`] with the
 /// built-in redirect-all program attached in `SKB_MODE` + the socket registered
 /// on its XSKMAP, so it captures with no external loader.
+///
+/// `promiscuous` is the monitor-wide flag ([`MonitorBuilder::promiscuous`],
+/// issue #4): when set, the interface is put into promiscuous mode for the
+/// socket's lifetime so AF_XDP sees traffic not addressed to the local MAC.
 #[cfg(feature = "af-xdp")]
-fn open_xdp_backend(spec: &crate::monitor::XdpIfaceSpec) -> Result<crate::AsyncXdpSocket> {
+fn open_xdp_backend(
+    spec: &crate::monitor::XdpIfaceSpec,
+    promiscuous: bool,
+) -> Result<crate::AsyncXdpSocket> {
     #[cfg(feature = "xdp-loader")]
     if spec.self_load {
         let socket = crate::XdpSocketBuilder::default()
             .interface(&spec.iface)
             .mode(crate::XdpMode::Rx)
-            .promiscuous(spec.promiscuous)
+            .promiscuous(promiscuous)
             .with_default_program()
             .build()?;
         return crate::AsyncXdpSocket::new(socket);
@@ -133,7 +139,7 @@ fn open_xdp_backend(spec: &crate::monitor::XdpIfaceSpec) -> Result<crate::AsyncX
     // applied; with `promiscuous = false` this is identical to `open`.
     let socket = crate::XdpSocketBuilder::default()
         .interface(&spec.iface)
-        .promiscuous(spec.promiscuous)
+        .promiscuous(promiscuous)
         .build()?;
     crate::AsyncXdpSocket::new(socket)
 }
@@ -170,6 +176,7 @@ pub(crate) async fn run_loop(monitor: Monitor, stop: StopCondition) -> Result<()
         flow_active_timeout,
         packet_subs,
         kernel_prefilter,
+        promiscuous,
     } = monitor;
     // Borrow the monitor name as `&str` for the run loop's
     // dispatch sites. The owned `Box<str>` lives in this stack
@@ -208,7 +215,7 @@ pub(crate) async fn run_loop(monitor: Monitor, stop: StopCondition) -> Result<()
 
     let mut caps: Vec<AnyBackend> = Vec::with_capacity(specs.len());
     for spec in &specs {
-        caps.push(open_backend(spec, fanout, &kernel_prefilter)?);
+        caps.push(open_backend(spec, fanout, &kernel_prefilter, promiscuous)?);
     }
     // 0.24 Phase C4: all sockets are open and the loop is about to run —
     // readiness flips true. `mark_started` stamps the uptime/liveness
@@ -387,7 +394,7 @@ pub(crate) async fn run_loop(monitor: Monitor, stop: StopCondition) -> Result<()
                 BackendErrorPolicy::Reopen => {
                     backend_errors += 1;
                     health.record_backend_error();
-                    match open_backend(&specs[i], fanout, &kernel_prefilter) {
+                    match open_backend(&specs[i], fanout, &kernel_prefilter, promiscuous) {
                         Ok(b) => {
                             caps[i] = b;
                             tracing::warn!(error = %e, idx = i, count = backend_errors, "capture backend error (Reopen) — source reopened");
@@ -581,6 +588,7 @@ pub(crate) async fn replay_loop(
         packet_subs,
         // pcap replay has no kernel filter to set (the source isn't a socket).
         kernel_prefilter: _,
+        promiscuous: _, // pcap replay has no live interface to set promiscuous
     } = monitor;
     let monitor_name_borrow: Option<&str> = monitor_name.as_deref();
 

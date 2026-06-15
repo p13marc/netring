@@ -131,7 +131,7 @@ Enable promiscuous mode:
 ```rust,ignore
 let sock = XdpSocket::builder().interface("eth0").promiscuous(true).build()?;
 // or, on the Monitor:
-Monitor::builder().xdp_interface_loaded("eth0").xdp_promiscuous(true) /* … */;
+Monitor::builder().xdp_interface_loaded("eth0").promiscuous(true) /* … */;
 ```
 
 netring holds promiscuity via a self-cleaning AF_PACKET `PACKET_MR_PROMISC`

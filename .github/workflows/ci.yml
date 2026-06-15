@@ -103,11 +103,11 @@ jobs:
       - uses: Swatinem/rust-cache@v2
 
       - name: Build test binaries
-        run: cargo test -p netring --features "integration-tests,tokio,channel,af-xdp" --no-run
+        run: cargo test -p netring --features "integration-tests,tokio,channel,flow,parse,af-xdp" --no-run
 
       - name: Grant CAP_NET_RAW to test binaries
         run: |
-          for bin in $(cargo test -p netring --features "integration-tests,tokio,channel,af-xdp" \
+          for bin in $(cargo test -p netring --features "integration-tests,tokio,channel,flow,parse,af-xdp" \
               --no-run --message-format=json 2>/dev/null \
               | jq -r 'select(.executable != null) | .executable'); do
             if [ -f "$bin" ]; then
@@ -117,7 +117,7 @@ jobs:
           done
 
       - name: Run integration tests
-        run: cargo test -p netring --features "integration-tests,tokio,channel,af-xdp" -- --test-threads=1
+        run: cargo test -p netring --features "integration-tests,tokio,channel,flow,parse,af-xdp" -- --test-threads=1
 
   # ── AF_XDP-on-lo live test (root) ─────────────────────────────────────────
   # The first live AF_XDP validation: loads the built-in redirect-all XDP

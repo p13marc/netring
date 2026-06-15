@@ -20,6 +20,7 @@ Forward-looking implementation plans only. Historical record lives in `CHANGELOG
 | [`netring-strategic-review-2026-06.md`](./netring-strategic-review-2026-06.md) | The *why* — competitive landscape, pain points, differentiators, the M1–M4 roadmap. |
 | ~~`netring-0.24-plan.md`~~ | **Shipped — 0.24.0 released 2026-06-14** (Zero-Copy Core + Production Trust; keystone `AnyBackend`). Plan deleted on ship; deferrals carried into the 0.25 plan's "Deferred from 0.24" section. |
 | ~~`netring-0.25-plan.md`~~ | **Shipped — 0.25.0 released 2026-06-15** (tag `0.25.0` + `netring-exporters` 0.1.0). Subscriptions, Async Effects, Performance & TX — the complete capability release; nothing deferred. Plan + subscription-engine design deleted on ship. |
+| [`netring-0.26-afxdp-capture-plan.md`](./netring-0.26-afxdp-capture-plan.md) | **Next** — AF_XDP Multi-Queue Capture & Hardening. The high-level `XdpCapture` (one socket per RX queue, `Queues::Auto` via ethtool) + Monitor `xdp_queues` that **removes the silent single-queue under-capture footgun (G2)** + footgun/bug sweep (B1 `default_program` lying param, F1 shared-UMEM race, F2 copy-mode, F3 per-queue NUMA). Last feature release before 1.0. Started from the issue-#4 / PR-#5 design review. |
 | [`upstream-tracking.md`](./upstream-tracking.md) | Live: rustc / kernel / flowscope features being watched. |
 | *(this)* `INDEX.md` | Roadmap overview, decisions, invariants, history. |
 
@@ -44,6 +45,11 @@ design).
   │     pinning · published pps/Gbps · symmetric TX · in-Monitor AF_XDP loader · UMEM
   │     hugepages/NUMA · Reopen/panic-catch · JA4S license-gating · OTLP/Kafka crate ·
   │     EVE-tls-record. The complete capability release — nothing deferred.
+0.26  AF_XDP Multi-Queue Capture & Hardening   ── NEXT (plan written): high-level
+  │     `XdpCapture` (one socket per RX queue · `Queues::Auto` via ETHTOOL_GCHANNELS) ·
+  │     Monitor `xdp_queues` **removes the silent single-queue under-capture footgun** ·
+  │     bug/footgun sweep (default_program lying param, shared-UMEM race, copy-mode,
+  │     per-queue NUMA). Promiscuous (#4/PR#5) already done. Last feature release pre-1.0.
   ▼   community test window → feedback incorporated → shims removed
 1.0   Stabilization (SemVer promise; plan written once feedback is in)
 ```
@@ -119,5 +125,8 @@ license-gating split landed in flowscope 0.16 + netring `ja4plus` passthrough (c
 ### Backward-compat breaks (history + planned)
 0.21 `AnomalySink::write` key `→ &dyn Key` · 0.22 typed roles + flat `FlowPacket` + 0.19
 removed · 0.23 `on_async` futures `Send` · **0.24** `backend()` axis + feature flatten
-(shimmed) · **0.25** typed 3-tier subscriptions + `on_async` effects (shimmed). SemVer
-stability only at **1.0**.
+(shimmed) · **0.25** typed 3-tier subscriptions + `on_async` effects (shimmed) · **0.26**
+AF_XDP multi-queue is *additive* (`XdpCapture`/`xdp_queues`; default stays single-queue) —
+see `netring-0.26-afxdp-capture-plan.md` §7. **Planned 1.0 break:** Monitor AF_XDP defaults
+to `Queues::Auto` (capture the whole NIC by default — the deliberate footgun-removal break,
+after field-testing). SemVer stability only at **1.0**.

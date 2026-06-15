@@ -1,24 +1,39 @@
-# netring 0.25 — Subscriptions, Async Effects & Performance
+# netring 0.25 — Subscriptions, Async Effects, Performance & TX (the complete release)
 
 > Second pre-1.0 release ([`netring-architecture.md`](./netring-architecture.md) first).
 > 0.24 landed the keystone — a zero-copy + `Send` + multi-backend (AF_PACKET/AF_XDP/pcap)
-> I/O core + production trust. **0.25 builds the redesigned API on top:** the
+> I/O core + production trust. **0.25 is the complete capability release on top:** the
 > strongly-typed 3-tier **subscription engine** with **kernel filter pushdown** (the
 > differentiator), async handlers that read `Ctx` + return `Effects` (the `&mut Ctx`
-> wart, solved), and the perf tuning + published throughput numbers. After 0.24 + 0.25
-> are **community-tested on real traffic**, we cut **1.0**.
+> wart, solved), **the perf tuning + scaling + published numbers (C), the symmetric TX
+> stack (D), the full deferral backlog, the in-Monitor AF_XDP loader, AND the clean
+> compat break** (shims removed, redesign where it sharpens the API). After 0.25 is
+> community-tested on real traffic, 1.0 is a *stabilization* tag, not new features.
 >
-> Depends on 0.24's `AnyBackend`/`set_filter` + borrowed loop. Additive-with-shims
-> (arch §7): existing code compiles unchanged. Grounded inline.
+> **Directive (2026-06-15):** no work is parked to "0.26+/1.0+". Everything the review
+> and architecture call for lands in 0.25. Backward compatibility may break; the API may
+> be redesigned. The only things that legitimately can't land are *measurements that need
+> hardware netring's sandbox lacks* (real-NIC line-rate numbers) — those ship as code +
+> CI-on-`lo` validation + an honest "measured on loopback / pending real-NIC" note, never
+> as a deferral.
+>
+> Depends on 0.24's `AnyBackend`/`set_filter` + borrowed loop. Grounded inline.
 
 ## Scope & locked decisions
-- **0.25 =** subscriptions + pushdown (A) · async effects + dispatcher (B) · perf numbers (C)
-  · TX symmetry (D, **trim-able → 1.0+**).
+- **0.25 = A + B + C + D + the entire backlog + loader integration + shim removal.** One
+  comprehensive release. Nothing carried forward except genuinely post-validation 1.0 work
+  (the SemVer-freeze itself) and the explicitly post-1.0 "named so not forgotten" list
+  (plugin DSL, Arrow/Parquet, io_uring, ICS/OT, clustering — these are *new product
+  surface*, not unfinished 0.25 scope).
 - **Filters are typed builders** (reuse `BpfFilterBuilder` vocabulary); `.expr("…")` strings
   are the *runtime* escape hatch (arch §4), parsed by an **own dep-free recursive-descent
   parser** over the same `Predicate` AST — **not** `wirefilter` (dead on crates.io). ✅ shipped.
-- **Compat shims** from 0.24 (`interface()`, payload-only `on_async`) remain through 0.25;
-  `on::<E>` becomes sugar over subscriptions. **All shims removed at 1.0.**
+- **Clean compat break in 0.25 (no shim half-life).** Remove the deprecated `interface()`
+  singular alias, `MultiInterfaceNotYetSupported`, and the payload-only `on_async` shim.
+  `on::<E>` stays as *ergonomic sugar* lowering to a subscription (it's the natural handler
+  spelling, not a deprecated wart). `on_async` is replaced outright by `on_effect`. Migration
+  guide carries every rename. Subscriptions are the front door; the old surface that was only
+  kept "for one more release" is gone now.
 
 ## Cross-cutting invariants (carried from 0.24)
 clippy/fmt/**doc -D warnings** clean · dhat **Δ0** + **0 allocs/packet** (gated-off hot
@@ -130,28 +145,47 @@ Items the 0.24 plan scoped but shipped without (0.24.0 released 2026-06-14, addi
 - **`netring-exporters` companion crate:** `OtlpAnomalySink` + `KafkaSink` (heavy async/C
   deps kept out of core).
 
-## 0.25 release readiness (audit 2026-06-15) — decision needed
-The **differentiator is done + CI-validated**: Phase A (3 tiers + filter split + cBPF
-compiler), S1/S2 safe fail-open pushdown (live-validated), Phase B (effects + dispatcher),
-A4 `.expr()`, JA4S gating, AF_XDP-path CI validation. The audit found **no MISSING/MIS-WIRED
-features** in any of it. What's genuinely outstanding splits into:
+## 0.25 execution backlog (committed — 2026-06-15, "stop deferring")
+The differentiator (A + B + S1–S4 + A4 + JA4S + AF_XDP-path CI) is **done + CI-validated**.
+The rest below is **committed 0.25 scope**, ordered for execution. Each lands with tests
+(cap-free + root-gated `lo` where live capture is needed) and updates docs/CHANGELOG.
 
-**Hard release tasks (Phase R — do at publish time):**
-1. Bump `netring/Cargo.toml` `version` 0.24.0 → **0.25.0** (still 0.24.0).
-2. Write **`docs/MIGRATING_0.24_TO_0.25.md`** (subscriptions, `on_async`→`on_effect`, dispatcher).
-3. Finalize the `## 0.25.0` CHANGELOG (drop "Unreleased"; reconcile with what actually ships).
+**W0 — clean compat break (mechanical, do first).** Remove deprecated `interface()` alias +
+`MultiInterfaceNotYetSupported`; replace `on_async`(payload-only) with `on_effect`; sweep
+examples/tests/docs. (`error.rs`, `monitor/mod.rs`, `monitor/async_handler.rs`.)
 
-**Scope decision (the plan headlines 0.25 as "+ perf numbers" but Phase C is unstarted):**
-- **Recommended:** ship 0.25 as **"Subscriptions, Async Effects & Safe Kernel Pushdown"** —
-  the differentiator — and **re-scope Phase C (perf numbers/gate/PERFORMANCE.md) + Phase D
-  (TX) to 0.26**, since C needs a real-NIC bench rig (in-sandbox only has lo) and D is already
-  marked trim-able. Update the title/CHANGELOG accordingly. *(Alternative: hold 0.25 until at
-  least C3 `docs/PERFORMANCE.md` + a pps gate land — but that blocks the validated
-  differentiator on hardware-gated perf work.)*
-- **Deferral backlog NOT in 0.25 either way** (all verified absent): B4 Reopen/panic-catch,
-  B5 hugepages/NUMA, in-Monitor xdp-loader, pcap→AnyBackend fold, D1 active-timeout export,
-  E2 EVE-tls-record, C5 example, netring-exporters crate, A3c XDP map. List them as "0.26+"
-  in the CHANGELOG's "not yet" section so their absence is intentional, not silent.
+**W1 — backlog code (pure, `lo`/cap-free testable):**
+- **W1a in-Monitor AF_XDP loader** (closes #37+#38) — `xdp_interface` must attach the loader
+  program + register the socket in XSKMAP, not open a bare socket (`monitor/run.rs`,
+  `monitor/backend.rs`). Fix the `force_replace`/`XDP_FLAGS_REPLACE`-vs-link-API bug
+  (`afxdp/loader/`). Add the **table-driven `filter_redirect.bpf`** map program (#38) so the
+  S5 early-shed has a home. CI: extend `xdp_lo_smoke` to drive a Monitor.
+- **W1b pcap → `AnyBackend` fold** — collapse `replay_loop` into the one generic drain loop
+  (Pcap arm). Removes a whole parallel code path.
+- **W1c D1 active-timeout flow export** — emit `FlowRecord` on a configurable active timeout,
+  not only `FlowEnded` (`monitor/exporter` + flow state).
+- **W1d E2 EVE tls-record** — Suricata `event_type:"tls"` record in `EveSink`.
+- **W1e B4 reopen/panic policy** — `BackendErrorPolicy::Reopen` + per-handler
+  `catch_unwind` option so one panicking handler doesn't kill the loop.
+- **W1f C5 tracing-JSON example.**
+
+**W2 — Phase C performance & scaling (code always; numbers on `lo` now + real-NIC note):**
+C1 CPU pinning + symmetric eBPF fanout; C2 prefetch + batched refill + `#[cold]`; C3 perf
+harness (pps/Gbps/latency, pushdown on/off) + CI regression gate + `docs/PERFORMANCE.md`.
+
+**W3 — Phase D TX symmetry:** `AsyncInjector::send_stream`, `TxPacer` token bucket, TX
+hardware timestamping. Full stack, not trimmed.
+
+**W4 — B5 AF_XDP UMEM hugepages + NUMA** (`MAP_HUGETLB`/`mbind`, copy-mode warn). Code +
+CI build; numbers HW-gated.
+
+**W5 — `netring-exporters` companion crate** — `OtlpAnomalySink` + `KafkaSink`. A *new
+workspace crate* (heavy async/C deps out of core) is the right home; "separate crate" is an
+architecture decision, not a deferral — it ships in this release cycle.
+
+**W6 — Phase R release prep:** bump `0.24.0 → 0.25.0`, `docs/MIGRATING_0.24_TO_0.25.md`,
+finalize `## 0.25.0` CHANGELOG. (The actual `cargo publish` + tag stay the maintainer's
+hands-on-keyboard action; everything up to it is prepared.)
 
 ---
 
@@ -240,25 +274,32 @@ userspace). In-tree cBPF compiler exists (`config/bpf_compile.rs`); 0.24-B gave
 - **Tests:** pinning asserted via `sched_getaffinity`; bidirectional flow → same shard under
   `SymmetricHash`; before/after pps per micro-opt; CI perf job fails on regression.
 
-## Phase D — TX Symmetry *(additive; trim-able → 1.0+)*
-TX is spartan (`afpacket/tx.rs`: V1 frames, no async/pacing/stream/timestamps).
+## Phase D — TX Symmetry *(full stack — NOT trimmed; W3)*
+TX is spartan (`afpacket/tx.rs`: V1 frames, no async/pacing/stream/timestamps). 0.25 brings RX
+parity to the TX side:
 - `AsyncInjector::send_stream(impl Stream<Item = impl AsRef<[u8]>>)`; a token-bucket `TxPacer`
   (pps/bps); TX hardware timestamping (`SO_TIMESTAMPING` egress, graceful skip where
-  unsupported). A subscription forward/transform tier only if Phase A makes it natural; else
-  defer to post-1.0. **Cut without guilt if 0.25 is already large.**
+  unsupported). Validate on `lo` (inject → capture loopback). A subscription forward/transform
+  tier lands if Phase A makes it natural; otherwise it's a genuinely *new* capability (not
+  unfinished 0.25 scope) and goes on the post-1.0 product list — but the send/pace/timestamp
+  stack itself ships complete in 0.25.
 
-## Phase R — Release → community test
-All gates green (incl. miri/fuzz/loom + perf regression). Version `0.24 → 0.25`; CHANGELOG
-`## 0.25.0`; `docs/MIGRATING_0.24_TO_0.25.md` (subscriptions, `on_async` effects, dispatcher).
-`cargo publish`; tag `0.25.0`; delete this plan. **Open the community-test window** — the exit
-criteria for 1.0 are validation, not features.
+## Phase R — Release prep (W6)
+All gates green (clippy/fmt/doc -D warnings, miri, fuzz, dhat Δ0, `monitor_send`, perf
+regression gate). Version `0.24 → 0.25`; CHANGELOG `## 0.25.0` (with an explicit "what is
+*not* in 0.25 and why" = the genuinely-new post-1.0 product surface, so absence is principled,
+not silent); `docs/MIGRATING_0.24_TO_0.25.md` (subscriptions, `on_async`→`on_effect`,
+dispatcher, the W0 removals). `cargo publish` + tag `0.25.0` are the maintainer's hands-on
+action; everything up to it is prepared. Delete this plan on ship.
 
-## The road to 1.0 (no plan file yet — by design)
-A **stabilization** release gated on: community validation of the new surface (subscriptions,
-`AnyBackend`, effect model, AF_XDP) on real traffic; **removal of the 0.24/0.25 shims**
-(`interface()`, payload-only `on_async`, `on::<E>`); a documented **SemVer-stable surface**; a
-**frozen perf baseline** + real-NIC numbers; `MIGRATING_0.25_TO_1.0.md`. The 1.0 plan is
-written once community feedback is in.
+## The road to 1.0 — a pure *stabilization* tag
+After 0.25 is community-tested on real traffic, 1.0 adds **no features**: it freezes a
+documented **SemVer-stable surface**, freezes a **perf baseline with real-NIC numbers**, and
+ships `MIGRATING_0.25_TO_1.0.md`. The compat shims are **already gone in 0.25** (W0) — 1.0
+inherits a clean surface, it doesn't do the breaking cleanup. The 1.0 plan is written once
+feedback is in. *Genuinely new product surface* (plugin/DSL, Arrow/Parquet, io_uring, file
+extraction, ICS/OT, clustering, reference daemon) is post-1.0 — these are new directions, not
+deferred 0.25 work.
 
 ## Coverage (review §2/§5/§6 finished by 0.24+0.25)
 §2.1 async-Ctx→0.25-B · §2.2 features/non-Linux→0.24-A · §2.3 `Packets`→0.24-A(miri)+B ·

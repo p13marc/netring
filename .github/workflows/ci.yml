@@ -103,11 +103,11 @@ jobs:
       - uses: Swatinem/rust-cache@v2
 
       - name: Build test binaries
-        run: cargo test -p netring --features "integration-tests,tokio,channel,flow,parse,af-xdp" --no-run
+        run: cargo test -p netring --features "integration-tests,tokio,channel,af-xdp" --no-run
 
       - name: Grant CAP_NET_RAW to test binaries
         run: |
-          for bin in $(cargo test -p netring --features "integration-tests,tokio,channel,flow,parse,af-xdp" \
+          for bin in $(cargo test -p netring --features "integration-tests,tokio,channel,af-xdp" \
               --no-run --message-format=json 2>/dev/null \
               | jq -r 'select(.executable != null) | .executable'); do
             if [ -f "$bin" ]; then
@@ -117,7 +117,7 @@ jobs:
           done
 
       - name: Run integration tests
-        run: cargo test -p netring --features "integration-tests,tokio,channel,flow,parse,af-xdp" -- --test-threads=1
+        run: cargo test -p netring --features "integration-tests,tokio,channel,af-xdp" -- --test-threads=1
 
   # ── AF_XDP-on-lo live test (root) ─────────────────────────────────────────
   # The first live AF_XDP validation: loads the built-in redirect-all XDP
@@ -147,6 +147,35 @@ jobs:
         run: |
           bin=$(cargo test -p netring --features "integration-tests,af-xdp,xdp-loader" \
               --test xdp_lo_smoke --no-run --message-format=json 2>/dev/null \
+              | jq -r 'select(.executable != null and (.target.kind[] == "test")) | .executable' \
+              | head -n1)
+          echo "test binary: $bin"
+          test -n "$bin" && test -f "$bin" || { echo "no test binary"; exit 1; }
+          sudo "$bin" --nocapture --test-threads=1
+
+  # ── Monitor live capture on lo (root) ─────────────────────────────────────
+  # The flow-gated Monitor live tests need `flow` (the main integration job
+  # doesn't enable it, so they were dormant). This runs the CI-robust one:
+  # `monitor_lo_kernel_pushdown` generates its own loopback traffic, gracefully
+  # skips without CAP_NET_RAW, and doesn't assume a perfectly quiet `lo`. It's
+  # the live validation of the 0.25 packet tier + S2 kernel prefilter
+  # (previously only pcap-replay + BpfFilter::matches software-tested).
+  # (The brittle multi_capture/fanout-stats suite stays local-only for now.)
+  monitor-live:
+    name: Monitor live (lo, root)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+
+      - name: Build the live monitor test
+        run: cargo test -p netring --features "integration-tests,tokio,channel,flow,parse" --test monitor_lo_kernel_pushdown --no-run
+
+      - name: Run as root
+        run: |
+          bin=$(cargo test -p netring --features "integration-tests,tokio,channel,flow,parse" \
+              --test monitor_lo_kernel_pushdown --no-run --message-format=json 2>/dev/null \
               | jq -r 'select(.executable != null and (.target.kind[] == "test")) | .executable' \
               | head -n1)
           echo "test binary: $bin"

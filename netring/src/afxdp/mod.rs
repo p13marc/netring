@@ -144,6 +144,10 @@ pub struct XdpSocketBuilder {
     busy_poll_us: Option<u32>,
     prefer_busy_poll: Option<bool>,
     busy_poll_budget: Option<u16>,
+    /// 0.25 W4: back the UMEM with hugepages (`MAP_HUGETLB`).
+    hugepages: bool,
+    /// 0.25 W4: bind the UMEM to this NUMA node (`mbind`).
+    numa_node: Option<u32>,
     #[cfg(feature = "xdp-loader")]
     attach_default: bool,
     #[cfg(feature = "xdp-loader")]
@@ -169,6 +173,8 @@ impl Default for XdpSocketBuilder {
             busy_poll_us: None,
             prefer_busy_poll: None,
             busy_poll_budget: None,
+            hugepages: false,
+            numa_node: None,
             #[cfg(feature = "xdp-loader")]
             attach_default: false,
             #[cfg(feature = "xdp-loader")]
@@ -203,6 +209,28 @@ impl XdpSocketBuilder {
     /// Number of UMEM frames. Default: 4096.
     pub fn frame_count(mut self, count: usize) -> Self {
         self.frame_count = count;
+        self
+    }
+
+    /// 0.25 W4: back the UMEM with **hugepages** (`MAP_HUGETLB`, 2 MiB) to cut
+    /// TLB misses on the per-frame DMA path. Default: false.
+    ///
+    /// Requires hugepages reserved on the host
+    /// (`sysctl vm.nr_hugepages` / `hugeadm`). Best-effort: if the hugepage
+    /// mapping fails (none reserved), `build()` falls back to regular pages with
+    /// a `warn` rather than failing. The UMEM region is rounded up to a
+    /// hugepage multiple.
+    pub fn hugepages(mut self, enable: bool) -> Self {
+        self.hugepages = enable;
+        self
+    }
+
+    /// 0.25 W4: bind the UMEM's pages to NUMA `node` (`mbind` / `MPOL_BIND`) —
+    /// set this to the NIC's NUMA node to avoid cross-node DMA + cache traffic.
+    /// Best-effort: a binding failure (single-node host, missing privilege) is
+    /// logged at `warn` and ignored.
+    pub fn numa_node(mut self, node: u32) -> Self {
+        self.numa_node = Some(node);
         self
     }
 
@@ -416,7 +444,14 @@ impl XdpSocketBuilder {
         let ifindex = crate::afpacket::socket::resolve_interface(iface)? as u32;
 
         // 1. Allocate UMEM (MAP_PRIVATE | MAP_ANONYMOUS | MAP_POPULATE)
-        let mut umem = Umem::new(self.frame_size, self.frame_count)?;
+        let mut umem = Umem::new_with_options(
+            self.frame_size,
+            self.frame_count,
+            &umem::UmemOptions {
+                hugepages: self.hugepages,
+                numa_node: self.numa_node,
+            },
+        )?;
 
         // 2. Create AF_XDP socket
         let fd = socket::create_xdp_socket()?;
@@ -554,6 +589,30 @@ impl XdpSocketBuilder {
             bind_flags,
             self.shared_umem_fd,
         )?;
+
+        // 0.25 W4: warn if the kernel fell back to COPY mode. On a fast NIC the
+        // per-frame copy dominates; the operator should know to switch to a
+        // native-XDP driver + DRV_MODE for true zero-copy. Best-effort read.
+        if self.shared_umem_fd == 0 {
+            let mut opts: u32 = 0;
+            let mut len = std::mem::size_of::<u32>() as libc::socklen_t;
+            // SAFETY: getsockopt writes a u32 into `opts`; `len` matches.
+            let rc = unsafe {
+                libc::getsockopt(
+                    fd.as_raw_fd(),
+                    libc::SOL_XDP,
+                    libc::XDP_OPTIONS,
+                    &mut opts as *mut u32 as *mut libc::c_void,
+                    &mut len,
+                )
+            };
+            if rc == 0 && opts & libc::XDP_OPTIONS_ZEROCOPY == 0 {
+                tracing::warn!(
+                    "AF_XDP bound in COPY mode (not zero-copy); for line-rate use a \
+                     native-XDP-capable driver with XdpFlags::DRV_MODE"
+                );
+            }
+        }
 
         #[cfg_attr(not(feature = "xdp-loader"), allow(unused_mut))]
         let mut socket = XdpSocket {

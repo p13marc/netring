@@ -1,14 +1,13 @@
 # Changelog
 
-## 0.25.0 — subscriptions, async effects, performance & TX
+## 0.25.0 — 2026-06-15 — subscriptions, async effects, performance & TX
 
-> **Release-ready on `0.25-dev`** (date stamped at tag/publish time). The
-> complete capability release on the 0.24 keystone: typed 3-tier subscriptions
-> + kernel filter pushdown, async read+effect handlers, perf & scaling (CPU
-> pinning, dispatch-throughput numbers), the symmetric TX stack, the in-Monitor
-> AF_XDP loader, UMEM hugepages/NUMA, and the `netring-exporters` companion
-> crate. Additive over 0.24 (existing code compiles unchanged). Depends on
-> **flowscope 0.16**.
+> The complete capability release on the 0.24 keystone: typed 3-tier
+> subscriptions + kernel filter pushdown, async read+effect handlers, perf &
+> scaling (CPU pinning, dispatch-throughput numbers), the symmetric TX stack,
+> the in-Monitor AF_XDP loader, UMEM hugepages/NUMA, and the `netring-exporters`
+> companion crate. Additive over 0.24 (existing code compiles unchanged).
+> Depends on **flowscope 0.16**.
 
 ### JA4S licensing fix + JA3/JA4 now actually populate
 

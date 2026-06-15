@@ -294,13 +294,16 @@ impl Dispatcher {
 
     /// 0.25-B1: dispatch effect handlers for the typed payload `P`.
     ///
-    /// Two phases, split at the batch boundary's mirror: build every
-    /// handler's future while holding only an **immutable** `&Ctx` (the
-    /// synchronous read), then await each and **apply its [`Effects`]**
-    /// with `&mut Ctx`. The futures are `'static` (they own what they
-    /// `move`d out of `Ctx`), so the `&Ctx` read borrow is released before
-    /// the first `.await` — no `&mut Ctx` (and no `!Send` payload pointer)
-    /// crosses an await, preserving the `Send` run loop.
+    /// Two phases: build every handler's future while holding only an
+    /// **immutable** `&Ctx` + the `*const ()` payload pointer (both confined to
+    /// the build block so neither crosses an `.await`), then await each and
+    /// **apply its [`Effects`]** with `&mut Ctx`. The futures are `'static`
+    /// (they own what they `move`d out of `Ctx`).
+    ///
+    /// `&mut Ctx` IS held across the `.await` in the apply phase (to write the
+    /// effects to the sink). That is `Send`-safe only because every `Ctx` field
+    /// is `Send` — see `effect.rs` for the invariant. What must *not* cross the
+    /// await is the type-erased `*const ()` (it isn't — it's scoped to phase 1).
     ///
     /// [`Effects`]: crate::monitor::effect::Effects
     pub async fn dispatch_effects<P: 'static>(

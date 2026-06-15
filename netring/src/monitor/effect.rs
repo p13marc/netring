@@ -5,9 +5,18 @@
 //! `Ctx<'a>` didn't compose. This module is the redesign (architecture
 //! §5): an async handler that **reads `Ctx` synchronously** and **writes
 //! back via a typed [`Effects`] value** the run loop applies after the
-//! batch — read access (sync, `&Ctx`) and write access (deferred,
-//! `Effects`), never `&mut Ctx` across an `.await`, so the run-loop future
-//! stays `Send`.
+//! batch — read access (sync, `&Ctx`), then I/O, then a deferred write
+//! ([`Effects`]).
+//!
+//! The handler closure never captures `Ctx` (the returned future is `'static`).
+//! The dispatcher's apply phase *does* hold `&mut Ctx` across the `.await` (to
+//! write [`Effects`] back to the sink afterwards) — that is `Send`-safe **only
+//! because every field of [`Ctx`] is `Send`** (notably
+//! `AnomalySink: Send`). The `Send`-ness of the run loop therefore rests on
+//! `Ctx: Send`, *not* on releasing `&mut Ctx` before the await; if a `!Send`
+//! field is ever added to `Ctx`, the effect path stops being `Send` (guarded
+//! by `run_loop_future_is_spawnable` in `tests/monitor_send.rs`, which
+//! registers an `on_effect` handler precisely to keep this honest).
 //!
 //! ```ignore
 //! .on_effect::<FlowStarted<Tcp>>(|evt, ctx| {

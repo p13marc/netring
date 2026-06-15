@@ -1313,10 +1313,11 @@ impl MonitorBuilder {
     /// a deferred, owned description of the writes (anomalies to emit,
     /// …) to apply once the future completes. The run loop awaits the
     /// future, then applies the effects to the sink under a short
-    /// `&mut Ctx` write phase. Because the handler never holds a
-    /// `&mut Ctx` across `.await`, the run-loop future stays `Send`
-    /// (it can be `tokio::spawn`'d), unlike a hypothetical
-    /// `Fn(&mut Ctx) -> Future` shape.
+    /// `&mut Ctx` write phase. The **handler** never captures `Ctx` (its
+    /// future is `'static`); the run-loop future stays `Send` because every
+    /// `Ctx` field is `Send` (see `effect.rs`), unlike a hypothetical
+    /// `Fn(&mut Ctx) -> Future` shape where the user's future would borrow
+    /// `Ctx` across the await.
     ///
     /// Use this when an async body needs to *both* `.await`
     /// (e.g. an enrichment lookup, an async I/O probe) *and* emit an

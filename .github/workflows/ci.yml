@@ -92,6 +92,17 @@ jobs:
       - uses: Swatinem/rust-cache@v2
       - name: Monitor lib tests (flow surface)
         run: cargo test -p netring --features "tokio,channel,flow,parse,http,dns,tls,icmp" --lib
+      # 0.25: the flow-gated *integration* tests that validate the new surface
+      # but open NO live socket (pcap replay / build-time filter checks /
+      # compile-time Send assertions) — these were never run in CI before. They
+      # exercise the B1 effect end-to-end path, all three subscription tiers,
+      # the S2 kernel-prefilter union, and the `Send` run-loop assertion
+      # (incl. the effect path). Cap-free, so they run here, not in the root job.
+      - name: Monitor integration tests (cap-free)
+        run: |
+          cargo test -p netring --features "tokio,channel,flow,parse,pcap,http,dns,tls,ja4plus" \
+            --test monitor_replay --test monitor_kernel_prefilter --test monitor_send \
+            --test monitor_run_until_idle --test monitor_drain_timeout --test monitor_name_in_ctx
 
   # ── Integration tests (need CAP_NET_RAW) ──────────────────────────────────
   test-integration:
@@ -260,6 +271,13 @@ jobs:
         run: |
           cargo +nightly miri test -p netring --lib config::
           cargo +nightly miri test -p netring --lib packet:: -- --skip afpacket
+          # 0.25: the type-erased `*const ()` casts that make the dispatcher /
+          # effect / packet-tier dispatch sound (registry.rs + dispatcher.rs)
+          # live in `monitor::`/`subscription::` — miri them under Tree Borrows.
+          # (These modules need `flow`; their tests are sync, so no tokio rt.)
+          cargo +nightly miri test -p netring --features "tokio,flow,http,dns,tls" --lib monitor::dispatcher
+          cargo +nightly miri test -p netring --features "tokio,flow,http,dns,tls" --lib monitor::registry
+          cargo +nightly miri test -p netring --features "tokio,flow,http,dns,tls" --lib monitor::subscription
 
   # ── cargo-fuzz smoke: BPF compiler + interpreter against adversarial input ─
   fuzz:
@@ -276,3 +294,4 @@ jobs:
         run: |
           cargo +nightly fuzz run bpf_matches -- -runs=200000 -max_total_time=60
           cargo +nightly fuzz run bpf_builder -- -runs=200000 -max_total_time=60
+          cargo +nightly fuzz run expr_parse -- -runs=200000 -max_total_time=60

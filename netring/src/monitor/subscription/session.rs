@@ -107,6 +107,14 @@ impl<P: MessageProtocol> std::fmt::Debug for SessionSubscription<P> {
 
 /// [`FieldSource`] over a parsed session message: L7 fields from the message
 /// (via [`L7Fields`]), 5-tuple from the flow key carried on the [`Ctx`].
+///
+/// **Orientation caveat (same as the flow tier):** the flow key is
+/// bidirectionally canonicalised (`a`/`b` sorted), not wire-directional, so
+/// `src_port`/`src_host` and `dst_port`/`dst_host` map to `a`/`b` as a best
+/// effort and may be swapped relative to the wire. For session/flow filters,
+/// prefer the **either-endpoint** combinators (`port`/`host`) — they're
+/// orientation-independent. (Only the packet tier, which extracts directionally
+/// per frame, has reliable `src_*`/`dst_*`.)
 pub(crate) struct SessionFields<'a, M: L7Fields> {
     pub(crate) key: Option<FlowKey>,
     pub(crate) msg: &'a M,

@@ -60,6 +60,22 @@ pub(crate) fn build_log_record(
     })
 }
 
+/// Wrap a batch of `LogRecord`s in the OTLP `logs` request envelope
+/// (`resourceLogs` → `scopeLogs` → `logRecords`). Pure — unit-tested.
+fn build_envelope(service_name: &str, records: &[Value]) -> Value {
+    json!({
+        "resourceLogs": [{
+            "resource": {
+                "attributes": [kv("service.name", json!(service_name))],
+            },
+            "scopeLogs": [{
+                "scope": { "name": "netring" },
+                "logRecords": records,
+            }],
+        }],
+    })
+}
+
 /// One OTLP key/value attribute, wrapping `value` in the correct OTLP
 /// `AnyValue` variant.
 fn kv(key: &str, value: Value) -> Value {
@@ -115,17 +131,7 @@ impl OtlpAnomalySink {
         if self.batch.is_empty() {
             return Ok(());
         }
-        let envelope = json!({
-            "resourceLogs": [{
-                "resource": {
-                    "attributes": [kv("service.name", json!(self.service_name))],
-                },
-                "scopeLogs": [{
-                    "scope": { "name": "netring" },
-                    "logRecords": self.batch,
-                }],
-            }],
-        });
+        let envelope = build_envelope(&self.service_name, &self.batch);
         self.agent
             .post(&self.endpoint)
             .set("content-type", "application/json")
@@ -201,6 +207,27 @@ mod tests {
                 .iter()
                 .any(|a| a["key"] == "anomaly.rate" && a["value"]["doubleValue"] == 42.0)
         );
+    }
+
+    #[test]
+    fn envelope_nests_records_under_resource_and_scope() {
+        let rec = build_log_record("X", Severity::Info, Timestamp::new(1, 0), None, &[], &[]);
+        let env = build_envelope("my-svc", std::slice::from_ref(&rec));
+        // service.name on the resource.
+        let res_attrs = env["resourceLogs"][0]["resource"]["attributes"]
+            .as_array()
+            .unwrap();
+        assert!(
+            res_attrs
+                .iter()
+                .any(|a| a["key"] == "service.name" && a["value"]["stringValue"] == "my-svc")
+        );
+        // the record under scopeLogs[0].logRecords.
+        let logs = env["resourceLogs"][0]["scopeLogs"][0]["logRecords"]
+            .as_array()
+            .unwrap();
+        assert_eq!(logs.len(), 1);
+        assert_eq!(logs[0]["body"]["stringValue"], "X");
     }
 
     #[test]

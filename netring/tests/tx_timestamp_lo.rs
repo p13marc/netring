@@ -50,3 +50,34 @@ async fn software_tx_timestamp_round_trips_on_lo() {
         "TX timestamp looks wrong: {ts:?}"
     );
 }
+
+/// 0.25 W3: `AsyncInjector::send_stream` transmits every frame from a stream,
+/// paced by a `TxPacer`. Root-gated (opens a TX socket on lo); skips without
+/// CAP_NET_RAW. Asserts the reported sent-count and that pacing actually
+/// throttles (10 frames at 100 pps takes ≳ ~90 ms).
+#[tokio::test]
+async fn send_stream_transmits_all_frames_paced() {
+    use netring::TxPacer;
+
+    let injector = match Injector::open("lo") {
+        Ok(t) => t,
+        Err(_) => return, // no CAP_NET_RAW → skip
+    };
+    let mut tx = AsyncInjector::new(injector).expect("wrap injector");
+
+    let frames = futures::stream::iter((0..10u32).map(|_| vec![0u8; 64]));
+    let start = std::time::Instant::now();
+    let sent = tx
+        .send_stream(frames, Some(TxPacer::packets_per_second(100.0)))
+        .await
+        .expect("send_stream");
+    let elapsed = start.elapsed();
+
+    assert_eq!(sent, 10, "all frames should be sent");
+    // 10 frames at 100 pps: the first is free (burst), the next 9 each wait
+    // ~10 ms → ≳ ~80 ms total. Generous lower bound to avoid flakiness.
+    assert!(
+        elapsed >= Duration::from_millis(50),
+        "pacing should throttle the stream; took {elapsed:?}"
+    );
+}

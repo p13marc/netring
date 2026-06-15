@@ -20,6 +20,7 @@ wrappers.
 |---|---|
 | `capture` | Plain `Capture::open` → batch loop |
 | `inject` | Plain `Injector::open` → `send` |
+| `tx_replay` | `AsyncInjector::send_stream` + `TxPacer` rate pacing + egress `tx_timestamps` (Phase D) |
 | `bridge` | Forward packets between two interfaces sync |
 | `batch_processing` | Walking a `PacketBatch` with sequence-gap detection |
 | `low_latency` | `LowLatency` ring profile + busy-poll |
@@ -127,6 +128,9 @@ runtime) — `Monitor` is `Send` since 0.21.
 | `monitor_sharded_runner` | `ShardedRunner::new(iface, FanoutMode::Cpu, group, N, build)` per-CPU sharding |
 | `monitor_eve_to_filebeat` | `EveSink` (feature `eve-sink`) writing Suricata-format EVE JSON for Filebeat ingest |
 | `monitor_tracing_json` | structured JSON logging of anomalies + telemetry via `tracing-subscriber` (`TracingSink` + `on_capture_stats`) |
+| `monitor_flow_export` | `export_flows` (NDJSON/IPFIX `FlowRecord`s) + `export_active_timeout` interim records for long flows (W1c) |
+| `monitor_resilience` | `BackendErrorPolicy::Reopen` + `catch_handler_panics` — survive a flapping source + a panicking handler (W1e) |
+| `monitor_eve_tls` | Suricata EVE `event_type:"tls"` records via `on_fingerprint` + `EveTlsSink` (W1d) |
 | `monitor_metrics_export` | `MetricsSink` (feature `metrics`) Prometheus counter facade |
 | `monitor_port_scan` | `pattern_detector!` over `PortScanDetector` (TRW scoring) |
 | `monitor_beacon_detector` | `pattern_detector!` over `BeaconDetector` (period variance) |

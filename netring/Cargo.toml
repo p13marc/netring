@@ -181,6 +181,11 @@ name = "inject"
 path = "examples/basic/inject.rs"
 
 [[example]]
+name = "tx_replay"
+path = "examples/basic/tx_replay.rs"
+required-features = ["tokio"]
+
+[[example]]
 name = "bridge"
 path = "examples/basic/bridge.rs"
 
@@ -492,6 +497,21 @@ required-features = ["tokio", "flow"]
 name = "monitor_tracing_json"
 path = "examples/monitor/tracing_json.rs"
 required-features = ["monitor"]
+
+[[example]]
+name = "monitor_flow_export"
+path = "examples/monitor/flow_export.rs"
+required-features = ["monitor"]
+
+[[example]]
+name = "monitor_resilience"
+path = "examples/monitor/resilience.rs"
+required-features = ["monitor"]
+
+[[example]]
+name = "monitor_eve_tls"
+path = "examples/monitor/eve_tls.rs"
+required-features = ["monitor", "eve-sink"]
 
 [[example]]
 name = "monitor_ja4_fingerprint"

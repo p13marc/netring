@@ -1232,6 +1232,7 @@ dependencies = [
  "netring",
  "rdkafka",
  "serde_json",
+ "tokio",
  "tracing",
  "ureq",
 ]

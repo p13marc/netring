@@ -56,10 +56,13 @@ pub struct FlowRecord {
     pub bytes_responder: u64,
     /// First-seen timestamp.
     pub start: Timestamp,
-    /// Last-seen timestamp (flow end).
+    /// Last-seen timestamp (flow end, or the snapshot time for an ongoing
+    /// active-timeout record).
     pub end: Timestamp,
-    /// Why the flow ended.
-    pub reason: EndReason,
+    /// Why the flow ended, or `None` for an **ongoing** record emitted on the
+    /// active timeout (0.25 W1c) — the flow is still alive and this is a
+    /// periodic interim snapshot, as NetFlow/IPFIX do for long-lived flows.
+    pub reason: Option<EndReason>,
 }
 
 impl FlowRecord {
@@ -75,8 +78,34 @@ impl FlowRecord {
             bytes_responder: stats.bytes_responder,
             start: stats.started,
             end: stats.last_seen,
-            reason,
+            reason: Some(reason),
         }
+    }
+
+    /// Build an **ongoing** interim record for a still-alive flow at the active
+    /// timeout (0.25 W1c). `reason` is `None`; `end` is the snapshot time
+    /// (`stats.last_seen`). Counters are cumulative-to-date, matching how
+    /// NetFlow/IPFIX active-timeout records report long-lived flows.
+    pub(crate) fn from_active(key: &FlowKey, stats: &FlowStats) -> Self {
+        Self {
+            proto: key.proto,
+            a: key.a,
+            b: key.b,
+            packets_initiator: stats.packets_initiator,
+            packets_responder: stats.packets_responder,
+            bytes_initiator: stats.bytes_initiator,
+            bytes_responder: stats.bytes_responder,
+            start: stats.started,
+            end: stats.last_seen,
+            reason: None,
+        }
+    }
+
+    /// Whether this is an ongoing active-timeout snapshot (`reason.is_none()`)
+    /// rather than a final end-of-flow record.
+    #[inline]
+    pub fn is_ongoing(&self) -> bool {
+        self.reason.is_none()
     }
 
     /// Total packets in both directions.
@@ -197,10 +226,23 @@ mod tests {
         assert_eq!(r.b.port(), 80);
         assert_eq!(r.packets_initiator, 10);
         assert_eq!(r.bytes_responder, 12000);
-        assert_eq!(r.reason, EndReason::Fin);
+        assert_eq!(r.reason, Some(EndReason::Fin));
+        assert!(!r.is_ongoing());
         assert_eq!(r.total_packets(), 18);
         assert_eq!(r.total_bytes(), 13500);
         assert_eq!(r.duration(), std::time::Duration::from_millis(2500));
+    }
+
+    #[test]
+    fn from_active_is_ongoing_with_no_reason() {
+        // 0.25 W1c: an interim active-timeout record carries the same counters
+        // but `reason == None` / `is_ongoing()`.
+        let r = FlowRecord::from_active(&key(), &stats());
+        assert!(r.is_ongoing());
+        assert_eq!(r.reason, None);
+        assert_eq!(r.packets_initiator, 10);
+        assert_eq!(r.bytes_responder, 12000);
+        assert_eq!(r.total_packets(), 18);
     }
 
     #[test]

@@ -212,6 +212,10 @@ pub struct Monitor {
     /// [`crate::export::FlowRecord`] for every `FlowEnded` and hands it
     /// to each. Empty (the common case) is zero cost.
     pub(crate) flow_exporters: Vec<Box<dyn crate::export::FlowExporter>>,
+    /// 0.25 W1c: active-timeout period for interim flow-record export. When
+    /// `Some` (and exporters exist), the run loop emits ongoing `FlowRecord`s
+    /// for long-lived flows every period. See [`MonitorBuilder::export_active_timeout`].
+    pub(crate) flow_active_timeout: Option<std::time::Duration>,
     /// 0.25 A1: packet-tier subscriptions. Dispatched inside the zero-copy
     /// drain (before flow tracking) for every captured frame matching the
     /// sub's filter. Empty (the common case) keeps the `track_into`-only
@@ -512,6 +516,8 @@ pub struct MonitorBuilder {
     /// 0.24 Phase D1: flow exporters registered via
     /// [`Self::export_flows`]. Moved into [`Monitor::flow_exporters`].
     flow_exporters: Vec<Box<dyn crate::export::FlowExporter>>,
+    /// 0.25 W1c: active-timeout period set via [`Self::export_active_timeout`].
+    flow_active_timeout: Option<std::time::Duration>,
     /// 0.21 D.1: TypeIds of protocol markers registered via
     /// `.protocol::<P>()`, paired with each marker's stable
     /// `Protocol::NAME` slug. Consulted at `build()` time against
@@ -854,6 +860,26 @@ impl MonitorBuilder {
         E: crate::export::FlowExporter + 'static,
     {
         self.flow_exporters.push(Box::new(exporter));
+        self
+    }
+
+    /// Emit interim [`FlowRecord`](crate::export::FlowRecord)s for **long-lived
+    /// flows** on an active timeout (0.25 W1c) — the NetFlow/IPFIX behaviour
+    /// where a flow alive longer than the active-timeout interval gets periodic
+    /// snapshots, not just one record when it finally ends.
+    ///
+    /// Every `period`, each live flow that has been active for at least
+    /// `period` since its last record gets a `FlowRecord` with
+    /// [`reason`](crate::export::FlowRecord::reason) `= None`
+    /// ([`is_ongoing`](crate::export::FlowRecord::is_ongoing) `== true`)
+    /// dispatched to every registered [`export_flows`](Self::export_flows)
+    /// exporter. The final end-of-flow record (reason `Some(_)`) still fires on
+    /// `FlowEnded` as before. No-op unless at least one exporter is registered.
+    ///
+    /// Counters in interim records are cumulative-to-date (not per-interval
+    /// deltas), matching IPFIX active-timeout semantics.
+    pub fn export_active_timeout(mut self, period: std::time::Duration) -> Self {
+        self.flow_active_timeout = Some(period);
         self
     }
 
@@ -1768,6 +1794,7 @@ impl MonitorBuilder {
             capture_stats: self.capture_stats,
             health: health::HealthState::new(),
             flow_exporters: self.flow_exporters,
+            flow_active_timeout: self.flow_active_timeout,
             packet_subs: self.packet_subs,
             kernel_prefilter,
         })

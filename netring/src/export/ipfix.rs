@@ -86,14 +86,17 @@ const V6_FIELDS: &[(u16, u16)] = &[
     (IE_FLOW_END_REASON, 1),
 ];
 
-/// IE 136 `flowEndReason` value for a netring [`EndReason`].
-fn flow_end_reason(reason: EndReason) -> u8 {
+/// IE 136 `flowEndReason` value for a netring [`FlowRecord::reason`].
+/// `None` (an ongoing active-timeout snapshot) maps to `0x02` (active timeout),
+/// per the IANA flowEndReason registry.
+fn flow_end_reason(reason: Option<EndReason>) -> u8 {
     match reason {
-        EndReason::IdleTimeout => 0x01, // idle timeout
-        EndReason::Fin | EndReason::Rst | EndReason::ParserDone => 0x03, // end of flow detected
-        EndReason::BufferOverflow => 0x05, // lack of resources
+        None => 0x02,                         // active timeout (ongoing record)
+        Some(EndReason::IdleTimeout) => 0x01, // idle timeout
+        Some(EndReason::Fin | EndReason::Rst | EndReason::ParserDone) => 0x03, // end of flow detected
+        Some(EndReason::BufferOverflow) => 0x05,                               // lack of resources
         // Evicted / ParseError / ForceClose / future non_exhaustive → forced end.
-        _ => 0x04,
+        Some(_) => 0x04,
     }
 }
 
@@ -305,10 +308,11 @@ mod tests {
 
     #[test]
     fn end_reason_and_protocol_maps() {
-        assert_eq!(flow_end_reason(EndReason::Fin), 3);
-        assert_eq!(flow_end_reason(EndReason::IdleTimeout), 1);
-        assert_eq!(flow_end_reason(EndReason::BufferOverflow), 5);
-        assert_eq!(flow_end_reason(EndReason::Evicted), 4);
+        assert_eq!(flow_end_reason(Some(EndReason::Fin)), 3);
+        assert_eq!(flow_end_reason(Some(EndReason::IdleTimeout)), 1);
+        assert_eq!(flow_end_reason(Some(EndReason::BufferOverflow)), 5);
+        assert_eq!(flow_end_reason(Some(EndReason::Evicted)), 4);
+        assert_eq!(flow_end_reason(None), 2); // ongoing active-timeout record
         assert_eq!(protocol_number(L4Proto::Tcp), 6);
         assert_eq!(protocol_number(L4Proto::Udp), 17);
     }

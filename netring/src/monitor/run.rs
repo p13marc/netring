@@ -113,6 +113,7 @@ pub(crate) async fn run_loop(monitor: Monitor, stop: StopCondition) -> Result<()
         mut capture_stats,
         health,
         mut flow_exporters,
+        flow_active_timeout,
         packet_subs,
         kernel_prefilter,
     } = monitor;
@@ -235,6 +236,21 @@ pub(crate) async fn run_loop(monitor: Monitor, stop: StopCondition) -> Result<()
             0
         });
 
+    // 0.25 W1c: active-timeout flow export. Armed only when a period is set AND
+    // at least one exporter is registered — otherwise the `Option` is `None`
+    // and the `select!` branch is gated off at zero cost (same pattern as the
+    // tick / telemetry branches). `last_active_export` dedups per flow so a
+    // long-lived flow gets one interim record per active-timeout window.
+    let mut active_export = flow_active_timeout
+        .filter(|_| !flow_exporters.is_empty())
+        .map(|period| {
+            let mut int = tokio::time::interval_at(tokio::time::Instant::now() + period, period);
+            int.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+            (int, period)
+        });
+    let mut last_active_export: std::collections::HashMap<FlowKey, flowscope::Timestamp> =
+        std::collections::HashMap::new();
+
     loop {
         // tokio::select! waits on shutdown, the next packet, OR
         // the next tick. The `if !tick_intervals.is_empty()`
@@ -302,6 +318,20 @@ pub(crate) async fn run_loop(monitor: Monitor, stop: StopCondition) -> Result<()
                         &label_table,
                         &health,
                     )?;
+                }
+                continue;
+            }
+            // 0.25 W1c: active-timeout flow export. Out-of-band like telemetry —
+            // emitting interim flow records is observability, not traffic, so it
+            // must NOT reset the idle timer.
+            _ = next_active_export(&mut active_export), if active_export.is_some() => {
+                if let Some((_, period)) = active_export.as_ref() {
+                    emit_active_flow_records(
+                        &driver,
+                        &mut flow_exporters,
+                        &mut last_active_export,
+                        *period,
+                    );
                 }
                 continue;
             }
@@ -498,6 +528,7 @@ pub(crate) async fn replay_loop(
         capture_stats: _,        // pcap replay has no kernel ring to sample
         health,
         mut flow_exporters,
+        flow_active_timeout: _, // active-timeout export is a live-loop concern
         packet_subs,
         // pcap replay has no kernel filter to set (the source isn't a socket).
         kernel_prefilter: _,
@@ -834,6 +865,57 @@ async fn next_telemetry_sample(interval: &mut Option<tokio::time::Interval>) {
         }
         None => std::future::pending().await,
     }
+}
+
+/// 0.25 W1c: await the next active-timeout export tick. `None` → never fires
+/// (gated off in the `select!`).
+async fn next_active_export(slot: &mut Option<(tokio::time::Interval, Duration)>) {
+    match slot {
+        Some((int, _)) => {
+            int.tick().await;
+        }
+        None => std::future::pending().await,
+    }
+}
+
+/// 0.25 W1c: emit an interim [`crate::export::FlowRecord`] for every live flow
+/// that has been active for at least `period` since its last record, to each
+/// registered exporter. Dedups per flow via `last_export` and prunes ended
+/// flows from that map. Counters are cumulative-to-date (IPFIX active-timeout
+/// semantics). Not on the per-packet hot path — runs once per `period`.
+fn emit_active_flow_records(
+    driver: &flowscope::driver::Driver<FiveTuple>,
+    exporters: &mut [Box<dyn crate::export::FlowExporter>],
+    last_export: &mut std::collections::HashMap<FlowKey, flowscope::Timestamp>,
+    period: Duration,
+) {
+    use crate::export::FlowRecord;
+
+    let now = flowscope::Timestamp::from_system_time(std::time::SystemTime::now());
+    // Snapshot live flows first so the immutable tracker borrow is released
+    // before we take `&mut exporters`. Cloning `FlowStats` per live flow once
+    // per `period` is negligible (not the hot path).
+    let snapshot: Vec<(FlowKey, flowscope::FlowStats)> = driver
+        .tracker()
+        .iter_active()
+        .map(|af| (*af.key, af.stats.clone()))
+        .collect();
+
+    let mut live: std::collections::HashSet<FlowKey> =
+        std::collections::HashSet::with_capacity(snapshot.len());
+    for (key, stats) in &snapshot {
+        live.insert(*key);
+        let last = last_export.get(key).copied().unwrap_or(stats.started);
+        if now.saturating_sub(last) >= period {
+            let rec = FlowRecord::from_active(key, stats);
+            for ex in exporters.iter_mut() {
+                ex.export(&rec);
+            }
+            last_export.insert(*key, now);
+        }
+    }
+    // Drop dedup entries for flows that have since ended.
+    last_export.retain(|k, _| live.contains(k));
 }
 
 /// 0.24 Phase C: read each capture source's cumulative kernel counters,
@@ -1800,4 +1882,77 @@ async fn dispatch_lifecycle_effects(
         _ => {}
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod active_export_tests {
+    use std::sync::{Arc, Mutex};
+    use std::time::Duration;
+
+    use flowscope::driver::Driver;
+    use flowscope::extract::FiveTuple;
+
+    use super::*;
+    use crate::export::{FlowExporter, FlowRecord};
+
+    /// Collects every exported record (`FlowRecord` is `Copy`).
+    struct Collect(Arc<Mutex<Vec<FlowRecord>>>);
+    impl FlowExporter for Collect {
+        fn export(&mut self, r: &FlowRecord) {
+            self.0.lock().unwrap().push(*r);
+        }
+    }
+
+    fn tcp_frame() -> Vec<u8> {
+        use etherparse::PacketBuilder;
+        let b = PacketBuilder::ethernet2([1, 2, 3, 4, 5, 6], [6, 5, 4, 3, 2, 1])
+            .ipv4([10, 0, 0, 1], [10, 0, 0, 2], 64)
+            .tcp(1234, 80, 0, 1024);
+        let mut frame = Vec::new();
+        b.write(&mut frame, &[]).unwrap();
+        frame
+    }
+
+    #[test]
+    fn emit_active_records_one_per_window_with_dedup() {
+        // A live flow whose `started` is far in the past (1970+1000s) so the
+        // active window has trivially elapsed against the wall clock.
+        let mut driver = Driver::builder(FiveTuple::bidirectional()).build();
+        let frame = tcp_frame();
+        let ts = flowscope::Timestamp::from_unix_f64(1000.0);
+        let mut events = Vec::new();
+        driver.track_into(flowscope::PacketView::new(&frame, ts), &mut events);
+        assert!(driver.tracker().flow_count() >= 1, "flow should be tracked");
+
+        let sink = Arc::new(Mutex::new(Vec::new()));
+        let mut exporters: Vec<Box<dyn FlowExporter>> = vec![Box::new(Collect(sink.clone()))];
+        let mut last_export = std::collections::HashMap::new();
+
+        // First sweep: the flow is older than the 1s window -> one ongoing record.
+        emit_active_flow_records(
+            &driver,
+            &mut exporters,
+            &mut last_export,
+            Duration::from_secs(1),
+        );
+        {
+            let recs = sink.lock().unwrap();
+            assert_eq!(recs.len(), 1, "one interim record for the live flow");
+            assert!(recs[0].is_ongoing(), "interim record has reason == None");
+        }
+
+        // Second sweep right after: dedup -- `last_export` was just stamped, so
+        // less than the 1s window has elapsed -> no new record.
+        emit_active_flow_records(
+            &driver,
+            &mut exporters,
+            &mut last_export,
+            Duration::from_secs(1),
+        );
+        assert_eq!(
+            sink.lock().unwrap().len(),
+            1,
+            "dedup: no second record within the active window"
+        );
+    }
 }

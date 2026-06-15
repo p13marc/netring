@@ -62,6 +62,9 @@ pub struct ShardedRunner {
     /// [`Self::merge_state`] / [`Self::state_auto_merge`] /
     /// [`Self::on_merge`]; driven by the merge-worker thread.
     merges: Vec<crate::monitor::merge::MergeSpec>,
+    /// 0.25 C1: pin each shard's OS thread to CPU `shard_index % n_cores`.
+    /// Off by default. See [`Self::pin_cpus`].
+    pin_cpus: bool,
 }
 
 impl ShardedRunner {
@@ -127,7 +130,24 @@ impl ShardedRunner {
             build_shard: Arc::new(build_shard),
             layer_specs: Vec::new(),
             merges: Vec::new(),
+            pin_cpus: false,
         }
+    }
+
+    /// 0.25 C1: pin each shard's OS thread to a dedicated CPU core (shard `i`
+    /// → core `i % num_cores`) via `sched_setaffinity`.
+    ///
+    /// With one shard per core and the kernel steering each flow to a fixed
+    /// shard (`FanoutMode::Cpu`, or a symmetric hash), pinning keeps a flow's
+    /// state, its socket's RX ring, and the worker on the same core — fewer
+    /// cross-core cache bounces and no scheduler migration of the busy capture
+    /// thread. Best paired with `num_shards == num_cores` and IRQ affinity set
+    /// so the NIC queue for core `i` also lands on core `i`.
+    ///
+    /// No-op if affinity can't be set (logged at `warn`); never fails the run.
+    pub fn pin_cpus(mut self, on: bool) -> Self {
+        self.pin_cpus = on;
+        self
     }
 
     /// 0.22 §5.1: periodically fold each shard's `T` state slot into a
@@ -235,6 +255,7 @@ impl ShardedRunner {
     fn run_inner(self, mode: RunMode) -> Result<()> {
         let stop = Arc::new(AtomicBool::new(false));
         let build_shard = self.build_shard;
+        let pin_cpus = self.pin_cpus;
         // 0.22 §5.2: share the layer specs across shard threads; each
         // shard instantiates its own layer instances.
         let layer_specs = Arc::new(self.layer_specs);
@@ -263,6 +284,11 @@ impl ShardedRunner {
             let handle = std::thread::Builder::new()
                 .name(format!("netring-shard-{cpu}"))
                 .spawn(move || -> Result<()> {
+                    // 0.25 C1: pin this shard's thread to its core before doing
+                    // any work, so the runtime + capture ring stay core-local.
+                    if pin_cpus && !pin_current_thread_to_core(cpu) {
+                        tracing::warn!(shard = cpu, "could not set CPU affinity for shard");
+                    }
                     // Each shard owns a current_thread tokio runtime.
                     let rt = tokio::runtime::Builder::new_current_thread()
                         .enable_all()
@@ -351,6 +377,26 @@ enum RunMode {
     Signal,
 }
 
+/// 0.25 C1: pin the calling OS thread to a single CPU core via
+/// `sched_setaffinity`. `index` is taken modulo the number of online cores, so
+/// `num_shards > cores` wraps instead of failing. Returns `false` if the
+/// syscall fails (e.g. a restricted cgroup cpuset) — callers treat that as a
+/// best-effort no-op.
+fn pin_current_thread_to_core(index: usize) -> bool {
+    let n = std::thread::available_parallelism()
+        .map(|n| n.get())
+        .unwrap_or(1)
+        .max(1);
+    let core = index % n;
+    // SAFETY: `cpu_set_t` is a POD bitmask; we zero it, set exactly one bit, and
+    // pass its byte size. pid `0` targets the calling thread only.
+    unsafe {
+        let mut set: libc::cpu_set_t = std::mem::zeroed();
+        libc::CPU_SET(core, &mut set);
+        libc::sched_setaffinity(0, std::mem::size_of::<libc::cpu_set_t>(), &set) == 0
+    }
+}
+
 impl std::fmt::Debug for ShardedRunner {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("ShardedRunner")
@@ -358,6 +404,45 @@ impl std::fmt::Debug for ShardedRunner {
             .field("mode", &self.mode)
             .field("group_id", &self.group_id)
             .field("num_shards", &self.num_shards)
+            .field("pin_cpus", &self.pin_cpus)
             .finish()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    /// 0.25 C1: pinning the current thread restricts its affinity to a single
+    /// core. Cap-free — `sched_setaffinity` on the calling thread needs no
+    /// privileges. Restores all-core affinity afterwards so it doesn't pin the
+    /// test runner.
+    #[test]
+    fn pin_current_thread_sets_single_core_affinity() {
+        let n = std::thread::available_parallelism()
+            .map(|n| n.get())
+            .unwrap_or(1);
+        if n < 2 {
+            return; // single visible core → trivially "pinned"
+        }
+        if !super::pin_current_thread_to_core(0) {
+            return; // restricted cpuset (e.g. locked-down CI) → skip
+        }
+        // SAFETY: same POD-bitmask contract as the helper; pid 0 = this thread.
+        unsafe {
+            let mut got: libc::cpu_set_t = std::mem::zeroed();
+            let r = libc::sched_getaffinity(0, std::mem::size_of::<libc::cpu_set_t>(), &mut got);
+            assert_eq!(r, 0, "sched_getaffinity failed");
+            assert!(libc::CPU_ISSET(0, &got), "core 0 should be set");
+            assert_eq!(
+                libc::CPU_COUNT(&got),
+                1,
+                "affinity should be pinned to exactly one core"
+            );
+            // Restore affinity to all cores so the test thread isn't left pinned.
+            let mut all: libc::cpu_set_t = std::mem::zeroed();
+            for c in 0..n {
+                libc::CPU_SET(c, &mut all);
+            }
+            libc::sched_setaffinity(0, std::mem::size_of::<libc::cpu_set_t>(), &all);
+        }
     }
 }

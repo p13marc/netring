@@ -72,6 +72,8 @@ etherparse = "0.16"
 core_affinity = "0.8"
 futures = "0.3"
 proptest = "1"
+# 0.25 W1f: structured JSON logging example (monitor/tracing_json).
+tracing-subscriber = { version = "0.3", features = ["json", "env-filter"] }
 
 # ── Feature graph ───────────────────────────────────────────────────────────
 # Features are organized as ORTHOGONAL AXES. See `docs/FEATURES.md` for the
@@ -485,6 +487,11 @@ required-features = ["tokio", "flow"]
 name = "monitor_health_endpoint"
 path = "examples/monitor/health_endpoint.rs"
 required-features = ["tokio", "flow"]
+
+[[example]]
+name = "monitor_tracing_json"
+path = "examples/monitor/tracing_json.rs"
+required-features = ["monitor"]
 
 [[example]]
 name = "monitor_ja4_fingerprint"

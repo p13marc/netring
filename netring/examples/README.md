@@ -126,6 +126,7 @@ runtime) — `Monitor` is `Send` since 0.21.
 | `monitor_pcap_replay` | `pcap_source(path) + pcap_speed_factor(f) + replay()` offline pipeline |
 | `monitor_sharded_runner` | `ShardedRunner::new(iface, FanoutMode::Cpu, group, N, build)` per-CPU sharding |
 | `monitor_eve_to_filebeat` | `EveSink` (feature `eve-sink`) writing Suricata-format EVE JSON for Filebeat ingest |
+| `monitor_tracing_json` | structured JSON logging of anomalies + telemetry via `tracing-subscriber` (`TracingSink` + `on_capture_stats`) |
 | `monitor_metrics_export` | `MetricsSink` (feature `metrics`) Prometheus counter facade |
 | `monitor_port_scan` | `pattern_detector!` over `PortScanDetector` (TRW scoring) |
 | `monitor_beacon_detector` | `pattern_detector!` over `BeaconDetector` (period variance) |

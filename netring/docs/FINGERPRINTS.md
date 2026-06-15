@@ -37,7 +37,6 @@ handshake:
 
 ```rust,no_run
 use netring::prelude::*;
-# fn _ex() -> Result<(), netring::Error> {
 let monitor = Monitor::builder()
     .interface("eth0")
     // auto-registers the TlsHandshake protocol
@@ -48,9 +47,6 @@ let monitor = Monitor::builder()
         Ok(())
     })
     .build()?;
-# let _ = monitor;
-# Ok(())
-# }
 ```
 
 For the lower-level view, `on::<TlsHandshake>(|hs| …)` hands you the full

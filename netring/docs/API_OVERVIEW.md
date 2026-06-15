@@ -36,15 +36,11 @@ let mut cap = Capture::builder()
     .block_timeout_ms(60)
     .ignore_outgoing(true)
     .build()?;
-# Ok::<(), netring::Error>(())
 ```
 
 ### Three reception modes
 
 ```rust,no_run
-# use netring::Capture;
-# use std::time::Duration;
-# let mut cap = Capture::open("eth0")?;
 // 1. Flat iterator (zero-copy, blocks indefinitely)
 for pkt in cap.packets().take(1000) {
     let data: &[u8] = pkt.data();        // borrows from ring
@@ -62,16 +58,13 @@ while let Some(batch) = cap.next_batch_blocking(Duration::from_millis(100))? {
     for pkt in &batch { /* ... */ }
     // batch dropped → block returned to kernel
 }
-# Ok::<(), netring::Error>(())
 ```
 
 ### Stats
 
 ```rust,no_run
-# let cap = netring::Capture::open("eth0")?;
 let s = cap.stats()?;             // since last call (resets kernel counters)
 let s2 = cap.cumulative_stats()?; // since open (monotonic)
-# Ok::<(), netring::Error>(())
 ```
 
 ## Injector (TX)
@@ -96,7 +89,6 @@ let _ = tx.frame_capacity();
 let _ = tx.pending_count();
 let _ = tx.available_slots();
 let _ = tx.rejected_slots();
-# Ok::<(), netring::Error>(())
 ```
 
 ## AF_XDP (`af-xdp` feature)
@@ -125,7 +117,6 @@ if let Some(batch) = xdp.next_batch_blocking(Duration::from_millis(100))? {
         println!("{} bytes", pkt.data().len());
     }
 }
-# Ok::<(), netring::Error>(())
 ```
 
 ## Bridge
@@ -139,7 +130,6 @@ let mut bridge = Bridge::builder()
     .build()?;
 
 bridge.run(|_pkt, _dir| BridgeAction::Forward)?;
-# Ok::<(), netring::Error>(())
 ```
 
 Async variant under `tokio` feature:
@@ -153,7 +143,6 @@ bridge.run_async(|_pkt, _dir| BridgeAction::Forward).await?;
 ### `AsyncCapture<S>` — three reception entry points
 
 ```rust,no_run
-# async fn _ex() -> Result<(), netring::Error> {
 use netring::{AsyncCapture, Capture};
 
 let mut cap = AsyncCapture::new(Capture::open("eth0")?)?;
@@ -169,39 +158,32 @@ let batch = cap.try_recv_batch().await?;
 
 // Owned copies — use when the future must be Send (tokio::spawn etc.).
 let packets = cap.recv().await?;
-# Ok(()) }
 ```
 
 ### `PacketStream` — futures-compatible
 
 ```rust,no_run
-# async fn _ex() -> Result<(), netring::Error> {
 use netring::{AsyncCapture, Capture};
 
 let stream = AsyncCapture::new(Capture::open("eth0")?)?.into_stream();
 // Use with `futures::StreamExt::next` or `tokio_stream`.
-# let _ = stream;
-# Ok(()) }
 ```
 
 ### `AsyncInjector` — TX with backpressure
 
 ```rust,no_run
-# async fn _ex() -> Result<(), netring::Error> {
 use netring::{AsyncInjector, Injector};
 
 let mut tx = AsyncInjector::new(Injector::open("eth0")?)?;
 tx.send(&[0xff; 64]).await?;          // awaits POLLOUT if ring is full
 tx.flush().await?;
 tx.wait_drained(std::time::Duration::from_secs(1)).await?;
-# Ok(()) }
 ```
 
 **TX symmetry (0.25 Phase D).** Stream-inject with rate pacing + egress
 timestamps:
 
 ```rust,no_run
-# async fn _ex() -> Result<(), netring::Error> {
 use netring::{AsyncInjector, Injector, TxPacer};
 // Egress timestamps via SO_TIMESTAMPING:
 let inj = Injector::builder().interface("eth0").tx_timestamps(true).build()?;
@@ -210,7 +192,6 @@ let frames = futures::stream::iter((0..1000).map(|_| vec![0u8; 64]));
 // Send a stream, paced to 10k pps:
 tx.send_stream(frames, Some(TxPacer::packets_per_second(10_000.0))).await?;
 let _egress_ts = tx.read_tx_timestamp(); // hw-preferred, else software, else None
-# Ok(()) }
 ```
 
 ### `ChannelCapture` (runtime-agnostic)
@@ -222,7 +203,6 @@ let rx = ChannelCapture::spawn("eth0", 4096)?;
 for pkt in &rx {
     println!("{} bytes", pkt.data.len());
 }
-# Ok::<(), netring::Error>(())
 ```
 
 ## Flow & session tracking (`flow` feature)
@@ -501,7 +481,6 @@ All handles implement `AsFd`. Use with `aya`, `libbpf-rs`, etc.:
 use std::os::fd::AsFd;
 let cap = netring::Capture::open("eth0")?;
 let _fd = cap.as_fd();
-# Ok::<(), netring::Error>(())
 ```
 
 For socket-filter attachment, prefer the inherent helpers:

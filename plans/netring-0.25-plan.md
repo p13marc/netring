@@ -209,8 +209,11 @@ examples/tests/docs. (`error.rs`, `monitor/mod.rs`, `monitor/async_handler.rs`.)
   CI-run) + `docs/PERFORMANCE.md` (capture-vs-dispatch split, dhat-Δ0 enforced gate, tuning
   levers, honest real-NIC-pending methodology — no fabricated figures).
 
-**W3 — Phase D TX symmetry:** `AsyncInjector::send_stream`, `TxPacer` token bucket, TX
-hardware timestamping. Full stack, not trimmed.
+**✅ W3 — Phase D TX symmetry (full stack).** `AsyncInjector::send_stream(stream, Option<TxPacer>)`
++ `TxPacer` token bucket (pps/bps, cap-free tested) + TX egress timestamping
+(`InjectorBuilder::tx_timestamps` → `SO_TIMESTAMPING`; `read_tx_timestamp()` reads
+`SCM_TIMESTAMPING` off the error queue, hw-preferred-else-sw). Root-gated `tx_timestamp_lo`
+validates the full enable→send→read path via software TX timestamps on `lo` (CI).
 
 **W4 — B5 AF_XDP UMEM hugepages + NUMA** (`MAP_HUGETLB`/`mbind`, copy-mode warn). Code +
 CI build; numbers HW-gated.

@@ -197,6 +197,22 @@ tx.wait_drained(std::time::Duration::from_secs(1)).await?;
 # Ok(()) }
 ```
 
+**TX symmetry (0.25 Phase D).** Stream-inject with rate pacing + egress
+timestamps:
+
+```rust,no_run
+# async fn _ex() -> Result<(), netring::Error> {
+use netring::{AsyncInjector, Injector, TxPacer};
+// Egress timestamps via SO_TIMESTAMPING:
+let inj = Injector::builder().interface("eth0").tx_timestamps(true).build()?;
+let mut tx = AsyncInjector::new(inj)?;
+let frames = futures::stream::iter((0..1000).map(|_| vec![0u8; 64]));
+// Send a stream, paced to 10k pps:
+tx.send_stream(frames, Some(TxPacer::packets_per_second(10_000.0))).await?;
+let _egress_ts = tx.read_tx_timestamp(); // hw-preferred, else software, else None
+# Ok(()) }
+```
+
 ### `ChannelCapture` (runtime-agnostic)
 
 ```rust,no_run
@@ -308,7 +324,39 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 | `.pcap_source(path)` | Source from offline pcap instead of live capture |
 | `.pcap_speed_factor(f)` | Replay pacing multiplier (1.0 = wire, `f32::INFINITY` = as-fast) |
 | `.drain_timeout(d)` | Graceful drain phase after shutdown signal |
+| `.subscribe(sub)` | **(0.25)** register a typed subscription (`packet()`/`flow::<P>()`/`session::<P>()`) — see below |
+| `.on_effect::<E>(handler)` | **(0.25)** async read+effect: `Fn(&Payload, &Ctx) -> impl Future<Output=Result<Effects>>` |
+| `.export_flows(exporter)` | `FlowRecord` per completed flow (NetFlow/IPFIX/`conn.log` shape) |
+| `.export_active_timeout(period)` | **(0.25)** interim `FlowRecord`s for long-lived flows (active timeout) |
+| `.xdp_interface(s)` / `.xdp_interface_loaded(s)` | AF_XDP source; `_loaded` (feat `xdp-loader`) attaches the built-in redirect program itself |
+| `.backend_error_policy(p)` | `FailFast` / `SkipSource` / **(0.25)** `Reopen` (rebuild a failed source in place) |
+| `.catch_handler_panics(b)` | **(0.25)** convert sync-handler panics to `Error::HandlerPanic` (route via `HandlerErrorPolicy`) |
 | `.build()` | Validate + freeze into a `Monitor` |
+
+### Subscriptions (0.25)
+
+The typed front door. Three tiers, each with per-subscription filters that split
+into a kernel conjunction (BPF-pushable) + a userspace remainder; `.expr("…")`
+parses a runtime filter string into the same `Predicate` AST.
+
+```rust,ignore
+use netring::monitor::subscription::{packet, flow, session};
+
+.subscribe(packet().tcp().dst_port(443).to(|view, ctx| Ok(())))   // every matching frame
+.subscribe(flow::<Tcp>().bytes_over(1 << 20).to(|evt, ctx| Ok(())))// once, at flow end
+.subscribe(session::<Tls>().sni_glob("*.bank").to(|msg, ctx| Ok(())))// each parsed L7 msg
+.subscribe(packet().expr("udp and dst port 53")?.to(|view, ctx| Ok(())))
+```
+
+| Tier | Constructor | Handler | Fires |
+|---|---|---|---|
+| packet | `packet()` | `Fn(&PacketView, &mut Ctx)` | every matching frame (pre-tracking) |
+| flow | `flow::<P>()` | `Fn(&FlowEnded<P>, &mut Ctx)` | once per matching flow, at its end |
+| session | `session::<P>()` | `Fn(&P::Message, &mut Ctx)` | each parsed L7 message that matches |
+
+Combinators: packet — `tcp()`/`udp()`/`dst_port()`/`port()`/`host()`; flow —
+`bytes_over()`/`packets_over()`; session — `sni_glob()` (`Tls`) /
+`host_glob()` (`Http`) / `qname_glob()` (`Dns`). All also accept `.expr("…")`.
 
 ### Run modes
 
@@ -414,6 +462,7 @@ runner.run_until_signal().await?;
 | `.frame_size(bytes)` | 2048 | TX frame size |
 | `.frame_count(n)` | 256 | Number of TX frames |
 | `.qdisc_bypass(bool)` | false | Skip qdisc layer |
+| `.tx_timestamps(bool)` | false | **(0.25)** request egress `SO_TIMESTAMPING`; read via `read_tx_timestamp()` |
 
 ### XdpSocketBuilder
 
@@ -425,6 +474,9 @@ runner.run_until_signal().await?;
 | `.frame_count(count)` | 4096 | UMEM frame count |
 | `.mode(mode)` | RxTx | RX/TX/RxTx/Custom split |
 | `.need_wakeup(bool)` | true | `XDP_USE_NEED_WAKEUP` optimization |
+| `.hugepages(bool)` | false | **(0.25)** back the UMEM with `MAP_HUGETLB` (graceful fallback) |
+| `.numa_node(n)` | — | **(0.25)** `mbind` the UMEM to NUMA node `n` (best-effort) |
+| `.with_default_program()` / `.with_program(p)` | — | attach an XDP redirect program (feat `xdp-loader`); `filter_program()` is the table-driven variant |
 
 ## Error handling
 

@@ -16,7 +16,12 @@ All netring documentation lives in this one tree (`netring/docs/`). The repo roo
 - [discoverability.md](discoverability.md) — the Monitor toolkit by use case.
 - [scaling.md](scaling.md) — fan-out capture, `FanoutMode` matrix, anti-patterns.
 - [TUNING_GUIDE.md](TUNING_GUIDE.md) — performance profiles, system tuning.
+- [PERFORMANCE.md](PERFORMANCE.md) — capture-vs-dispatch split, the dispatch-throughput bench, tuning levers, real-NIC methodology (0.25).
 - [TROUBLESHOOTING.md](TROUBLESHOOTING.md) — common errors and fixes.
+
+The **0.25 subscription engine** (`packet()`/`flow::<P>()`/`session::<P>()` +
+`.expr()`) is shown in `examples/monitor/subscriptions.rs`; the heavy OTLP/Kafka
+exporters live in the [`netring-exporters`](../../netring-exporters) crate.
 
 ## Quality / internals
 - [METRICS.md](METRICS.md) — every `netring_*` metric (capture gauges/counters, anomalies) + cardinality notes.
@@ -25,6 +30,7 @@ All netring documentation lives in this one tree (`netring/docs/`). The repo roo
 - [AF_XDP_EVALUATION.md](AF_XDP_EVALUATION.md) — AF_XDP design notes.
 
 ## Migration guides
+- [MIGRATING_0.24_TO_0.25.md](MIGRATING_0.24_TO_0.25.md) — subscriptions, async effects, TX symmetry, exporters crate; the one break (`FlowRecord.reason` → `Option`) + JA4S `ja4plus` gating.
 - [MIGRATING_0.23_TO_0.24.md](MIGRATING_0.23_TO_0.24.md) — telemetry/health, exporters, JA4/JA4S, AF_XDP-in-Monitor (additive).
 - [MIGRATING_0.22_TO_0.23.md](MIGRATING_0.22_TO_0.23.md) — `Send` run-loop future.
 - [MIGRATING_0.21_TO_0.22.md](MIGRATING_0.21_TO_0.22.md) — typed roles, flat `FlowPacket`, ops toolkit.

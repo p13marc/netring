@@ -11,7 +11,7 @@ mostly used as the underlying source for the async wrappers.
 
 ```toml
 [dependencies]
-netring = { version = "0.21", features = ["tokio"] }
+netring = { version = "0.25", features = ["tokio"] }
 ```
 
 ```rust,no_run
@@ -72,7 +72,7 @@ considerations.
 
 ```toml
 [dependencies]
-netring = { version = "0.21", features = ["tokio", "flow"] }
+netring = { version = "0.25", features = ["tokio", "flow"] }
 futures = "0.3"
 ```
 
@@ -115,34 +115,51 @@ cross-protocol correlation), and `pcap` (offline replay).
 The `Monitor::builder()` API is a single fluent surface: typed event
 handlers, a tower-style middleware chain over the anomaly sink, an
 opt-in async escape hatch, `detector!` and `pattern_detector!` macros,
-streaming subscribers, per-CPU sharding, offline pcap replay, and (0.22)
-a high-level operations toolkit — bandwidth-by-app, ICMP-error
+streaming subscribers, per-CPU sharding, offline pcap replay, and a
+high-level operations toolkit — bandwidth-by-app, ICMP-error
 correlation, TCP-reset alerts, custom port labels, and a report stream.
 
 ```toml
 [dependencies]
 # Full app-tier experience (Monitor + all sinks + parsers):
-netring = { version = "0.22", features = ["monitor-quickstart"] }
+netring = { version = "0.25", features = ["monitor-quickstart"] }
 
 # Lean embedded build — pick what you need:
-netring = { version = "0.22", features = ["monitor", "eve-sink", "metrics"] }
+netring = { version = "0.25", features = ["monitor", "eve-sink", "metrics"] }
 ```
 
-> **0.22 is a breaking release.** Typed protocol roles make `on::<Tcp>`
-> and `FlowStarted<Http>` compile errors; `FlowPacket` is now flat
-> (`FlowPacket { proto, … }`); the legacy 0.19 `ProtocolMonitor` /
-> `AnomalyMonitor` / `AnomalyRule` API is removed. See
-> [docs/MIGRATING_0.21_TO_0.22.md](docs/MIGRATING_0.21_TO_0.22.md).
+### Subscriptions (0.25 — the headline)
 
-**Monitor is `Send`** as of 0.21 — plain `#[tokio::main]` (the
-multi-thread runtime) works without ceremony. The
-`Monitor::run_for` / `run_until_signal` *futures* stay `!Send`
-because the underlying `AsyncCapture<S>` borrows from the
-`!Sync` mmap ring across awaits — `tokio::spawn(monitor.run_for(d))`
-won't compile. Keep the run-loop future on the main task and
-use `tokio::select!` (or `ChannelSink` to ship anomalies to a
-spawned consumer task). flowscope's `Driver<E>: Send + Sync`
-is unconditional upstream as of 0.13.
+The 0.25 front door is the **typed subscription engine**: three strongly-typed
+tiers, each with per-subscription filters that split into a kernel conjunction
+(BPF-pushable, so uninteresting traffic is shed before userspace) plus a
+userspace remainder. `.expr("…")` parses a Wireshark-ish filter string into the
+*same* `Predicate` AST. `on::<E>` still works as the natural handler spelling.
+
+```rust,ignore
+use netring::monitor::subscription::{packet, flow, session};
+
+Monitor::builder()
+    .interface("eth0").protocol::<Tcp>().protocol::<Tls>()
+    .subscribe(packet().tcp().dst_port(443).to(|view, ctx| { /* every :443 frame */ Ok(()) }))
+    .subscribe(flow::<Tcp>().bytes_over(1 << 20).to(|evt, ctx| { /* big flows, at end */ Ok(()) }))
+    .subscribe(session::<Tls>().sni_glob("*.bank").to(|msg, ctx| { /* matching TLS */ Ok(()) }))
+    .subscribe(packet().expr("udp and dst port 53")?.to(|view, ctx| { /* runtime string */ Ok(()) }))
+    .build()?;
+```
+
+See `examples/monitor/subscriptions.rs`. 0.25 also adds async **read+effect**
+handlers (`on_effect::<E>(|p, &Ctx| async move { … Effects … })`), active-timeout
+flow export, the in-Monitor AF_XDP loader (`xdp_interface_loaded`), resilience
+knobs (`BackendErrorPolicy::Reopen`, `catch_handler_panics`), CPU pinning, a
+symmetric **TX** stack (`send_stream` + `TxPacer` + egress timestamps), and the
+[`netring-exporters`](../netring-exporters) companion crate (OTLP + Kafka). See
+[CHANGELOG.md](../CHANGELOG.md) and
+[docs/MIGRATING_0.24_TO_0.25.md](docs/MIGRATING_0.24_TO_0.25.md).
+
+**Monitor is `Send`** (since 0.21) and its **run-loop future is `Send + 'static`**
+(since 0.23) — so `tokio::spawn(monitor.run_for(d))` works on the default
+multi-thread runtime. flowscope's `Driver<E>: Send + Sync` is unconditional.
 
 ```rust,ignore
 use std::time::Duration;

@@ -723,6 +723,35 @@ just ci-full         # setcap + full test suite
 
 ## Key Files
 
+### 0.25 additions (subscriptions, effects, TX, exporters)
+
+- `src/monitor/subscription/` — the typed subscription engine (Phase A):
+  `builder.rs` (`packet()`/`flow::<P>()`/`session::<P>()` + combinators + `.to()`),
+  `predicate.rs` (the `Predicate` AST + `kernel_approx` split), `expr.rs`
+  (dep-free `.expr()` recursive-descent parser), `kernel_filter.rs`
+  (`{class,dispatch}_interest`), `packet.rs`/`flow.rs`/`session.rs` (tier subs).
+- `src/monitor/effect.rs` — async read+effect handlers (`on_effect`, `Effects`).
+- `src/monitor/run.rs` — `open_backend`/`BackendSpec` (Reopen), `open_xdp_backend`
+  (in-Monitor loader), `emit_active_flow_records` (active-timeout export).
+- `src/monitor/mod.rs` — `kernel_prefilter` (S2 fail-open union),
+  `XdpIfaceSpec`, `export_active_timeout`, `catch_handler_panics`,
+  `xdp_interface_loaded`.
+- `src/monitor/shard.rs` — `pin_cpus` (`sched_setaffinity`).
+- `src/afxdp/umem.rs` — `UmemOptions` (hugepages `MAP_HUGETLB` + NUMA `mbind`).
+- `src/afxdp/loader/programs/filter_redirect.bpf.{c,o}` — table-driven
+  `{proto,port}`-map XDP program + `filter_program()`/`set_filter`. NOTE both
+  vendored `.o`s load via `aya::include_bytes_aligned!` (alignment is
+  load-critical under feature unification — see `default_program.rs`).
+- `src/async_adapters/tokio_injector.rs` — `send_stream` + `TxPacer` +
+  `read_tx_timestamp` (Phase D TX). `InjectorBuilder::tx_timestamps`
+  (`src/afpacket/tx.rs`).
+- `src/export/mod.rs` — `FlowRecord.reason: Option<EndReason>` (active-timeout).
+- `src/anomaly/eve_sink.rs` — `EveTlsSink`/`eve_tls_record` (`event_type:"tls"`).
+- **`../netring-exporters/`** — companion workspace crate: `OtlpAnomalySink`
+  (feature `otlp`, ureq) + `KafkaSink` (feature `kafka`, rdkafka). Both impl
+  netring's `AnomalySink`. Heavy deps kept out of core.
+- `benches/dispatch_throughput.rs` — cap-free userspace pps proxy (`docs/PERFORMANCE.md`).
+
 - `SPEC.md` — Complete specification (source of truth for design)
 - `docs/` — Architecture, API overview, tuning guide, troubleshooting
 - `src/capture.rs` — High-level Capture + CaptureBuilder
@@ -922,25 +951,27 @@ Cargo features unique to 0.21:
 
 ## Pre-publish checklist
 
-For the `0.22.0` `cargo publish` (in progress on `0.22-dev`):
+For the `0.25.0` `cargo publish` (release-ready on `0.25-dev`; all CI green).
+flowscope `0.16` is already published, so there's no upstream-first step or
+`[patch.crates-io]` to remove — the registry resolves it.
 
-1. **Publish flowscope `0.14.1` to crates.io first** (the ICMP
-   datagram-routing fix `on_icmp_error` needs), then **remove the
-   `[patch.crates-io] flowscope = { path = "../flowscope" }`** from the
-   workspace `Cargo.toml` and confirm `flowscope = "0.14.1"` resolves
-   from the registry.
-2. Verify `netring/Cargo.toml`'s `flowscope` dep is `0.14.1`
-   (default features false; same feature selectors as today).
-3. Bump `netring/Cargo.toml` `version` `0.21.0` → `0.22.0`.
-4. Refresh the `## 0.22.0` CHANGELOG entry date header on tag day; flip
-   the "Implementation Status" above to "released".
-5. `cargo publish -p netring --dry-run` to verify the package contents.
-6. `cargo publish -p netring`.
-7. `git tag 0.22.0` (no `v` prefix, per the user's convention).
-8. Delete `plans/netring-0.22-plan.md` (delete-on-ship convention).
+1. Confirm `netring/Cargo.toml` is `version = "0.25.0"` (done) and
+   `flowscope = "0.16"` (done); the `## 0.25.0` CHANGELOG banner is finalized
+   (done) — stamp the date header on tag day and flip "Implementation Status"
+   above to "released".
+2. `cargo publish -p netring --dry-run` to verify the package contents.
+3. `cargo publish -p netring`.
+4. **Then** publish the companion crate: `cargo publish -p netring-exporters`
+   (it depends on `netring = "0.25"`, so netring must be on crates.io first).
+   Its `kafka` feature needs `cmake`/librdkafka available at *its* build time,
+   not at publish time.
+5. `git tag 0.25.0` (no `v` prefix, per the user's convention).
+6. Delete `plans/netring-0.25-plan.md` (delete-on-ship convention).
 
-Run `just doc` (now `RUSTDOCFLAGS="-D warnings"`) + `just ci` before
-publish — the CI doc job fails on broken intra-doc links.
+Run `just doc` (`RUSTDOCFLAGS="-D warnings"`) + `just ci` before publish — the
+CI doc job fails on broken intra-doc links. (Earlier-version notes: 0.22 needed
+flowscope 0.14.1 published first + a `[patch.crates-io]` removal; no longer
+applicable.)
 
 **Known operator gotcha**: on at least one dev machine
 `~/.cargo/credentials.toml` is an empty root-owned directory (likely

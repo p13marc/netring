@@ -152,11 +152,14 @@ jobs:
           ip link show lo
 
       - name: Build the AF_XDP smoke test
-        run: cargo test -p netring --features "integration-tests,af-xdp,xdp-loader" --test xdp_lo_smoke --no-run
+        # flow,tokio,monitor enable the W1a in-Monitor loader test
+        # (monitor_xdp_interface_loaded_captures_loopback_flows) alongside the
+        # bare-socket smoke test.
+        run: cargo test -p netring --features "integration-tests,af-xdp,xdp-loader,flow,tokio,monitor" --test xdp_lo_smoke --no-run
 
       - name: Run as root
         run: |
-          bin=$(cargo test -p netring --features "integration-tests,af-xdp,xdp-loader" \
+          bin=$(cargo test -p netring --features "integration-tests,af-xdp,xdp-loader,flow,tokio,monitor" \
               --test xdp_lo_smoke --no-run --message-format=json 2>/dev/null \
               | jq -r 'select(.executable != null and (.target.kind[] == "test")) | .executable' \
               | head -n1)

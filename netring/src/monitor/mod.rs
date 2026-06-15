@@ -90,6 +90,26 @@ pub(crate) mod merge;
 pub mod bandwidth;
 pub use bandwidth::{BandwidthEntry, BandwidthReport, BandwidthSnapshot};
 
+/// How an AF_XDP capture interface obtains its redirect program (0.25 W1a).
+///
+/// A bare AF_XDP socket receives no packets until an XDP program redirects
+/// traffic into its XSKMAP. `self_load` distinguishes the two ways a Monitor
+/// gets one:
+/// - `false` ([`MonitorBuilder::xdp_interface`]): the caller attaches a
+///   redirect program out of band; the Monitor opens a plain socket.
+/// - `true` ([`MonitorBuilder::xdp_interface_loaded`], requires `xdp-loader`):
+///   the Monitor itself attaches the built-in redirect-all program and
+///   registers the socket on its XSKMAP, so no external loader is needed.
+#[cfg(feature = "af-xdp")]
+#[derive(Clone, Debug)]
+pub(crate) struct XdpIfaceSpec {
+    pub(crate) iface: String,
+    /// Only consulted on the `xdp-loader` path (the run loop's
+    /// `open_xdp_backend`); without that feature it's always `false` and unread.
+    #[cfg_attr(not(feature = "xdp-loader"), allow(dead_code))]
+    pub(crate) self_load: bool,
+}
+
 /// The 0.20 top-level monitor — a fully-constructed graph of
 /// (driver, dispatcher, parser-slots, state) that runs to a
 /// stop condition.
@@ -104,7 +124,7 @@ pub struct Monitor {
     /// loop opens an `AnyBackend::Xdp` for each, alongside the AF_PACKET
     /// `interfaces`. See [`MonitorBuilder::xdp_interface`].
     #[cfg(feature = "af-xdp")]
-    pub(crate) xdp_interfaces: Vec<String>,
+    pub(crate) xdp_interfaces: Vec<XdpIfaceSpec>,
     pub(crate) driver: Driver<FiveTuple>,
     pub(crate) dispatcher: Dispatcher,
     pub(crate) protocol_slots: Vec<Box<dyn ProtocolSlot>>,
@@ -450,7 +470,7 @@ pub struct MonitorBuilder {
     interfaces: Vec<String>,
     /// 0.24 Phase B: AF_XDP capture interfaces. See [`Self::xdp_interface`].
     #[cfg(feature = "af-xdp")]
-    xdp_interfaces: Vec<String>,
+    xdp_interfaces: Vec<XdpIfaceSpec>,
     driver_builder: Option<DriverBuilder<FiveTuple>>,
     protocol_slots: Vec<Box<dyn ProtocolSlot>>,
     handlers: HandlerRegistry,
@@ -606,11 +626,37 @@ impl MonitorBuilder {
     /// [`XdpSocketBuilder::with_default_program`](crate::XdpSocketBuilder)
     /// (feature `xdp-loader`) and attach it out of band, or run a custom
     /// loader. A bare `xdp_interface` with no program bound sees no
-    /// traffic. Full in-Monitor loader integration is tracked for a
-    /// follow-up; this is the API seam that lets AF_XDP reach the Monitor.
+    /// traffic — use [`Self::xdp_interface_loaded`] (feature `xdp-loader`)
+    /// to have the Monitor attach the built-in redirect program for you.
     #[cfg(feature = "af-xdp")]
     pub fn xdp_interface(mut self, iface: impl Into<String>) -> Self {
-        self.xdp_interfaces.push(iface.into());
+        self.xdp_interfaces.push(XdpIfaceSpec {
+            iface: iface.into(),
+            self_load: false,
+        });
+        self
+    }
+
+    /// 0.25 W1a: add an **AF_XDP** capture interface and have the Monitor
+    /// **load + attach the built-in redirect-all XDP program** itself
+    /// (feature `xdp-loader`).
+    ///
+    /// Unlike [`Self::xdp_interface`] (which needs an externally-attached
+    /// redirect program), this is the one-call AF_XDP recipe: on run, the
+    /// Monitor builds the socket via
+    /// [`XdpSocketBuilder::with_default_program`](crate::XdpSocketBuilder),
+    /// which attaches the vendored `redirect_all` program in `SKB_MODE` (works
+    /// on `lo` and unprivileged interfaces) and registers the socket on the
+    /// program's XSKMAP. The attachment is RAII-tied to the socket and detaches
+    /// when the Monitor's run loop ends. For native-driver zero-copy on a real
+    /// NIC, build the socket yourself with `.xdp_attach_flags(XdpFlags::DRV_MODE)`
+    /// and use [`Self::xdp_interface`].
+    #[cfg(all(feature = "af-xdp", feature = "xdp-loader"))]
+    pub fn xdp_interface_loaded(mut self, iface: impl Into<String>) -> Self {
+        self.xdp_interfaces.push(XdpIfaceSpec {
+            iface: iface.into(),
+            self_load: true,
+        });
         self
     }
 

@@ -63,6 +63,27 @@ pub(crate) enum StopCondition {
     Idle(Duration),
 }
 
+/// Open the AF_XDP backend for one capture interface (0.25 W1a).
+///
+/// A bare spec (`self_load = false`) opens a plain socket and relies on an
+/// externally-attached redirect program. A self-loading spec (requires
+/// `xdp-loader`) builds the socket through [`crate::XdpSocketBuilder`] with the
+/// built-in redirect-all program attached in `SKB_MODE` + the socket registered
+/// on its XSKMAP, so it captures with no external loader.
+#[cfg(feature = "af-xdp")]
+fn open_xdp_backend(spec: &crate::monitor::XdpIfaceSpec) -> Result<crate::AsyncXdpSocket> {
+    #[cfg(feature = "xdp-loader")]
+    if spec.self_load {
+        let socket = crate::XdpSocketBuilder::default()
+            .interface(&spec.iface)
+            .mode(crate::XdpMode::Rx)
+            .with_default_program()
+            .build()?;
+        return crate::AsyncXdpSocket::new(socket);
+    }
+    crate::AsyncXdpSocket::open(&spec.iface)
+}
+
 pub(crate) async fn run_loop(monitor: Monitor, stop: StopCondition) -> Result<()> {
     let Monitor {
         interfaces,
@@ -152,10 +173,13 @@ pub(crate) async fn run_loop(monitor: Monitor, stop: StopCondition) -> Result<()
         caps.push(AnyBackend::AfPacket(cap));
     }
     // 0.24 Phase B: AF_XDP backends (in builder-registration order, after the
-    // AF_PACKET ones). Needs an attached XDP redirect program to see traffic.
+    // AF_PACKET ones). A bare `xdp_interface` needs an externally-attached XDP
+    // redirect program to see traffic; an `xdp_interface_loaded` (0.25 W1a,
+    // feature `xdp-loader`) has the Monitor attach the built-in redirect-all
+    // program + register the socket on its XSKMAP here.
     #[cfg(feature = "af-xdp")]
-    for iface in &xdp_interfaces {
-        let xdp = crate::AsyncXdpSocket::open(iface)?;
+    for spec in &xdp_interfaces {
+        let xdp = open_xdp_backend(spec)?;
         caps.push(AnyBackend::Xdp(xdp));
     }
     // 0.24 Phase C4: all sockets are open and the loop is about to run —

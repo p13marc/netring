@@ -330,9 +330,20 @@ impl XdpSocketBuilder {
         self
     }
 
-    /// If `true`, attach with `XDP_FLAGS_REPLACE` so an existing
-    /// program on the interface is replaced. Default: false (build
-    /// fails with `EBUSY` if a program is already attached).
+    /// Request replacement of an existing XDP program on the interface.
+    ///
+    /// **Kernel ≥ 5.9 caveat:** netring (via aya) attaches through the
+    /// `bpf_link_create` link API, which does **not** support
+    /// `XDP_FLAGS_REPLACE` — that flag is only honoured by the legacy netlink
+    /// attach path. So on modern kernels atomic replacement of a *foreign*
+    /// incumbent program is not reachable here. Setting this flag therefore no
+    /// longer forces a replace; instead it makes a failed attach return an
+    /// actionable [`Error::Loader`] explaining how to clear the incumbent
+    /// (`ip link set dev <iface> xdp off`). (Previously this OR'd in
+    /// `XDP_FLAGS_REPLACE` and crashed with `EINVAL`.)
+    ///
+    /// Default: false (build fails with the raw attach error if a program is
+    /// already attached).
     #[cfg(feature = "xdp-loader")]
     pub fn force_replace(mut self, force: bool) -> Self {
         self.force_replace = force;
@@ -571,16 +582,31 @@ impl XdpSocketBuilder {
             };
             if let Some(mut prog) = prog {
                 let iface = self.interface.as_deref().unwrap_or("");
-                let flags = if self.force_replace {
-                    self.attach_flags | loader::XdpFlags::REPLACE
-                } else {
-                    self.attach_flags
-                };
+                // NOTE: `XDP_FLAGS_REPLACE` is **not** OR'd in here even when
+                // `force_replace` is set. On kernels ≥ 5.9 aya attaches via
+                // `bpf_link_create`, which rejects `XDP_FLAGS_REPLACE` (that flag
+                // is only honoured by the legacy netlink `IFLA_XDP_FLAGS` path).
+                // Passing it caused `EINVAL` ("bpf_link_create failed"). Atomic
+                // replacement of a *foreign* incumbent program isn't reachable
+                // through the link API, so `force_replace` now only enriches the
+                // attach error with a remediation hint (see below).
+                let flags = self.attach_flags;
                 // Register *before* attach: the kernel program reads
                 // map[queue_id] on the very first packet, so any race
                 // in the other order risks dropping the first batch.
                 prog.register(self.queue_id, &socket)?;
-                let attachment = prog.attach(iface, flags)?;
+                let attachment = prog.attach(iface, flags).map_err(|e| {
+                    if self.force_replace {
+                        Error::Loader(format!(
+                            "XDP attach to '{iface}' failed and atomic replacement of an \
+                             existing program is not supported through the link API on this \
+                             kernel (≥ 5.9). Remove the incumbent first \
+                             (`ip link set dev {iface} xdp off`), then retry. Underlying: {e}"
+                        ))
+                    } else {
+                        e
+                    }
+                })?;
                 socket._xdp_attachment = Some(attachment);
             }
         }

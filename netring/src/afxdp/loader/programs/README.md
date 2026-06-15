@@ -21,17 +21,24 @@ which is rare.
 From this directory:
 
 ```bash
-clang -O2 -target bpf -c -D__TARGET_ARCH_x86 \
+# -g is REQUIRED: it emits BTF (.BTF/.BTF.ext). The `.maps` BTF-style map
+# definition can only be parsed by libbpf/aya from BTF, so a BTF-less object
+# fails to load at runtime with "no BTF parsed for object" (aya >= 0.13).
+clang -O2 -g -target bpf -c -D__TARGET_ARCH_x86 \
     redirect_all.bpf.c -o redirect_all.bpf.o
+# Strip DWARF but KEEP BTF (.BTF/.BTF.ext are not .debug_* sections):
+llvm-strip -g redirect_all.bpf.o
 ```
 
-This produces a ~1 KB ELF object containing:
+This produces a ~2.3 KB ELF object containing:
 
-- `xdp` section: the 5-instruction program.
+- `xdp` section: the redirect program.
 - `.maps` section: the XSKMAP definition (`max_entries = 256`).
+- `.BTF` / `.BTF.ext`: type info for the map definition (**load-critical**).
 - `license` section: `"GPL"` (required for the redirect helper).
 
-Verify with `readelf -h redirect_all.bpf.o` (`Machine: Linux BPF`).
+Verify with `readelf -h redirect_all.bpf.o` (`Machine: Linux BPF`) and
+`readelf -S redirect_all.bpf.o | grep BTF` (must show `.BTF`).
 
 The program is intentionally minimal. If you want filtering or
 classification in XDP, write your own program with `aya-bpf` and

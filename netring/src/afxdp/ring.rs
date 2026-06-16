@@ -192,6 +192,18 @@ impl<T: Copy> XdpRing<T> {
         self.cached_prod.wrapping_sub(self.cached_cons)
     }
 
+    /// Refresh the cached producer index from the kernel and return the number
+    /// of available entries. Unlike [`cached_count`](Self::cached_count) this
+    /// does one `Acquire` load so it can't under-report — a correct
+    /// non-consuming readiness probe (used by the multi-queue
+    /// [`XdpCapture`](crate::xdp::XdpCapture) round-robin, which must decide
+    /// *which* socket to peek without consuming from the others).
+    #[inline]
+    pub(crate) fn refresh_count(&mut self) -> u32 {
+        self.cached_prod = unsafe { &*self.producer }.load(Ordering::Acquire);
+        self.cached_prod.wrapping_sub(self.cached_cons)
+    }
+
     /// Peek up to `max` available entries.
     ///
     /// Returns a [`PeekToken`] carrying the start index and actual count, or

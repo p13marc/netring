@@ -904,6 +904,17 @@ impl XdpSocket {
         self.fd.as_fd()
     }
 
+    /// Fresh (kernel-synced) RX readiness probe for the multi-queue round-robin.
+    ///
+    /// Unlike [`rx_is_empty`](Self::rx_is_empty) (which reads the *cached*
+    /// producer index and so can't be used to *decide* whether to peek), this
+    /// re-loads the kernel producer index, so `XdpCapture` can pick which
+    /// socket to drain without consuming from the others.
+    #[cfg(all(feature = "af-xdp", feature = "xdp-loader"))]
+    pub(crate) fn rx_poll_ready(&mut self) -> bool {
+        self.rx.refresh_count() > 0
+    }
+
     /// Receive packets (non-blocking) as owned copies.
     ///
     /// Returns owned copies of received packets — convenient but allocates

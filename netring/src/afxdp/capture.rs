@@ -372,11 +372,13 @@ mod mq {
             if n == 0 {
                 return None;
             }
-            // Phase 1: pick the next ready queue (immutable borrows, released).
+            // Phase 1: pick the next ready queue using a fresh, kernel-synced
+            // probe (the cached `rx_is_empty` can't be used to *decide* to peek
+            // — it only refreshes inside `consumer_peek`, which we'd be gating).
             let mut target = None;
             for off in 0..n {
                 let i = (self.cursor + off) % n;
-                if !self.sockets[i].rx_is_empty() {
+                if self.sockets[i].rx_poll_ready() {
                     target = Some(i);
                     break;
                 }
@@ -394,7 +396,7 @@ mod mq {
             &mut self,
             timeout: Duration,
         ) -> Result<Option<(u32, XdpBatch<'_>)>, Error> {
-            if self.sockets.iter().any(|s| !s.rx_is_empty()) {
+            if self.sockets.iter_mut().any(|s| s.rx_poll_ready()) {
                 return Ok(self.next_batch());
             }
             let mut pfds: Vec<nix::poll::PollFd> = self

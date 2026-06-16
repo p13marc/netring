@@ -4,6 +4,21 @@
 
 ### Added
 
+- **High-level multi-queue AF_XDP capture** ([#6](https://github.com/p13marc/netring/issues/6)).
+  `netring::xdp::XdpCapture` opens **one socket per RX queue** (the only way to
+  capture a whole multi-queue NIC — RSS spreads traffic across queues, which a
+  single socket can't see even in promiscuous mode), loading one redirect
+  program, registering each socket in its XSKMAP, attaching once, and draining
+  them through a unified round-robin `next_batch()` / `next_batch_blocking()`.
+  Each socket gets its **own UMEM** (the safe default — sharing a UMEM across
+  per-CPU sockets races on the FILL ring). Queue selection via
+  `Queues::{Single, Range, Auto}`; `Auto` auto-detects the RSS queue count with
+  `netring::xdp::queue_count()` (`ETHTOOL_GCHANNELS`) and falls back to queue 0.
+  `into_parts()` hands out the per-queue sockets + a guard for the
+  worker-per-queue model. `XdpSocket::is_zerocopy()` / `XdpCapture::is_zerocopy()`
+  surface the bind mode (was log-only). This is phases M1–M2 of the 0.26 plan;
+  the Monitor `xdp_queues(...)` integration that removes the single-queue
+  under-capture footgun and an async wrapper follow.
 - **Promiscuous mode for AF_XDP** ([#4](https://github.com/p13marc/netring/issues/4)).
   `XdpSocketBuilder::promiscuous(bool)` (per-socket) and a backend-agnostic
   `MonitorBuilder::promiscuous(bool)` (monitor-wide; applies to both AF_PACKET

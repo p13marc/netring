@@ -776,7 +776,12 @@ just ci-full         # setcap + full test suite
   (monitor-wide, both backends; threaded through `open_backend`/`open_xdp_backend`)
 - `src/afpacket/ffi.rs` — libc re-exports + supplemental constants
 - `src/afpacket/fanout.rs` — `PACKET_FANOUT` plumbing (Hash/CPU/QM/EBPF/LB)
-- `src/afxdp/mod.rs` — XdpSocket + XdpSocketBuilder (AF_XDP public API)
+- `src/afxdp/mod.rs` — XdpSocket + XdpSocketBuilder (AF_XDP public API);
+  `is_zerocopy()` (issue #6 F2)
+- `src/afxdp/capture.rs` — **`XdpCapture`** high-level multi-queue capture (issue
+  #6): `Queues` + `queue_count()` (ETHTOOL_GCHANNELS) + one-socket-per-queue +
+  unified round-robin `next_batch`. Re-exported at `netring::xdp::*`. M1+M2 of
+  `plans/netring-0.26-afxdp-capture-plan.md`; Monitor `xdp_queues` + async wrapper still to come.
 - `src/afxdp/ffi.rs` — libc re-exports for XDP constants/structs
 - `src/afxdp/socket.rs` — AF_XDP socket/setsockopt/bind wrappers
 - `src/afxdp/umem.rs` — UMEM mmap + frame allocator

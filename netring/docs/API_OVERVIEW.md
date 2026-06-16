@@ -465,8 +465,41 @@ runner.run_until_signal().await?;
 > capture everything on the wire. Two gotchas: `PACKET_MR_PROMISC` does not set
 > the user-visible `IFF_PROMISC` flag (`ip link` won't show `PROMISC`, but the
 > interface *is* promiscuous), and on a multi-queue NIC one XSK still only sees
-> its bound queue's RSS share — force a single queue
-> (`ethtool -L <iface> combined 1`) or open one socket per queue for full capture.
+> its bound queue's RSS share — for full capture use `XdpCapture` (below) or
+> force a single queue (`ethtool -L <iface> combined 1`).
+
+### XdpCapture — full-NIC multi-queue capture (issue #6, feature `xdp-loader`)
+
+`XdpSocket` binds a single queue; `netring::xdp::XdpCapture` opens **one socket
+per RX queue** and drains them through a unified round-robin — the right entry
+point for real-NIC AF_XDP capture.
+
+```rust
+use netring::xdp::{XdpCapture, Queues};
+
+let mut cap = XdpCapture::builder()
+    .interface("eth0")
+    .queues(Queues::Auto)        // all RSS queues (ethtool); or ::range(0..4) / ::single(0)
+    .promiscuous(true)           // one interface-global guard for every queue
+    .build()?;
+while let Some((queue_id, batch)) = cap.next_batch_blocking(timeout)? {
+    for pkt in &batch { /* … */ }
+}
+// or: let (sockets, _guard) = cap.into_parts();  // one socket per worker thread
+```
+
+| Method | Description |
+|--------|-------------|
+| `XdpCapture::open(iface)` | all RSS queues + promiscuous, one call |
+| `.builder()…build()` | full control (queues, mode, frames, attach flags, custom program) |
+| `.next_batch()` / `.next_batch_blocking(t)` | unified round-robin RX → `(queue_id, batch)` |
+| `.into_parts()` | `(Vec<XdpSocket>, XdpCaptureGuard)` for worker-per-queue |
+| `.is_zerocopy()` / `.queue_ids()` / `.socket_count()` | introspection |
+| `netring::xdp::queue_count(iface)` | RSS queue count via `ETHTOOL_GCHANNELS` |
+
+Each socket gets its **own UMEM** (safe default — sharing one across per-CPU
+sockets races on the FILL ring). See [scaling.md](scaling.md) for the
+multi-queue model and `examples/xdp/xdp_multiqueue.rs`.
 
 ## Error handling
 

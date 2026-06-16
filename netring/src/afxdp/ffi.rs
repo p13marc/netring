@@ -45,6 +45,43 @@ pub use libc::xdp_umem_reg; // addr, len, chunk_size, headroom, flags, tx_metada
 /// Flag set in ring's flags field when kernel needs a wakeup via `sendto`/`poll`.
 pub const XDP_RING_NEED_WAKEUP: u32 = 1;
 
+// ── ethtool channel discovery (queue-count auto-detect, issue #6) ───────────
+// `libc` exports neither `SIOCETHTOOL`, `ETHTOOL_GCHANNELS`, nor
+// `struct ethtool_channels`, so we vendor the minimal definitions from
+// <linux/ethtool.h> / <linux/sockios.h>. Used by `crate::xdp::queue_count` to
+// read the NIC's combined RSS queue count without privilege.
+
+/// `ioctl` request: pass an ethtool command to a netdev. From `<linux/sockios.h>`.
+pub const SIOCETHTOOL: libc::c_ulong = 0x8946;
+
+/// ethtool sub-command: get channel (queue) counts. From `<linux/ethtool.h>`.
+pub const ETHTOOL_GCHANNELS: u32 = 0x0000_003c;
+
+/// `struct ethtool_channels` from `<linux/ethtool.h>`. The RSS queue count for
+/// AF_XDP capture is `combined_count` (or `rx_count` on rx/tx-split NICs).
+#[repr(C)]
+#[derive(Debug, Default, Clone, Copy)]
+pub struct ethtool_channels {
+    pub cmd: u32,
+    pub max_rx: u32,
+    pub max_tx: u32,
+    pub max_other: u32,
+    pub max_combined: u32,
+    pub rx_count: u32,
+    pub tx_count: u32,
+    pub other_count: u32,
+    pub combined_count: u32,
+}
+
+/// Minimal `struct ifreq` for the `SIOCETHTOOL` ioctl: interface name + a
+/// pointer to the ethtool command struct (the `ifr_data` union member). We
+/// vendor this rather than use `libc::ifreq` to avoid its `ifr_ifru` union.
+#[repr(C)]
+pub struct ethtool_ifreq {
+    pub ifr_name: [libc::c_char; libc::IFNAMSIZ],
+    pub ifr_data: *mut libc::c_void,
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

@@ -128,6 +128,20 @@ pub fn queue_count(iface: &str) -> Result<u32, Error> {
     Ok(n)
 }
 
+/// The NUMA node the NIC backing `iface` sits on (issue #6 F3), read from
+/// `/sys/class/net/<iface>/device/numa_node`.
+///
+/// `None` if the node is unknown (`-1`) or the path is absent (virtual
+/// interfaces like `lo`, containers without the sysfs entry). Binding the
+/// capture's UMEM to this node keeps DMA + the capture loop node-local. Used by
+/// [`XdpCaptureBuilder::numa_auto`](crate::xdp::XdpCaptureBuilder::numa_auto).
+pub fn interface_numa_node(iface: &str) -> Option<u32> {
+    let path = format!("/sys/class/net/{iface}/device/numa_node");
+    let raw = std::fs::read_to_string(path).ok()?;
+    let node = raw.trim().parse::<i32>().ok()?;
+    (node >= 0).then_some(node as u32)
+}
+
 // ── XdpCapture (multi-queue handle) ─────────────────────────────────────────
 
 #[cfg(feature = "xdp-loader")]
@@ -141,10 +155,6 @@ mod mq {
     use crate::afxdp::loader::{XdpAttachment, XdpFlags, XdpProgram, default_program};
     use crate::afxdp::{XdpBatch, XdpMode, XdpSocket, XdpSocketBuilder};
 
-    /// The vendored redirect program's XSKMAP capacity (`max_entries`). Queue
-    /// ids must be `< XSKMAP_CAP`; far above any real NIC's queue count.
-    const XSKMAP_CAP: u32 = 256;
-
     /// Builder for [`XdpCapture`].
     #[must_use]
     pub struct XdpCaptureBuilder {
@@ -156,6 +166,7 @@ mod mq {
         promiscuous: bool,
         hugepages: bool,
         numa_node: Option<u32>,
+        numa_auto: bool,
         busy_poll_us: Option<u32>,
         prefer_busy_poll: Option<bool>,
         busy_poll_budget: Option<u16>,
@@ -174,6 +185,7 @@ mod mq {
                 promiscuous: false,
                 hugepages: false,
                 numa_node: None,
+                numa_auto: false,
                 busy_poll_us: None,
                 prefer_busy_poll: None,
                 busy_poll_budget: None,
@@ -236,6 +248,18 @@ mod mq {
             self
         }
 
+        /// Issue #6 F3: auto-bind every queue's UMEM to the **NIC's** NUMA node,
+        /// read from `/sys/class/net/<iface>/device/numa_node`
+        /// ([`interface_numa_node`](crate::xdp::interface_numa_node)). A NIC sits
+        /// on one node, so this keeps the per-queue DMA + capture node-local
+        /// without hardcoding the number. Best-effort: ignored if the node is
+        /// unknown (`-1`, virtual interface). An explicit
+        /// [`numa_node`](Self::numa_node) takes precedence. Default: off.
+        pub fn numa_auto(mut self) -> Self {
+            self.numa_auto = true;
+            self
+        }
+
         /// Enable `SO_BUSY_POLL` (microseconds) on **every** per-queue socket
         /// (kernel ≥ 4.5). The performance lever for the worker-per-queue model
         /// (one socket per core): the worker busy-polls its queue instead of
@@ -287,21 +311,25 @@ mod mq {
             let ifindex = crate::afpacket::socket::resolve_interface(&iface)? as u32;
             let queue_ids = self.queues.resolve(&iface)?;
 
-            // B1 guard: the vendored XSKMAP holds 256 entries; a queue id past
-            // that would silently fail to register. Fail loudly instead.
-            if let Some(&max_q) = queue_ids.iter().max()
-                && max_q >= XSKMAP_CAP
-            {
-                return Err(Error::Config(format!(
-                    "queue id {max_q} exceeds the built-in XSKMAP capacity ({XSKMAP_CAP}); \
-                     narrow the queue range or supply a larger program via with_program()"
-                )));
-            }
+            // Issue #6 F3: resolve the NIC's NUMA node once if `numa_auto` was
+            // set and no explicit node given — bind every queue's UMEM there so
+            // DMA stays node-local.
+            let numa_node = self.numa_node.or_else(|| {
+                if self.numa_auto {
+                    super::interface_numa_node(&iface)
+                } else {
+                    None
+                }
+            });
 
-            // One program for the whole interface.
+            // Issue #6 B1: size the built-in XSKMAP to exactly fit the queue set
+            // (queue `q` registers at index `q`), now that `default_program`
+            // honors its `max_queues` argument. A caller-supplied program keeps
+            // its own map size; registering past it errors at `register`.
+            let map_size = queue_ids.iter().max().map(|&m| m + 1).unwrap_or(1);
             let mut prog = match self.program.take() {
                 Some(p) => p,
-                None => default_program(XSKMAP_CAP)?,
+                None => default_program(map_size)?,
             };
 
             // One bare socket per queue (own UMEM = safe default), each
@@ -315,7 +343,7 @@ mod mq {
                     .frame_size(self.frame_size)
                     .frame_count(self.frame_count)
                     .hugepages(self.hugepages);
-                if let Some(node) = self.numa_node {
+                if let Some(node) = numa_node {
                     b = b.numa_node(node);
                 }
                 if let Some(us) = self.busy_poll_us {
@@ -499,6 +527,15 @@ mod tests {
         // rather than propagate the ioctl error.
         let resolved = Queues::Auto.resolve("lo").unwrap();
         assert!(resolved.contains(&0));
+    }
+
+    #[test]
+    fn interface_numa_node_is_none_for_lo() {
+        // `lo` has no backing PCI device → no `device/numa_node` sysfs entry,
+        // so the NIC-NUMA lookup degrades to None rather than panicking.
+        assert_eq!(interface_numa_node("lo"), None);
+        // A nonexistent interface is also None (missing path).
+        assert_eq!(interface_numa_node("netring-no-such-if0"), None);
     }
 
     #[test]

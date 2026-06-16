@@ -118,7 +118,7 @@ pub mod xdp {
     pub use crate::afxdp::loader::{
         LoaderError, XdpAttachment, XdpFlags, XdpProgram, default_program, filter_program,
     };
-    pub use crate::afxdp::{Queues, queue_count};
+    pub use crate::afxdp::{Queues, interface_numa_node, queue_count};
     #[cfg(feature = "xdp-loader")]
     pub use crate::afxdp::{XdpCapture, XdpCaptureBuilder, XdpCaptureGuard};
 }

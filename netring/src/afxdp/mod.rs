@@ -50,7 +50,7 @@ pub mod loader;
 #[cfg(feature = "af-xdp")]
 pub use batch::{XdpBatch, XdpBatchIter, XdpPacket};
 #[cfg(feature = "af-xdp")]
-pub use capture::{Queues, queue_count};
+pub use capture::{Queues, interface_numa_node, queue_count};
 #[cfg(all(feature = "af-xdp", feature = "xdp-loader"))]
 pub use capture::{XdpCapture, XdpCaptureBuilder, XdpCaptureGuard};
 pub use stats::XdpStats;
@@ -437,14 +437,24 @@ impl XdpSocketBuilder {
     /// uses the second half; configure each via `frame_count` and
     /// arrange for them to land at disjoint frame indices.
     ///
-    /// For the canonical multi-queue capture pattern (one socket per
-    /// NIC queue, one process), this is fine: each socket's fill ring
-    /// only ever contains its own addresses, and the kernel dispatches
-    /// inbound packets to the correct queue's RX ring via the BPF
-    /// program's `bpf_redirect_map(&xskmap, queue_id, 0)` call.
+    /// # Expert-only — prefer per-socket UMEM for multi-queue capture
     ///
-    /// A higher-level `SharedUmem` helper that automates partitioning
-    /// is planned for a future release.
+    /// Issue #6 F1: the high-level [`XdpCapture`] gives
+    /// each per-queue socket its **own** UMEM and is the blessed multi-queue
+    /// path. Shared UMEM is a *memory* optimization with two sharp edges, so it
+    /// stays low-level and opt-in:
+    /// 1. **Manual frame-space partitioning** (above) — netring won't do it for
+    ///    you, and a mistake silently corrupts frames.
+    /// 2. **A per-CPU FILL-queue race** — when sockets on different cores share
+    ///    one UMEM, the kernel's shared `xsk_buff_pool` FILL queue can race
+    ///    ([kernel AF_XDP docs] / LKML 2025). Only share a UMEM across sockets
+    ///    you drive from a **single thread**, or accept the partitioning + FILL
+    ///    discipline yourself.
+    ///
+    /// Reach for this only to cut UMEM memory on a single-threaded multi-queue
+    /// drain; otherwise use `XdpCapture` (own UMEM per queue).
+    ///
+    /// [kernel AF_XDP docs]: https://docs.kernel.org/networking/af_xdp.html
     pub fn shared_umem<F: AsFd>(mut self, primary: F) -> Self {
         self.shared_umem_fd = primary.as_fd().as_raw_fd() as u32;
         self

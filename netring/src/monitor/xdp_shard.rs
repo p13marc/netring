@@ -53,6 +53,7 @@ pub struct XdpShardedRunner {
     promiscuous: bool,
     busy_poll_us: Option<u32>,
     pin_cpus: bool,
+    numa_auto: bool,
     attach_flags: XdpFlags,
     build_shard: Arc<dyn Fn(usize, MonitorBuilder) -> MonitorBuilder + Send + Sync + 'static>,
 }
@@ -73,9 +74,17 @@ impl XdpShardedRunner {
             promiscuous: false,
             busy_poll_us: None,
             pin_cpus: false,
+            numa_auto: false,
             attach_flags: XdpFlags::SKB_MODE,
             build_shard: Arc::new(build_shard),
         }
+    }
+
+    /// Auto-bind every queue's UMEM to the NIC's NUMA node (issue #6 F3). Best
+    /// paired with [`Self::pin_cpus`] so worker, ring, and DMA stay node-local.
+    pub fn numa_auto(mut self, on: bool) -> Self {
+        self.numa_auto = on;
+        self
     }
 
     /// Put the interface into promiscuous mode for the run (one shared guard).
@@ -115,6 +124,9 @@ impl XdpShardedRunner {
             .attach_flags(self.attach_flags);
         if let Some(us) = self.busy_poll_us {
             b = b.busy_poll(us).prefer_busy_poll(true);
+        }
+        if self.numa_auto {
+            b = b.numa_auto();
         }
         let capture = b.build()?;
         let n = capture.socket_count();

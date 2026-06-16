@@ -198,6 +198,7 @@ impl<T: Copy> XdpRing<T> {
     /// non-consuming readiness probe (used by the multi-queue
     /// [`XdpCapture`](crate::xdp::XdpCapture) round-robin, which must decide
     /// *which* socket to peek without consuming from the others).
+    #[cfg(feature = "xdp-loader")]
     #[inline]
     pub(crate) fn refresh_count(&mut self) -> u32 {
         self.cached_prod = unsafe { &*self.producer }.load(Ordering::Acquire);

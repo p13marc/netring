@@ -20,7 +20,7 @@ Forward-looking implementation plans only. Historical record lives in `CHANGELOG
 | [`netring-strategic-review-2026-06.md`](./netring-strategic-review-2026-06.md) | The *why* — competitive landscape, pain points, differentiators, the M1–M4 roadmap. |
 | ~~`netring-0.24-plan.md`~~ | **Shipped — 0.24.0 released 2026-06-14** (Zero-Copy Core + Production Trust; keystone `AnyBackend`). Plan deleted on ship; deferrals carried into the 0.25 plan's "Deferred from 0.24" section. |
 | ~~`netring-0.25-plan.md`~~ | **Shipped — 0.25.0 released 2026-06-15** (tag `0.25.0` + `netring-exporters` 0.1.0). Subscriptions, Async Effects, Performance & TX — the complete capability release; nothing deferred. Plan + subscription-engine design deleted on ship. |
-| [`netring-0.26-afxdp-capture-plan.md`](./netring-0.26-afxdp-capture-plan.md) | **Next** — AF_XDP Multi-Queue Capture & Hardening. The high-level `XdpCapture` (one socket per RX queue, `Queues::Auto` via ethtool) + Monitor `xdp_queues` that **removes the silent single-queue under-capture footgun (G2)** + footgun/bug sweep (B1 `default_program` lying param, F1 shared-UMEM race, F2 copy-mode, F3 per-queue NUMA). Last feature release before 1.0. Started from the issue-#4 / PR-#5 design review. |
+| [`netring-0.26-afxdp-capture-plan.md`](./netring-0.26-afxdp-capture-plan.md) | **In progress** (issue #6) — AF_XDP Multi-Queue Capture & Hardening. **Done:** M1 `queue_count`/`Queues` + M2 `XdpCapture` (one socket per RX queue, own-UMEM, `Queues::Auto`) + `is_zerocopy` (PR #7); promiscuous (PR #5). **Next: the tiered threading redesign** (§4.5) — Tier 1 `AnyBackend::XdpMq` + monitor-wide `xdp_queues` removes the 🔴 single-queue footgun (G2); Tier 2 `XdpShardedRunner` worker-per-queue + busy-poll for line rate (Suricata model). Then F1/F3/B1 hardening. Last feature release before 1.0. |
 | [`upstream-tracking.md`](./upstream-tracking.md) | Live: rustc / kernel / flowscope features being watched. |
 | *(this)* `INDEX.md` | Roadmap overview, decisions, invariants, history. |
 
@@ -45,11 +45,12 @@ design).
   │     pinning · published pps/Gbps · symmetric TX · in-Monitor AF_XDP loader · UMEM
   │     hugepages/NUMA · Reopen/panic-catch · JA4S license-gating · OTLP/Kafka crate ·
   │     EVE-tls-record. The complete capability release — nothing deferred.
-0.26  AF_XDP Multi-Queue Capture & Hardening   ── NEXT (plan written): high-level
-  │     `XdpCapture` (one socket per RX queue · `Queues::Auto` via ETHTOOL_GCHANNELS) ·
-  │     Monitor `xdp_queues` **removes the silent single-queue under-capture footgun** ·
-  │     bug/footgun sweep (default_program lying param, shared-UMEM race, copy-mode,
-  │     per-queue NUMA). Promiscuous (#4/PR#5) already done. Last feature release pre-1.0.
+0.26  AF_XDP Multi-Queue Capture & Hardening   ── IN PROGRESS (issue #6): M1+M2 DONE
+  │     (PR #7) — `XdpCapture` (one socket per RX queue · own-UMEM · `Queues::Auto` via
+  │     ETHTOOL_GCHANNELS · `is_zerocopy`). NEXT = tiered threading redesign: Tier 1
+  │     `AnyBackend::XdpMq` + monitor-wide `xdp_queues` **removes the silent single-queue
+  │     footgun**; Tier 2 `XdpShardedRunner` worker-per-queue + busy-poll (Suricata model).
+  │     Then F1/F3/B1 hardening. Promiscuous (#4/PR#5) done. Last feature release pre-1.0.
   ▼   community test window → feedback incorporated → shims removed
 1.0   Stabilization (SemVer promise; plan written once feedback is in)
 ```

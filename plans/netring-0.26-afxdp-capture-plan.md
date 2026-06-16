@@ -1,16 +1,26 @@
 # netring 0.26 — AF_XDP Multi-Queue Capture & Hardening
 
-> **Status:** plan, 2026-06-15. The last *feature* release before 1.0 stabilization.
-> Closes the AF_XDP-capture gaps surfaced reviewing issue #4 (promiscuous mode,
-> PR #5). Breaking changes are permitted (the maintainer authorized redesign);
-> they are inventoried in §7 and aligned to the **one break at 1.0** SemVer model
+> **Status:** in progress, updated 2026-06-16. The last *feature* release before
+> 1.0 stabilization. Closes the AF_XDP-capture gaps surfaced reviewing issue #4
+> (promiscuous, PR #5) and tracked in **issue #6**. Breaking changes are
+> permitted (the maintainer authorized redesign); inventoried in §7, aligned to
+> the **one break at 1.0** SemVer model
 > ([`netring-architecture.md`](./netring-architecture.md) §7).
 >
-> **North-star alignment.** This plan adds *no* new run-loop machinery: the
-> Monitor already holds `Vec<AnyBackend>` and round-robin-polls multiple sources
-> (Arch §3, Phase F.1 multi-interface). "One AF_XDP socket per NIC queue" drops
-> straight into that model. The work is a high-level *handle* over the kernel's
-> immutable 1-socket-per-queue ABI, plus footgun removal.
+> **Progress:** M0 (promiscuous) shipped in **PR #5** (merged). M1 (queue
+> discovery: `queue_count`/`Queues`) + M2 (`XdpCapture` sync handle) shipped in
+> **PR #7** (merged). Remaining: the **threading-model redesign** below (§4.5) →
+> M3/M4/M5.
+>
+> **Redesign note (2026-06-16).** Implementing M2 + researching how Suricata/DPDK
+> actually run multi-queue AF_XDP changed the Monitor-integration design. The
+> performant production model is **worker-per-queue** (one socket per core +
+> busy-poll — Suricata `threads: auto`), *not* a single async reactor draining N
+> queues. That maps onto netring's existing **`ShardedRunner`**. So the plan is
+> now **tiered** (§4.5): a simple single-reactor path *and* a sharded
+> worker-per-queue path, mirroring how the rest of netring scales (plain Monitor
+> vs `ShardedRunner`). This supersedes the earlier "one `AnyBackend::Xdp` per
+> queue in the single run loop" sketch.
 
 ---
 
@@ -56,20 +66,33 @@ the Monitor silently binds queue 0 only. **That is below netring's altitude.**
 
 Severity: 🔴 correctness/silent-data-loss · 🟠 ergonomics/pain · 🟡 polish.
 
-| # | Item | Sev | Kind | Where |
+| # | Item | Sev | Kind | Status |
 |---|---|---|---|---|
-| G1 | **No high-level multi-queue capture API.** Full-NIC AF_XDP = manual N-socket + program + XSKMAP dance. | 🟠 | gap | `afxdp/` |
-| G2 | **Monitor binds queue 0 only** → silent under-capture on every multi-queue NIC. Documented, not solved. | 🔴 | footgun | `monitor/run.rs::open_xdp_backend` |
-| G3 | **No queue-count discovery.** Users must `ethtool -l` by hand; no `Queues::Auto`. | 🟠 | gap | `afxdp/` |
-| B1 | **`default_program(_max_queues)` ignores its argument** — XSKMAP is baked at `max_entries=256`. The parameter lies (works ≤256 queues, silent contract violation above). | 🟡 | bug/wart | `afxdp/loader/default_program.rs` |
-| F1 | **`shared_umem` is a footgun:** manual frame-space partitioning + the per-CPU FILL race. Exposed with only a prose caveat. | 🟠 | footgun | `afxdp/mod.rs::shared_umem` |
-| F2 | **Copy-mode perf cliff.** We `warn!` on COPY bind, but the high-level handle should *surface* it as data, and steer DRV/SKB choice. | 🟡 | footgun | `afxdp/mod.rs::build` |
-| F3 | **No per-queue NUMA affinity.** `numa_node` is a single value; per-queue sockets should bind each UMEM to that queue's node. | 🟡 | gap | `afxdp/umem.rs` |
-| D1 | **Promiscuous (issue #4) — DONE in PR #5.** Per-socket guard + monitor-wide flag. Design settled; listed for completeness. | ✅ | — | merged |
+| G1 | **No high-level multi-queue capture API.** Full-NIC AF_XDP = manual N-socket + program + XSKMAP dance. | 🟠 | gap | ✅ **DONE** — `XdpCapture` (PR #7, M2) |
+| G2 | **Monitor binds queue 0 only** → silent under-capture on every multi-queue NIC. | 🔴 | footgun | ⏳ **M4** (the headline remaining work) |
+| G3 | **No queue-count discovery.** Users must `ethtool -l` by hand; no `Queues::Auto`. | 🟠 | gap | ✅ **DONE** — `queue_count`/`Queues::Auto` (PR #7, M1) |
+| B1 | **`default_program(_max_queues)` ignores its argument** — XSKMAP baked at `max_entries=256`. | 🟡 | bug/wart | ◑ **partial** — PR #7 errors loudly on queue id ≥ 256 (the silent-failure risk). Honoring the param via BTF resize, or deprecating it, deferred to M5/1.0. |
+| F1 | **`shared_umem` is a footgun:** manual frame-space partitioning + the per-CPU FILL race. | 🟠 | footgun | ⏳ **M5** — `XdpCapture` defaults to per-socket UMEM (PR #7); a partitioning helper + caveats are M5. |
+| F2 | **Copy-mode perf cliff** surfaced only as a log line. | 🟡 | footgun | ✅ **DONE** — `is_zerocopy()` on `XdpSocket` + `XdpCapture` (PR #7). |
+| F3 | **No per-queue NUMA affinity.** `numa_node` is one value; per-queue sockets should bind each UMEM to that queue's node. | 🟡 | gap | ⏳ **M5** |
+| D1 | **Promiscuous (issue #4).** Per-socket guard + monitor-wide flag. | ✅ | — | **DONE** — PR #5. |
 
-The headline is **G1 + G2** (the missing high-level API and the silent Monitor
-footgun). G3/B1/F1–F3 are the hardening that makes the high-level API *correct and
-complete* rather than a thin wrapper.
+**Where we are.** G1/G3/F2 closed and B1's sharp edge defanged in PR #7 (M1+M2).
+The remaining headline is **G2** — the silent single-queue Monitor footgun — whose
+fix is the threading-model work in §4.5 (M3/M4). F1/F3 are the M5 hardening.
+
+### 2.1 Learnings from M1/M2 (don't relitigate)
+- **The unified round-robin needs a *fresh* readiness probe.** First cut gated each
+  socket on the cached producer index (`rx_is_empty`), which only refreshes inside
+  `consumer_peek` — so it gated away its own refresh and captured nothing. Fixed
+  with `rx_poll_ready` / `XdpRing::refresh_count` (one `Acquire` load). **The
+  root-gated `lo` live test caught this** — keep every new drain path live-tested.
+- **`XdpCapture` owns one program + N own-UMEM sockets + one promisc guard;**
+  `into_parts()` hands out `(Vec<XdpSocket>, XdpCaptureGuard)` so worker threads
+  can't drop the program by accident. This is the seam M4/M5 build on.
+- **Feature-combo gotcha:** a helper used only by an `xdp-loader`-gated caller must
+  itself be `xdp-loader`-gated or the `af-xdp`-only clippy combo fails (`-D
+  warnings`). `--all-features` locally masks it — run the matrix.
 
 ---
 
@@ -101,24 +124,29 @@ let mut cap = XdpCapture::builder()
    `XdpCapture` (RAII detach on drop, *after* the sockets).
 6. Install **one** promiscuous guard for the interface (not per socket).
 
-### 3.1 Draining — two shapes (both, like Suricata + DPDK)
+### 3.1 Draining — two shapes (both, like Suricata + DPDK) — ✅ M2
+
+As implemented in PR #7:
 
 ```rust
 // (a) Single-thread, unified round-robin — simplest:
-while let Some(batch) = cap.recv()? {        // batch carries .queue_id()
+while let Some((queue_id, batch)) = cap.next_batch_blocking(timeout)? {
     for pkt in &batch { /* … */ }
 }
 
 // (b) Worker-per-queue — scales to line rate (Suricata model):
-for sock in cap.into_sockets() {             // Vec<XdpSocket>, program kept alive by a guard
-    std::thread::spawn(move || { /* drain sock on its own core */ });
+let (sockets, guard) = cap.into_parts();     // guard owns program + promisc
+let guard = std::sync::Arc::new(guard);
+for sock in sockets {
+    let g = guard.clone();
+    std::thread::spawn(move || { let _g = g; /* drain sock on its own core */ });
 }
 ```
 
-`into_sockets()` returns the N sockets **plus** a `ProgramGuard` (keeps the single
-attachment + promisc guard alive) so the worker model can't accidentally detach the
-program by dropping the handle. Async mirror: `AsyncXdpCapture` (tokio), unified
-`recv().await` + `into_async_sockets()`.
+`into_parts()` returns `(Vec<XdpSocket>, XdpCaptureGuard)`; the guard keeps the single
+attachment + promisc alive so the worker model can't detach the program by dropping
+the handle. Async mirror `AsyncXdpCapture` = **M3**. The Monitor wires (a) as Tier 1
+and (b) as Tier 2 — see §4.5.
 
 ### 3.2 `Queues`
 
@@ -151,100 +179,164 @@ and unit-testable on any host (`lo` returns the fallback path).
 
 ## 4. Monitor integration (G2) — the silent-footgun fix
 
-Make the Monitor capture the whole NIC, riding the **existing** multi-source loop.
+The footgun fix is the **threading-model redesign** in §4.5. The Monitor API surface
+that drives it (consistent with the monitor-wide `promiscuous` decision in PR #5):
 
-**API (consistent with the monitor-wide `promiscuous` decision in PR #5):**
 ```rust
+// Tier 1 — single-reactor, captures every queue on one core (the default fix):
 Monitor::builder()
     .xdp_interface_loaded("eth0")
     .xdp_queues(Queues::Auto)      // monitor-wide, mirrors .promiscuous(bool)
     .promiscuous(true)
     .protocol::<Tcp>()
     .build()?;
+
+// Tier 2 — sharded, one worker (core) per queue, for line rate:
+XdpShardedRunner::new("eth0", Queues::Auto, |q, builder| builder.protocol::<Tcp>())
+    .promiscuous(true)
+    .busy_poll(50)                 // µs; pairs with SO_PREFER_BUSY_POLL
+    .pin_cpus(true)
+    .run_for(d)?;
 ```
 
-`xdp_queues(Queues)` is **monitor-wide** (applies to every AF_XDP interface) — same
-shape as `promiscuous(bool)`, so the two read symmetrically and avoid the positional
-"last-added" wart rejected in the PR-#5 review. Default stays `Queues::Single(0)`
-(no behavior change for existing code until they opt in).
+`xdp_queues(Queues)` is **monitor-wide** (every AF_XDP interface) — same shape as
+`promiscuous(bool)`, avoiding the positional "last-added" wart rejected in PR #5.
+Default stays `Queues::Single(0)` (no behavior change until opt-in; the 1.0 break is
+to default it to `Auto`, §7).
 
-**Run-loop mechanics.** `open_xdp_backend` becomes "open the *interface*": it builds
-an `XdpCapture` for that iface (1 program + N sockets), pushes each socket as an
-`AnyBackend::Xdp` into the run loop's `Vec<AnyBackend>` (which already round-robins),
-and stashes the `XdpCapture`'s program/promisc guard in a side `Vec<ProgramGuard>`
-kept alive for the run's duration. No new polling code — the N sockets are just more
-sources. The `Reopen` resilience policy (0.25 W1e) extends naturally per socket.
+---
 
-**Decision to lock (§9 Q3):** monitor-wide `xdp_queues` vs per-interface. Recommend
-monitor-wide for symmetry; per-interface only if a real mixed-NIC need appears.
+## 4.5 Threading model — the tiered redesign *(the important part)*
+
+**What changed and why.** The earlier sketch — "expand one xdp interface into N
+`AnyBackend::Xdp` in the single run loop" — is wrong on two counts:
+
+1. **Program lifetime.** All N per-queue sockets share **one** attached program +
+   XSKMAP. Expanding into N independent `BackendSpec`s breaks the 1-spec↔1-backend
+   invariant the `Reopen` policy relies on, and there's no natural owner for the
+   shared program/promisc guard.
+2. **Performance.** Research (Suricata `threads: auto`, DPDK, VPP) is unanimous: the
+   line-rate model is **one worker per RSS queue** (a socket per core, ideally
+   busy-polled), *not* one reactor draining N queues. A single async round-robin
+   caps at one core — fine for moderate rates, wrong for line rate.
+
+So mirror how netring *already* scales — **plain Monitor vs `ShardedRunner`** — with
+**two tiers** over the same `XdpCapture` core:
+
+### Tier 1 — single-reactor (`AnyBackend::XdpMq`, M3+M4)
+One `AsyncXdpCapture` (N sockets, owns the program) wrapped as a **single**
+`AnyBackend::XdpMq` arm. `readable().await` awaits readiness across the N fds;
+`drain_batch(f)` round-robins all ready queues synchronously (zero-copy, `Send`
+preserved — same borrowed-batch discipline as Arch §3, one socket at a time). This:
+- **preserves 1-spec↔1-backend** → `Reopen` rebuilds the whole `XdpCapture`, the
+  program/promisc guard lives *inside* the backend (no side-vec);
+- **removes G2** for the common case — `.xdp_queues(Auto)` now captures every queue;
+- is single-core (the honest limitation; Tier 2 is the answer for line rate).
+
+`AsyncXdpCapture` (M3) = `XdpCapture` + one `tokio::AsyncFd` per socket; `readable`
+is a `poll_fn`/`select` over them (any-ready wins). This is the only genuinely new
+async machinery, and it's small.
+
+### Tier 2 — sharded worker-per-queue (`XdpShardedRunner`, M5)
+The performant path, parallel to `ShardedRunner` (AF_PACKET fanout). The coupling
+that makes AF_XDP different from `PACKET_FANOUT`: the **program is shared setup**, not
+per-worker. So:
+- Build **one** `XdpCapture` (program + N sockets + promisc) up front; `into_parts()`
+  → `(Vec<XdpSocket>, XdpCaptureGuard)`.
+- Spawn one OS thread per queue (reuse `ShardedRunner`'s thread/`current_thread`-rt/
+  CPU-pin/merge-worker machinery); shard `i` runs a single-shard `Monitor` whose
+  backend **is the provided `sockets[i]`**.
+- The `XdpCaptureGuard` is held by the runner (in an `Arc`) for the run's duration so
+  the program outlives every shard.
+- **New seam required:** the Monitor must accept a *pre-built* AF_XDP backend (today
+  it only builds its own from a spec). Add `BackendSpec::XdpProvided(AsyncXdpSocket)`
+  (or `MonitorBuilder::xdp_socket(socket)`), drained through the existing
+  `AnyBackend::Xdp` arm. This is the one architectural addition; it also future-proofs
+  "bring your own socket" use cases.
+- **Perf knobs** (Suricata-validated): per-socket busy-poll
+  (`SO_BUSY_POLL`/`SO_PREFER_BUSY_POLL`/`SO_BUSY_POLL_BUDGET` — already on
+  `XdpSocketBuilder`, thread through `XdpCapture`), CPU pinning (have it), and
+  *document* the system NAPI knobs (`napi-defer-hard-irqs`, `gro-flush-timeout`) that
+  make busy-poll effective — netring sets the socket opts, the operator sets the
+  netdev knobs.
+
+**Why both, not just Tier 2.** Tier 2 needs N cores and is overkill for a flow
+monitor at 1–5 Gbps; Tier 1 is one builder flag. Offering both matches plain-Monitor
+↔ `ShardedRunner` and lets the footgun fix (Tier 1) ship before the heavier Tier 2.
+
+**Decisions locked:** monitor-wide `xdp_queues` (symmetry, §9 Q3); Tier 1 via a new
+`AnyBackend::XdpMq` arm (not spec-expansion); Tier 2 via `XdpShardedRunner` +
+`BackendSpec::XdpProvided`.
 
 ---
 
 ## 5. Footgun & bug fixes
 
-- **B1 — `default_program` max_queues.** Either (a) **honor it** by rewriting the
-  XSKMAP `max_entries` via aya's BTF map-resize before load, or (b) **drop the
-  parameter** and document the fixed 256 cap. Recommend (a) if aya's
-  `map_mut().set_max_entries()` works pre-load on stable; else (b) — a lying
-  parameter is worse than an honest constant. `XdpCapture` sizes the map to the
-  queue count either way.
-- **F1 — `shared_umem`.** Keep it (memory optimization) but (1) re-document with the
-  per-CPU FILL-race caveat and a link, (2) make `XdpCapture`'s default **per-socket
-  UMEM** (no sharing) so the safe path is the easy path, (3) optionally add a
-  `XdpCapture::shared_umem(true)` opt-in that does the partitioning *for* the user
-  (the "SharedUmem helper… planned" promised in the `shared_umem` rustdoc).
-- **F2 — copy-mode.** Promote the COPY-bind `warn!` to a queryable
-  `XdpCapture::zerocopy() -> bool` (and per-socket `XdpSocket::is_zerocopy()`), so
-  callers/tests can assert the binding mode instead of grepping logs.
-- **F3 — per-queue NUMA.** `XdpCapture` optionally pins each queue's UMEM to that
-  queue's NUMA node (read once, best-effort, mirrors 0.25 W4 `numa_node`).
-- **G2/Monitor docs.** Once §4 lands, the "single queue (queue 0)" caveat on
-  `xdp_interface_loaded` becomes "defaults to queue 0; `.xdp_queues(Auto)` for the
-  whole NIC" — the footgun is *removed*, not just documented.
+- **B1 — `default_program` max_queues** — ◑ *partial (PR #7), rest M5.* PR #7 errors
+  loudly on queue id ≥ 256 (the XSKMAP cap), killing the silent-failure risk. M5:
+  either (a) **honor** `max_queues` via aya BTF map-resize before load, or (b)
+  `#[deprecated]` the param and document the fixed 256 cap. A lying parameter is worse
+  than an honest constant.
+- **F1 — `shared_umem`** — ⏳ *M5.* Default is already **per-socket UMEM** (PR #7), so
+  the safe path is the easy path. M5: re-document the raw `XdpSocketBuilder::shared_umem`
+  with the per-CPU FILL-race caveat, and add a guarded `XdpCapture::shared_umem(true)`
+  opt-in that does the frame-space partitioning *for* the user (Q6).
+- **F2 — copy-mode** — ✅ *done (PR #7).* `XdpSocket::is_zerocopy()` /
+  `XdpCapture::is_zerocopy()` surface the bind mode; the `lo` live test asserts
+  `is_zerocopy() == false` under SKB.
+- **F3 — per-queue NUMA** — ⏳ *M5.* `XdpCapture` optionally pins each queue's UMEM to
+  that queue's NUMA node (best-effort, mirrors 0.25 W4 `numa_node`).
+- **G2/Monitor docs** — ⏳ *M4.* Once `xdp_queues` lands, the "single queue (queue 0)"
+  caveat on `xdp_interface_loaded` becomes "defaults to queue 0; `.xdp_queues(Auto)`
+  for the whole NIC" — the footgun *removed*, not just documented.
 
 ---
 
 ## 6. Phasing
 
-| Phase | Scope | Testable in CI (`lo`, root) |
+| Phase | Scope | Status |
 |---|---|---|
-| **M0** | Merge PR #5 (promiscuous). Land `examples/xdp/xdp_multiqueue.rs` (done). | ✅ already green |
-| **M1** | `queue_count()` via ETHTOOL_GCHANNELS + ffi + `Queues` enum. | ✅ unit + `lo` fallback |
-| **M2** | `XdpCapture` builder + per-socket-UMEM open + 1-program register + unified `recv()` + `into_sockets()`. B1 fix. F2 `zerocopy()`. | ✅ N=1 on `lo` (root); N>1 HW-gated |
-| **M3** | `AsyncXdpCapture` (tokio) — unified `recv().await` + async sockets. | ✅ N=1 on `lo` |
-| **M4** | Monitor `xdp_queues(Queues)` → one backend per queue through the existing loop; `ProgramGuard` side-vec; `Reopen` per socket. | ✅ N=1 on `lo`; G2 removed |
-| **M5** | F1 `shared_umem` opt-in + partitioning helper; F3 per-queue NUMA. | partial (HW) |
-| **M6** | Docs (API_OVERVIEW, scaling.md, TROUBLESHOOTING, FEATURES), migration note, CHANGELOG, rewrite `xdp_multiqueue.rs` on top of `XdpCapture` (it shrinks to ~10 lines — the proof the API earns its keep). | ✅ |
+| **M0** | Promiscuous (issue #4) + manual `xdp_multiqueue` example. | ✅ **PR #5** |
+| **M1** | `queue_count()` (ETHTOOL_GCHANNELS) + `Queues` enum. | ✅ **PR #7** |
+| **M2** | `XdpCapture`: per-socket-UMEM open + 1-program register + unified `next_batch`/`into_parts`. B1 overflow-guard. F2 `is_zerocopy()`. Example rewritten on it. | ✅ **PR #7** |
+| **M3** | `AsyncXdpCapture` (tokio): `XdpCapture` + one `AsyncFd`/socket; `readable().await` over N fds (poll_fn/select); unified async `next_batch`. | ⏳ next |
+| **M4** | **Tier 1 footgun fix (G2):** `AnyBackend::XdpMq(AsyncXdpCapture)` arm + monitor-wide `MonitorBuilder::xdp_queues(Queues)`. 1-spec↔1-backend preserved; `Reopen` rebuilds the capture. | ⏳ next (headline) |
+| **M5** | **Tier 2:** `XdpShardedRunner` (worker-per-queue over `ShardedRunner`) + the `BackendSpec::XdpProvided` seam + busy-poll passthrough on `XdpCapture`. **F1** shared-UMEM opt-in + partitioning helper. **F3** per-queue NUMA. **B1** honor/deprecate `max_queues`. | ⏳ |
+| **M6** | Docs (API_OVERVIEW/scaling/TROUBLESHOOTING/FEATURES), `MIGRATING_0.25_TO_0.26`, CHANGELOG `## 0.26.0`, version bump, release. | ⏳ |
 
-**Testing reality.** CI exercises only `lo` (single queue), so the N>1 path is
-**structurally** validated (N=1 degenerate + unit tests for queue math, map
-registration, guard lifetimes) but **functionally** HW-gated. Mitigations: (1) a
-`miri`/unit harness over the queue-set resolution and round-robin drain logic with a
-mock backend; (2) keep the root-gated `lo` live test asserting N=1 capture +
-zerocopy()==false (SKB on lo); (3) ship the example as the real-NIC validation path
-and explicitly ask @georgmu (issue #4) to run it on his multi-queue NIC. **No silent
-coverage claims** — the plan and CHANGELOG state the N>1 path is example-validated,
-not CI-validated.
+**PR slicing:** M3+M4 = one PR (the footgun fix — Tier 1 is useless without the async
+wrapper). M5 = one or two PRs (Tier 2 sharding; then F1/F3/B1 hardening). M6 folds in
+per PR + a release PR. Keep each green before the next.
+
+**Testing reality.** CI exercises only `lo` (single queue), so **N>1 is
+example-validated, not CI-validated** — stated plainly in the plan + CHANGELOG, no
+silent coverage claims. Structural coverage: N=1 root-gated `lo` live tests for every
+new drain path (Tier 1 `XdpMq` backend, Tier 2 shard) — **M2 proved these catch real
+bugs** (the `rx_poll_ready` cache bug, §2.1) — plus unit tests for queue math, guard
+lifetimes, and round-robin fairness with a mock ring. Real-NIC validation: the
+`xdp_multiqueue` example + @georgmu's offer on #6.
 
 ---
 
 ## 7. Breaking-change inventory (allowed; aligned to "one break at 1.0")
 
-Most of this is **additive** (`XdpCapture`, `queue_count`, `Queues`, `xdp_queues`,
-`is_zerocopy`). The candidate breaks — to bundle into the 1.0 stabilization wave, not
-sprung piecemeal:
+Shipped in PR #5/#7 — **all additive** (`XdpCapture`, `queue_count`, `Queues`,
+`is_zerocopy`, monitor-wide `promiscuous`). Planned:
 
-1. **B1(b) path:** if we drop `default_program`'s `max_queues` parameter, that's a
-   signature break → 1.0 (or a `#[deprecated]` shim in 0.26 ignoring the arg, removed
-   at 1.0). Prefer the shim so 0.26 stays additive.
-2. **`xdp_interface_loaded` default queue set:** stays `Single(0)` in 0.26 (additive).
-   *At 1.0*, consider defaulting Monitor AF_XDP to `Queues::Auto` so the safe,
-   complete behavior is the default — the one deliberate break, after field-testing.
-3. **`shared_umem` signature:** if the partitioning helper changes its shape, gate
-   behind the new `XdpCapture::shared_umem` and `#[deprecate]` the raw builder method.
+1. **`xdp_queues` / `AnyBackend::XdpMq` / `XdpShardedRunner` (M4/M5):** additive. The
+   Monitor default stays `Queues::Single(0)`.
+2. **`BackendSpec::XdpProvided` seam (M5):** internal (`pub(crate)`); the public face
+   is `XdpShardedRunner` / a `MonitorBuilder::xdp_socket` — additive.
+3. **B1 `default_program(max_queues)` (M5):** prefer a `#[deprecated]` shim that
+   ignores the arg (0.26 stays additive); the signature removal is a **1.0** break.
+4. **`shared_umem` (M5):** if the safe partitioning helper changes the shape, gate
+   behind `XdpCapture::shared_umem` and `#[deprecated]` the raw `XdpSocketBuilder`
+   method; removal at 1.0.
+5. **Planned 1.0 break:** Monitor AF_XDP defaults to `Queues::Auto` (capture the whole
+   NIC by default — the deliberate footgun-removal break, after field-testing).
 
-Net: **0.26 is additive-with-shims** (matches Arch §7); the deliberate defaults-break
-(Auto-by-default) is a **1.0** decision listed here so it isn't forgotten.
+Net: **0.26 stays additive-with-shims** (Arch §7); the one deliberate defaults-break
+is a **1.0** item, recorded here + in INDEX so it isn't forgotten.
 
 ---
 
@@ -261,29 +353,40 @@ Net: **0.26 is additive-with-shims** (matches Arch §7); the deliberate defaults
 
 ## 9. Open decisions to lock before M2
 
-- **Q1 — Unified `recv()` ownership.** Round-robin over N sockets in one call
-  returning a queue-tagged batch: confirm the borrow shape stays zero-copy/`Send`
-  (it should — same borrowed-batch discipline as Arch §3, one socket at a time).
-- **Q2 — `into_sockets()` guard.** Return `(Vec<XdpSocket>, ProgramGuard)` vs a
-  `XdpSockets` collection type that owns the guard. Recommend the collection type so
-  the guard can't be dropped by accident.
-- **Q3 — Monitor `xdp_queues` scope.** Monitor-wide (recommended, symmetric with
-  `promiscuous`) vs per-interface.
-- **Q4 — B1.** Honor `max_queues` via BTF resize (a) vs deprecate the param (b).
-  Spike aya's pre-load map resize on stable; fall back to (b).
-- **Q5 — `Queues::Auto` as the eventual default.** 0.26 keeps `Single(0)`; lock the
-  1.0 default-to-Auto break here so it's on the 1.0 checklist.
+- ~~**Q1 — unified `next_batch` borrow shape.**~~ ✅ Resolved in M2: zero-copy/`Send`
+  holds (one socket borrowed at a time); needed a *fresh* readiness probe (§2.1).
+- ~~**Q2 — `into_parts` guard.**~~ ✅ Resolved in M2: returns `(Vec<XdpSocket>,
+  XdpCaptureGuard)` — the guard owns the program + promisc so workers can't detach by
+  accident.
+- ~~**Q3 — `xdp_queues` scope.**~~ ✅ Locked: monitor-wide (symmetric with
+  `promiscuous`).
+- **Q4 — Tier-2 backend seam (M5).** `BackendSpec::XdpProvided(AsyncXdpSocket)` vs a
+  public `MonitorBuilder::xdp_socket(...)`. Recommend the internal spec + the
+  `XdpShardedRunner` public face; expose `xdp_socket` only if a "bring-your-own-socket"
+  demand appears.
+- **Q5 — B1 (M5).** Honor `max_queues` via aya BTF map-resize (a) vs `#[deprecated]`
+  shim ignoring it (b). Spike (a) on stable aya; fall back to (b). (PR #7 already
+  removed the silent-failure risk via the ≥256 error.)
+- **Q6 — shared-UMEM partitioning helper (M5/F1).** Confirm a safe per-queue frame
+  partition that sidesteps the FILL race, or keep per-socket UMEM the only blessed
+  path and document `shared_umem` as expert-only.
+- **Q7 — `AsyncXdpCapture` readiness (M3).** N× `AsyncFd` + `poll_fn`/`select` (simple)
+  vs one epoll fd registering all N (one wakeup, more machinery). Start with N×
+  `AsyncFd`; revisit only if reactor pressure shows up at high queue counts.
 
 ---
 
 ## 10. Definition of done
 
-- `XdpCapture` + `AsyncXdpCapture` + `Queues` + `queue_count()` shipped; B1 honest;
-  `is_zerocopy()` queryable.
-- Monitor `xdp_queues(Queues)` captures every queue through the existing loop; the
-  G2 silent-under-capture footgun is **gone** (default documented, `Auto` one call).
-- `examples/xdp/xdp_multiqueue.rs` rewritten on `XdpCapture` (~10 lines).
-- Gates: fmt + clippy `--all-features -D warnings` + rustdoc `-D warnings` + dhat
-  Δ 0/0 + the root-gated `lo` N=1 live test, all green.
-- Docs updated; CHANGELOG `## 0.26.0`; this plan **deleted on ship** (delete-on-ship
-  convention), its locked decisions folded into `netring-architecture.md`.
+- **Done (PR #5/#7):** `XdpCapture` + `Queues` + `queue_count()` + `is_zerocopy()`;
+  B1 silent-failure removed; `xdp_multiqueue` example on `XdpCapture`.
+- **M3/M4:** `AsyncXdpCapture` + `AnyBackend::XdpMq` + monitor-wide `xdp_queues(Queues)`
+  → the **G2 footgun is gone** (Tier 1 captures every queue; default documented,
+  `Auto` one call).
+- **M5:** `XdpShardedRunner` (Tier 2 worker-per-queue + busy-poll) ; F1/F3/B1 hardening.
+- **M6:** docs + `MIGRATING_0.25_TO_0.26` + CHANGELOG `## 0.26.0` + version bump.
+- Gates throughout: fmt + clippy `--all-features -D warnings` + the **feature-combo
+  matrix** (§2.1 lesson) + rustdoc `-D warnings` + dhat Δ 0/0 + root-gated `lo` live
+  tests for each new drain path.
+- This plan **deleted on ship**, its locked decisions (the tiered threading model
+  §4.5) folded into `netring-architecture.md`.

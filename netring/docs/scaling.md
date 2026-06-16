@@ -178,14 +178,24 @@ Two ways to capture everything:
 
 | Approach | How | Trade-off |
 |---|---|---|
-| **One socket per queue** | load the redirect program once, open one `XdpSocket` per `queue_id`, register each at its queue index in the program's XSKMAP, poll them together | full line-rate; the canonical pattern — see `examples/xdp/xdp_multiqueue.rs` |
-| **Collapse to one queue** | `ethtool -L <iface> combined 1`, then a single socket | simplest; caps throughput at one core's worth |
+| **One socket per queue** | `XdpCapture` opens one socket per `queue_id`, loads one redirect program, registers each in its XSKMAP, and drains them round-robin | full line-rate; the canonical pattern |
+| **Collapse to one queue** | `ethtool -L <iface> combined 1`, then a single `XdpSocket` | simplest; caps throughput at one core's worth |
 
-With per-queue sockets, **promiscuous mode only needs to be set once** — it's an
-interface-global, reference-counted property, so a single `PACKET_MR_PROMISC`
-guard (e.g. on the first socket) holds the whole NIC promiscuous. Each socket can
-own its own UMEM (simplest), or share one via `XdpSocketBuilder::shared_umem` to
-save memory at the cost of partitioning the frame space by hand.
+The high-level [`XdpCapture`](../docs/API_OVERVIEW.md#xdpcapture--full-nic-multi-queue-capture-issue-6-feature-xdp-loader)
+handle does the one-socket-per-queue orchestration for you:
+
+```rust
+use netring::xdp::{XdpCapture, Queues};
+let mut cap = XdpCapture::builder()
+    .interface("eth0").queues(Queues::Auto).promiscuous(true).build()?;
+while let Some((queue_id, batch)) = cap.next_batch_blocking(timeout)? { /* … */ }
+// or cap.into_parts() → one socket per worker thread (Suricata model)
+```
+
+It enables **promiscuous mode once** (interface-global, reference-counted — a
+single `PACKET_MR_PROMISC` guard covers every queue) and gives each socket its
+**own UMEM** — the safe default, since sharing a UMEM across per-CPU sockets
+races on the FILL queue. Runnable: `examples/xdp/xdp_multiqueue.rs`.
 
 > Some NICs (notably Mellanox) require you to create **twice** as many AF_XDP
 > queues as `ethtool -L combined` reports to be sure of receiving every packet.

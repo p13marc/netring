@@ -171,6 +171,62 @@ fn afxdp_lo_promiscuous_guard_does_not_break_capture() {
     std::thread::sleep(Duration::from_millis(300));
 }
 
+/// Issue #6: the high-level multi-queue [`XdpCapture`]. On `lo` (single queue)
+/// this degenerates to one socket on queue 0, but it exercises the whole
+/// `XdpCapture` path end-to-end: queue resolution, one-program-load, per-queue
+/// socket open + XSKMAP register, single attach, the interface-global
+/// promiscuous guard, and the unified round-robin `next_batch`. Asserts it
+/// captures redirected loopback frames and reports COPY mode (SKB on lo).
+#[test]
+fn xdp_capture_lo_captures_via_unified_recv() {
+    use netring::xdp::{Queues, XdpCapture};
+
+    wait_lo_free();
+
+    let mut cap = XdpCapture::builder()
+        .interface("lo")
+        .queues(Queues::Auto) // → [0] on lo (no ethtool channels)
+        .promiscuous(true)
+        .frame_size(2048)
+        .frame_count(4096)
+        .build()
+        .expect("build XdpCapture on lo (needs root / CAP_BPF+CAP_NET_ADMIN)");
+
+    assert_eq!(cap.socket_count(), 1, "lo has a single queue");
+    assert_eq!(cap.queue_ids(), &[0]);
+    assert!(
+        !cap.is_zerocopy(),
+        "SKB/generic XDP on lo binds in COPY mode, not zero-copy"
+    );
+
+    let tx = UdpSocket::bind("127.0.0.1:0").expect("bind udp tx");
+    let deadline = Instant::now() + Duration::from_secs(10);
+    let mut captured: u64 = 0;
+    let mut last_qid = u32::MAX;
+    while Instant::now() < deadline && captured == 0 {
+        for _ in 0..8 {
+            let _ = tx.send_to(b"netring-xdpcapture", "127.0.0.1:65125");
+        }
+        if let Some((qid, batch)) = cap.next_batch() {
+            last_qid = qid;
+            captured += (&batch).into_iter().count() as u64;
+        }
+        if captured == 0 {
+            std::thread::sleep(Duration::from_millis(20));
+        }
+    }
+
+    assert!(
+        captured > 0,
+        "XdpCapture should capture at least one redirected loopback frame via \
+         the unified round-robin within 10s",
+    );
+    assert_eq!(last_qid, 0, "the only queue is 0");
+
+    drop(cap);
+    std::thread::sleep(Duration::from_millis(300));
+}
+
 /// 0.25 W1a: the **in-Monitor** AF_XDP loader path. `xdp_interface_loaded("lo")`
 /// must make a high-level [`Monitor`] attach the redirect-all program itself,
 /// register its socket on the XSKMAP, and deliver redirected loopback frames

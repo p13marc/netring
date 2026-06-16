@@ -75,7 +75,7 @@ matrix and anti-patterns.
 | `async_xdp_busy_poll` | Busy-poll trio for latency |
 | `async_xdp_self_loaded` | `with_default_program()` — no external XDP loader; `PROMISC=1` for promiscuous capture (issue #4) |
 | `async_xdp_custom_program` | `with_program(prog)` for a caller-loaded XDP program |
-| `xdp_multiqueue` | full-NIC capture: **one `XdpSocket` per RX queue** + promiscuous (issue #4) |
+| `xdp_multiqueue` | full-NIC capture via **`XdpCapture`** — one socket per RX queue + promiscuous (issues #4/#6) |
 
 ## flow/ — flow tracking (no L7 parsing)
 

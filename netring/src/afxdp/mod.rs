@@ -33,6 +33,8 @@
 
 #[cfg(feature = "af-xdp")]
 mod batch;
+#[cfg(feature = "af-xdp")]
+mod capture;
 pub(crate) mod ffi;
 #[cfg(feature = "af-xdp")]
 mod ring;
@@ -47,6 +49,10 @@ pub mod loader;
 
 #[cfg(feature = "af-xdp")]
 pub use batch::{XdpBatch, XdpBatchIter, XdpPacket};
+#[cfg(feature = "af-xdp")]
+pub use capture::{Queues, queue_count};
+#[cfg(all(feature = "af-xdp", feature = "xdp-loader"))]
+pub use capture::{XdpCapture, XdpCaptureBuilder, XdpCaptureGuard};
 pub use stats::XdpStats;
 
 #[cfg(feature = "xdp-loader")]
@@ -624,10 +630,12 @@ impl XdpSocketBuilder {
             self.shared_umem_fd,
         )?;
 
-        // 0.25 W4: warn if the kernel fell back to COPY mode. On a fast NIC the
-        // per-frame copy dominates; the operator should know to switch to a
-        // native-XDP driver + DRV_MODE for true zero-copy. Best-effort read.
-        if self.shared_umem_fd == 0 {
+        // 0.25 W4 / issue #6 F2: read the bind mode. On a fast NIC the per-frame
+        // copy of COPY mode dominates; the operator should know to switch to a
+        // native-XDP driver + DRV_MODE for true zero-copy. We both `warn!` and
+        // store the result so callers can query it via `is_zerocopy()` instead
+        // of grepping logs. Best-effort: a failed read is treated as not-ZC.
+        let zerocopy = {
             let mut opts: u32 = 0;
             let mut len = std::mem::size_of::<u32>() as libc::socklen_t;
             // SAFETY: getsockopt writes a u32 into `opts`; `len` matches.
@@ -640,13 +648,15 @@ impl XdpSocketBuilder {
                     &mut len,
                 )
             };
-            if rc == 0 && opts & libc::XDP_OPTIONS_ZEROCOPY == 0 {
+            let zc = rc == 0 && opts & libc::XDP_OPTIONS_ZEROCOPY != 0;
+            if self.shared_umem_fd == 0 && !zc {
                 tracing::warn!(
                     "AF_XDP bound in COPY mode (not zero-copy); for line-rate use a \
                      native-XDP-capable driver with XdpFlags::DRV_MODE"
                 );
             }
-        }
+            zc
+        };
 
         // Optionally hold the interface in promiscuous mode for the socket's
         // lifetime (issue #4). AF_XDP has no promisc knob; an AF_PACKET
@@ -668,6 +678,7 @@ impl XdpSocketBuilder {
             tx,
             comp,
             need_wakeup_enabled: self.need_wakeup,
+            zerocopy,
             _promisc_guard: promisc_guard,
             #[cfg(feature = "xdp-loader")]
             _xdp_attachment: None,
@@ -761,6 +772,11 @@ pub struct XdpSocket {
     /// whether `flush()` honors `tx.needs_wakeup()` or always kicks.
     #[cfg(feature = "af-xdp")]
     need_wakeup_enabled: bool,
+    /// Issue #6 F2: whether the kernel bound this socket in zero-copy mode
+    /// (`XDP_OPTIONS_ZEROCOPY`). Read once at build; surfaced via
+    /// [`XdpSocket::is_zerocopy`].
+    #[cfg(feature = "af-xdp")]
+    zerocopy: bool,
     /// RAII guard holding the interface in promiscuous mode (set when built
     /// with [`XdpSocketBuilder::promiscuous`]). On drop, its fd closes and the
     /// kernel decrements `dev->promiscuity`, so the interface leaves
@@ -866,8 +882,26 @@ impl XdpSocket {
     /// are fine (we'll just loop), false negatives just mean we go through
     /// poll() once unnecessarily on a fresh batch.
     #[cfg(feature = "af-xdp")]
-    fn rx_is_empty(&self) -> bool {
+    pub(crate) fn rx_is_empty(&self) -> bool {
         self.rx.cached_count() == 0
+    }
+
+    /// Whether the kernel bound this socket in **zero-copy** mode (issue #6 F2).
+    ///
+    /// `false` means COPY mode — the kernel copies each frame into the UMEM
+    /// (works on any driver, including SKB/generic XDP, but caps throughput).
+    /// For line rate on a real NIC, use a native-XDP driver with
+    /// [`XdpFlags::DRV_MODE`](crate::xdp::XdpFlags).
+    #[cfg(feature = "af-xdp")]
+    pub fn is_zerocopy(&self) -> bool {
+        self.zerocopy
+    }
+
+    /// Borrow the socket fd for polling (used by the multi-queue
+    /// [`XdpCapture`](crate::xdp::XdpCapture) round-robin).
+    #[cfg(all(feature = "af-xdp", feature = "xdp-loader"))]
+    pub(crate) fn poll_fd(&self) -> std::os::fd::BorrowedFd<'_> {
+        self.fd.as_fd()
     }
 
     /// Receive packets (non-blocking) as owned copies.

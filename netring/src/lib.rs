@@ -110,13 +110,17 @@ pub use traits::{PacketSetFilter, PacketSink, PacketSource};
 pub use afxdp::{XdpBatch, XdpBatchIter, XdpPacket};
 pub use afxdp::{XdpMode, XdpSocket, XdpSocketBuilder, XdpStats};
 
-/// XDP program loader (built-in redirect-all program). Requires the
-/// `xdp-loader` Cargo feature.
-#[cfg(feature = "xdp-loader")]
+/// AF_XDP capture surface: queue discovery + multi-queue capture (issue #6) and,
+/// with the `xdp-loader` feature, the built-in XDP program loader.
+#[cfg(feature = "af-xdp")]
 pub mod xdp {
+    #[cfg(feature = "xdp-loader")]
     pub use crate::afxdp::loader::{
         LoaderError, XdpAttachment, XdpFlags, XdpProgram, default_program, filter_program,
     };
+    pub use crate::afxdp::{Queues, queue_count};
+    #[cfg(feature = "xdp-loader")]
+    pub use crate::afxdp::{XdpCapture, XdpCaptureBuilder, XdpCaptureGuard};
 }
 
 // Async / channel adapters

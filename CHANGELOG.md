@@ -1,6 +1,13 @@
 # Changelog
 
-## Unreleased
+## 0.26.0 — 2026-06-16 — AF_XDP multi-queue capture & promiscuous mode
+
+> Completes the AF_XDP capture story (issues #4 + #6): promiscuous mode, the
+> high-level `XdpCapture` (one socket per RX queue, `Queues::Auto` via ethtool),
+> the Monitor `xdp_queues` single-reactor tier that removes the silent
+> single-queue under-capture footgun, and the `XdpShardedRunner` line-rate tier
+> (one Monitor per queue, busy-poll). Additive over 0.25 (existing code compiles
+> unchanged). Depends on flowscope 0.16. Companion `netring-exporters` 0.1.1.
 
 ### Added
 

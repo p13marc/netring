@@ -1,6 +1,6 @@
 [package]
 name = "netring-exporters"
-version = "0.1.0"
+version = "0.1.1"
 edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
@@ -25,7 +25,7 @@ kafka = ["dep:rdkafka", "dep:serde_json"]
 [dependencies]
 # `flow` + `tokio` expose the Monitor's anomaly-sink surface the exporters
 # implement (netring::anomaly::{sink::AnomalySink, Severity, key::Key}).
-netring = { path = "../netring", version = "0.25", default-features = false, features = [
+netring = { path = "../netring", version = "0.26", default-features = false, features = [
     "flow",
     "tokio",
 ] }

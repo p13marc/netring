@@ -1191,7 +1191,7 @@ dependencies = [
 
 [[package]]
 name = "netring"
-version = "0.25.0"
+version = "0.26.0"
 dependencies = [
  "ahash",
  "arrayvec",
@@ -1227,7 +1227,7 @@ dependencies = [
 
 [[package]]
 name = "netring-exporters"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "netring",
  "rdkafka",

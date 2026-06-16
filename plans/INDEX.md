@@ -20,7 +20,7 @@ Forward-looking implementation plans only. Historical record lives in `CHANGELOG
 | [`netring-strategic-review-2026-06.md`](./netring-strategic-review-2026-06.md) | The *why* — competitive landscape, pain points, differentiators, the M1–M4 roadmap. |
 | ~~`netring-0.24-plan.md`~~ | **Shipped — 0.24.0 released 2026-06-14** (Zero-Copy Core + Production Trust; keystone `AnyBackend`). Plan deleted on ship; deferrals carried into the 0.25 plan's "Deferred from 0.24" section. |
 | ~~`netring-0.25-plan.md`~~ | **Shipped — 0.25.0 released 2026-06-15** (tag `0.25.0` + `netring-exporters` 0.1.0). Subscriptions, Async Effects, Performance & TX — the complete capability release; nothing deferred. Plan + subscription-engine design deleted on ship. |
-| [`netring-0.26-afxdp-capture-plan.md`](./netring-0.26-afxdp-capture-plan.md) | **In progress** (issue #6) — AF_XDP Multi-Queue Capture & Hardening. **Done:** M1 `queue_count`/`Queues` + M2 `XdpCapture` (one socket per RX queue, own-UMEM, `Queues::Auto`) + `is_zerocopy` (PR #7); promiscuous (PR #5). **Next: the tiered threading redesign** (§4.5) — Tier 1 `AnyBackend::XdpMq` + monitor-wide `xdp_queues` removes the 🔴 single-queue footgun (G2); Tier 2 `XdpShardedRunner` worker-per-queue + busy-poll for line rate (Suricata model). Then F1/F3/B1 hardening. Last feature release before 1.0. |
+| ~~`netring-0.26-afxdp-capture-plan.md`~~ | **Shipped — 0.26.0 released 2026-06-16** (tag `0.26.0` + `netring-exporters` 0.1.1). AF_XDP Multi-Queue Capture & Hardening (issues #4/#6): promiscuous · `XdpCapture` (one socket per RX queue, `Queues::Auto`) · Monitor `xdp_queues` (removed the single-queue footgun) · `XdpShardedRunner` (line-rate worker-per-queue) · B1/F3/F1 hardening. Plan deleted on ship. Last feature release before 1.0. |
 | [`upstream-tracking.md`](./upstream-tracking.md) | Live: rustc / kernel / flowscope features being watched. |
 | *(this)* `INDEX.md` | Roadmap overview, decisions, invariants, history. |
 
@@ -45,12 +45,11 @@ design).
   │     pinning · published pps/Gbps · symmetric TX · in-Monitor AF_XDP loader · UMEM
   │     hugepages/NUMA · Reopen/panic-catch · JA4S license-gating · OTLP/Kafka crate ·
   │     EVE-tls-record. The complete capability release — nothing deferred.
-0.26  AF_XDP Multi-Queue Capture & Hardening   ── IN PROGRESS (issue #6): M1+M2 DONE
-  │     (PR #7) — `XdpCapture` (one socket per RX queue · own-UMEM · `Queues::Auto` via
-  │     ETHTOOL_GCHANNELS · `is_zerocopy`). NEXT = tiered threading redesign: Tier 1
-  │     `AnyBackend::XdpMq` + monitor-wide `xdp_queues` **removes the silent single-queue
-  │     footgun**; Tier 2 `XdpShardedRunner` worker-per-queue + busy-poll (Suricata model).
-  │     Then F1/F3/B1 hardening. Promiscuous (#4/PR#5) done. Last feature release pre-1.0.
+0.26  AF_XDP Multi-Queue Capture & Hardening   ── ✅ PUBLISHED 2026-06-16 (tag 0.26.0
+  │     + netring-exporters 0.1.1): promiscuous (#4) · XdpCapture (one socket per RX
+  │     queue · Queues::Auto via ETHTOOL_GCHANNELS) · Monitor xdp_queues / AnyBackend::XdpMq
+  │     (removed the silent single-queue footgun) · XdpShardedRunner (line-rate
+  │     worker-per-queue + busy-poll) · B1/F3/F1 hardening (#6). Last feature release pre-1.0.
   ▼   community test window → feedback incorporated → shims removed
 1.0   Stabilization (SemVer promise; plan written once feedback is in)
 ```
@@ -94,6 +93,7 @@ seam everything else (incl. 0.25's subscriptions) builds on.
 
 | Release | Status |
 |---|---|
+| netring **0.26** | **Published 2026-06-16** (tag `0.26.0`) + **netring-exporters 0.1.1**. AF_XDP Multi-Queue Capture & Hardening (issues #4/#6): promiscuous mode · `XdpCapture` (one socket per RX queue, `Queues::Auto` via `ETHTOOL_GCHANNELS`) · Monitor `xdp_queues`/`AnyBackend::XdpMq` (single-reactor, removed the silent single-queue footgun) · `XdpShardedRunner` (line-rate worker-per-queue + busy-poll) · `default_program` honors `max_queues` · per-queue NUMA. Depends on flowscope 0.16.0. Additive over 0.25. |
 | netring **0.25** | **Published 2026-06-15** (tag `0.25.0`) + **netring-exporters 0.1.0**. Subscriptions, Async Effects, Performance & TX: typed 3-tier subscriptions + kernel filter pushdown (cBPF / XDP map) · async read+effect handlers · CPU/NUMA pinning + dispatch-throughput numbers · symmetric TX stack · in-Monitor AF_XDP loader · UMEM hugepages/NUMA · Reopen/panic-catch · JA4S `ja4plus` license-gating · OTLP/Kafka companion crate · EVE-tls-record. Depends on flowscope 0.16.0. Additive over 0.24. |
 | netring **0.24** | **Published 2026-06-14** (tag `0.24.0`). Zero-Copy Core + Production Trust: `AnyBackend` + borrowed zero-copy + `Send` loop · AF_XDP-in-Monitor · resilience + error counters · telemetry/health · syslog/IPFIX exporters · JA4/JA4S. Depends on flowscope 0.15.0. Additive over 0.23. |
 | netring **0.23** | `Send` run-loop future (spawnable). **Folded into 0.24 — never published standalone.** |

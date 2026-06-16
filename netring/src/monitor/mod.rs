@@ -82,6 +82,12 @@ pub mod subscription;
 pub mod shard;
 pub use shard::ShardedRunner;
 
+// Issue #6 M5 (Tier 2): per-queue sharded AF_XDP capture.
+#[cfg(all(feature = "af-xdp", feature = "xdp-loader"))]
+pub mod xdp_shard;
+#[cfg(all(feature = "af-xdp", feature = "xdp-loader"))]
+pub use xdp_shard::XdpShardedRunner;
+
 // 0.22 §5.1: cross-shard state merging (internal; driven by ShardedRunner).
 pub(crate) mod merge;
 
@@ -239,6 +245,12 @@ pub struct Monitor {
     /// Default `Queues::Single(0)`; `Queues::Auto` captures the whole NIC.
     #[cfg(feature = "af-xdp")]
     pub(crate) xdp_queues: crate::xdp::Queues,
+    /// Issue #6 M5 (Tier 2): pre-built AF_XDP backends injected by
+    /// [`XdpShardedRunner`](crate::monitor::xdp_shard::XdpShardedRunner) — one
+    /// per shard, drained as `AnyBackend::Xdp`. Not reopenable (the program +
+    /// registration live outside the Monitor).
+    #[cfg(feature = "af-xdp")]
+    pub(crate) injected_xdp: Vec<crate::AsyncXdpSocket>,
 }
 
 /// How the run loop reacts when a handler (detector / sink / async handler)
@@ -602,6 +614,10 @@ pub struct MonitorBuilder {
     /// interfaces. Set via [`Self::xdp_queues`]; defaults to `Queues::Single(0)`.
     #[cfg(feature = "af-xdp")]
     xdp_queues: crate::xdp::Queues,
+    /// Issue #6 M5: pre-built AF_XDP backends injected via
+    /// [`Self::inject_xdp_backend`] (the `XdpShardedRunner` Tier-2 seam).
+    #[cfg(feature = "af-xdp")]
+    injected_xdp: Vec<crate::AsyncXdpSocket>,
 }
 
 impl MonitorBuilder {
@@ -760,6 +776,20 @@ impl MonitorBuilder {
     #[cfg(feature = "af-xdp")]
     pub fn xdp_queues(mut self, queues: crate::xdp::Queues) -> Self {
         self.xdp_queues = queues;
+        self
+    }
+
+    /// Issue #6 M5: inject a pre-built AF_XDP backend (one queue's socket) that
+    /// this Monitor drains directly, instead of opening its own from a spec.
+    ///
+    /// The seam behind [`XdpShardedRunner`](crate::monitor::xdp_shard::XdpShardedRunner):
+    /// the runner attaches one program, opens one socket per queue, and hands
+    /// each shard its socket here. Counts as a capture source for `build()`.
+    /// Not reopenable — the program/registration live outside the Monitor, so a
+    /// backend error on an injected socket is terminal for that shard.
+    #[cfg(feature = "af-xdp")]
+    pub(crate) fn inject_xdp_backend(mut self, socket: crate::AsyncXdpSocket) -> Self {
+        self.injected_xdp.push(socket);
         self
     }
 
@@ -1821,7 +1851,9 @@ impl MonitorBuilder {
         // 0.24 Phase B: an AF_XDP-only monitor (no AF_PACKET interface) is
         // valid too — only error when *no* capture source of any kind is set.
         #[cfg(feature = "af-xdp")]
-        let no_capture_source = self.interfaces.is_empty() && self.xdp_interfaces.is_empty();
+        let no_capture_source = self.interfaces.is_empty()
+            && self.xdp_interfaces.is_empty()
+            && self.injected_xdp.is_empty();
         #[cfg(not(feature = "af-xdp"))]
         let no_capture_source = self.interfaces.is_empty();
         if interface_required && no_capture_source {
@@ -1918,6 +1950,8 @@ impl MonitorBuilder {
             promiscuous: self.promiscuous,
             #[cfg(feature = "af-xdp")]
             xdp_queues: self.xdp_queues,
+            #[cfg(feature = "af-xdp")]
+            injected_xdp: self.injected_xdp,
         })
     }
 }

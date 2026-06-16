@@ -382,7 +382,7 @@ enum RunMode {
 /// `num_shards > cores` wraps instead of failing. Returns `false` if the
 /// syscall fails (e.g. a restricted cgroup cpuset) — callers treat that as a
 /// best-effort no-op.
-fn pin_current_thread_to_core(index: usize) -> bool {
+pub(crate) fn pin_current_thread_to_core(index: usize) -> bool {
     let n = std::thread::available_parallelism()
         .map(|n| n.get())
         .unwrap_or(1)

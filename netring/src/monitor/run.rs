@@ -72,6 +72,11 @@ enum BackendSpec {
     /// AF_XDP per its interface spec (bare vs self-loaded program).
     #[cfg(feature = "af-xdp")]
     Xdp(crate::monitor::XdpIfaceSpec),
+    /// Issue #6 M5: a pre-built AF_XDP socket injected by `XdpShardedRunner`.
+    /// Placeholder so `specs` stays parallel to `caps`; the actual socket comes
+    /// from the Monitor's `injected_xdp` vec at first open. Not reopenable.
+    #[cfg(feature = "af-xdp")]
+    XdpProvided,
 }
 
 /// Open (or re-open) one capture backend from its [`BackendSpec`], applying the
@@ -105,6 +110,14 @@ fn open_backend(
         }
         #[cfg(feature = "af-xdp")]
         BackendSpec::Xdp(xspec) => open_xdp_backend(xspec, promiscuous),
+        // Reached only on Reopen — first open takes the socket from the
+        // Monitor's `injected_xdp` vec. An injected backend can't be rebuilt.
+        #[cfg(feature = "af-xdp")]
+        BackendSpec::XdpProvided => Err(crate::error::Error::Config(
+            "cannot reopen an injected AF_XDP backend (XdpShardedRunner): the \
+             program and socket registration live outside the Monitor"
+                .into(),
+        )),
     }
 }
 
@@ -187,6 +200,8 @@ pub(crate) async fn run_loop(monitor: Monitor, stop: StopCondition) -> Result<()
         promiscuous,
         #[cfg(feature = "af-xdp")]
         xdp_queues,
+        #[cfg(feature = "af-xdp")]
+        injected_xdp,
     } = monitor;
     // Borrow the monitor name as `&str` for the run loop's
     // dispatch sites. The owned `Box<str>` lives in this stack
@@ -225,10 +240,27 @@ pub(crate) async fn run_loop(monitor: Monitor, stop: StopCondition) -> Result<()
         spec.queues = xdp_queues.clone();
         specs.push(BackendSpec::Xdp(spec));
     }
+    // Issue #6 M5: one placeholder spec per injected (pre-built) AF_XDP socket,
+    // keeping `specs` parallel to `caps`. The sockets are consumed below.
+    #[cfg(feature = "af-xdp")]
+    let mut injected_iter = injected_xdp.into_iter();
+    #[cfg(feature = "af-xdp")]
+    for _ in 0..injected_iter.len() {
+        specs.push(BackendSpec::XdpProvided);
+    }
 
     let mut caps: Vec<AnyBackend> = Vec::with_capacity(specs.len());
     for spec in &specs {
-        caps.push(open_backend(spec, fanout, &kernel_prefilter, promiscuous)?);
+        let cap = match spec {
+            #[cfg(feature = "af-xdp")]
+            BackendSpec::XdpProvided => AnyBackend::Xdp(
+                injected_iter
+                    .next()
+                    .expect("one injected socket per XdpProvided spec"),
+            ),
+            _ => open_backend(spec, fanout, &kernel_prefilter, promiscuous)?,
+        };
+        caps.push(cap);
     }
     // 0.24 Phase C4: all sockets are open and the loop is about to run —
     // readiness flips true. `mark_started` stamps the uptime/liveness
@@ -604,6 +636,8 @@ pub(crate) async fn replay_loop(
         promiscuous: _, // pcap replay has no live interface to set promiscuous
         #[cfg(feature = "af-xdp")]
             xdp_queues: _, // pcap replay has no live AF_XDP backend
+        #[cfg(feature = "af-xdp")]
+            injected_xdp: _, // pcap replay has no live AF_XDP backend
     } = monitor;
     let monitor_name_borrow: Option<&str> = monitor_name.as_deref();
 

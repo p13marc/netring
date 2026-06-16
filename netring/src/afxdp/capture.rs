@@ -156,6 +156,9 @@ mod mq {
         promiscuous: bool,
         hugepages: bool,
         numa_node: Option<u32>,
+        busy_poll_us: Option<u32>,
+        prefer_busy_poll: Option<bool>,
+        busy_poll_budget: Option<u16>,
         attach_flags: XdpFlags,
         program: Option<XdpProgram>,
     }
@@ -171,6 +174,9 @@ mod mq {
                 promiscuous: false,
                 hugepages: false,
                 numa_node: None,
+                busy_poll_us: None,
+                prefer_busy_poll: None,
+                busy_poll_budget: None,
                 attach_flags: XdpFlags::SKB_MODE, // safest; works on lo
                 program: None,
             }
@@ -230,6 +236,32 @@ mod mq {
             self
         }
 
+        /// Enable `SO_BUSY_POLL` (microseconds) on **every** per-queue socket
+        /// (kernel ≥ 4.5). The performance lever for the worker-per-queue model
+        /// (one socket per core): the worker busy-polls its queue instead of
+        /// sleeping on the reactor, cutting wake latency at the cost of a spinning
+        /// core. Pair with [`prefer_busy_poll`](Self::prefer_busy_poll) +
+        /// [`busy_poll_budget`](Self::busy_poll_budget) and the netdev NAPI knobs
+        /// (`napi-defer-hard-irqs`, `gro-flush-timeout`). Default: off.
+        pub fn busy_poll(mut self, us: u32) -> Self {
+            self.busy_poll_us = Some(us);
+            self
+        }
+
+        /// Set `SO_PREFER_BUSY_POLL` on every per-queue socket (kernel ≥ 5.11).
+        /// No effect without [`busy_poll`](Self::busy_poll).
+        pub fn prefer_busy_poll(mut self, enable: bool) -> Self {
+            self.prefer_busy_poll = Some(enable);
+            self
+        }
+
+        /// Set `SO_BUSY_POLL_BUDGET` (per-poll frame cap) on every per-queue
+        /// socket (kernel ≥ 5.11). 64 is a common production value.
+        pub fn busy_poll_budget(mut self, budget: u16) -> Self {
+            self.busy_poll_budget = Some(budget);
+            self
+        }
+
         /// XDP attach mode. Default: `SKB_MODE` (works everywhere incl. `lo`).
         /// Use `DRV_MODE` for native-driver zero-copy on a real NIC.
         pub fn attach_flags(mut self, flags: XdpFlags) -> Self {
@@ -285,6 +317,15 @@ mod mq {
                     .hugepages(self.hugepages);
                 if let Some(node) = self.numa_node {
                     b = b.numa_node(node);
+                }
+                if let Some(us) = self.busy_poll_us {
+                    b = b.busy_poll_us(us);
+                }
+                if let Some(prefer) = self.prefer_busy_poll {
+                    b = b.prefer_busy_poll(prefer);
+                }
+                if let Some(budget) = self.busy_poll_budget {
+                    b = b.busy_poll_budget(budget);
                 }
                 let sock = b.build()?;
                 prog.register(q, &sock)?;

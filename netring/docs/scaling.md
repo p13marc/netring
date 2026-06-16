@@ -197,11 +197,33 @@ single `PACKET_MR_PROMISC` guard covers every queue) and gives each socket its
 **own UMEM** — the safe default, since sharing a UMEM across per-CPU sockets
 races on the FILL queue. Runnable: `examples/xdp/xdp_multiqueue.rs`.
 
-In the **Monitor**, `MonitorBuilder::xdp_queues(Queues::Auto)` does this for you —
-one socket per queue behind a single program, drained through a unified
-round-robin (`AnyBackend::XdpMq`), so a self-loading AF_XDP monitor captures the
-whole NIC instead of just queue 0. That's the single-reactor tier (one core); the
-sharded worker-per-queue tier (one core per queue, line rate) is on the roadmap.
+Two Monitor tiers, mirroring plain-Monitor ↔ `ShardedRunner` on the AF_PACKET side:
+
+- **Single-reactor** — `MonitorBuilder::xdp_queues(Queues::Auto)`: one socket per
+  queue behind a single program, drained through a unified round-robin
+  (`AnyBackend::XdpMq`) on **one core**. Captures the whole NIC instead of just
+  queue 0; the simplest fix, fine up to a core's worth of traffic.
+- **Sharded (line rate)** — `XdpShardedRunner`: **one `Monitor` per RX queue**,
+  each on its own core, ideally busy-polled. The AF_XDP analogue of
+  `ShardedRunner`; this is Suricata's `threads: auto`.
+
+```rust
+use netring::monitor::XdpShardedRunner;
+use netring::xdp::Queues;
+use netring::prelude::*;
+
+XdpShardedRunner::new("eth0", Queues::Auto, |queue, builder| {
+    builder.protocol::<Tcp>().on::<FlowStarted<Tcp>>(move |_e| Ok(()))
+})
+.promiscuous(true)
+.busy_poll(50)        // µs — one busy-polled socket per core
+.pin_cpus(true)
+.run_for(std::time::Duration::from_secs(60))?;
+```
+
+Pair `pin_cpus(true)` with NIC IRQ affinity (queue `i`'s interrupt on core `i`)
+and the netdev NAPI knobs (`napi-defer-hard-irqs`, `gro-flush-timeout`) so
+busy-poll is effective. Runnable: `examples/xdp/xdp_sharded.rs`.
 
 > Some NICs (notably Mellanox) require you to create **twice** as many AF_XDP
 > queues as `ethtool -L combined` reports to be sure of receiving every packet.

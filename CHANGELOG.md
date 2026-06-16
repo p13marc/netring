@@ -4,6 +4,18 @@
 
 ### Added
 
+- **Per-queue sharded AF_XDP capture: `XdpShardedRunner`** ([#6](https://github.com/p13marc/netring/issues/6), M5 Tier 2).
+  The line-rate multi-queue model — one `Monitor` (worker thread) per RX queue,
+  the AF_XDP analogue of `ShardedRunner` (which shards AF_PACKET via
+  `PACKET_FANOUT`). It builds one shared `XdpCapture` (one attached program, one
+  socket per queue, one promiscuous guard) and hands each shard its socket via a
+  new injection seam, so every queue gets full flow tracking on its own core
+  (Suricata's `threads: auto`). Per-queue **busy-poll** (`SO_BUSY_POLL` /
+  `SO_PREFER_BUSY_POLL` / `SO_BUSY_POLL_BUDGET`, also new on `XdpCapture`) + CPU
+  pinning are the performance levers. Use `MonitorBuilder::xdp_queues` for the
+  single-reactor (one-core) tier; `XdpShardedRunner` when one core can't keep up.
+  Example: `examples/xdp/xdp_sharded.rs`.
+
 - **Monitor multi-queue AF_XDP + async capture** ([#6](https://github.com/p13marc/netring/issues/6), M3/M4).
   `MonitorBuilder::xdp_queues(Queues)` (monitor-wide, mirroring `promiscuous`)
   makes a self-loading AF_XDP interface capture **every RX queue**, not just

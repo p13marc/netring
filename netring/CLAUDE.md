@@ -790,7 +790,14 @@ just ci-full         # setcap + full test suite
 - `src/monitor/backend.rs` — **`AnyBackend::XdpMq`** (M4 Tier 1): one backend, N
   sockets, unified round-robin drain. `MonitorBuilder::xdp_queues(Queues)`
   (monitor-wide) routes a self-loading interface through it when `≠ Single(0)`,
-  **removing the G2 single-queue footgun**. Tier 2 (sharded worker-per-queue) is M5.
+  **removing the G2 single-queue footgun**.
+- `src/monitor/xdp_shard.rs` — **`XdpShardedRunner`** (M5 Tier 2): one `Monitor`
+  per RX queue (worker-per-core, busy-poll), the AF_XDP analogue of
+  `ShardedRunner`. Builds one shared `XdpCapture`, `into_parts`, and injects each
+  socket into a per-shard Monitor via the pub(crate) **injection seam**
+  (`MonitorBuilder::inject_xdp_backend` → `BackendSpec::XdpProvided`, not
+  reopenable; the shared program/promisc guard is held on the calling thread).
+  `XdpCapture` gained busy-poll passthrough. Remaining M5: F1/F3/B1 hardening.
 - `src/afxdp/ffi.rs` — libc re-exports for XDP constants/structs
 - `src/afxdp/socket.rs` — AF_XDP socket/setsockopt/bind wrappers
 - `src/afxdp/umem.rs` — UMEM mmap + frame allocator

@@ -4,6 +4,18 @@
 
 ### Added
 
+- **AF_XDP hardening** ([#6](https://github.com/p13marc/netring/issues/6), M5 finish).
+  - **B1:** `netring::xdp::default_program(max_queues)` now **honors** its argument —
+    the XSKMAP is sized via aya's `EbpfLoader::set_max_entries` (was ignored; map
+    fixed at 256). `XdpCapture` sizes the map to exactly its queue set.
+  - **F3:** `XdpCaptureBuilder::numa_auto()` / `XdpShardedRunner::numa_auto(true)`
+    bind every queue's UMEM to the NIC's NUMA node, read from
+    `/sys/class/net/<iface>/device/numa_node` (new `netring::xdp::interface_numa_node`).
+  - **F1:** `XdpSocketBuilder::shared_umem` documented as **expert-only** with the
+    per-CPU FILL-queue race caveat; per-socket UMEM (the `XdpCapture` default)
+    stays the blessed multi-queue path. (No shared-UMEM opt-in added to
+    `XdpCapture` — it would be a footgun.)
+
 - **Per-queue sharded AF_XDP capture: `XdpShardedRunner`** ([#6](https://github.com/p13marc/netring/issues/6), M5 Tier 2).
   The line-rate multi-queue model — one `Monitor` (worker thread) per RX queue,
   the AF_XDP analogue of `ShardedRunner` (which shards AF_PACKET via

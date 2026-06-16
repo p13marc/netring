@@ -29,19 +29,24 @@ const PROGRAM_NAME: &str = "xdp_sock_prog";
 /// Map name inside the compiled object.
 const MAP_NAME: &str = "xsks_map";
 
-/// Load the built-in redirect-all XDP program. The program contains
-/// an embedded `BPF_MAP_TYPE_XSKMAP` named `xsks_map` of capacity
-/// `max_queues`.
+/// Load the built-in redirect-all XDP program. Its `BPF_MAP_TYPE_XSKMAP`
+/// (`xsks_map`) is sized to hold **`max_queues`** entries — one per RX queue you
+/// intend to register a socket for. Register socket for queue `q` at index `q`,
+/// so `max_queues` must exceed the highest queue id you'll use.
 ///
-/// After this returns, call [`XdpProgram::attach`] to attach to an
-/// interface, then [`XdpProgram::register`] (or its alias methods on
+/// Issue #6 B1: the parameter is now **honored** — the map's `max_entries` is
+/// rewritten before load via aya's `EbpfLoader::set_max_entries` (clamped to at
+/// least 1). Previously it was ignored (the map was fixed at the compiled-in
+/// 256).
+///
+/// After this returns, call [`XdpProgram::attach`] to attach to an interface,
+/// then [`XdpProgram::register`] (or its alias methods on
 /// [`super::XdpAttachment`]) to register AF_XDP sockets on the map.
-pub fn default_program(_max_queues: u32) -> Result<XdpProgram, Error> {
-    // The BPF object's XSKMAP has its own `max_entries` baked in by
-    // the compiler. `max_queues` is currently informational; we keep
-    // the parameter to surface the kernel limit and to allow a future
-    // resize via aya's `BTF_KIND_VAR` rewriting.
-    let bpf = Ebpf::load(REDIRECT_ALL_BYTECODE).map_err(|e| LoaderError::Aya(e.to_string()))?;
+pub fn default_program(max_queues: u32) -> Result<XdpProgram, Error> {
+    let bpf = aya::EbpfLoader::new()
+        .set_max_entries(MAP_NAME, max_queues.max(1))
+        .load(REDIRECT_ALL_BYTECODE)
+        .map_err(|e| LoaderError::Aya(e.to_string()))?;
     Ok(XdpProgram::new(bpf, PROGRAM_NAME, MAP_NAME))
 }
 

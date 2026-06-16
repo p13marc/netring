@@ -797,7 +797,13 @@ just ci-full         # setcap + full test suite
   socket into a per-shard Monitor via the pub(crate) **injection seam**
   (`MonitorBuilder::inject_xdp_backend` → `BackendSpec::XdpProvided`, not
   reopenable; the shared program/promisc guard is held on the calling thread).
-  `XdpCapture` gained busy-poll passthrough. Remaining M5: F1/F3/B1 hardening.
+  `XdpCapture` gained busy-poll passthrough + `numa_auto`.
+- **M5 hardening (issue #6, done):** B1 — `default_program(max_queues)` now honors
+  its arg via aya `EbpfLoader::set_max_entries` (`XdpCapture` sizes the XSKMAP to
+  its queue set). F3 — `XdpCaptureBuilder::numa_auto`/`XdpShardedRunner::numa_auto`
+  + `netring::xdp::interface_numa_node` (sysfs). F1 — `shared_umem` documented
+  expert-only (per-CPU FILL race); per-socket UMEM stays blessed. **Issue #6
+  feature-complete; only M6 (CHANGELOG date + version bump + release) remains.**
 - `src/afxdp/ffi.rs` — libc re-exports for XDP constants/structs
 - `src/afxdp/socket.rs` — AF_XDP socket/setsockopt/bind wrappers
 - `src/afxdp/umem.rs` — UMEM mmap + frame allocator

@@ -7,10 +7,12 @@
 > the **one break at 1.0** SemVer model
 > ([`netring-architecture.md`](./netring-architecture.md) §7).
 >
-> **Progress:** M0 (promiscuous) shipped in **PR #5** (merged). M1 (queue
-> discovery: `queue_count`/`Queues`) + M2 (`XdpCapture` sync handle) shipped in
-> **PR #7** (merged). Remaining: the **threading-model redesign** below (§4.5) →
-> M3/M4/M5.
+> **Progress — feature-complete (only M6 release prep left).** M0 promiscuous
+> (PR #5) · M1/M2 `XdpCapture` + queue discovery (PR #7) · M3/M4 single-reactor
+> `xdp_queues` / `AnyBackend::XdpMq` — the G2 footgun fix (PR #8) · M5 Tier 2
+> `XdpShardedRunner` (PR #9) + the B1/F3/F1 hardening (this PR). Every gap,
+> footgun, and bug in §2 is now closed. **Remaining: M6** — stamp the CHANGELOG
+> date, bump the version, release.
 >
 > **Redesign note (2026-06-16).** Implementing M2 + researching how Suricata/DPDK
 > actually run multi-queue AF_XDP changed the Monitor-integration design. The
@@ -71,10 +73,10 @@ Severity: 🔴 correctness/silent-data-loss · 🟠 ergonomics/pain · 🟡 poli
 | G1 | **No high-level multi-queue capture API.** Full-NIC AF_XDP = manual N-socket + program + XSKMAP dance. | 🟠 | gap | ✅ **DONE** — `XdpCapture` (PR #7, M2) |
 | G2 | **Monitor binds queue 0 only** → silent under-capture on every multi-queue NIC. | 🔴 | footgun | ⏳ **M4** (the headline remaining work) |
 | G3 | **No queue-count discovery.** Users must `ethtool -l` by hand; no `Queues::Auto`. | 🟠 | gap | ✅ **DONE** — `queue_count`/`Queues::Auto` (PR #7, M1) |
-| B1 | **`default_program(_max_queues)` ignores its argument** — XSKMAP baked at `max_entries=256`. | 🟡 | bug/wart | ◑ **partial** — PR #7 errors loudly on queue id ≥ 256 (the silent-failure risk). Honoring the param via BTF resize, or deprecating it, deferred to M5/1.0. |
-| F1 | **`shared_umem` is a footgun:** manual frame-space partitioning + the per-CPU FILL race. | 🟠 | footgun | ⏳ **M5** — `XdpCapture` defaults to per-socket UMEM (PR #7); a partitioning helper + caveats are M5. |
+| B1 | **`default_program(_max_queues)` ignores its argument** — XSKMAP baked at `max_entries=256`. | 🟡 | bug/wart | ✅ **DONE** — now honored via aya `EbpfLoader::set_max_entries`; `XdpCapture` sizes the map to its queue set. |
+| F1 | **`shared_umem` is a footgun:** manual frame-space partitioning + the per-CPU FILL race. | 🟠 | footgun | ✅ **DONE (decision Q6)** — per-socket UMEM stays the only blessed multi-queue path; `shared_umem` documented expert-only with the FILL-race caveat. **No** shared-UMEM opt-in on `XdpCapture` (would be a footgun). |
 | F2 | **Copy-mode perf cliff** surfaced only as a log line. | 🟡 | footgun | ✅ **DONE** — `is_zerocopy()` on `XdpSocket` + `XdpCapture` (PR #7). |
-| F3 | **No per-queue NUMA affinity.** `numa_node` is one value; per-queue sockets should bind each UMEM to that queue's node. | 🟡 | gap | ⏳ **M5** |
+| F3 | **No per-queue NUMA affinity.** `numa_node` is one value; per-queue sockets should bind each UMEM to that queue's node. | 🟡 | gap | ✅ **DONE** — `XdpCaptureBuilder::numa_auto` / `XdpShardedRunner::numa_auto` bind every queue's UMEM to the NIC's node (`interface_numa_node`, sysfs). |
 | D1 | **Promiscuous (issue #4).** Per-socket guard + monitor-wide flag. | ✅ | — | **DONE** — PR #5. |
 
 **Where we are.** G1/G3/F2 closed and B1's sharp edge defanged in PR #7 (M1+M2).
@@ -301,7 +303,7 @@ monitor at 1–5 Gbps; Tier 1 is one builder flag. Offering both matches plain-M
 | **M2** | `XdpCapture`: per-socket-UMEM open + 1-program register + unified `next_batch`/`into_parts`. B1 overflow-guard. F2 `is_zerocopy()`. Example rewritten on it. | ✅ **PR #7** |
 | **M3** | `AsyncXdpCapture` (tokio): `XdpCapture` + one `AsyncFd`/socket; `readable().await` over N fds (poll_fn/select); unified async `next_batch`. | ⏳ next |
 | **M4** | **Tier 1 footgun fix (G2):** `AnyBackend::XdpMq(AsyncXdpCapture)` arm + monitor-wide `MonitorBuilder::xdp_queues(Queues)`. 1-spec↔1-backend preserved; `Reopen` rebuilds the capture. | ⏳ next (headline) |
-| **M5** | **Tier 2:** `XdpShardedRunner` (worker-per-queue over `ShardedRunner`) + the `BackendSpec::XdpProvided` seam + busy-poll passthrough on `XdpCapture`. **F1** shared-UMEM opt-in + partitioning helper. **F3** per-queue NUMA. **B1** honor/deprecate `max_queues`. | ⏳ |
+| **M5** | **Tier 2:** `XdpShardedRunner` (worker-per-queue) + `BackendSpec::XdpProvided` seam + busy-poll passthrough (**PR #9**). Hardening: **B1** honor `max_queues` · **F3** per-queue NUMA · **F1** shared-UMEM expert-only decision (this PR). | ✅ **PR #9 + hardening** |
 | **M6** | Docs (API_OVERVIEW/scaling/TROUBLESHOOTING/FEATURES), `MIGRATING_0.25_TO_0.26`, CHANGELOG `## 0.26.0`, version bump, release. | ⏳ |
 
 **PR slicing:** M3+M4 = one PR (the footgun fix — Tier 1 is useless without the async

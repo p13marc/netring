@@ -8,6 +8,8 @@ pub mod tokio_injector;
 
 #[cfg(all(feature = "tokio", feature = "af-xdp"))]
 pub mod tokio_xdp;
+#[cfg(all(feature = "tokio", feature = "af-xdp", feature = "xdp-loader"))]
+pub mod tokio_xdp_capture;
 
 #[cfg(all(feature = "tokio", feature = "flow"))]
 pub mod async_reassembler;

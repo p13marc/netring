@@ -108,6 +108,11 @@ pub(crate) struct XdpIfaceSpec {
     /// `open_xdp_backend`); without that feature it's always `false` and unread.
     #[cfg_attr(not(feature = "xdp-loader"), allow(dead_code))]
     pub(crate) self_load: bool,
+    /// Issue #6: which RX queues to bind (self-loading path only). Stamped from
+    /// the monitor-wide [`MonitorBuilder::xdp_queues`] when the run loop builds
+    /// the backend specs; the constructors leave it at the default.
+    #[cfg_attr(not(feature = "xdp-loader"), allow(dead_code))]
+    pub(crate) queues: crate::xdp::Queues,
 }
 
 /// The 0.20 top-level monitor — a fully-constructed graph of
@@ -230,6 +235,10 @@ pub struct Monitor {
     /// promiscuous mode for the run's lifetime. Set via
     /// [`MonitorBuilder::promiscuous`].
     pub(crate) promiscuous: bool,
+    /// Issue #6: which RX queues each self-loading AF_XDP interface binds.
+    /// Default `Queues::Single(0)`; `Queues::Auto` captures the whole NIC.
+    #[cfg(feature = "af-xdp")]
+    pub(crate) xdp_queues: crate::xdp::Queues,
 }
 
 /// How the run loop reacts when a handler (detector / sink / async handler)
@@ -589,6 +598,10 @@ pub struct MonitorBuilder {
     /// Issue #4: monitor-wide promiscuous mode for every capture interface.
     /// Set via [`Self::promiscuous`]; defaults to `false`.
     promiscuous: bool,
+    /// Issue #6: monitor-wide RX-queue selection for self-loading AF_XDP
+    /// interfaces. Set via [`Self::xdp_queues`]; defaults to `Queues::Single(0)`.
+    #[cfg(feature = "af-xdp")]
+    xdp_queues: crate::xdp::Queues,
 }
 
 impl MonitorBuilder {
@@ -657,6 +670,7 @@ impl MonitorBuilder {
         self.xdp_interfaces.push(XdpIfaceSpec {
             iface: iface.into(),
             self_load: false,
+            queues: crate::xdp::Queues::default(),
         });
         self
     }
@@ -676,16 +690,17 @@ impl MonitorBuilder {
     /// NIC, build the socket yourself with `.xdp_attach_flags(XdpFlags::DRV_MODE)`
     /// and use [`Self::xdp_interface`].
     ///
-    /// **Single queue.** The Monitor binds **queue 0** of the interface. On a
-    /// multi-queue NIC, RSS spreads traffic across queues, so this captures only
-    /// queue 0's share — even with [`Self::promiscuous`]. For full-NIC capture
-    /// either pin the NIC to one queue (`ethtool -L <iface> combined 1`) or use
-    /// the one-socket-per-queue pattern in `examples/xdp/xdp_multiqueue.rs`.
+    /// **Queue selection.** Defaults to **queue 0** only. On a multi-queue NIC,
+    /// RSS spreads traffic across queues, so the default captures just queue 0's
+    /// share — even with [`Self::promiscuous`]. Add [`Self::xdp_queues`]
+    /// (`Queues::Auto`) to capture **every** queue (one socket per queue behind a
+    /// single program, drained round-robin).
     #[cfg(all(feature = "af-xdp", feature = "xdp-loader"))]
     pub fn xdp_interface_loaded(mut self, iface: impl Into<String>) -> Self {
         self.xdp_interfaces.push(XdpIfaceSpec {
             iface: iface.into(),
             self_load: true,
+            queues: crate::xdp::Queues::default(),
         });
         self
     }
@@ -716,6 +731,35 @@ impl MonitorBuilder {
     /// sockets yourself with the low-level builders.
     pub fn promiscuous(mut self, enable: bool) -> Self {
         self.promiscuous = enable;
+        self
+    }
+
+    /// Capture **all RX queues** of each self-loading AF_XDP interface
+    /// (feature `af-xdp`; issue #6). Default: `Queues::Single(0)`.
+    ///
+    /// An AF_XDP socket binds one queue, and RSS spreads traffic across queues,
+    /// so the default single-queue bind silently under-captures a multi-queue
+    /// NIC — even with [`Self::promiscuous`]. Set `Queues::Auto` (or an explicit
+    /// `Queues::range(..)`) to open one socket per queue behind a single program
+    /// and drain them through a unified round-robin:
+    ///
+    /// ```ignore
+    /// Monitor::builder()
+    ///     .xdp_interface_loaded("eth0")
+    ///     .xdp_queues(Queues::Auto)     // every RSS queue, not just queue 0
+    ///     .promiscuous(true)
+    ///     .protocol::<Tcp>()
+    ///     .build()?;
+    /// ```
+    ///
+    /// Monitor-wide (applies to every [`Self::xdp_interface_loaded`] interface),
+    /// mirroring [`Self::promiscuous`]. Single-reactor (one core); for line rate
+    /// across cores, drive [`XdpCapture`](crate::xdp::XdpCapture) sockets with one
+    /// worker per queue. Ignored for the bare [`Self::xdp_interface`] path (an
+    /// externally-attached program owns the redirect map).
+    #[cfg(feature = "af-xdp")]
+    pub fn xdp_queues(mut self, queues: crate::xdp::Queues) -> Self {
+        self.xdp_queues = queues;
         self
     }
 
@@ -1872,6 +1916,8 @@ impl MonitorBuilder {
             packet_subs: self.packet_subs,
             kernel_prefilter,
             promiscuous: self.promiscuous,
+            #[cfg(feature = "af-xdp")]
+            xdp_queues: self.xdp_queues,
         })
     }
 }
@@ -1918,6 +1964,24 @@ mod tests {
         // The flag survives into the built Monitor and reaches the run loop.
         let m = b.build().expect("build monitor");
         assert!(m.promiscuous);
+    }
+
+    #[cfg(feature = "af-xdp")]
+    #[test]
+    fn xdp_queues_defaults_single_zero_and_flag_plumbs() {
+        use crate::xdp::Queues;
+
+        // Default is the historical single-queue-0 bind (no behavior change).
+        let b = Monitor::builder();
+        assert!(matches!(b.xdp_queues, Queues::Single(0)));
+
+        // Opting into Auto plumbs through to the built Monitor (→ run loop → XdpMq).
+        let m = Monitor::builder()
+            .interface("lo")
+            .xdp_queues(Queues::Auto)
+            .build()
+            .expect("build monitor");
+        assert!(matches!(m.xdp_queues, Queues::Auto));
     }
 
     #[test]

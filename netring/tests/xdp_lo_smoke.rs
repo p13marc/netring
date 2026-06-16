@@ -291,6 +291,63 @@ async fn monitor_xdp_interface_loaded_captures_loopback_flows() {
     );
 }
 
+/// Issue #6 (M4 Tier 1): the **multi-queue** Monitor path. `.xdp_queues(Auto)`
+/// routes through `AnyBackend::XdpMq` (an `AsyncXdpCapture` of one socket per
+/// queue, unified round-robin) instead of the single-socket arm. On `lo` (one
+/// queue) this is N=1 through `XdpMq`, exercising `AsyncXdpCapture::new`,
+/// `poll_read_ready` (with stale-readiness clearing), and the round-robin
+/// `drain_batch` end-to-end through the real run loop. Regression guard for the
+/// G2 silent-single-queue footgun fix.
+#[cfg(all(feature = "flow", feature = "tokio"))]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn monitor_xdp_queues_auto_captures_via_xdpmq() {
+    use std::sync::Arc;
+    use std::sync::atomic::{AtomicU64, Ordering};
+
+    use netring::monitor::Monitor;
+    use netring::protocol::builtin::Udp;
+    use netring::protocol::event_typed::FlowStarted;
+    use netring::xdp::Queues;
+
+    wait_lo_free();
+
+    let seen = Arc::new(AtomicU64::new(0));
+    let seen_h = Arc::clone(&seen);
+
+    let monitor = Monitor::builder()
+        .xdp_interface_loaded("lo")
+        .xdp_queues(Queues::Auto) // → [0] on lo, routed through AnyBackend::XdpMq
+        .protocol::<Udp>()
+        .on::<FlowStarted<Udp>>(move |_evt: &FlowStarted<Udp>| {
+            seen_h.fetch_add(1, Ordering::Relaxed);
+            Ok(())
+        })
+        .build()
+        .expect("build Monitor with xdp_queues(Auto) on lo (needs root)");
+
+    let stop = Arc::new(AtomicU64::new(0));
+    let stop_h = Arc::clone(&stop);
+    let generator = std::thread::spawn(move || {
+        let tx = UdpSocket::bind("127.0.0.1:0").expect("bind udp tx");
+        while stop_h.load(Ordering::Relaxed) == 0 {
+            for _ in 0..16 {
+                let _ = tx.send_to(b"netring-monitor-xdpmq", "127.0.0.1:65126");
+            }
+            std::thread::sleep(Duration::from_millis(5));
+        }
+    });
+
+    let _ = monitor.run_for(Duration::from_secs(4)).await;
+    stop.store(1, Ordering::Relaxed);
+    let _ = generator.join();
+
+    assert!(
+        seen.load(Ordering::Relaxed) > 0,
+        "Monitor with xdp_queues(Auto) should observe >=1 UDP flow through the \
+         multi-queue AnyBackend::XdpMq round-robin",
+    );
+}
+
 /// 0.25 W1a: the **table-driven** `filter_program` + `XdpProgram::set_filter`
 /// end-to-end. Loads the filter program on `lo`, registers the socket, populates
 /// the `{udp, PORT}` filter, and asserts that matching loopback frames are

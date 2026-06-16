@@ -326,6 +326,11 @@ name = "xdp_multiqueue"
 path = "examples/xdp/xdp_multiqueue.rs"
 required-features = ["af-xdp", "xdp-loader"]
 
+[[example]]
+name = "xdp_sharded"
+path = "examples/xdp/xdp_sharded.rs"
+required-features = ["monitor", "af-xdp", "xdp-loader"]
+
 # flow/ — flow tracking (no L7 parsers)
 [[example]]
 name = "async_flow_keys"

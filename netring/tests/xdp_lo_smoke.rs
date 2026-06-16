@@ -348,6 +348,67 @@ async fn monitor_xdp_queues_auto_captures_via_xdpmq() {
     );
 }
 
+/// Issue #6 (M5 Tier 2): the per-queue **`XdpShardedRunner`** — one Monitor
+/// (worker thread) per RX queue, fed by injected sockets from one shared
+/// program. On `lo` (one queue) this is a single shard, exercising the whole
+/// Tier-2 path end-to-end: `XdpCapture` build → `into_parts` → thread spawn →
+/// `inject_xdp_backend` → per-shard `Monitor` run loop draining the injected
+/// `AnyBackend::Xdp`, with the shared program/promisc guard held on the calling
+/// thread across the run.
+#[cfg(all(feature = "flow", feature = "tokio"))]
+#[test]
+fn xdp_sharded_runner_lo_captures_flows() {
+    use std::sync::Arc;
+    use std::sync::atomic::{AtomicU64, Ordering};
+
+    use netring::monitor::XdpShardedRunner;
+    use netring::protocol::builtin::Udp;
+    use netring::protocol::event_typed::FlowStarted;
+    use netring::xdp::Queues;
+
+    wait_lo_free();
+
+    let seen = Arc::new(AtomicU64::new(0));
+    let seen_h = Arc::clone(&seen);
+
+    // Generate loopback UDP for the run window on a separate thread (the runner
+    // blocks the calling thread until every shard exits).
+    let stop = Arc::new(AtomicU64::new(0));
+    let stop_h = Arc::clone(&stop);
+    let generator = std::thread::spawn(move || {
+        let tx = UdpSocket::bind("127.0.0.1:0").expect("bind udp tx");
+        while stop_h.load(Ordering::Relaxed) == 0 {
+            for _ in 0..16 {
+                let _ = tx.send_to(b"netring-xdp-sharded", "127.0.0.1:65127");
+            }
+            std::thread::sleep(Duration::from_millis(5));
+        }
+    });
+
+    let runner = XdpShardedRunner::new("lo", Queues::Auto, move |_queue, builder| {
+        let s = Arc::clone(&seen_h);
+        builder
+            .protocol::<Udp>()
+            .on::<FlowStarted<Udp>>(move |_evt: &FlowStarted<Udp>| {
+                s.fetch_add(1, Ordering::Relaxed);
+                Ok(())
+            })
+    });
+
+    runner
+        .run_for(Duration::from_secs(4))
+        .expect("XdpShardedRunner on lo (needs root / CAP_BPF+CAP_NET_ADMIN)");
+
+    stop.store(1, Ordering::Relaxed);
+    let _ = generator.join();
+
+    assert!(
+        seen.load(Ordering::Relaxed) > 0,
+        "XdpShardedRunner should observe >=1 UDP flow on its per-queue shard",
+    );
+    std::thread::sleep(Duration::from_millis(300));
+}
+
 /// 0.25 W1a: the **table-driven** `filter_program` + `XdpProgram::set_filter`
 /// end-to-end. Loads the filter program on `lo`, registers the socket, populates
 /// the `{udp, PORT}` filter, and asserts that matching loopback frames are

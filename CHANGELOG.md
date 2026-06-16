@@ -4,6 +4,18 @@
 
 ### Added
 
+- **Monitor multi-queue AF_XDP + async capture** ([#6](https://github.com/p13marc/netring/issues/6), M3/M4).
+  `MonitorBuilder::xdp_queues(Queues)` (monitor-wide, mirroring `promiscuous`)
+  makes a self-loading AF_XDP interface capture **every RX queue**, not just
+  queue 0 — removing the silent single-queue under-capture footgun on multi-queue
+  NICs. `Queues::Auto` opens one socket per queue behind a single program and
+  drains them through a unified round-robin (`AnyBackend::XdpMq`); the default
+  stays `Queues::Single(0)` (no behavior change). New `netring::AsyncXdpCapture`
+  is the tokio front for `XdpCapture` (per-queue `AsyncFd`s, unified
+  `readable().await` + owned `recv()`, `into_parts()` for the worker-per-queue
+  model). This is the single-reactor tier; the sharded worker-per-queue tier
+  (line rate) is still to come.
+
 - **High-level multi-queue AF_XDP capture** ([#6](https://github.com/p13marc/netring/issues/6)).
   `netring::xdp::XdpCapture` opens **one socket per RX queue** (the only way to
   capture a whole multi-queue NIC — RSS spreads traffic across queues, which a

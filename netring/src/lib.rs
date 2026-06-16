@@ -134,6 +134,8 @@ pub use async_adapters::tokio_adapter::{AsyncCapture, PacketStream, ReadableGuar
 pub use async_adapters::tokio_injector::{AsyncInjector, TxPacer};
 #[cfg(all(feature = "tokio", feature = "af-xdp"))]
 pub use async_adapters::tokio_xdp::{AsyncXdpSocket, XdpReadableGuard, XdpStream};
+#[cfg(all(feature = "tokio", feature = "af-xdp", feature = "xdp-loader"))]
+pub use async_adapters::tokio_xdp_capture::AsyncXdpCapture;
 #[cfg(feature = "tokio")]
 pub use traits::AsyncPacketSource;
 

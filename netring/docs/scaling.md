@@ -197,6 +197,12 @@ single `PACKET_MR_PROMISC` guard covers every queue) and gives each socket its
 **own UMEM** — the safe default, since sharing a UMEM across per-CPU sockets
 races on the FILL queue. Runnable: `examples/xdp/xdp_multiqueue.rs`.
 
+In the **Monitor**, `MonitorBuilder::xdp_queues(Queues::Auto)` does this for you —
+one socket per queue behind a single program, drained through a unified
+round-robin (`AnyBackend::XdpMq`), so a self-loading AF_XDP monitor captures the
+whole NIC instead of just queue 0. That's the single-reactor tier (one core); the
+sharded worker-per-queue tier (one core per queue, line rate) is on the roadmap.
+
 > Some NICs (notably Mellanox) require you to create **twice** as many AF_XDP
 > queues as `ethtool -L combined` reports to be sure of receiving every packet.
 

@@ -104,44 +104,52 @@ fn open_backend(
             Ok(AnyBackend::AfPacket(cap))
         }
         #[cfg(feature = "af-xdp")]
-        BackendSpec::Xdp(xspec) => Ok(AnyBackend::Xdp(open_xdp_backend(xspec, promiscuous)?)),
+        BackendSpec::Xdp(xspec) => open_xdp_backend(xspec, promiscuous),
     }
 }
 
-/// Open the AF_XDP backend for one capture interface (0.25 W1a).
+/// Open the AF_XDP backend for one capture interface (0.25 W1a; multi-queue #6).
 ///
 /// A bare spec (`self_load = false`) opens a plain socket and relies on an
 /// externally-attached redirect program. A self-loading spec (requires
-/// `xdp-loader`) builds the socket through [`crate::XdpSocketBuilder`] with the
-/// built-in redirect-all program attached in `SKB_MODE` + the socket registered
-/// on its XSKMAP, so it captures with no external loader.
+/// `xdp-loader`) builds through [`crate::XdpSocketBuilder`] / [`crate::xdp::XdpCapture`]
+/// with the built-in redirect-all program attached in `SKB_MODE`:
+/// - `queues == Single(0)` (the default) → one socket on queue 0 → `AnyBackend::Xdp`;
+/// - any other `Queues` (e.g. `Auto`) → one socket per RX queue behind a single
+///   program, drained round-robin → `AnyBackend::XdpMq` (issue #6 Tier 1, removes
+///   the silent single-queue under-capture footgun).
 ///
-/// `promiscuous` is the monitor-wide flag ([`MonitorBuilder::promiscuous`],
-/// issue #4): when set, the interface is put into promiscuous mode for the
-/// socket's lifetime so AF_XDP sees traffic not addressed to the local MAC.
+/// `promiscuous` is the monitor-wide flag ([`MonitorBuilder::promiscuous`], #4).
 #[cfg(feature = "af-xdp")]
-fn open_xdp_backend(
-    spec: &crate::monitor::XdpIfaceSpec,
-    promiscuous: bool,
-) -> Result<crate::AsyncXdpSocket> {
+fn open_xdp_backend(spec: &crate::monitor::XdpIfaceSpec, promiscuous: bool) -> Result<AnyBackend> {
     #[cfg(feature = "xdp-loader")]
     if spec.self_load {
+        // Multi-queue: anything but the default single queue 0 opens one socket
+        // per queue behind one program (issue #6).
+        if !matches!(spec.queues, crate::xdp::Queues::Single(0)) {
+            let capture = crate::xdp::XdpCapture::builder()
+                .interface(&spec.iface)
+                .queues(spec.queues.clone())
+                .promiscuous(promiscuous)
+                .build()?;
+            return Ok(AnyBackend::XdpMq(crate::AsyncXdpCapture::new(capture)?));
+        }
         let socket = crate::XdpSocketBuilder::default()
             .interface(&spec.iface)
             .mode(crate::XdpMode::Rx)
             .promiscuous(promiscuous)
             .with_default_program()
             .build()?;
-        return crate::AsyncXdpSocket::new(socket);
+        return Ok(AnyBackend::Xdp(crate::AsyncXdpSocket::new(socket)?));
     }
-    // Bare path (externally-attached redirect program). Build through the
-    // builder rather than `AsyncXdpSocket::open` so promiscuous mode can be
-    // applied; with `promiscuous = false` this is identical to `open`.
+    // Bare path (externally-attached redirect program). `queues` is ignored —
+    // the external program owns the redirect map, so we can't register N sockets
+    // on it. Build through the builder so promiscuous mode can be applied.
     let socket = crate::XdpSocketBuilder::default()
         .interface(&spec.iface)
         .promiscuous(promiscuous)
         .build()?;
-    crate::AsyncXdpSocket::new(socket)
+    Ok(AnyBackend::Xdp(crate::AsyncXdpSocket::new(socket)?))
 }
 
 pub(crate) async fn run_loop(monitor: Monitor, stop: StopCondition) -> Result<()> {
@@ -177,6 +185,8 @@ pub(crate) async fn run_loop(monitor: Monitor, stop: StopCondition) -> Result<()
         packet_subs,
         kernel_prefilter,
         promiscuous,
+        #[cfg(feature = "af-xdp")]
+        xdp_queues,
     } = monitor;
     // Borrow the monitor name as `&str` for the run loop's
     // dispatch sites. The owned `Box<str>` lives in this stack
@@ -210,7 +220,10 @@ pub(crate) async fn run_loop(monitor: Monitor, stop: StopCondition) -> Result<()
     }
     #[cfg(feature = "af-xdp")]
     for spec in &xdp_interfaces {
-        specs.push(BackendSpec::Xdp(spec.clone()));
+        // Stamp the monitor-wide queue selection (issue #6) onto each spec.
+        let mut spec = spec.clone();
+        spec.queues = xdp_queues.clone();
+        specs.push(BackendSpec::Xdp(spec));
     }
 
     let mut caps: Vec<AnyBackend> = Vec::with_capacity(specs.len());
@@ -589,6 +602,8 @@ pub(crate) async fn replay_loop(
         // pcap replay has no kernel filter to set (the source isn't a socket).
         kernel_prefilter: _,
         promiscuous: _, // pcap replay has no live interface to set promiscuous
+        #[cfg(feature = "af-xdp")]
+            xdp_queues: _, // pcap replay has no live AF_XDP backend
     } = monitor;
     let monitor_name_borrow: Option<&str> = monitor_name.as_deref();
 

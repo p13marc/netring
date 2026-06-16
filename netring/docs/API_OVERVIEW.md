@@ -309,6 +309,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 | `.export_flows(exporter)` | `FlowRecord` per completed flow (NetFlow/IPFIX/`conn.log` shape) |
 | `.export_active_timeout(period)` | **(0.25)** interim `FlowRecord`s for long-lived flows (active timeout) |
 | `.xdp_interface(s)` / `.xdp_interface_loaded(s)` | AF_XDP source; `_loaded` (feat `xdp-loader`) attaches the built-in redirect program itself |
+| `.xdp_queues(Queues)` | **(issue #6)** capture every RX queue of each `_loaded` AF_XDP interface (`Queues::Auto`), not just queue 0 — removes the silent single-queue under-capture on multi-queue NICs. Default `Single(0)` |
 | `.backend_error_policy(p)` | `FailFast` / `SkipSource` / **(0.25)** `Reopen` (rebuild a failed source in place) |
 | `.catch_handler_panics(b)` | **(0.25)** convert sync-handler panics to `Error::HandlerPanic` (route via `HandlerErrorPolicy`) |
 | `.build()` | Validate + freeze into a `Monitor` |

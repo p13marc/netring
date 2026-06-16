@@ -46,6 +46,12 @@ pub(crate) enum AnyBackend {
     /// program to receive packets (see `XdpSocketBuilder`).
     #[cfg(feature = "af-xdp")]
     Xdp(crate::AsyncXdpSocket),
+    /// Multi-queue AF_XDP (issue #6 Tier 1): one socket per RX queue behind a
+    /// single attached program, drained through a unified fair round-robin.
+    /// One backend, internally N sockets — preserves the run loop's
+    /// 1-spec↔1-backend invariant (so `Reopen` rebuilds the whole capture).
+    #[cfg(all(feature = "af-xdp", feature = "xdp-loader"))]
+    XdpMq(crate::AsyncXdpCapture),
 }
 
 impl AnyBackend {
@@ -65,6 +71,8 @@ impl AnyBackend {
                 Ok(_guard) => Ok(()),
                 Err(e) => Err(Error::Io(e)),
             }),
+            #[cfg(all(feature = "af-xdp", feature = "xdp-loader"))]
+            AnyBackend::XdpMq(cap) => cap.poll_read_ready(cx),
         }
     }
 
@@ -104,6 +112,29 @@ impl AnyBackend {
                     }
                 }
             }
+            #[cfg(all(feature = "af-xdp", feature = "xdp-loader"))]
+            AnyBackend::XdpMq(cap) => {
+                // Fair round-robin: drain every queue that currently has data,
+                // starting after the last-served one. `socket_rx_ready` is a
+                // fresh ring probe, so `socket_readable` resolves immediately
+                // (no blocking on idle queues).
+                let n = cap.socket_count();
+                let start = cap.next_cursor();
+                for off in 0..n {
+                    let i = (start + off) % n;
+                    if !cap.socket_rx_ready(i) {
+                        continue;
+                    }
+                    let mut guard = cap.socket_readable(i).await?;
+                    while let Some(batch) = guard.next_batch() {
+                        for pkt in &batch {
+                            let ts = pkt.timestamp().unwrap_or_else(now_ts);
+                            last_ts = Some(ts);
+                            on_packet(PacketView::new(pkt.data(), ts));
+                        }
+                    }
+                }
+            }
         }
         Ok(last_ts)
     }
@@ -130,6 +161,8 @@ impl AnyBackend {
                     freeze_count: 0,
                 })
             }
+            #[cfg(all(feature = "af-xdp", feature = "xdp-loader"))]
+            AnyBackend::XdpMq(cap) => cap.cumulative_stats(),
         }
     }
 }

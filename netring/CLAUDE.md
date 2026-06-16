@@ -781,7 +781,16 @@ just ci-full         # setcap + full test suite
 - `src/afxdp/capture.rs` — **`XdpCapture`** high-level multi-queue capture (issue
   #6): `Queues` + `queue_count()` (ETHTOOL_GCHANNELS) + one-socket-per-queue +
   unified round-robin `next_batch`. Re-exported at `netring::xdp::*`. M1+M2 of
-  `plans/netring-0.26-afxdp-capture-plan.md`; Monitor `xdp_queues` + async wrapper still to come.
+  `plans/netring-0.26-afxdp-capture-plan.md`.
+- `src/async_adapters/tokio_xdp_capture.rs` — **`AsyncXdpCapture`** (M3): tokio
+  front for `XdpCapture` (per-queue `AsyncFd`s, unified `readable`/`recv`,
+  `into_parts`). The `flow`-gated `impl` block holds the Monitor-only drain helpers
+  (the §2.1 feature-combo lesson). **Readiness gotcha:** the round-robin must use a
+  *fresh* `rx_poll_ready` probe + clear stale `AsyncFd` readiness, else it spins.
+- `src/monitor/backend.rs` — **`AnyBackend::XdpMq`** (M4 Tier 1): one backend, N
+  sockets, unified round-robin drain. `MonitorBuilder::xdp_queues(Queues)`
+  (monitor-wide) routes a self-loading interface through it when `≠ Single(0)`,
+  **removing the G2 single-queue footgun**. Tier 2 (sharded worker-per-queue) is M5.
 - `src/afxdp/ffi.rs` — libc re-exports for XDP constants/structs
 - `src/afxdp/socket.rs` — AF_XDP socket/setsockopt/bind wrappers
 - `src/afxdp/umem.rs` — UMEM mmap + frame allocator

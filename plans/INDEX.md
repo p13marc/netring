@@ -12,12 +12,13 @@ Forward-looking implementation plans only. Historical record lives in `CHANGELOG
 
 ---
 
-## The six documents
+## The documents
 
 | Doc | Role |
 |---|---|
 | [`netring-architecture.md`](./netring-architecture.md) | **Design north-star — read first.** The coherent end-to-end design every release implements: the data path, the `AnyBackend` enum, typed multi-stage filtering, the handler/effect model, resilience, threading, and the SemVer strategy. Design values: **performance · strongly-typed · async-friendly (tokio) · idiomatic.** |
 | [`netring-strategic-review-2026-06.md`](./netring-strategic-review-2026-06.md) | The *why* — competitive landscape, pain points, differentiators, the M1–M4 roadmap. |
+| [`netring-roadmap-to-1.0.md`](./netring-roadmap-to-1.0.md) | **Post-0.26 → 1.0 roadmap (best-in-class).** Research-grounded: netring = "Retina's subscription model as a production library." Detailed per-theme plans: **P0** benchmarks (gates the claim) · **F1** AF_XDP HW metadata/timestamps · **F2** io_uring ZC-RX · **F3** NIC flow steering · **P1** QUIC + encrypted visibility · **P2** ARP (parse + table + spoof detection) · **A1** declarative capture facade + multi-NIC/tap merge (#11) · **A2** compile-time subscription specialization · **1.0** stabilization. flowscope co-evolution called out per theme; breaking changes bundled at 1.0. |
 | ~~`netring-0.24-plan.md`~~ | **Shipped — 0.24.0 released 2026-06-14** (Zero-Copy Core + Production Trust; keystone `AnyBackend`). Plan deleted on ship; deferrals carried into the 0.25 plan's "Deferred from 0.24" section. |
 | ~~`netring-0.25-plan.md`~~ | **Shipped — 0.25.0 released 2026-06-15** (tag `0.25.0` + `netring-exporters` 0.1.0). Subscriptions, Async Effects, Performance & TX — the complete capability release; nothing deferred. Plan + subscription-engine design deleted on ship. |
 | ~~`netring-0.26-afxdp-capture-plan.md`~~ | **Shipped — 0.26.0 released 2026-06-16** (tag `0.26.0` + `netring-exporters` 0.1.1). AF_XDP Multi-Queue Capture & Hardening (issues #4/#6): promiscuous · `XdpCapture` (one socket per RX queue, `Queues::Auto`) · Monitor `xdp_queues` (removed the single-queue footgun) · `XdpShardedRunner` (line-rate worker-per-queue) · B1/F3/F1 hardening. Plan deleted on ship. Last feature release before 1.0. |
@@ -50,8 +51,16 @@ design).
   │     queue · Queues::Auto via ETHTOOL_GCHANNELS) · Monitor xdp_queues / AnyBackend::XdpMq
   │     (removed the silent single-queue footgun) · XdpShardedRunner (line-rate
   │     worker-per-queue + busy-poll) · B1/F3/F1 hardening (#6). Last feature release pre-1.0.
-  ▼   community test window → feedback incorporated → shims removed
-1.0   Stabilization (SemVer promise; plan written once feedback is in)
+  │   (best-in-class roadmap → `netring-roadmap-to-1.0.md`)
+0.27  Prove it & precise capture   ── P0 benchmarks (gates the "best" claim) + F1 AF_XDP
+  │     HW metadata/timestamps (kfuncs). flowscope: PacketView metadata fields.
+0.28  Protocol frontier            ── P1 QUIC + encrypted visibility · P2 ARP (parse +
+  │     table + spoof detection). flowscope-led; the relevance + ARP-ask release.
+0.29  API capstone & steering      ── A1 declarative `Backend::Auto` facade + multi-NIC/tap
+  │     merge (#11) · F3 NIC flow steering (closes the AF_XDP-vs-DPDK gap).
+0.30  Frontier backend             ── F2 io_uring ZC-RX (6.15+) + A2 compile-time
+  ▼     subscription specialization (the Retina efficiency trick; may slip its own release).
+1.0   Stabilization (SemVer promise; shim removal + the defaults-breaks; plan once feedback in)
 ```
 
 **One break, not three.** 0.24/0.25 are *additive-with-shims* — they add the new surface

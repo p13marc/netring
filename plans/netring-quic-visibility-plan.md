@@ -33,15 +33,24 @@ for TLS; extending to QUIC keeps netring current where the incumbents are blind.
      existing JA4 over the ClientHello.
   - Deps: an AEAD + HKDF (`aes-gcm`/`chacha20poly1305` + `hkdf`, or `ring`). Keep
     behind the `quic` feature so the crypto deps are opt-in.
-  - Emit `QuicMessage { version, dcid, scid, sni: Option<String>, alpn: Vec<…>,
-    ja4: Option<…> }`. Datagram-style parser on UDP/443 (+ configurable), like DNS.
+  - Emit a **strongly-typed** `QuicMessage { version: QuicVersion, dcid:
+    ConnId, scid: ConnId, sni: Option<String>, alpn: Vec<String>, ja4:
+    Option<Ja4> }` — `enum QuicVersion { V1, V2, Other(u32) }` (not a raw `u32`;
+    drives the salt table + a clean "unknown → skip" match), `ConnId` a small
+    bounded inline type (`ArrayVec<u8, 20>` — CIDs are ≤ 20 bytes, no heap).
+    Datagram-style parser on UDP/443 (+ configurable), like DNS.
   - Robustness: only the v1 (and v2) salts; bail cleanly on unknown versions,
     Retry/0-RTT/short-header packets (no SNI there) — emit `QuicMessage` with
     `sni: None` rather than failing the flow.
 - **Encrypted-flow fingerprints (stretch):** a `flowscope::fingerprint` module —
   packet-size / inter-arrival sequence fingerprints for *any* encrypted session
   (QUIC or TLS), the "encrypted visibility" angle without decryption. Reuses the
-  detector/scoring primitives.
+  detector/scoring primitives. **Perf caveat:** unlike QUIC-Initial parsing (once
+  per connection), fingerprints touch the *per-packet* path — so accumulate a
+  fixed-size, alloc-free running summary (first-N packet sizes in an
+  `ArrayVec`/ring, not a growing `Vec`), preserve dhat Δ0, and only finalize the
+  fingerprint at flow end. This is why it's a *separate* opt-in feature, not folded
+  into the always-on session tier.
 
 ### netring side
 - `Quic` **`MessageProtocol`** marker → `on::<Quic>(|m: &QuicMessage, …|)`.

@@ -44,13 +44,24 @@ not yet wired` TODO in our recv path. Small, unique, high-value differentiator.
 - `XdpCapture::rx_metadata() -> RxMetaSupport { timestamp, hash, vlan }` — a probe
   (built by attempting the kfuncs at load / reading the first valid frame) so
   callers know what the driver actually provides.
-- **flowscope `PacketView`:** add `hw_timestamp: Option<Timestamp>`, `rx_hash:
-  Option<(u32, RssHashType)>`, `vlan: Option<VlanTag>`, `checksum: ChecksumStatus`.
-  netring populates from the metadata struct; `None`/`Unknown` on AF_PACKET
-  (unless `SO_TIMESTAMPING` is later wired there) and on COPY/generic XDP.
-- The Monitor's per-packet `ts` prefers `hw_timestamp` when present → flow records
-  + EVE get NIC-accurate timing. `rx_hash` is a free flow-key accelerator (the NIC
-  already hashed the 5-tuple) — optional fast-path for the tracker.
+- **flowscope `PacketView`:** add **one cohesive, strongly-typed**
+  `rx_meta: RxMetadata` (not four loose `Option`s — cohesion + one branch):
+  ```rust
+  pub struct RxMetadata {
+      pub hw_timestamp: Option<Timestamp>,            // None ⇒ driver gave -ENODATA
+      pub rx_hash: Option<RxHash>,                    // RxHash { value: u32, ty: RssHashType }
+      pub vlan: Option<VlanTag>,                      // VlanTag { tci: u16, proto: VlanProto }
+      pub checksum: ChecksumStatus,                   // enum Unknown|Unnecessary|Complete(u16)|None
+  }
+  ```
+  Per-field `Option` mirrors the kfunc `-EOPNOTSUPP`/`-ENODATA` reality (a NIC may
+  give hash but not timestamp). `Default` = all-absent, so existing `PacketView`
+  construction keeps compiling; netring fills it from the metadata struct, leaves
+  default on AF_PACKET (until `SO_TIMESTAMPING`) and COPY/generic XDP.
+  `RssHashType`/`VlanProto`/`ChecksumStatus` are enums, not raw ints (strong typing).
+- The Monitor's per-packet `ts` prefers `rx_meta.hw_timestamp` when present → flow
+  records + EVE get NIC-accurate timing. `rx_meta.rx_hash` is a free flow-key
+  accelerator (the NIC already hashed the 5-tuple) — an optional tracker fast-path.
 
 ## 3. flowscope side
 `PacketView` gains the optional metadata fields above + the `RssHashType` /

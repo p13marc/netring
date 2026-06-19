@@ -24,6 +24,22 @@
 > behind an opt-in feature (0.25), keep the default surface royalty-free; `FINGERPRINTS.md`
 > now carries the warning. (See architecture §9.6.)
 
+> **Update 2026-06-16 (post-0.26; reconciliation — read this first).** Everything
+> below is **historical analysis** from 0.23-dev; the moves it sketched have
+> *shipped*: **0.24** (AnyBackend keystone, telemetry/health, IPFIX/syslog,
+> JA4/JA4S), **0.25** (the Retina-class 3-tier subscription engine + kernel
+> filter pushdown — the differentiator — plus async effects, perf, TX, OTLP/Kafka
+> exporters), **0.26** (full AF_XDP multi-queue: `XdpCapture`, Monitor
+> `xdp_queues`, `XdpShardedRunner`, promiscuous, HW-metadata-ready). The
+> competitive thesis still holds (**Retina remains DPDK-only research**; netring is
+> the production library on AF_PACKET + AF_XDP with in-kernel pushdown). The *current*
+> forward direction is the **candidate feature plans** in `INDEX.md` (ARP, AF_XDP
+> HW metadata/timestamps, QUIC visibility, NIC flow steering, capture facade +
+> multi-NIC/tap merge, compile-time subscription specialization) — picked in no
+> fixed order; **1.0 is gated by community validation, not scheduled.** Keep this
+> doc for the landscape analysis + positioning; the per-feature *plans* are
+> authoritative for what to build next.
+
 ---
 
 ## 0. TL;DR

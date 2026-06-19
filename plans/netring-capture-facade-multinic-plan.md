@@ -42,7 +42,17 @@ Two gaps the multi-queue work (0.26) exposed:
     routing gateway. Make it an explicit opt-in, not a default.
 
 ### C. `Backend::Auto` facade
-- `enum Backend { Auto, AfPacket, AfXdp { queues, sharded }, Pcap }`.
+- Strongly typed (enums over `bool`s):
+  ```rust
+  pub enum Backend {
+      Auto,                                            // probe + pick
+      AfPacket { fanout: Fanout },                     // Fanout::None | Cpu(n) | Hash(n)
+      AfXdp { queues: Queues, dispatch: XdpDispatch }, // XdpDispatch::Reactor | Sharded
+      Pcap,                                            // dev / non-Linux fallback
+  }
+  ```
+  (`XdpDispatch::{Reactor, Sharded}` reads better than `sharded: bool` and leaves
+  room for a future hybrid.)
 - `Monitor::builder().capture("eth0", Backend::Auto)` / a top-level
   `Capture::auto("eth0")` probes and picks: AF_XDP DRV-mode if the driver supports
   it → `Queues::Auto` → single-reactor vs `XdpShardedRunner` by core count; else
@@ -73,6 +83,13 @@ else — the merge reuses existing bidirectional keying.
 - A real TX/RX-split tap is topology-gated — example-documented.
 
 ## 6. Risks & open decisions
+- **Tap merge serializes onto one tracker (perf).** Source-agnostic merge feeds a
+  single flow tracker so both legs land on one flow — correct, but it forfeits the
+  per-source parallelism the sharded path gives. Honest trade-off: tap *correctness*
+  costs a shared tracker. Mitigate by sharding the merged tracker on the
+  bidirectional 5-tuple hash (each shard owns a key range, both legs of a flow hash
+  identically) — i.e. compose with `XdpShardedRunner` keyed by flow, not by NIC.
+  Document; don't pretend merge is free.
 - **Tap clock skew / reordering.** The two legs arrive on independent NIC queues;
   merged flow stats (RTT, ordering) can be skewed without HW timestamps — pairs
   naturally with the **AF_XDP RX-metadata/timestamp** plan (use `hw_timestamp` to

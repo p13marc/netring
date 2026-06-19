@@ -208,7 +208,17 @@ compiling."
 | §4 typed filters + multi-stage · §5 tiers | 0.25-plan · Phase A |
 | §5 handler/effect + ctx-read | 0.25-plan · Phase B |
 | §2 sharded perf · §4 STAGE-0 measurement | 0.25-plan · Phase C |
-| §7 shim removal + stabilization | 1.0 (plan written post-community-test) |
+| §3 AF_XDP multi-queue (`XdpCapture`/`xdp_queues`/`XdpShardedRunner`) + promiscuous | ✅ 0.26 (issues #4/#6) |
+| §3 `AnyBackend::Pcap` live arm (the §3 sketch's Pcap arm) | candidate: `netring-capture-facade-multinic-plan.md` |
+| §3 RX HW metadata/timestamps on `PacketView` | candidate: `netring-afxdp-rx-metadata-plan.md` |
+| §4 EtherType atom (ARP) · §5 `Quic` session tier | candidate: `netring-arp-plan.md` · `netring-quic-visibility-plan.md` |
+| §4 compile-time subscription specialization | candidate: `netring-subscription-specialization-plan.md` |
+| §7 shim removal + stabilization | 1.0 — **community-gated, not scheduled** (plan post-community-test) |
+
+> Post-0.26 is a set of **candidate feature plans** (see `INDEX.md`), not a fixed
+> sequence. The "future io_uring ZC-RX arm" named in §3 stays the *illustration* of
+> why the `CaptureBackend` extensibility seam exists — **de-prioritized**, not
+> committed (AF_XDP multi-queue covers the high-rate path).
 
 ---
 

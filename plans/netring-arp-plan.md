@@ -16,18 +16,27 @@ natural extension, not new machinery.
 
 ## 2. Design
 
-### flowscope side — `arp` feature
-- Parse EtherType `0x0806` (28-byte payload):
-  `ArpMessage { hw_type, proto_type, oper, sender_mac: [u8;6], sender_ip: IpAddr,
-  target_mac: [u8;6], target_ip: IpAddr }` with `oper ∈ {Request, Reply,
-  RarpRequest, RarpReply}`. IPv4 ARP first; carry the generic shape for RARP.
+### flowscope side — `arp` feature (+ a strong-typing upgrade we own)
+- **Introduce a `MacAddr([u8; 6])` newtype** in flowscope (Display `aa:bb:…`,
+  `From<[u8;6]>`, `is_broadcast`/`is_multicast`/`is_zero` helpers). Today flowscope
+  uses **raw `[u8; 6]`** (e.g. `MacPairKey.a/b`) — a deliberate compat break to
+  adopt `MacAddr` everywhere (MacPair too) so ARP, the L2 keys, and (later) the
+  VLAN metadata all share one strongly-typed MAC. This is exactly the
+  "strongly-typed over raw bytes" value; cheap, `#[repr(transparent)]`, zero-cost.
+- Parse EtherType `0x0806` (28-byte payload) → a **typed** message:
+  `ArpMessage { oper: ArpOp, sender: MacAddr, sender_ip: Ipv4Addr, target:
+  MacAddr, target_ip: Ipv4Addr }`, `enum ArpOp { Request, Reply, RarpRequest,
+  RarpReply }`. **`Ipv4Addr`, not `IpAddr`** — ARP is IPv4 (the htype/ptype/hlen/
+  plen header fields are validated, not surfaced; non-IPv4-over-Ethernet ARP is
+  rejected, not coerced).
 - L2, **no IP 5-tuple** — ARP rides below the flow tracker. Expose it as a
-  *datagram-style* parser (like the DNS-over-UDP one): request→reply correlation
-  keyed by `(sender_ip, target_ip)`, plus gratuitous-ARP detection
-  (`sender_ip == target_ip`, announce/defend) and unsolicited replies.
+  *datagram-style* parser (like DNS-over-UDP): request→reply correlation keyed by
+  `(sender_ip, target_ip)`, plus gratuitous detection (`sender_ip == target_ip`)
+  and unsolicited replies.
 - `ArpTable` in `flowscope::correlate` (mirrors `KeyIndexed`/`label_table`):
-  `IpAddr → ArpBinding { mac, first_seen, last_seen, seen_count, change_count,
-  prior_mac: Option<MAC> }`. Source-of-truth for the detector. Bounded + TTL'd.
+  `Ipv4Addr → ArpBinding { mac: MacAddr, first_seen, last_seen, seen_count,
+  change_count, prior_mac: Option<MacAddr> }`. Source-of-truth for the detector.
+  Bounded + TTL'd. Strongly typed throughout.
 
 ### netring side — ops toolkit (0.22-style, like `on_icmp_error`/`label_table`)
 - `Arp` **`MessageProtocol`** marker → `on::<Arp>(|m: &ArpMessage, …|)` and the
@@ -52,11 +61,15 @@ natural extension, not new machinery.
 
 ### Capture-path subtlety (must document + handle)
 - ARP is **broadcast L2**. AF_PACKET sees it natively. AF_XDP's `redirect_all`
-  passes it, but the **subscription kernel-pushdown filter** (cBPF + the XDP
-  `{proto,port}` map) keys on IP `{proto,port}` and would **shed ARP** — so a
-  monitor with both `session::<Arp>()` and IP subscriptions must widen the kernel
-  filter to *also* match EtherType `0x0806`. → extend the predicate AST + the
-  cBPF/XDP-map compiler with an **EtherType atom** (small, additive). Fail-open
+  passes it, but the **subscription kernel-pushdown filter** keys on IP
+  `{proto,port}` and would **shed ARP** — so a monitor with both `session::<Arp>()`
+  and IP subscriptions must widen the kernel filter to *also* match EtherType
+  `0x0806`. **Good news:** the cBPF compiler (`config/bpf_compile.rs`) **already
+  emits EtherType loads/compares** (for the VLAN `0x8100`/`0x88a8` path), so this
+  is a small **`Atom::EtherType(u16)`** added to the predicate AST + a `Predicate`
+  combinator (`packet().ethertype(0x0806)` / the `.expr()` keyword `arp`), reusing
+  the existing compiler machinery — not new codegen. (The XDP `{proto,port}` map is
+  a separate path; ARP rides the cBPF/fail-open side, which is correct.) Fail-open
   already covers the conservative case; this makes ARP a first-class pushdown term.
 - Promiscuous mode (issue #4, shipped) lets a monitor see *other hosts'* ARP for
   full-segment / span-port coverage — note it in the docs.

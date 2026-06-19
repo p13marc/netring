@@ -41,6 +41,12 @@ production library") lives in `netring-strategic-review-2026-06.md`.
 | [`netring-capture-facade-multinic-plan.md`](./netring-capture-facade-multinic-plan.md) | **Capture facade + multi-NIC/tap merge** — `AsyncXdpMultiCapture` (**issue #11**), source-agnostic tap merge, `Backend::Auto` probe, pcap fallback. |
 | [`netring-subscription-specialization-plan.md`](./netring-subscription-specialization-plan.md) | **Compile-time subscription specialization** — `subscribe!` proc-macro monomorphizing the dispatch + const-folding the kernel filter (Retina's codegen trick). **Spike/measure-first.** |
 
+**Design-values gate (every candidate plan was reviewed against these — Arch design values):**
+- **Strongly typed over raw bytes/bools** — newtypes (`MacAddr`, `ConnId`, `Ja4`) not `[u8;6]`/`Vec<u8>`; enums (`ArpOp`, `QuicVersion`, `XdpDispatch`, `RssHashType`, `ChecksumStatus`) not raw ints/`bool` flags; cohesive structs (`RxMetadata`) not loose `Option` soup. Compat breaks taken where they buy stronger types (e.g. flowscope `MacAddr` replaces raw `[u8;6]`).
+- **Async-friendly** — hot-path drain stays the borrowed-batch, `Send + 'static` run loop (dhat Δ0); per-packet work (ARP/QUIC parse, RX-metadata read) is sync in-place; *setup* paths (flow steering, queue/UMEM config) are sync one-shot, not faux-async.
+- **Performance** — kernel pushdown extended (ARP EtherType atom), not bypassed; per-packet additions are fixed-size + alloc-free (`ArrayVec`, no growing `Vec`); fingerprints finalize at flow end; tap-merge's single-tracker cost is called out + sharded, not hidden.
+- **Idiomatic** — RAII guards (`SteerGuard`, the `PromiscGuard` pattern), typed builders, `Backend::Auto` is observable + overridable (no black box), the runtime builder stays alongside the `subscribe!` macro (no forced migration).
+
 The first drafts were a single mega-plan, then nine phase files; this is the settled middle:
 **one architecture spine + two consolidated release plans.** The architecture doc holds the
 design rationale so the release plans stay execution-focused (phased sections, not re-derived

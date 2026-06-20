@@ -33,6 +33,7 @@ jobs:
             "--features flow" \
             "--features af-xdp" \
             "--features monitor-lite" \
+            "--features arp" \
             "--features tokio,flow,dns,http"; do
             echo "::group::clippy -p netring $f"
             cargo clippy -p netring $f -- -D warnings
@@ -91,7 +92,7 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
       - name: Monitor lib tests (flow surface)
-        run: cargo test -p netring --features "tokio,channel,flow,parse,http,dns,tls,icmp" --lib
+        run: cargo test -p netring --features "tokio,channel,flow,parse,http,dns,tls,icmp,arp" --lib
       # 0.25: the flow-gated *integration* tests that validate the new surface
       # but open NO live socket (pcap replay / build-time filter checks /
       # compile-time Send assertions) — these were never run in CI before. They
@@ -207,6 +208,19 @@ jobs:
           test -n "$bin" && test -f "$bin" || { echo "no test binary"; exit 1; }
           sudo "$bin" --nocapture --test-threads=1
 
+      # Issue #12: ARP spoof detection on lo — inject a gratuitous-spoof ARP
+      # frame via the Injector, assert on_arp + SpoofSuspected fire through the
+      # real capture → drain → parse_frame path.
+      - name: ARP spoof lo test (root)
+        run: |
+          cargo test -p netring --features "integration-tests,tokio,channel,arp,emit" --test arp_lo_spoof --no-run
+          bin=$(cargo test -p netring --features "integration-tests,tokio,channel,arp,emit" \
+              --test arp_lo_spoof --no-run --message-format=json 2>/dev/null \
+              | jq -r 'select(.executable != null and (.target.kind[] == "test")) | .executable' \
+              | head -n1)
+          test -n "$bin" && test -f "$bin" || { echo "no test binary"; exit 1; }
+          sudo "$bin" --nocapture --test-threads=1
+
   # ── Benchmarks compile ────────────────────────────────────────────────────
   bench:
     name: Benchmarks compile
@@ -250,6 +264,8 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
       - run: cargo build -p netring --examples --features tokio,channel
+      # Issue #12: the ARP example needs the `arp` + `emit` features.
+      - run: cargo build -p netring --example monitor_arp_watch --features tokio,arp,emit
 
   # ── License + advisory checks (cargo-deny) ───────────────────────────────
   deny:

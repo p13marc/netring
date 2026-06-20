@@ -10,10 +10,9 @@
 //!    a different MAC — failover or MITM). Each is also pushed to the
 //!    anomaly sink so it lands in your normal alert pipeline.
 //!
-//! ARP is L2 (no 5-tuple), so arming any ARP hook makes the Monitor
-//! capture every frame (the kernel prefilter can't narrow to ARP) — fine
-//! for an L2 watch, but don't combine it with a narrow L4 workload
-//! expecting the kernel to shed the rest.
+//! ARP is L2 (no 5-tuple), but the kernel prefilter still narrows precisely:
+//! arming an ARP hook adds an `EtherType(0x0806)` term, so a pure-ARP monitor
+//! sheds non-ARP traffic in-kernel, and an ARP+IP monitor captures the union.
 //!
 //! Run:
 //!

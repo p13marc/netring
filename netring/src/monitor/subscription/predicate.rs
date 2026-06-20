@@ -160,6 +160,12 @@ pub enum Atom {
     AnyNet(IpNet),
     /// 802.1Q VLAN id.
     VlanId(u16),
+    /// L2 EtherType (e.g. `0x0806` ARP, `0x0800` IPv4, `0x86dd` IPv6).
+    /// The kernel-pushdown term that lets ARP survive the cBPF prefilter
+    /// (issue #20) — without it, an ARP-watching monitor falls back to
+    /// capture-all. In userspace it's derived from the IP version where the
+    /// frame carries one (ARP frames don't reach the 5-tuple packet tier).
+    EtherType(u16),
 
     // --- userspace-only (L7 / stateful) ---
     /// TLS SNI glob (e.g. `*.bank.example`).
@@ -193,6 +199,7 @@ impl Atom {
                 | Atom::DstNet(_)
                 | Atom::AnyNet(_)
                 | Atom::VlanId(_)
+                | Atom::EtherType(_)
         )
     }
 
@@ -212,6 +219,7 @@ impl Atom {
                     || src.dst_ip().is_some_and(|ip| n.contains(&ip))
             }
             Atom::VlanId(v) => src.vlan_id() == Some(*v),
+            Atom::EtherType(t) => src.ethertype() == Some(*t),
             Atom::SniGlob(g) => src.sni().is_some_and(|s| g.matches(s)),
             Atom::HttpHostGlob(g) => src.http_host().is_some_and(|s| g.matches(s)),
             Atom::DnsQnameGlob(g) => src.dns_qname().is_some_and(|s| g.matches(s)),
@@ -314,6 +322,18 @@ pub trait FieldSource {
     fn vlan_id(&self) -> Option<u16> {
         None
     }
+    /// L2 EtherType. The default derives it from the IP version exposed by
+    /// [`Self::src_ip`] (`0x0800` IPv4 / `0x86dd` IPv6), so a packet-tier
+    /// `ethertype(..)` predicate works for IP frames. ARP frames carry no
+    /// 5-tuple and never reach the packet tier (they're delivered via
+    /// `on_arp`), so `EtherType(0x0806)` is a *kernel-pushdown* term rather
+    /// than a userspace match — see issue #20.
+    fn ethertype(&self) -> Option<u16> {
+        match self.src_ip()? {
+            IpAddr::V4(_) => Some(0x0800),
+            IpAddr::V6(_) => Some(0x86dd),
+        }
+    }
     /// TLS SNI (session tier).
     fn sni(&self) -> Option<&str> {
         None
@@ -391,6 +411,17 @@ mod tests {
     #[test]
     fn always_matches_everything() {
         assert!(Predicate::Always.eval(&Fields::default()));
+    }
+
+    #[test]
+    fn ethertype_derives_from_ip_version() {
+        // Issue #20: the default ethertype() derives 0x0800 from an IPv4 src.
+        assert!(Predicate::Atom(Atom::EtherType(0x0800)).eval(&tcp_443()));
+        assert!(!Predicate::Atom(Atom::EtherType(0x86dd)).eval(&tcp_443()));
+        // No IP → no ethertype → no match (ARP rides the kernel filter, not
+        // the userspace packet tier).
+        assert!(!Predicate::Atom(Atom::EtherType(0x0806)).eval(&Fields::default()));
+        assert!(Atom::EtherType(0x0806).is_kernel_pushable());
     }
 
     #[test]

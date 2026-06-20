@@ -202,6 +202,8 @@ pub(crate) async fn run_loop(monitor: Monitor, stop: StopCondition) -> Result<()
         xdp_queues,
         #[cfg(feature = "af-xdp")]
         injected_xdp,
+        #[cfg(feature = "arp")]
+        mut arp_watch,
     } = monitor;
     // Borrow the monitor name as `&str` for the run loop's
     // dispatch sites. The owned `Box<str>` lives in this stack
@@ -501,6 +503,29 @@ pub(crate) async fn run_loop(monitor: Monitor, stop: StopCondition) -> Result<()
                 {
                     packet_err = Some(e);
                 }
+                // Issue #12: parse the L2 frame for ARP and drive the detector,
+                // in-borrow like the packet subs (synchronous — its borrows
+                // drop before the `.await`, preserving `Send`).
+                #[cfg(feature = "arp")]
+                if let Some(watch) = arp_watch.as_mut()
+                    && !watch.is_idle()
+                    && packet_err.is_none()
+                    && let Err(e) = dispatch_arp(
+                        watch,
+                        view,
+                        sink.as_mut(),
+                        &mut state_map,
+                        &mut counters,
+                        &mut flow_states,
+                        &label_table,
+                        source,
+                        monitor_name_borrow,
+                        handler_error_policy,
+                        &health,
+                    )
+                {
+                    packet_err = Some(e);
+                }
                 driver.track_into(view, &mut events)
             })
             .await?;
@@ -638,6 +663,8 @@ pub(crate) async fn replay_loop(
             xdp_queues: _, // pcap replay has no live AF_XDP backend
         #[cfg(feature = "af-xdp")]
             injected_xdp: _, // pcap replay has no live AF_XDP backend
+        #[cfg(feature = "arp")]
+        mut arp_watch, // ARP detection works on offline replay too
     } = monitor;
     let monitor_name_borrow: Option<&str> = monitor_name.as_deref();
 
@@ -670,6 +697,26 @@ pub(crate) async fn replay_loop(
                 &packet_subs,
                 view,
                 &pkt_extractor,
+                sink.as_mut(),
+                &mut state_map,
+                &mut counters,
+                &mut flow_states,
+                &label_table,
+                SourceIdx(0),
+                monitor_name_borrow,
+                handler_error_policy,
+                &health,
+            )?;
+        }
+
+        // Issue #12: ARP detection on offline replay, mirroring the live path.
+        #[cfg(feature = "arp")]
+        if let Some(watch) = arp_watch.as_mut()
+            && !watch.is_idle()
+        {
+            dispatch_arp(
+                watch,
+                view,
                 sink.as_mut(),
                 &mut state_map,
                 &mut counters,
@@ -1541,6 +1588,77 @@ fn dispatch_packet_subs(
                     tracing::warn!(error = %e, "packet-sub handler error isolated");
                 }
             }
+        }
+    }
+    Ok(())
+}
+
+/// Issue #12: parse one L2 frame for ARP and drive the detector. Called in
+/// the zero-copy drain (and the replay loop) for every captured frame when
+/// an ARP hook is armed. Synchronous — its borrows drop before any `.await`,
+/// keeping the run-loop future `Send`. Non-ARP frames (the overwhelming
+/// majority) cost one `parse_frame` early-return and nothing else.
+///
+/// Order: learn the binding (`observe`) first so the anomaly is derived
+/// against the *prior* table state, then dispatch the raw-message handlers
+/// and finally the anomaly handlers — all over one shared `Ctx`.
+#[cfg(feature = "arp")]
+#[allow(clippy::too_many_arguments)]
+fn dispatch_arp(
+    watch: &mut crate::monitor::arp::ArpWatch,
+    view: PacketView<'_>,
+    sink: &mut dyn AnomalySink,
+    state_map: &mut StateMap,
+    counters: &mut CounterRegistry,
+    flow_states: &mut crate::ctx::FlowStateRegistry,
+    label_table: &flowscope::well_known::LabelTable,
+    source: SourceIdx,
+    monitor_name: Option<&str>,
+    policy: HandlerErrorPolicy,
+    health: &crate::monitor::health::HealthState,
+) -> Result<()> {
+    let Some(msg) = flowscope::arp::parse_frame(view.frame) else {
+        return Ok(());
+    };
+    // Learn the binding and derive an anomaly against the prior table state.
+    // `ArpAnomaly` is `Copy` and doesn't borrow `watch`, so the handler loops
+    // below can re-borrow `watch.{msg,anomaly}_handlers` immutably.
+    let anomaly = watch.observe(&msg, view.timestamp);
+
+    let mut ctx = Ctx {
+        flow: None, // ARP is L2 — no 5-tuple flow key.
+        ts: view.timestamp,
+        source,
+        monitor_name,
+        state_map,
+        sink,
+        counters,
+        flow_states,
+        label_table,
+        tracker: None,
+    };
+
+    // Helper: apply the error policy uniformly to one handler result.
+    macro_rules! guard {
+        ($res:expr, $what:literal) => {
+            if let Err(e) = $res {
+                match policy {
+                    HandlerErrorPolicy::Propagate => return Err(e),
+                    HandlerErrorPolicy::Isolate => {
+                        health.record_handler_error();
+                        tracing::warn!(error = %e, concat!($what, " handler error isolated"));
+                    }
+                }
+            }
+        };
+    }
+
+    for handler in &watch.msg_handlers {
+        guard!(handler(&msg, &mut ctx), "arp");
+    }
+    if let Some(anomaly) = anomaly {
+        for handler in &watch.anomaly_handlers {
+            guard!(handler(&anomaly, &mut ctx), "arp-anomaly");
         }
     }
     Ok(())

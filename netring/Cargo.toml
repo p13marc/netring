@@ -111,6 +111,11 @@ http = ["flow", "flowscope/http"]
 dns = ["flow", "flowscope/dns"]
 tls = ["flow", "flowscope/tls", "flowscope/tls-fingerprints"]
 icmp = ["flow", "flowscope/icmp"]
+# L2 ARP visibility + spoof/binding-change detection. Pulls flowscope's `arp`
+# module (parser + ArpMessage::is_likely_spoof) and reuses its NeighborTable.
+# Parsed per-frame in the Monitor drain (no 5-tuple → not a flow protocol);
+# see `MonitorBuilder::on_arp` / `on_arp_anomaly` and `src/monitor/arp.rs`.
+arp = ["flow", "flowscope/arp"]
 all-parsers = ["http", "dns", "tls", "icmp"]
 
 # JA4S server fingerprint (`TlsFingerprint.ja4s`). Part of the JA4+ suite,
@@ -146,13 +151,13 @@ monitor-lite = ["tokio", "channel", "flow"]
 # Full Monitor + detector! experience for app users.
 monitor = [
     "tokio", "channel", "flow", "parse", "metrics",
-    "http", "dns", "tls", "icmp",
+    "http", "dns", "tls", "icmp", "arp",
     "emit", "serde",
 ]
 # Maximal app-tier umbrella (every shipped sink + parser + flowscope bonus).
 monitor-quickstart = [
     "tokio", "channel", "flow", "parse", "pcap", "metrics",
-    "http", "dns", "tls", "icmp",
+    "http", "dns", "tls", "icmp", "arp",
     "emit", "eve-sink", "file-hash", "serde",
 ]
 

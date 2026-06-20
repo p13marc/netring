@@ -50,6 +50,9 @@ use crate::layer::Layer;
 use crate::protocol::Protocol;
 use crate::protocol::event_typed::{Event, Tick};
 
+// L2 ARP visibility + spoof/binding-change detection (feature `arp`).
+#[cfg(feature = "arp")]
+pub mod arp;
 pub mod async_handler;
 pub(crate) mod backend;
 pub mod dispatcher;
@@ -63,6 +66,8 @@ pub mod run;
 pub mod telemetry;
 pub mod tick;
 
+#[cfg(feature = "arp")]
+pub use arp::{ArpAnomaly, ArpAnomalyKind};
 pub use async_handler::{AsyncHandler, BoxFuture};
 pub use dispatcher::{Dispatcher, MAX_EVENT_TYPES};
 pub use effect::{EffectHandler, Effects};
@@ -251,6 +256,12 @@ pub struct Monitor {
     /// registration live outside the Monitor).
     #[cfg(feature = "af-xdp")]
     pub(crate) injected_xdp: Vec<crate::AsyncXdpSocket>,
+    /// Issue #12: live ARP detector state (table + config + handlers). `Some`
+    /// when any ARP hook was registered; the run loop parses each frame for
+    /// ARP and drives this. `None` (the common case) keeps the drain free of
+    /// the ARP parse.
+    #[cfg(feature = "arp")]
+    pub(crate) arp_watch: Option<arp::ArpWatch>,
 }
 
 /// How the run loop reacts when a handler (detector / sink / async handler)
@@ -618,6 +629,22 @@ pub struct MonitorBuilder {
     /// [`Self::inject_xdp_backend`] (the `XdpShardedRunner` Tier-2 seam).
     #[cfg(feature = "af-xdp")]
     injected_xdp: Vec<crate::AsyncXdpSocket>,
+    /// Issue #12: ARP detector config, accumulated by
+    /// [`Self::arp_allow`] / [`Self::arp_warmup`] / etc. Folded into the
+    /// [`arp::ArpWatch`] at build alongside the handler vecs.
+    #[cfg(feature = "arp")]
+    arp_config: arp::ArpConfig,
+    /// Issue #12: `on_arp` raw-message handlers.
+    #[cfg(feature = "arp")]
+    arp_msg_handlers: Vec<arp::ArpMsgHandler>,
+    /// Issue #12: `on_arp_anomaly` derived-anomaly handlers.
+    #[cfg(feature = "arp")]
+    arp_anomaly_handlers: Vec<arp::ArpAnomalyHandler>,
+    /// Issue #12: set once any ARP hook (`on_arp` / `on_arp_anomaly` /
+    /// `arp_table`) is registered, so the run loop builds an
+    /// [`arp::ArpWatch`] and arms the per-frame parse.
+    #[cfg(feature = "arp")]
+    arp_enabled: bool,
 }
 
 impl MonitorBuilder {
@@ -1289,6 +1316,114 @@ impl MonitorBuilder {
         s
     }
 
+    /// Issue #12: observe every parsed [`ArpMessage`](flowscope::ArpMessage)
+    /// — request, reply, gratuitous, RARP — captured on any interface.
+    ///
+    /// ARP is L2 (no 5-tuple), so it doesn't flow through the flow tracker;
+    /// the Monitor parses each frame for ARP inside the zero-copy drain and
+    /// hands the message to your closure with a `&mut Ctx`. Arming any ARP
+    /// hook forces **capture-all** at the kernel prefilter (ARP can't be
+    /// expressed in the 5-tuple cBPF union), so pair it with a real workload
+    /// only when you want the whole segment's L2 chatter.
+    ///
+    /// ```ignore
+    /// Monitor::builder().interface("eth0")
+    ///     .on_arp(|m, _ctx| {
+    ///         println!("{} is-at {:?} (op {:?})", m.sender_ip, m.sender, m.oper);
+    ///         Ok(())
+    ///     });
+    /// ```
+    ///
+    /// For the security signal (spoof / binding-change) use
+    /// [`Self::on_arp_anomaly`] instead — it's far less noisy.
+    #[cfg(feature = "arp")]
+    pub fn on_arp<F>(mut self, handler: F) -> Self
+    where
+        F: Fn(&flowscope::ArpMessage, &mut Ctx<'_>) -> Result<()> + Send + 'static,
+    {
+        self.arp_enabled = true;
+        self.arp_msg_handlers.push(Box::new(handler));
+        self
+    }
+
+    /// Issue #12: receive derived [`ArpAnomaly`]s — the security view of the
+    /// ARP feed.
+    ///
+    /// The Monitor learns every sender's `IP → MAC` binding into an internal
+    /// [`ArpTable`](flowscope::correlate::ArpTable) and emits:
+    /// - [`ArpAnomalyKind::SpoofSuspected`] — a gratuitous reply whose target
+    ///   MAC ≠ sender MAC (cache poisoning). Fires even during warm-up.
+    /// - [`ArpAnomalyKind::BindingChanged`] — a known IP now claims a
+    ///   different MAC (failover or MITM). Suppressed during the warm-up
+    ///   window ([`Self::arp_warmup`], default 5 s).
+    ///
+    /// Opt into the informational kinds with [`Self::arp_report_gratuitous`]
+    /// / [`Self::arp_report_new_binding`]. Allowlist trusted bindings
+    /// (gateways, VRRP) with [`Self::arp_allow`].
+    ///
+    /// ```ignore
+    /// Monitor::builder().interface("eth0")
+    ///     .arp_allow("10.0.0.1".parse().unwrap(), MacAddr([0,0,0x5e,0,1,1]))
+    ///     .on_arp_anomaly(|a, ctx| {
+    ///         ctx.emit(a.kind.as_str(), a.kind.severity())
+    ///             .with("ip", a.ip().to_string())
+    ///             .emit();
+    ///         Ok(())
+    ///     });
+    /// ```
+    #[cfg(feature = "arp")]
+    pub fn on_arp_anomaly<F>(mut self, handler: F) -> Self
+    where
+        F: Fn(&arp::ArpAnomaly, &mut Ctx<'_>) -> Result<()> + Send + 'static,
+    {
+        self.arp_enabled = true;
+        self.arp_anomaly_handlers.push(Box::new(handler));
+        self
+    }
+
+    /// Issue #12: trust an `IP → MAC` binding — it never raises an ARP
+    /// anomaly. Use for gateways, VRRP/HSRP virtual MACs, and known
+    /// multi-homed hosts. Implies [`Self::arp_table`].
+    #[cfg(feature = "arp")]
+    pub fn arp_allow(mut self, ip: std::net::Ipv4Addr, mac: flowscope::MacAddr) -> Self {
+        self.arp_enabled = true;
+        self.arp_config.allow.insert((ip, mac));
+        self
+    }
+
+    /// Issue #12: set the warm-up window during which learning-dependent
+    /// anomalies ([`ArpAnomalyKind::BindingChanged`] /
+    /// [`ArpAnomalyKind::NewBinding`]) are suppressed while the table learns
+    /// the steady-state topology. Default
+    /// [`DEFAULT_ARP_WARMUP`](arp::DEFAULT_ARP_WARMUP) (5 s).
+    /// `SpoofSuspected` is unaffected — it always fires.
+    #[cfg(feature = "arp")]
+    pub fn arp_warmup(mut self, window: Duration) -> Self {
+        self.arp_enabled = true;
+        self.arp_config.warmup = window;
+        self
+    }
+
+    /// Issue #12: also emit [`ArpAnomalyKind::Gratuitous`] for benign
+    /// gratuitous announcements (boot / IP-change / failover). Off by
+    /// default — useful for an inventory / "who just joined" view.
+    #[cfg(feature = "arp")]
+    pub fn arp_report_gratuitous(mut self, enabled: bool) -> Self {
+        self.arp_enabled = true;
+        self.arp_config.report_gratuitous = enabled;
+        self
+    }
+
+    /// Issue #12: also emit [`ArpAnomalyKind::NewBinding`] the first time a
+    /// post-warm-up `IP → MAC` binding is learned ("new host appeared"). Off
+    /// by default — noisy on a first network sweep.
+    #[cfg(feature = "arp")]
+    pub fn arp_report_new_binding(mut self, enabled: bool) -> Self {
+        self.arp_enabled = true;
+        self.arp_config.report_new_binding = enabled;
+        self
+    }
+
     /// 0.21 F: register `P` for broadcast delivery.
     ///
     /// Calls [`Protocol::register_broadcast`] on the underlying
@@ -1591,6 +1726,20 @@ impl MonitorBuilder {
         self
     }
 
+    /// Issue #12: whether an ARP hook is armed (forces capture-all, since
+    /// ARP can't be expressed in the 5-tuple cBPF prefilter union). Always
+    /// `false` without the `arp` feature.
+    #[cfg(feature = "arp")]
+    #[inline]
+    fn arp_wants_all(&self) -> bool {
+        self.arp_enabled
+    }
+    #[cfg(not(feature = "arp"))]
+    #[inline]
+    fn arp_wants_all(&self) -> bool {
+        false
+    }
+
     /// The classic-BPF **kernel prefilter** this monitor compiles to (0.25
     /// S2): the conservative OR-union of **every** consumer's traffic interest
     /// — packet subs, registered handlers (via `Event::traffic_class`),
@@ -1613,7 +1762,8 @@ impl MonitorBuilder {
         let wants_all = !self.flow_exporters.is_empty()
             || !self.tick_handlers.is_empty()
             || !self.broadcast_handles.is_empty()
-            || self.bandwidth_registered;
+            || self.bandwidth_registered
+            || self.arp_wants_all();
 
         let interests = self
             .handlers
@@ -1952,6 +2102,13 @@ impl MonitorBuilder {
             xdp_queues: self.xdp_queues,
             #[cfg(feature = "af-xdp")]
             injected_xdp: self.injected_xdp,
+            #[cfg(feature = "arp")]
+            arp_watch: self.arp_enabled.then(|| {
+                let mut w = arp::ArpWatch::new(self.arp_config);
+                w.msg_handlers = self.arp_msg_handlers;
+                w.anomaly_handlers = self.arp_anomaly_handlers;
+                w
+            }),
         })
     }
 }

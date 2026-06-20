@@ -20,6 +20,23 @@ built on AF_PACKET with TPACKET_V3 (block-based mmap ring buffers) and AF_XDP.
 
 ## Implementation Status
 
+**Unreleased (branch `afxdp-flowscope017-arp`)** — flowscope **0.16 → 0.17**
+bump + **ARP feature** (issue #12). New opt-in `arp` feature: L2 ARP visibility
++ spoof/binding-change detection. ARP has no 5-tuple, so it's parsed per-frame
+in the Monitor zero-copy drain (and the replay loop), mirroring the packet-tier
+hook — NOT a flow protocol. `MonitorBuilder::on_arp` (raw `ArpMessage` feed) +
+`on_arp_anomaly` (derived `ArpAnomaly`: `SpoofSuspected` via
+`ArpMessage::is_likely_spoof`, `BindingChanged` via flowscope's `NeighborTable`,
+opt-in `Gratuitous`/`NewBinding`), `arp_allow`/`arp_warmup`/
+`arp_report_{gratuitous,new_binding}`. Arming any ARP hook forces capture-all
+(ARP isn't expressible in the 5-tuple cBPF prefilter — fail-open). `arp` is in
+the `monitor` umbrellas; prelude exports `ArpAnomaly`/`ArpAnomalyKind` +
+`ArpMessage`/`ArpOp`/`MacAddr`. `src/monitor/arp.rs` (`ArpWatch` detector +
+`dispatch_arp` in `run.rs`). Example `monitor_arp_watch`; root-gated
+`arp_lo_spoof` test. **Deferred:** `Ctx::arp_table()` (cross-protocol IP→MAC
+lookup — needs a gated field threaded through 13 Ctx sites); the EtherType-aware
+kernel pushdown (today ARP just forces fail-open capture-all).
+
 **0.25.0 — RELEASE-READY on `0.25-dev`** ("Subscriptions, Async Effects,
 Performance & TX"). Version bumped to 0.25.0; CHANGELOG + `docs/MIGRATING_0.24_TO_0.25.md`
 written; depends on **flowscope 0.16**. The actual `cargo publish` + `git tag

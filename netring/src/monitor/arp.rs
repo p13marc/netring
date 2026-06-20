@@ -211,8 +211,7 @@ impl ArpWatch {
     ///
     /// Mutates the table (learns `sender_ip → sender`) and returns the
     /// derived [`ArpAnomaly`], if any. Pure aside from the table update;
-    /// the run loop separately invokes the handlers (so the table can be
-    /// borrowed `&` by `Ctx::arp_table` during dispatch).
+    /// the run loop separately invokes the handlers.
     pub(crate) fn observe(&mut self, msg: &ArpMessage, ts: Timestamp) -> Option<ArpAnomaly> {
         let first = *self.first_seen.get_or_insert(ts);
         let in_warmup = ts.saturating_sub(first) < self.config.warmup;

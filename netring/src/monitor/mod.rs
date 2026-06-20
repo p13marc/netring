@@ -641,7 +641,7 @@ pub struct MonitorBuilder {
     #[cfg(feature = "arp")]
     arp_anomaly_handlers: Vec<arp::ArpAnomalyHandler>,
     /// Issue #12: set once any ARP hook (`on_arp` / `on_arp_anomaly` /
-    /// `arp_table`) is registered, so the run loop builds an
+    /// `arp_allow` / ...) is registered, so the run loop builds an
     /// [`arp::ArpWatch`] and arms the per-frame parse.
     #[cfg(feature = "arp")]
     arp_enabled: bool,
@@ -1383,7 +1383,7 @@ impl MonitorBuilder {
 
     /// Issue #12: trust an `IP → MAC` binding — it never raises an ARP
     /// anomaly. Use for gateways, VRRP/HSRP virtual MACs, and known
-    /// multi-homed hosts. Implies [`Self::arp_table`].
+    /// multi-homed hosts. Arms ARP detection (like [`Self::on_arp_anomaly`]).
     #[cfg(feature = "arp")]
     pub fn arp_allow(mut self, ip: std::net::Ipv4Addr, mac: flowscope::MacAddr) -> Self {
         self.arp_enabled = true;

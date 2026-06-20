@@ -148,6 +148,7 @@ headline API with kernel filter pushdown.
 | `monitor_multi_thread_default` | plain `#[tokio::main]` (multi-thread) — `Monitor` is `Send` (0.21) and **the run-loop future is `Send + 'static` (0.23)**, demonstrated via `tokio::spawn(monitor.run_for(..))` |
 | `monitor_report_stream` | `report_to(period, build, sink)` + `JsonReportSink` (0.22 §3) shipping a typed `BandwidthSnapshot` report — the third output stream beside anomalies and broadcast |
 | `monitor_label_table` | `LabelTable::new().set(...)` + `MonitorBuilder::label_table` — custom well-known port → app-label map feeding `on_bandwidth` |
+| `monitor_arp_watch` | **L2 ARP** (feature `arp`): raw ARP feed via `on_arp` + spoof/binding-change anomalies via `on_arp_anomaly` (`SpoofSuspected`/`BindingChanged`), with `arp_allow`/`arp_warmup` |
 
 All take an `<iface>` argument (default `lo`) and an optional
 `<seconds>` deadline. Pair with `synthetic_traffic` for

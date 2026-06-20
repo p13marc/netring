@@ -1,5 +1,37 @@
 # Changelog
 
+## Unreleased
+
+> Depends on flowscope **0.17**. Additive over 0.26 (existing code compiles
+> unchanged).
+
+### Added
+
+- **ARP visibility + spoof/binding-change detection** — new opt-in `arp`
+  feature ([#12](https://github.com/p13marc/netring/issues/12)). ARP is L2
+  (no 5-tuple), so the Monitor parses each frame for ARP inside the zero-copy
+  drain (and the pcap-replay loop), mirroring the packet-tier hook, and drives
+  a detector built on flowscope's `NeighborTable` + `ArpMessage::is_likely_spoof`.
+  - `MonitorBuilder::on_arp(|m: &ArpMessage, ctx|)` — every parsed ARP message.
+  - `MonitorBuilder::on_arp_anomaly(|a: &ArpAnomaly, ctx|)` — derived security
+    signal: `SpoofSuspected` (gratuitous reply, target MAC ≠ sender — fires even
+    during warm-up) and `BindingChanged` (a known IP now claims a different MAC),
+    plus opt-in informational `Gratuitous` / `NewBinding`.
+  - `arp_allow(ip, mac)` allowlist (gateways/VRRP), `arp_warmup(d)` (default 5 s),
+    `arp_report_gratuitous` / `arp_report_new_binding`.
+  - Arming any ARP hook forces capture-all at the kernel prefilter (ARP can't be
+    expressed in the 5-tuple cBPF union) — fail-open, no starvation.
+  - `arp` is in the `monitor` / `monitor-quickstart` umbrellas. Prelude exports
+    `ArpAnomaly`/`ArpAnomalyKind` + re-exports `ArpMessage`/`ArpOp`/`MacAddr`.
+  - Example `monitor_arp_watch`; root-gated `arp_lo_spoof` live test.
+
+### Changed
+
+- **flowscope 0.16 → 0.17.** Picks up `MacAddr`, the `arp` module, the
+  `NeighborTable`, `RxMetadata` on a now-`#[non_exhaustive]` `PacketView`, and
+  `detect::fingerprint`. netring constructs `PacketView` via `::new()`
+  everywhere, so the `#[non_exhaustive]` change is transparent.
+
 ## 0.26.0 — 2026-06-16 — AF_XDP multi-queue capture & promiscuous mode
 
 > Completes the AF_XDP capture story (issues #4 + #6): promiscuous mode, the

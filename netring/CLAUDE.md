@@ -32,8 +32,11 @@ opt-in `Gratuitous`/`NewBinding`), `arp_allow`/`arp_warmup`/
 (ARP isn't expressible in the 5-tuple cBPF prefilter — fail-open). `arp` is in
 the `monitor` umbrellas; prelude exports `ArpAnomaly`/`ArpAnomalyKind` +
 `ArpMessage`/`ArpOp`/`MacAddr`. `src/monitor/arp.rs` (`ArpWatch` detector +
-`dispatch_arp` in `run.rs`). Example `monitor_arp_watch`; root-gated
-`arp_lo_spoof` test. **Deferred:** `Ctx::arp_table()` (cross-protocol IP→MAC
+`dispatch_arp` in `run.rs`). Example `monitor_arp_watch`; cap-free
+`arp_replay` pcap-replay test (live AF_PACKET TX→RX on lo does NOT loop raw
+injected frames back to the capture, so the live-inject approach was dropped
+for deterministic pcap replay, which drives the same `dispatch_arp` path).
+**Deferred:** `Ctx::arp_table()` (cross-protocol IP→MAC
 lookup — needs a gated field threaded through 13 Ctx sites); the EtherType-aware
 kernel pushdown (today ARP just forces fail-open capture-all).
 

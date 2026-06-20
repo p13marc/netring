@@ -23,7 +23,8 @@
     expressed in the 5-tuple cBPF union) — fail-open, no starvation.
   - `arp` is in the `monitor` / `monitor-quickstart` umbrellas. Prelude exports
     `ArpAnomaly`/`ArpAnomalyKind` + re-exports `ArpMessage`/`ArpOp`/`MacAddr`.
-  - Example `monitor_arp_watch`; root-gated `arp_lo_spoof` live test.
+  - Example `monitor_arp_watch`; cap-free `arp_replay` pcap test (drives the
+    real `replay → dispatch_arp → parse_frame → detector` path).
 
 ### Changed
 

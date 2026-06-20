@@ -101,9 +101,10 @@ jobs:
       # (incl. the effect path). Cap-free, so they run here, not in the root job.
       - name: Monitor integration tests (cap-free)
         run: |
-          cargo test -p netring --features "tokio,channel,flow,parse,pcap,http,dns,tls,ja4plus" \
+          cargo test -p netring --features "tokio,channel,flow,parse,pcap,http,dns,tls,ja4plus,arp" \
             --test monitor_replay --test monitor_kernel_prefilter --test monitor_send \
-            --test monitor_run_until_idle --test monitor_drain_timeout --test monitor_name_in_ctx
+            --test monitor_run_until_idle --test monitor_drain_timeout --test monitor_name_in_ctx \
+            --test arp_replay
 
   # ── Integration tests (need CAP_NET_RAW) ──────────────────────────────────
   test-integration:
@@ -203,19 +204,6 @@ jobs:
           cargo test -p netring --features "integration-tests,tokio" --test tx_timestamp_lo --no-run
           bin=$(cargo test -p netring --features "integration-tests,tokio" \
               --test tx_timestamp_lo --no-run --message-format=json 2>/dev/null \
-              | jq -r 'select(.executable != null and (.target.kind[] == "test")) | .executable' \
-              | head -n1)
-          test -n "$bin" && test -f "$bin" || { echo "no test binary"; exit 1; }
-          sudo "$bin" --nocapture --test-threads=1
-
-      # Issue #12: ARP spoof detection on lo — inject a gratuitous-spoof ARP
-      # frame via the Injector, assert on_arp + SpoofSuspected fire through the
-      # real capture → drain → parse_frame path.
-      - name: ARP spoof lo test (root)
-        run: |
-          cargo test -p netring --features "integration-tests,tokio,channel,arp,emit" --test arp_lo_spoof --no-run
-          bin=$(cargo test -p netring --features "integration-tests,tokio,channel,arp,emit" \
-              --test arp_lo_spoof --no-run --message-format=json 2>/dev/null \
               | jq -r 'select(.executable != null and (.target.kind[] == "test")) | .executable' \
               | head -n1)
           test -n "$bin" && test -f "$bin" || { echo "no test binary"; exit 1; }

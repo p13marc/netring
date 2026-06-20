@@ -1,6 +1,23 @@
 # netring — ARP visibility & spoof detection (plan)
 
-> **Status:** plan, 2026-06-16. Candidate feature; no fixed release slot (1.0 is
+> **Status: IMPLEMENTED (PR #18, 2026-06-20)** — flowscope 0.17 ships the `arp`
+> module + `NeighborTable`; netring adds the `arp` feature. Delete-on-ship once
+> #18 merges + releases. Two pieces were **deferred to follow-up issues** (see
+> §7).
+>
+> **Design divergence from this plan (deliberate):** the plan envisioned ARP as a
+> `MessageProtocol` (`on::<Arp>` + `session::<Arp>()`). flowscope 0.17 ships ARP
+> as a **free-function parser** (`arp::parse_frame`), not a `SessionParser` — and
+> ARP has no 5-tuple, so it doesn't fit the session/datagram driver. So netring
+> surfaces it as the **ops-toolkit hook style** (like `on_icmp_error`):
+> `MonitorBuilder::on_arp` (raw `ArpMessage` feed) + `on_arp_anomaly`, parsed
+> per-frame in the zero-copy drain (`dispatch_arp` in `run.rs`) + the replay loop.
+> flowscope's generic `NeighborTable<L3, L4>` (= `ArpTable`) replaced the plan's
+> bespoke `ArpTable`/`ArpBinding`; the detector derives `ArpAnomaly` from its
+> `NeighborEvent` + `ArpMessage::is_likely_spoof`.
+>
+> ---
+> Original plan below (2026-06-16). Candidate feature; no fixed release slot (1.0 is
 > gated by community validation, not a roadmap). **flowscope-led** (we own it):
 > the parser + table land there, netring surfaces them. Additive; any
 > protocol-trait churn defers to the eventual 1.0 stabilization (Arch §7).
@@ -75,15 +92,39 @@ natural extension, not new machinery.
   full-segment / span-port coverage — note it in the docs.
 
 ## 3. Milestones
-- **M1** flowscope `arp` parser + `ArpMessage` + datagram correlation (publish).
-- **M2** `ArpTable` (flowscope::correlate) + netring `Arp` protocol marker +
-  `arp_table()`/`Ctx::arp_table()`.
-- **M3** `on_arp_anomaly` + the detector logic (table diff) + tunables
-  (warm-up window, allowlist) + EVE surfacing.
-- **M4** EtherType atom in the predicate AST + cBPF/XDP-map compiler (ARP
-  survives subscription pushdown); `session::<Arp>()` field gating.
-- **M5** `examples/monitor/arp_watch.rs` (live IP↔MAC table + spoof alerts) +
-  docs (capture-path note, promiscuous tie-in, detector tuning).
+- **M1 ✅** flowscope `arp` parser + `ArpMessage` + `is_likely_spoof` (shipped
+  flowscope 0.17; flowscope#1 closed).
+- **M2 ✅ (partial)** `NeighborTable`/`ArpTable` (flowscope::correlate) +
+  netring `on_arp` (raw feed). **`Ctx::arp_table()` deferred** → §7.
+- **M3 ✅** `on_arp_anomaly` + detector (`ArpWatch` over `NeighborEvent` +
+  `is_likely_spoof`) + tunables (`arp_warmup` warm-up, `arp_allow` allowlist,
+  `arp_report_{gratuitous,new_binding}`). EVE surfacing rides the existing
+  anomaly sink (`ctx.emit(kind.as_str(), kind.severity())`).
+- **M4 ⏸ DEFERRED** EtherType atom + subscription-pushdown / `session::<Arp>()`
+  field gating → §7. Today arming any ARP hook forces **fail-open capture-all**
+  (`arp_wants_all()`), which is correct (no shedding) but unoptimized.
+- **M5 ✅** `examples/monitor/arp_watch.rs` + docs (CHANGELOG/FEATURES/CLAUDE/
+  examples README). Cap-free `arp_replay` pcap test + 5 unit tests. (The
+  root-gated lo-inject test was dropped — PF_PACKET TX on `lo` doesn't loop a
+  raw injected L2 frame back to PF_PACKET RX taps; pcap replay drives the same
+  `dispatch_arp` path deterministically.)
+
+## 7. Deferred → follow-up issues
+- **`Ctx::arp_table()`** (cross-protocol IP→MAC lookup, e.g. a TLS handler
+  resolving a peer IP to its MAC). Needs an `#[cfg(feature="arp")]
+  arp_table: Option<&ArpTable>` field threaded through ~13 `Ctx` construction
+  sites; deferred to keep PR #18 focused. The table already exists inside
+  `ArpWatch` — only the read accessor is missing.
+- **ARP as a first-class subscription/predicate term** — `Atom::EtherType(0x0806)`
+  in the predicate AST + `packet().ethertype(..)` combinator + `.expr()` keyword
+  `arp`, so a monitor with BOTH ARP hooks and narrow IP subscriptions can push
+  "ethertype arp OR (ip narrow)" into the kernel instead of falling back to
+  capture-all. The cBPF compiler already emits EtherType loads (VLAN path), so
+  this reuses existing codegen. Optionally also `session::<Arp>()` field gating
+  (`.sender_ip(..)`/`.oper(..)`).
+- **NDP (IPv6 neighbor) sibling** — flowscope's `NeighborTable<L3, L4>` is
+  already generic, so an `ndp` feature (ICMPv6 NS/NA) could reuse it with an
+  `Ipv6Addr` L3. Open naming decision (`on_l2_anomaly` unifying ARP+NDP?).
 
 ## 4. Testing
 - Cap-free: parser unit tests (golden ARP request/reply bytes, gratuitous,

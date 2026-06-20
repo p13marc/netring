@@ -31,6 +31,9 @@ AF_PACKET capture/inject is always compiled (the base); everything else is opt-i
 - `parse` — etherparse L2–L4 extractors. **Implied by `flow`** (the tracker needs it).
 - `flow` — flowscope flow/session tracking + reassembler. `flow + tokio` ⇒ `flow_stream` + the Monitor.
 - `http` / `dns` / `tls` / `icmp` — L7 parser pass-throughs (each implies `flow`). `all-parsers` = all four.
+- `arp` — L2 ARP visibility + spoof/binding-change detection (implies `flow`).
+  Adds `MonitorBuilder::on_arp` / `on_arp_anomaly`; parsed per-frame in the
+  Monitor drain (ARP has no 5-tuple). In the `monitor` umbrellas.
 - `file-hash` — flowscope `Sha256Sink` / `FileType`.
 
 ### Sinks / exporters / serialization

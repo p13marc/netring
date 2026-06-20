@@ -34,7 +34,7 @@ production library") lives in `netring-strategic-review-2026-06.md`.
 
 | Plan | Theme |
 |---|---|
-| [`netring-arp-plan.md`](./netring-arp-plan.md) | **ARP** — flowscope parser + `ArpTable` + `on_arp_anomaly` (spoof/poison/conflict/gratuitous detection), EtherType kernel-filter atom, `arp_watch` example. *(maintainer ask)* |
+| [`netring-arp-plan.md`](./netring-arp-plan.md) | **ARP** ✅ **IMPLEMENTED (PR #18, issue #12)** — `arp` feature: `on_arp`/`on_arp_anomaly` (spoof/binding-change detection) parsed per-frame in the drain, over flowscope 0.17's `arp` module + `NeighborTable`. Shipped as the ops-toolkit hook style (not `MessageProtocol` — flowscope ships a free-function parser; ARP has no 5-tuple). Deferred → **#19** (`Ctx::arp_table()`) + **#20** (EtherType kernel-pushdown atom). Delete-on-ship after #18 merges. |
 | [`netring-afxdp-rx-metadata-plan.md`](./netring-afxdp-rx-metadata-plan.md) | **AF_XDP RX HW metadata + timestamps** — XDP-hints kfuncs (HW timestamp / rx_hash / VLAN / checksum) → `PacketView` fields; vendored `redirect_meta` program; graceful degrade. |
 | [`netring-quic-visibility-plan.md`](./netring-quic-visibility-plan.md) | **QUIC + encrypted visibility** — flowscope on-path QUIC-Initial parser (DCID-derived key → SNI/ALPN/JA4; *not* a QUIC stack); `Quic` protocol + `session::<Quic>`; encrypted-flow fingerprints. |
 | [`netring-nic-flow-steering-plan.md`](./netring-nic-flow-steering-plan.md) | **NIC flow steering** — `ethtool` ntuple/RSS (`ETHTOOL_SRXCLSRLINS`, `FLOW_RSS`); typed `FlowRule` + `SteerGuard`; `XdpCapture::steer`. Closes the AF_XDP-vs-DPDK gap. |

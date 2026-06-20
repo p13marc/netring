@@ -44,6 +44,52 @@ fn frame(proto: u8, dst_port: u16) -> Vec<u8> {
 const TCP: u8 = 6;
 const UDP: u8 = 17;
 
+/// A minimal broadcast ARP-request Ethernet frame (EtherType 0x0806).
+#[cfg(feature = "arp")]
+fn arp_frame() -> Vec<u8> {
+    let mut f = Vec::new();
+    f.extend_from_slice(&[0xff; 6]); // dst mac: broadcast
+    f.extend_from_slice(&[0x02, 0, 0, 0, 0, 2]); // src mac
+    f.extend_from_slice(&[0x08, 0x06]); // ethertype: ARP
+    f.extend_from_slice(&[0, 1, 0x08, 0x00, 6, 4, 0, 1]); // htype/ptype/hlen/plen/oper
+    f.extend_from_slice(&[0x02, 0, 0, 0, 0, 2]); // sha
+    f.extend_from_slice(&[10, 0, 0, 1]); // spa
+    f.extend_from_slice(&[0; 6]); // tha
+    f.extend_from_slice(&[10, 0, 0, 2]); // tpa
+    f
+}
+
+// Issue #20: an ARP hook contributes a precise EtherType(0x0806) interest, so
+// a pure-ARP monitor's kernel prefilter passes ARP and sheds IP — not the old
+// fail-open capture-all.
+#[cfg(feature = "arp")]
+#[test]
+fn arp_only_monitor_narrows_to_arp() {
+    let bpf = Monitor::builder()
+        .interface("lo")
+        .on_arp(|_m, _ctx| Ok(()))
+        .kernel_prefilter()
+        .expect("an ARP-only monitor yields a real filter, not capture-all");
+    assert!(bpf.matches(&arp_frame()), "ARP wanted");
+    assert!(!bpf.matches(&frame(TCP, 443)), "tcp/443 shed");
+    assert!(!bpf.matches(&frame(UDP, 53)), "udp/53 shed");
+}
+
+// ARP unions with IP interests rather than collapsing to capture-all.
+#[cfg(feature = "arp")]
+#[test]
+fn arp_plus_protocol_unions() {
+    let bpf = Monitor::builder()
+        .interface("lo")
+        .on_arp_anomaly(|_a, _ctx| Ok(()))
+        .protocol::<Tls>()
+        .kernel_prefilter()
+        .expect("ARP + TLS unions to a filter");
+    assert!(bpf.matches(&arp_frame()), "ARP in union");
+    assert!(bpf.matches(&frame(TCP, 443)), "tls/443 in union");
+    assert!(!bpf.matches(&frame(UDP, 53)), "udp/53 in neither");
+}
+
 #[test]
 fn single_protocol_narrows_to_its_dispatch() {
     // protocol::<Tls>() → Dispatch::Tcp([443, 8443]) → tcp AND (443 or 8443).

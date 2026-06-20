@@ -1322,9 +1322,9 @@ impl MonitorBuilder {
     /// ARP is L2 (no 5-tuple), so it doesn't flow through the flow tracker;
     /// the Monitor parses each frame for ARP inside the zero-copy drain and
     /// hands the message to your closure with a `&mut Ctx`. Arming any ARP
-    /// hook forces **capture-all** at the kernel prefilter (ARP can't be
-    /// expressed in the 5-tuple cBPF union), so pair it with a real workload
-    /// only when you want the whole segment's L2 chatter.
+    /// hook adds a precise `EtherType(0x0806)` term to the kernel prefilter
+    /// (issue #20), so a pure-ARP monitor sheds non-ARP traffic in-kernel; an
+    /// ARP+IP monitor unions `arp OR (the IP interests)`.
     ///
     /// ```ignore
     /// Monitor::builder().interface("eth0")
@@ -1726,18 +1726,22 @@ impl MonitorBuilder {
         self
     }
 
-    /// Issue #12: whether an ARP hook is armed (forces capture-all, since
-    /// ARP can't be expressed in the 5-tuple cBPF prefilter union). Always
-    /// `false` without the `arp` feature.
+    /// Issue #20: the kernel-filter interest contributed by an armed ARP hook
+    /// — a precise `EtherType(0x0806)` term so the prefilter passes ARP up to
+    /// `on_arp`/`on_arp_anomaly` (issue #12) without falling back to
+    /// capture-all. `None` when no ARP hook is armed (or the `arp` feature is
+    /// off), so non-ARP monitors are unaffected.
     #[cfg(feature = "arp")]
     #[inline]
-    fn arp_wants_all(&self) -> bool {
-        self.arp_enabled
+    fn arp_interest(&self) -> Option<subscription::Predicate> {
+        self.arp_enabled.then_some(subscription::Predicate::Atom(
+            subscription::Atom::EtherType(0x0806),
+        ))
     }
     #[cfg(not(feature = "arp"))]
     #[inline]
-    fn arp_wants_all(&self) -> bool {
-        false
+    fn arp_interest(&self) -> Option<subscription::Predicate> {
+        None
     }
 
     /// The classic-BPF **kernel prefilter** this monitor compiles to (0.25
@@ -1762,8 +1766,7 @@ impl MonitorBuilder {
         let wants_all = !self.flow_exporters.is_empty()
             || !self.tick_handlers.is_empty()
             || !self.broadcast_handles.is_empty()
-            || self.bandwidth_registered
-            || self.arp_wants_all();
+            || self.bandwidth_registered;
 
         let interests = self
             .handlers
@@ -1772,6 +1775,12 @@ impl MonitorBuilder {
             .cloned()
             .chain(self.traffic_interests.iter().cloned())
             .chain(self.packet_subs.iter().map(|s| s.predicate.clone()))
+            // Issue #20: ARP rides the kernel filter as a precise EtherType
+            // term (0x0806), not the old fail-open capture-all. A pure-ARP
+            // monitor now sheds non-ARP at the kernel; an ARP+IP monitor unions
+            // `ethertype arp OR (the IP interests)`. The union stays a superset
+            // (fail-open) — this only *narrows* toward what's actually wanted.
+            .chain(self.arp_interest())
             .chain(wants_all.then_some(subscription::Predicate::Always));
 
         subscription::kernel_filter::compile_union(interests)

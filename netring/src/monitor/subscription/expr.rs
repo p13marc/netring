@@ -22,6 +22,7 @@
 //! atom    := "tcp" | "udp" | "icmp"
 //!          | dir? "port" INT | dir? "host" IP | dir? "net" CIDR
 //!          | "vlan" INT
+//!          | "arp" | "ethertype" (HEX | INT)
 //!          | "bytes" ">" INT | "packets" ">" INT
 //!          | "tls.sni" "~" GLOB | "http.host" "~" GLOB | "dns.qname" "~" GLOB
 //! dir     := "src" | "dst"
@@ -169,6 +170,8 @@ impl Parser {
             "tcp" => Atom::Proto(L4Proto::Tcp),
             "udp" => Atom::Proto(L4Proto::Udp),
             "icmp" => Atom::Proto(L4Proto::Icmp),
+            "arp" => Atom::EtherType(0x0806),
+            "ethertype" => Atom::EtherType(self.expect_ethertype()?),
             "vlan" => Atom::VlanId(self.expect_u16("a VLAN id")?),
             "port" => Atom::AnyPort(self.expect_u16("a port number")?),
             "host" => Atom::AnyHost(self.expect_ip()?),
@@ -239,6 +242,19 @@ impl Parser {
             .map_err(|_| ParseError::new(format!("expected {what}, got {t:?}")))
     }
 
+    /// An EtherType, accepting both hex (`0x0806`) and decimal (`2054`).
+    fn expect_ethertype(&mut self) -> Result<u16, ParseError> {
+        let t = self
+            .advance()
+            .ok_or_else(|| ParseError::new("expected an EtherType (e.g. 0x0806)"))?;
+        let parsed = t
+            .strip_prefix("0x")
+            .or_else(|| t.strip_prefix("0X"))
+            .map(|hex| u16::from_str_radix(hex, 16))
+            .unwrap_or_else(|| t.parse::<u16>());
+        parsed.map_err(|_| ParseError::new(format!("expected an EtherType, got {t:?}")))
+    }
+
     fn expect_u64(&mut self, what: &str) -> Result<u64, ParseError> {
         let t = self
             .advance()
@@ -304,6 +320,26 @@ mod tests {
         assert_eq!(p("src port 53"), Predicate::Atom(Atom::SrcPort(53)));
         assert_eq!(p("port 80"), Predicate::Atom(Atom::AnyPort(80)));
         assert_eq!(p("vlan 100"), Predicate::Atom(Atom::VlanId(100)));
+    }
+
+    #[test]
+    fn ethertype_and_arp_atoms() {
+        // Issue #20: `arp` sugar + `ethertype` with hex or decimal.
+        assert_eq!(p("arp"), Predicate::Atom(Atom::EtherType(0x0806)));
+        assert_eq!(
+            p("ethertype 0x0806"),
+            Predicate::Atom(Atom::EtherType(0x0806))
+        );
+        assert_eq!(
+            p("ethertype 2048"),
+            Predicate::Atom(Atom::EtherType(0x0800))
+        );
+        // Composes with the rest of the grammar.
+        assert_eq!(
+            p("arp or tcp"),
+            Predicate::Atom(Atom::EtherType(0x0806)).or(Predicate::Atom(Atom::Proto(L4Proto::Tcp)))
+        );
+        assert!(parse("ethertype nothex").is_err());
     }
 
     #[test]

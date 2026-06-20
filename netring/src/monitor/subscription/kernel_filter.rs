@@ -196,6 +196,7 @@ fn apply_atom(b: BpfFilterBuilder, atom: &Atom) -> Option<BpfFilterBuilder> {
         Atom::DstNet(net) => b.dst_net(*net),
         Atom::AnyNet(net) => b.net(*net),
         Atom::VlanId(id) => b.vlan().vlan_id(*id),
+        Atom::EtherType(ty) => b.eth_type(*ty),
         // Userspace atoms can't reach here after kernel_approx; refuse safely.
         Atom::SniGlob(_)
         | Atom::HttpHostGlob(_)
@@ -229,6 +230,45 @@ mod tests {
         f.extend_from_slice(&dst_port.to_be_bytes()); // dst port
         f.extend_from_slice(&[0, 0, 0, 0]); // l4 rest
         f
+    }
+
+    /// A minimal broadcast ARP-request Ethernet frame (EtherType 0x0806).
+    fn arp_frame() -> Vec<u8> {
+        let mut f = Vec::new();
+        f.extend_from_slice(&[0xff; 6]); // dst mac: broadcast
+        f.extend_from_slice(&[0x02, 0, 0, 0, 0, 2]); // src mac
+        f.extend_from_slice(&[0x08, 0x06]); // ethertype: ARP
+        f.extend_from_slice(&[0, 1, 0x08, 0x00, 6, 4, 0, 1]); // htype/ptype/hlen/plen/oper
+        f.extend_from_slice(&[0x02, 0, 0, 0, 0, 2]); // sha
+        f.extend_from_slice(&[10, 0, 0, 1]); // spa
+        f.extend_from_slice(&[0; 6]); // tha
+        f.extend_from_slice(&[10, 0, 0, 2]); // tpa
+        f
+    }
+
+    #[test]
+    fn ethertype_arp_passes_arp_sheds_ip() {
+        // Issue #20: an ARP-only interest compiles to a real cBPF filter that
+        // passes ARP and sheds IP traffic — the alternative to capture-all.
+        let pred = packet().arp().into_predicate();
+        let bpf = predicate_to_bpf(&pred.kernel_approx()).expect("ethertype compiles");
+        assert!(bpf.matches(&arp_frame()), "ARP frame should pass");
+        assert!(!bpf.matches(&frame(17, 53)), "UDP frame should be shed");
+        assert!(!bpf.matches(&frame(6, 80)), "TCP frame should be shed");
+    }
+
+    #[test]
+    fn ethertype_unions_with_ip_interests() {
+        // ARP OR (tcp/443): an ARP-watching monitor that also subscribes to
+        // HTTPS captures both — not capture-all.
+        let bpf = compile_union([
+            packet().arp().into_predicate(),
+            packet().tcp().dst_port(443).into_predicate(),
+        ])
+        .expect("union compiles");
+        assert!(bpf.matches(&arp_frame()), "ARP in union");
+        assert!(bpf.matches(&frame(6, 443)), "tcp/443 in union");
+        assert!(!bpf.matches(&frame(17, 53)), "udp/53 not in union");
     }
 
     #[test]

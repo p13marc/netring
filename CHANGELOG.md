@@ -25,6 +25,15 @@
     `ArpAnomaly`/`ArpAnomalyKind` + re-exports `ArpMessage`/`ArpOp`/`MacAddr`.
   - Example `monitor_arp_watch`; cap-free `arp_replay` pcap test (drives the
     real `replay → dispatch_arp → parse_frame → detector` path).
+- **ARP as a first-class kernel-pushdown term**
+  ([#20](https://github.com/p13marc/netring/issues/20)). New `Atom::EtherType`
+  predicate atom + `packet().ethertype(..)` / `.arp()` combinators + `.expr()`
+  keywords `arp` / `ethertype 0x0806`. Arming an ARP hook now contributes a
+  precise `EtherType(0x0806)` interest instead of forcing fail-open
+  capture-all: a pure-ARP monitor sheds non-ARP traffic in-kernel, and an
+  ARP+IP monitor captures `arp OR (the IP interests)`. The cBPF compiler
+  already emitted EtherType matches (the VLAN path), so this is AST + wiring,
+  not new codegen.
 
 ### Changed
 

@@ -182,6 +182,18 @@ impl<T> SubscriptionBuilder<T> {
     pub fn vlan(self, id: u16) -> Self {
         self.and_atom(Atom::VlanId(id))
     }
+    /// Match an L2 EtherType (`0x0806` ARP, `0x0800` IPv4, `0x86dd` IPv6, …).
+    /// Kernel-pushable. Note ARP frames carry no 5-tuple, so an ARP handler
+    /// sub on the packet tier won't fire — `ethertype(0x0806)` is most useful
+    /// as a kernel-interest widener (so the prefilter passes ARP up to
+    /// [`MonitorBuilder::on_arp`](crate::monitor::MonitorBuilder::on_arp)).
+    pub fn ethertype(self, ty: u16) -> Self {
+        self.and_atom(Atom::EtherType(ty))
+    }
+    /// Sugar for [`Self::ethertype`]`(0x0806)` — match ARP frames.
+    pub fn arp(self) -> Self {
+        self.ethertype(0x0806)
+    }
 }
 
 // ---- packet-tier terminal ----------------------------------------------

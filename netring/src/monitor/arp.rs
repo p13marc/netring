@@ -201,12 +201,6 @@ impl ArpWatch {
         }
     }
 
-    /// `true` if no work to do per frame (no handlers). The run loop skips
-    /// the parse entirely when this holds, keeping the hot path free.
-    pub(crate) fn is_idle(&self) -> bool {
-        self.msg_handlers.is_empty() && self.anomaly_handlers.is_empty()
-    }
-
     /// Feed one parsed ARP message into the table and derive an anomaly.
     ///
     /// Mutates the table (learns `sender_ip → sender`) and returns the

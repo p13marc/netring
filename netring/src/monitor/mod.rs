@@ -1384,13 +1384,10 @@ impl MonitorBuilder {
     /// Issue #19: arm ARP learning without registering an ARP handler, so the
     /// `IP → MAC` binding table is maintained. Implied by [`Self::on_arp`] /
     /// [`Self::on_arp_anomaly`] / [`Self::arp_allow`], so an explicit call is
-    /// only needed if you want the table built but register no ARP hook.
-    ///
-    /// The table is read via [`Ctx::arp_table`](crate::ctx::Ctx::arp_table),
-    /// which is populated **only while an ARP frame is being dispatched** — so
-    /// the reader must itself run on an ARP hook (e.g. an `on_arp` detector
-    /// that consults the broader table). Cross-protocol reads from flow/TLS
-    /// handlers are a tracked follow-up.
+    /// only needed if you want the table built but register no ARP hook — e.g.
+    /// to enrich flow/TLS handlers with peer MACs via
+    /// [`Ctx::arp_table`](crate::ctx::Ctx::arp_table) (issue #23) without any
+    /// ARP detector of your own.
     #[cfg(feature = "arp")]
     pub fn arp_table(mut self) -> Self {
         self.arp_enabled = true;

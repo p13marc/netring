@@ -285,21 +285,19 @@ impl<'a> Ctx<'a> {
     /// Issue #19: the read-only ARP binding table (`IP → MAC`) — the learned
     /// neighbour map behind the ARP detector.
     ///
-    /// `Some` while dispatching an ARP hook
-    /// ([`on_arp`](crate::monitor::MonitorBuilder::on_arp) /
-    /// [`on_arp_anomaly`](crate::monitor::MonitorBuilder::on_arp_anomaly)),
-    /// where it reflects the table *including* the current frame's binding —
-    /// so a detector can look **beyond** the triggering message: cross-check
-    /// the sender's gateway, count how many IPs claim one MAC (ARP-scan), or
-    /// read a binding's change history. `None` on every other dispatch path
-    /// (flow / session / tick / packet subs) — those don't run inside the ARP
-    /// drain. Enroll learning without a handler via
+    /// `Some` on the **flow / session / lifecycle** dispatch paths and inside
+    /// the ARP drain itself (issue #23): an `on::<FlowEnded<Tcp>>` /
+    /// `on::<Tls>` / `on_arp` handler can resolve a peer IP to the MAC that
+    /// last claimed it (**cross-protocol IP→MAC**), or — from an ARP detector —
+    /// look beyond the triggering message: cross-check the sender's gateway,
+    /// count how many IPs claim one MAC (ARP-scan), or read a binding's change
+    /// history. Reflects every binding learned up to and including the current
+    /// batch. Enroll learning without registering an ARP handler via
     /// [`MonitorBuilder::arp_table`](crate::monitor::MonitorBuilder::arp_table).
     ///
-    /// **Cross-protocol lookup** (a flow/TLS handler resolving a peer IP to
-    /// its MAC) would need the table threaded into the post-borrow
-    /// dispatchers too — a tracked follow-up; today it's exposed on the ARP
-    /// drain only.
+    /// `None` on the **packet-tier** subscriptions (they run pre-flow, before
+    /// the frame is even tracked) and during the **graceful-drain** shutdown
+    /// flush, and always `None` when no ARP hook is armed.
     ///
     /// Look up a binding with
     /// [`peek`](flowscope::correlate::NeighborTable::peek):

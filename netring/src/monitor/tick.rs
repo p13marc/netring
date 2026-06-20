@@ -91,6 +91,7 @@ mod tests {
             flow_states: &mut flow_states,
             label_table: crate::ctx::default_label_table(),
             tracker: None,
+            arp_table: None,
         };
 
         let tick = Tick {

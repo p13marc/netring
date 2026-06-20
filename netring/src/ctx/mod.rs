@@ -134,6 +134,17 @@ pub struct Ctx<'a> {
     /// `None` on synthetic / tick / drain `Ctx`s that have no live
     /// capture behind them.
     pub(crate) tracker: Option<&'a flowscope::FlowTracker<flowscope::extract::FiveTuple, ()>>,
+
+    /// Issue #19: read-only ARP binding table for cross-protocol IP→MAC
+    /// lookups (e.g. a TLS handler annotating a flow with the peer's MAC).
+    /// `Some` only inside the ARP drain (`dispatch_arp`), where the table is
+    /// borrowed `&` *after* the current frame's binding was learned; `None`
+    /// everywhere else. Read through [`Self::arp_table`] (feature `arp`). The
+    /// field is the unconditional `NeighborTable` type so the dozen `Ctx`
+    /// construction sites stay feature-agnostic.
+    #[cfg_attr(not(feature = "arp"), allow(dead_code))]
+    pub(crate) arp_table:
+        Option<&'a flowscope::correlate::NeighborTable<std::net::Ipv4Addr, flowscope::MacAddr>>,
 }
 
 impl<'a> Ctx<'a> {
@@ -160,6 +171,7 @@ impl<'a> Ctx<'a> {
             flow_states,
             label_table: default_label_table(),
             tracker: None,
+            arp_table: None,
         }
     }
 
@@ -191,6 +203,7 @@ impl<'a> Ctx<'a> {
             flow_states,
             label_table: default_label_table(),
             tracker: None,
+            arp_table: None,
         }
     }
 
@@ -267,6 +280,40 @@ impl<'a> Ctx<'a> {
         inner: &flowscope::icmp::IcmpInner,
     ) -> Option<(FlowKey, flowscope::FlowStats)> {
         self.tracker?.stats_for_inner(inner)
+    }
+
+    /// Issue #19: the read-only ARP binding table (`IP → MAC`) — the learned
+    /// neighbour map behind the ARP detector.
+    ///
+    /// `Some` while dispatching an ARP hook
+    /// ([`on_arp`](crate::monitor::MonitorBuilder::on_arp) /
+    /// [`on_arp_anomaly`](crate::monitor::MonitorBuilder::on_arp_anomaly)),
+    /// where it reflects the table *including* the current frame's binding —
+    /// so a detector can look **beyond** the triggering message: cross-check
+    /// the sender's gateway, count how many IPs claim one MAC (ARP-scan), or
+    /// read a binding's change history. `None` on every other dispatch path
+    /// (flow / session / tick / packet subs) — those don't run inside the ARP
+    /// drain. Enroll learning without a handler via
+    /// [`MonitorBuilder::arp_table`](crate::monitor::MonitorBuilder::arp_table).
+    ///
+    /// **Cross-protocol lookup** (a flow/TLS handler resolving a peer IP to
+    /// its MAC) would need the table threaded into the post-borrow
+    /// dispatchers too — a tracked follow-up; today it's exposed on the ARP
+    /// drain only.
+    ///
+    /// Look up a binding with
+    /// [`peek`](flowscope::correlate::NeighborTable::peek):
+    /// ```ignore
+    /// if let Some(t) = ctx.arp_table()
+    ///     && let Some(b) = t.peek(&some_ipv4, ctx.ts)
+    /// {
+    ///     // b.addr is the MAC; b.change_count, b.prior_addr, … available too.
+    /// }
+    /// ```
+    #[cfg(feature = "arp")]
+    #[inline]
+    pub fn arp_table(&self) -> Option<&flowscope::correlate::ArpTable> {
+        self.arp_table
     }
 
     /// Borrow the `K`-keyed sliding-window counter mutably.
@@ -386,6 +433,7 @@ mod tests {
             flow_states,
             label_table: default_label_table(),
             tracker: None,
+            arp_table: None,
         }
     }
 

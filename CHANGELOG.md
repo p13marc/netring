@@ -34,6 +34,14 @@
   ARP+IP monitor captures `arp OR (the IP interests)`. The cBPF compiler
   already emitted EtherType matches (the VLAN path), so this is AST + wiring,
   not new codegen.
+- **`Ctx::arp_table()`** ([#19](https://github.com/p13marc/netring/issues/19))
+  — read-only access to the learned `IP → MAC` binding table from inside an
+  ARP hook, so a detector can look beyond the triggering message (cross-check
+  the sender's gateway, ARP-scan counting, binding change history). Populated
+  on the ARP drain (reflects the current frame's binding); `None` elsewhere.
+  `MonitorBuilder::arp_table()` arms learning without a handler. (Cross-protocol
+  reads from flow/TLS handlers are a tracked follow-up — the table isn't yet
+  threaded into the post-borrow dispatchers.)
 
 ### Changed
 

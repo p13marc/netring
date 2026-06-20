@@ -4,6 +4,18 @@
 > **flowscope touch** (we own it): `PacketView` gains optional metadata fields.
 > Additive where possible; the `PacketView` field additions are the one small
 > flowscope break worth taking, deferred/absorbed per Arch §7.
+>
+> **Update 2026-06-20 — M1 SHIPPED flowscope-side (0.17, issue #13).**
+> `flowscope::RxMetadata { hw_timestamp, rx_hash: Option<RxHash>, vlan:
+> Option<VlanTag>, checksum: ChecksumStatus, source_idx }` + `RssHashType` /
+> `VlanProto` / `ChecksumStatus` enums + `PacketView.rx_metadata` field +
+> `PacketView::with_rx_metadata(..)` builder all landed (this is what made
+> `PacketView` `#[non_exhaustive]`; netring builds via `::new()` so it's
+> transparent — picked up in the 0.17 bump on `afxdp-flowscope017-arp`). **What
+> remains is the netring side:** read the XDP-hints kfuncs in the loader program
+> into the UMEM metadata area and thread it into `PacketView::with_rx_metadata`
+> on the AF_XDP capture path (M2+ below). Update milestones accordingly when
+> picked up.
 
 ## 1. Why
 

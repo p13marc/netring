@@ -374,8 +374,10 @@ mod tests {
 
     #[test]
     fn new_binding_opt_in_after_warmup() {
-        let mut cfg = ArpConfig::default();
-        cfg.report_new_binding = true;
+        let cfg = ArpConfig {
+            report_new_binding: true,
+            ..Default::default()
+        };
         let mut w = ArpWatch::new(cfg);
         // First binding during warm-up → suppressed.
         assert!(w.observe(&reply(ip(5), mac(1), ip(9)), ts(0)).is_none());

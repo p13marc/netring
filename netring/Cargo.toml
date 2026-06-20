@@ -479,6 +479,11 @@ path = "examples/monitor/eve_to_filebeat.rs"
 required-features = ["tokio", "flow", "eve-sink"]
 
 [[example]]
+name = "monitor_arp_watch"
+path = "examples/monitor/arp_watch.rs"
+required-features = ["tokio", "arp", "emit"]
+
+[[example]]
 name = "monitor_metrics_export"
 path = "examples/monitor/metrics_export.rs"
 required-features = ["tokio", "flow", "metrics"]

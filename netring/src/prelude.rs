@@ -71,6 +71,12 @@ pub use crate::correlate::{
     BurstDetector, Ewma, KeyIndexed, RollingRate, TimeBucketedCounter, TimeBucketedSet, TopK,
 };
 
+// ─── ARP (issue #12, feature `arp`) ──────────────────────────────
+#[cfg(feature = "arp")]
+pub use crate::monitor::arp::{ArpAnomaly, ArpAnomalyKind};
+#[cfg(feature = "arp")]
+pub use flowscope::{ArpMessage, ArpOp, MacAddr};
+
 // ─── Bandwidth + reports + well-known labels (0.22) ──────────────
 pub use crate::monitor::{BandwidthReport, BandwidthSnapshot};
 #[cfg(feature = "serde")]

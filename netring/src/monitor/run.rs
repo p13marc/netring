@@ -47,6 +47,14 @@ use crate::protocol::event_typed::{
 };
 use std::time::SystemTime;
 
+/// Issue #23: a borrow of the ARP detector's learned `IP → MAC` table, threaded
+/// into the post-borrow dispatchers so flow/session/lifecycle handlers can read
+/// it via [`Ctx::arp_table`](crate::ctx::Ctx::arp_table). `None` when no ARP
+/// hook is armed (or the `arp` feature is off). The type is the unconditional
+/// `NeighborTable` so the dispatch signatures stay feature-agnostic.
+type ArpTableRef<'a> =
+    Option<&'a flowscope::correlate::NeighborTable<std::net::Ipv4Addr, flowscope::MacAddr>>;
+
 /// How long to keep the run loop alive.
 pub(crate) enum StopCondition {
     /// Stop when wall-clock reaches this deadline.
@@ -508,7 +516,6 @@ pub(crate) async fn run_loop(monitor: Monitor, stop: StopCondition) -> Result<()
                 // drop before the `.await`, preserving `Send`).
                 #[cfg(feature = "arp")]
                 if let Some(watch) = arp_watch.as_mut()
-                    && !watch.is_idle()
                     && packet_err.is_none()
                     && let Err(e) = dispatch_arp(
                         watch,
@@ -536,6 +543,15 @@ pub(crate) async fn run_loop(monitor: Monitor, stop: StopCondition) -> Result<()
         // A spurious wake (no retired block) leaves `last_ts == None`.
         let Some(ts) = last_ts else { continue };
 
+        // Issue #23: borrow the learned ARP table (the drain's `&mut` borrow was
+        // released above) so flow/session/lifecycle handlers can resolve IP→MAC
+        // via `ctx.arp_table()`. Recomputed each iteration; dropped before the
+        // next drain re-borrows `arp_watch` mutably.
+        #[cfg(feature = "arp")]
+        let arp_table_ref: ArpTableRef<'_> = arp_watch.as_ref().map(|w| &w.table);
+        #[cfg(not(feature = "arp"))]
+        let arp_table_ref: ArpTableRef<'_> = None;
+
         // AFTER BORROW: dispatch on owned data (sync + async, Send-safe).
         dispatch_tracked_events(
             &mut dispatcher,
@@ -550,6 +566,7 @@ pub(crate) async fn run_loop(monitor: Monitor, stop: StopCondition) -> Result<()
             handler_error_policy,
             &mut flow_exporters,
             &health,
+            arp_table_ref,
         )
         .await?;
         drain_protocol_slots(
@@ -566,6 +583,7 @@ pub(crate) async fn run_loop(monitor: Monitor, stop: StopCondition) -> Result<()
             &label_table,
             handler_error_policy,
             &health,
+            arp_table_ref,
         )?;
 
         // 0.24 Phase C4: record progress for the health handle — a packet
@@ -711,9 +729,7 @@ pub(crate) async fn replay_loop(
 
         // Issue #12: ARP detection on offline replay, mirroring the live path.
         #[cfg(feature = "arp")]
-        if let Some(watch) = arp_watch.as_mut()
-            && !watch.is_idle()
-        {
+        if let Some(watch) = arp_watch.as_mut() {
             dispatch_arp(
                 watch,
                 view,
@@ -728,6 +744,13 @@ pub(crate) async fn replay_loop(
                 &health,
             )?;
         }
+
+        // Issue #23: expose the ARP table to flow/session/lifecycle handlers on
+        // offline replay too (the ARP block's `&mut` borrow above is released).
+        #[cfg(feature = "arp")]
+        let arp_table_ref: ArpTableRef<'_> = arp_watch.as_ref().map(|w| &w.table);
+        #[cfg(not(feature = "arp"))]
+        let arp_table_ref: ArpTableRef<'_> = None;
 
         events.clear();
         driver.track_into(view, &mut events);
@@ -744,6 +767,7 @@ pub(crate) async fn replay_loop(
             handler_error_policy,
             &mut flow_exporters,
             &health,
+            arp_table_ref,
         )
         .await?;
 
@@ -761,6 +785,7 @@ pub(crate) async fn replay_loop(
             &label_table,
             handler_error_policy,
             &health,
+            arp_table_ref,
         )?;
 
         // 0.24 Phase C4: record replay progress for the health handle.
@@ -861,6 +886,10 @@ async fn drain_phase(
             monitor_name,
             flow_states,
             label_table,
+            // Issue #23: the graceful-drain flush runs after the main loop; the
+            // ARP table isn't threaded into shutdown (no IP→MAC lookups matter
+            // while flushing trailing FlowEnded events).
+            None,
         ) {
             Ok(()) => match dispatch_lifecycle_async(dispatcher, evt.clone()).await {
                 // 0.25-B1: effect pass (drain) — same gating as the live path.
@@ -1161,6 +1190,7 @@ async fn dispatch_tracked_events(
     policy: HandlerErrorPolicy,
     flow_exporters: &mut [Box<dyn crate::export::FlowExporter>],
     health: &crate::monitor::health::HealthState,
+    arp_table: ArpTableRef<'_>,
 ) -> Result<()> {
     for evt in events.drain(..) {
         // 0.24 Phase D: a flow just ended → build a FlowRecord and fan it
@@ -1190,6 +1220,7 @@ async fn dispatch_tracked_events(
             monitor_name,
             flow_states,
             label_table,
+            arp_table,
         ) {
             Ok(()) => match dispatch_lifecycle_async(dispatcher, evt.clone()).await {
                 // 0.25-B1: effect pass — gated so no-effect monitors skip
@@ -1244,12 +1275,15 @@ fn drain_protocol_slots(
     label_table: &flowscope::well_known::LabelTable,
     policy: HandlerErrorPolicy,
     health: &crate::monitor::health::HealthState,
+    arp_table: ArpTableRef<'_>,
 ) -> Result<()> {
     for slot in protocol_slots.iter_mut() {
         let mut ctx = Ctx::new(None, ts, source, state_map, sink, counters, flow_states);
         ctx.monitor_name = monitor_name;
         ctx.label_table = label_table;
         ctx.tracker = Some(driver.tracker());
+        // Issue #23: cross-protocol IP→MAC lookup for L7 (TLS/HTTP/DNS) handlers.
+        ctx.arp_table = arp_table;
         if let Err(e) = slot.drain_and_dispatch(dispatcher, &mut ctx) {
             match policy {
                 HandlerErrorPolicy::Propagate => return Err(e),
@@ -1680,6 +1714,7 @@ fn dispatch_lifecycle(
     monitor_name: Option<&str>,
     flow_states: &mut crate::ctx::FlowStateRegistry,
     label_table: &flowscope::well_known::LabelTable,
+    arp_table: ArpTableRef<'_>,
 ) -> Result<()> {
     // Macro inlines the Ctx construction at each match arm so the
     // borrow checker can shorten each `&mut` borrow to the
@@ -1698,7 +1733,8 @@ fn dispatch_lifecycle(
                 flow_states: &mut *flow_states,
                 label_table,
                 tracker: None,
-                arp_table: None,
+                // Issue #23: cross-protocol IP→MAC lookup for lifecycle handlers.
+                arp_table,
             };
             dispatcher.dispatch::<$ty>(&$payload, &mut ctx)?;
         }};

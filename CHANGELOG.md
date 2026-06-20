@@ -34,14 +34,19 @@
   ARP+IP monitor captures `arp OR (the IP interests)`. The cBPF compiler
   already emitted EtherType matches (the VLAN path), so this is AST + wiring,
   not new codegen.
-- **`Ctx::arp_table()`** ([#19](https://github.com/p13marc/netring/issues/19))
-  — read-only access to the learned `IP → MAC` binding table from inside an
-  ARP hook, so a detector can look beyond the triggering message (cross-check
-  the sender's gateway, ARP-scan counting, binding change history). Populated
-  on the ARP drain (reflects the current frame's binding); `None` elsewhere.
-  `MonitorBuilder::arp_table()` arms learning without a handler. (Cross-protocol
-  reads from flow/TLS handlers are a tracked follow-up — the table isn't yet
-  threaded into the post-borrow dispatchers.)
+- **`Ctx::arp_table()`** ([#19](https://github.com/p13marc/netring/issues/19),
+  [#23](https://github.com/p13marc/netring/issues/23)) — read-only access to
+  the learned `IP → MAC` binding table. An **ARP** detector can look beyond the
+  triggering message (cross-check the sender's gateway, ARP-scan counting,
+  binding change history); and (#23) **flow / session / lifecycle handlers**
+  can resolve a peer IP to the MAC that last claimed it — e.g. an
+  `on::<FlowStarted<Tcp>>` / `on::<Tls>` handler annotating a flow with the
+  peer's MAC. Threaded into the post-borrow dispatchers (`Δ0` alloc preserved);
+  `None` only on the packet tier (pre-flow) and the shutdown drain.
+  `MonitorBuilder::arp_table()` arms learning without an ARP handler (so a
+  pure flow/TLS monitor can enrich with MACs). The run loop now parses ARP
+  whenever any ARP hook *or* `arp_table()` is armed (was gated on having an ARP
+  handler, which left a table-only monitor empty).
 
 ### Changed
 

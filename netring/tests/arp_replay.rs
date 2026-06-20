@@ -48,7 +48,33 @@ fn spoof_arp_frame() -> Vec<u8> {
     f
 }
 
-fn write_arp_pcap() -> NamedTempFile {
+/// A UDP/IPv4 frame sourced from `SENDER_IP` (so a flow handler can resolve its
+/// MAC against the ARP table the ARP frame taught).
+fn udp_from_sender(dst_port: u16) -> Vec<u8> {
+    let payload = [0u8; 4];
+    let mut f = Vec::new();
+    f.extend_from_slice(&[0x02, 0, 0, 0, 0, 1]); // dst mac
+    f.extend_from_slice(&SENDER_MAC); // src mac
+    f.extend_from_slice(&[0x08, 0x00]); // ipv4
+    f.push(0x45);
+    f.push(0);
+    let ip_total = (20 + 8 + payload.len()) as u16;
+    f.extend_from_slice(&ip_total.to_be_bytes());
+    f.extend_from_slice(&[0, 0, 0, 0]);
+    f.push(64);
+    f.push(17); // udp
+    f.extend_from_slice(&[0, 0]);
+    f.extend_from_slice(&SENDER_IP); // src ip = the ARP sender
+    f.extend_from_slice(&[10, 0, 0, 9]); // dst ip
+    f.extend_from_slice(&54321u16.to_be_bytes());
+    f.extend_from_slice(&dst_port.to_be_bytes());
+    f.extend_from_slice(&((8 + payload.len()) as u16).to_be_bytes());
+    f.extend_from_slice(&[0, 0]);
+    f.extend_from_slice(&payload);
+    f
+}
+
+fn write_pcap(frames: &[Vec<u8>]) -> NamedTempFile {
     use pcap_file::pcap::{PcapHeader, PcapPacket, PcapWriter};
     let file = NamedTempFile::new().expect("tempfile");
     let header = PcapHeader {
@@ -62,11 +88,20 @@ fn write_arp_pcap() -> NamedTempFile {
         endianness: pcap_file::Endianness::native(),
     };
     let mut w = PcapWriter::with_header(file.reopen().unwrap(), header).expect("writer");
-    let frame = spoof_arp_frame();
-    let pkt = PcapPacket::new_owned(Duration::new(100, 0), frame.len() as u32, frame);
-    w.write_packet(&pkt).expect("write");
+    for (i, frame) in frames.iter().enumerate() {
+        let pkt = PcapPacket::new_owned(
+            Duration::new(100 + i as u64, 0),
+            frame.len() as u32,
+            frame.clone(),
+        );
+        w.write_packet(&pkt).expect("write");
+    }
     drop(w);
     file
+}
+
+fn write_arp_pcap() -> NamedTempFile {
+    write_pcap(&[spoof_arp_frame()])
 }
 
 #[tokio::test(flavor = "current_thread")]
@@ -138,5 +173,49 @@ async fn ctx_arp_table_exposes_the_learned_binding() {
         hits.load(Ordering::Relaxed),
         1,
         "on_arp ran and read the table"
+    );
+}
+
+// Issue #23: cross-protocol — an ARP frame teaches the binding, then a UDP flow
+// from that IP fires `FlowStarted<Udp>`, whose handler resolves the peer's MAC
+// via `ctx.arp_table()`. Proves the table reaches the flow/lifecycle paths, not
+// just ARP handlers.
+#[tokio::test(flavor = "current_thread")]
+async fn flow_handler_resolves_peer_mac_via_arp_table() {
+    use std::net::Ipv4Addr;
+
+    use netring::ctx::Ctx;
+    use netring::prelude::MacAddr;
+    use netring::protocol::builtin::Udp;
+    use netring::protocol::event_typed::FlowStarted;
+
+    // ARP first (teach 192.0.2.50 → SENDER_MAC), then a UDP flow from that IP.
+    let pcap = write_pcap(&[spoof_arp_frame(), udp_from_sender(53)]);
+    let resolved = Arc::new(AtomicU32::new(0));
+    let r = Arc::clone(&resolved);
+
+    let monitor = Monitor::builder()
+        .pcap_source(pcap.path())
+        .arp_table() // arm ARP learning WITHOUT an ARP handler
+        .protocol::<Udp>()
+        .on_ctx::<FlowStarted<Udp>>(move |_e: &FlowStarted<Udp>, ctx: &mut Ctx<'_>| {
+            let ts = ctx.ts;
+            // A flow handler resolves the peer IP → MAC the ARP frame taught.
+            if let Some(t) = ctx.arp_table()
+                && let Some(b) = t.peek(&Ipv4Addr::from(SENDER_IP), ts)
+                && b.addr == MacAddr(SENDER_MAC)
+            {
+                r.fetch_add(1, Ordering::Relaxed);
+            }
+            Ok(())
+        })
+        .build()
+        .expect("build with pcap_source");
+
+    monitor.replay().await.expect("replay completes");
+    assert_eq!(
+        resolved.load(Ordering::Relaxed),
+        1,
+        "the UDP flow handler resolved the peer MAC from the ARP table"
     );
 }

@@ -110,16 +110,13 @@ natural extension, not new machinery.
   `dispatch_arp` path deterministically.)
 
 ## 7. Deferred → follow-up issues
-- **`Ctx::arp_table()`** (#19) — ✅ **partially done (PR for #19).** Read-only
-  accessor lands, exposed on the **ARP drain** (an `on_arp`/`on_arp_anomaly`
-  detector can read the broader binding table — gateway cross-check, ARP-scan
-  counting, change history). The field is the unconditional `NeighborTable`
-  type so the ~13 `Ctx` sites stay feature-agnostic (`arp_table: None`), with
-  `dispatch_arp` setting `Some(&watch.table)` after `observe`. **Still
-  deferred:** the *cross-protocol* case (a flow/TLS handler reading the table)
-  needs it threaded into the post-borrow dispatchers (`dispatch_tracked_events`
-  / `drain_protocol_slots` + their Ctx macros) — hot-path surgery that wants
-  its own dhat-Δ0 review.
+- **`Ctx::arp_table()`** (#19 + #23) — ✅ **DONE.** Read-only accessor
+  (#19) exposed on the ARP drain, then (#23) threaded into the post-borrow
+  dispatchers (`dispatch_tracked_events` → `dispatch_lifecycle`,
+  `drain_protocol_slots`) so **flow / session / lifecycle** handlers resolve a
+  peer IP→MAC too — dhat Δ0 preserved. `arp_table()` arms learning without an
+  ARP handler (run loop now parses ARP whenever armed, not just when a handler
+  exists). `None` only on the packet tier (pre-flow) + shutdown drain.
 - **ARP as a first-class subscription/predicate term** — `Atom::EtherType(0x0806)`
   in the predicate AST + `packet().ethertype(..)` combinator + `.expr()` keyword
   `arp`, so a monitor with BOTH ARP hooks and narrow IP subscriptions can push

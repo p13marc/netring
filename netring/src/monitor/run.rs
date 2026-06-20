@@ -1576,6 +1576,7 @@ fn dispatch_packet_subs(
         flow_states,
         label_table,
         tracker: None,
+        arp_table: None,
     };
     for sub in subs {
         if sub.predicate.eval(&fields)
@@ -1636,6 +1637,10 @@ fn dispatch_arp(
         flow_states,
         label_table,
         tracker: None,
+        // Issue #19: the binding was already learned by `observe` above, so
+        // this shared borrow exposes the table *including* the current frame
+        // to `Ctx::arp_table()` in the handlers below.
+        arp_table: Some(&watch.table),
     };
 
     // Helper: apply the error policy uniformly to one handler result.
@@ -1693,6 +1698,7 @@ fn dispatch_lifecycle(
                 flow_states: &mut *flow_states,
                 label_table,
                 tracker: None,
+                arp_table: None,
             };
             dispatcher.dispatch::<$ty>(&$payload, &mut ctx)?;
         }};
@@ -1927,6 +1933,7 @@ async fn dispatch_lifecycle_effects(
                 flow_states: &mut *flow_states,
                 label_table,
                 tracker: None,
+                arp_table: None,
             };
             dispatcher
                 .dispatch_effects::<$ty>(&$payload, &mut ctx)

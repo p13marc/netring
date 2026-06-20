@@ -110,11 +110,16 @@ natural extension, not new machinery.
   `dispatch_arp` path deterministically.)
 
 ## 7. Deferred → follow-up issues
-- **`Ctx::arp_table()`** (cross-protocol IP→MAC lookup, e.g. a TLS handler
-  resolving a peer IP to its MAC). Needs an `#[cfg(feature="arp")]
-  arp_table: Option<&ArpTable>` field threaded through ~13 `Ctx` construction
-  sites; deferred to keep PR #18 focused. The table already exists inside
-  `ArpWatch` — only the read accessor is missing.
+- **`Ctx::arp_table()`** (#19) — ✅ **partially done (PR for #19).** Read-only
+  accessor lands, exposed on the **ARP drain** (an `on_arp`/`on_arp_anomaly`
+  detector can read the broader binding table — gateway cross-check, ARP-scan
+  counting, change history). The field is the unconditional `NeighborTable`
+  type so the ~13 `Ctx` sites stay feature-agnostic (`arp_table: None`), with
+  `dispatch_arp` setting `Some(&watch.table)` after `observe`. **Still
+  deferred:** the *cross-protocol* case (a flow/TLS handler reading the table)
+  needs it threaded into the post-borrow dispatchers (`dispatch_tracked_events`
+  / `drain_protocol_slots` + their Ctx macros) — hot-path surgery that wants
+  its own dhat-Δ0 review.
 - **ARP as a first-class subscription/predicate term** — `Atom::EtherType(0x0806)`
   in the predicate AST + `packet().ethertype(..)` combinator + `.expr()` keyword
   `arp`, so a monitor with BOTH ARP hooks and narrow IP subscriptions can push

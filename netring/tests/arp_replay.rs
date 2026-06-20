@@ -102,3 +102,41 @@ async fn replay_detects_arp_spoof() {
     assert_eq!(got_msgs, 1, "expected exactly one parsed ARP message");
     assert_eq!(got_spoofs, 1, "expected exactly one SpoofSuspected anomaly");
 }
+
+// Issue #19: `Ctx::arp_table()` is populated in the ARP drain and reflects the
+// binding the current frame just taught — so an `on_arp` detector can read the
+// broader table (here: peek the sender's learned MAC).
+#[tokio::test(flavor = "current_thread")]
+async fn ctx_arp_table_exposes_the_learned_binding() {
+    use std::net::Ipv4Addr;
+
+    use netring::prelude::MacAddr;
+
+    let pcap = write_arp_pcap();
+    let hits = Arc::new(AtomicU32::new(0));
+    let h = Arc::clone(&hits);
+
+    let monitor = Monitor::builder()
+        .pcap_source(pcap.path())
+        .on_arp(move |_m, ctx| {
+            let ts = ctx.ts;
+            let table = ctx
+                .arp_table()
+                .expect("arp_table() is Some inside the ARP drain");
+            let binding = table
+                .peek(&Ipv4Addr::from(SENDER_IP), ts)
+                .expect("the sender's binding was just learned");
+            assert_eq!(binding.addr, MacAddr(SENDER_MAC), "learned MAC matches");
+            h.fetch_add(1, Ordering::Relaxed);
+            Ok(())
+        })
+        .build()
+        .expect("build with pcap_source");
+
+    monitor.replay().await.expect("replay completes");
+    assert_eq!(
+        hits.load(Ordering::Relaxed),
+        1,
+        "on_arp ran and read the table"
+    );
+}

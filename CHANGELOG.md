@@ -50,10 +50,17 @@
 
 ### Changed
 
-- **flowscope 0.16 → 0.17.** Picks up `MacAddr`, the `arp` module, the
+- **flowscope 0.16 → 0.18.** 0.17 brought `MacAddr`, the `arp` module, the
   `NeighborTable`, `RxMetadata` on a now-`#[non_exhaustive]` `PacketView`, and
-  `detect::fingerprint`. netring constructs `PacketView` via `::new()`
-  everywhere, so the `#[non_exhaustive]` change is transparent.
+  `detect::fingerprint`. **0.18** is a huge additive release — ~25 new protocol
+  parsers (QUIC, SMB2/3, Kerberos, LDAP, SSH, DHCP, LLDP/CDP, NTP, SSDP, mDNS,
+  NetBIOS-NS, FTP, SMTP, WireGuard, Modbus, DNP3, STUN, RDP, SNMP, RADIUS, TFTP),
+  the `asset` inventory layer, `ml_features` (CICFlowMeter parity) + `nprint`,
+  binary IPFIX export (`ipfix::wire`), p0f/HASSH/JA4H/JA4X fingerprints, and TCP
+  overlap-policy + memcap reassembler hardening. netring consumes only the stable
+  core (arp/tls/http/dns/icmp/driver), so the bump is additive — the one fix is a
+  fallback arm for the now-`#[non_exhaustive]` `L4Proto` in the cBPF lowering
+  (fail-open). Surfacing the new 0.18 capabilities is tracked in follow-up issues.
 
 ## 0.26.0 — 2026-06-16 — AF_XDP multi-queue capture & promiscuous mode
 

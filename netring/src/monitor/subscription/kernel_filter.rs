@@ -185,6 +185,10 @@ fn apply_atom(b: BpfFilterBuilder, atom: &Atom) -> Option<BpfFilterBuilder> {
             L4Proto::IcmpV6 => b.ipv6().ip_proto(58),
             L4Proto::Sctp => b.ip_proto(132),
             L4Proto::Other(n) => b.ip_proto(*n),
+            // flowscope 0.18 made `L4Proto` #[non_exhaustive]. A future named
+            // variant we can't map to an IP proto number → bail to no kernel
+            // filter for this atom (fail-open capture-all, never drops a frame).
+            _ => return None,
         },
         Atom::SrcPort(port) => b.src_port(*port),
         Atom::DstPort(port) => b.dst_port(*port),

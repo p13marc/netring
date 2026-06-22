@@ -32,6 +32,25 @@
 
 ### Added
 
+- **JA4X + JA4H fingerprint surfacing** (issue
+  [#31](https://github.com/p13marc/netring/issues/31)) — completes the FoxIO
+  JA4+ family alongside the existing JA4 / JA4S:
+  - `TlsFingerprint` gains a `ja4x` field (the leaf-certificate fingerprint:
+    issuer / subject / extension OID hashes), populated from
+    `flowscope::tls::TlsHandshake::ja4x`. Existing `on_fingerprint` handlers
+    get it for free. `None` for TLS 1.3 (encrypted cert).
+  - New `HttpFingerprint` bundle (JA4H + method / host / user-agent + flow key)
+    and a `MonitorBuilder::on_http_fingerprint(|fp, ctx| …)` hook — the HTTP
+    analogue of `on_fingerprint`: it auto-registers the `Http` protocol and
+    computes JA4H over each request via `flowscope::http::ja4h_fingerprint`.
+
+  Both JA4X and JA4H are **FoxIO License 1.1** (non-commercial; patent
+  pending), so they live behind the opt-in `ja4plus` feature (with JA4S) —
+  the default JA3 + JA4 client surface stays BSD/royalty-free. Prelude exports
+  `HttpFingerprint`. The `monitor_ja4_fingerprint` example now matches JA4 /
+  JA4S / JA4X / JA4H against a blocklist. (p0f passive-TCP and HASSH/SSH
+  fingerprints are a follow-up — p0f needs packet-tier plumbing and HASSH a
+  new SSH parser overlapping #30.)
 - **Asset-discovery protocol visibility** (issue
   [#28](https://github.com/p13marc/netring/issues/28), part 1) — three new
   opt-in L7 datagram `Protocol` markers surfacing flowscope 0.18's passive

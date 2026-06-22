@@ -581,9 +581,10 @@ required-features = ["monitor", "eve-sink"]
 [[example]]
 name = "monitor_ja4_fingerprint"
 path = "examples/monitor/ja4_fingerprint.rs"
-# Demonstrates JA4S (server fingerprint) → requires the opt-in `ja4plus`
-# feature (FoxIO License 1.1). JA3 + JA4 client alone need only `tls`.
-required-features = ["tokio", "flow", "ja4plus"]
+# Demonstrates JA4S/JA4X (server + cert) and JA4H (HTTP) → requires the opt-in
+# `ja4plus` feature (FoxIO License 1.1) + `http`. JA3 + JA4 client alone need
+# only `tls`.
+required-features = ["tokio", "flow", "http", "ja4plus"]
 
 [[example]]
 name = "monitor_beacon_detector"

@@ -152,6 +152,7 @@ headline API with kernel filter pushdown.
 | `monitor_lateral_movement` | **Active Directory / lateral movement** (feature `ad-protocols`): `.protocol::<Smb\|Kerberos\|Ldap\|Rdp>()` + `.on::<P>()` emitting anomalies for admin-share/DCSync (SMB), Kerberoasting (Kerberos), GetUserSPNs (LDAP), and RDP target usernames |
 | `monitor_asset_discovery` | **Passive asset discovery** (feature `asset-protocols`): `.protocol::<Dhcp\|Ssdp\|Nbns>()` + `.on::<P>()` surfacing DHCP hostname/fingerprint, SSDP/UPnP firmware banners, and NetBIOS names — device facts leaked onto the LAN with no active probing |
 | `monitor_ssh_hassh` | **SSH visibility + HASSH** (feature `ssh`): `.protocol::<Ssh>()` + `.on::<Ssh>()` surfacing the SSH version banner and the HASSH / HASSHServer handshake fingerprints (the SSH analogue of JA3/JA4) |
+| `monitor_l2_discovery` | **L2 neighbor discovery** (features `lldp,cdp`): `.on_lldp()` + `.on_cdp()` surfacing LLDP (IEEE 802.1AB) and CDP (Cisco) device announcements — chassis/device id, port, system name, platform — the infrastructure half of an asset inventory |
 
 All take an `<iface>` argument (default `lo`) and an optional
 `<seconds>` deadline. Pair with `synthetic_traffic` for

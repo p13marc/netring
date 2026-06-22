@@ -32,6 +32,28 @@
 
 ### Added
 
+- **LLDP + CDP L2 link-layer discovery** (issue
+  [#28](https://github.com/p13marc/netring/issues/28), part 2a) — two new opt-in
+  per-frame hooks mirroring `on_arp` / `on_ndp`, for the network-infrastructure
+  half of an asset inventory:
+  - **`MonitorBuilder::on_lldp`** (feature `lldp`) — every parsed IEEE 802.1AB
+    `flowscope::LldpMessage` (chassis id, port id, system name, capabilities,
+    management addresses). LLDP is EtherType `0x88cc`, so arming it contributes a
+    precise `EtherType(0x88cc)` kernel-prefilter term (same pushdown as ARP).
+  - **`MonitorBuilder::on_cdp`** (feature `cdp`) — every parsed Cisco
+    `flowscope::CdpMessage` (device id, platform, software version,
+    capabilities, addresses). CDP rides 802.3 LLC/SNAP, which has no EtherType
+    term the cBPF model can match — **arming a CDP hook forces capture-all**
+    (fail-open).
+
+  Both are L2 (no 5-tuple), parsed per-frame in the zero-copy drain and the
+  pcap replay loop. Folded into the `monitor` / `monitor-quickstart` umbrellas;
+  prelude exports `LldpMessage`/`ChassisId`/`PortId` and
+  `CdpMessage`/`CdpAddress`/`CdpCapabilities`. Example `monitor_l2_discovery`;
+  cap-free `lldp_replay` / `cdp_replay` pcap tests. **Live-capture note:**
+  LLDP/CDP are link-local multicast — the interface must actually receive them
+  (promiscuous / multicast membership). The `asset::Inventory` aggregator that
+  ties these to a MAC-keyed device record is the next slice of #28.
 - **SSH protocol visibility + HASSH** (issue
   [#30](https://github.com/p13marc/netring/issues/30), first Tier-2 protocol) —
   new opt-in `Ssh` `Protocol` marker (feature `ssh`, TCP/22) surfacing

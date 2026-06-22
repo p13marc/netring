@@ -214,6 +214,10 @@ pub(crate) async fn run_loop(monitor: Monitor, stop: StopCondition) -> Result<()
         mut arp_watch,
         #[cfg(feature = "ndp")]
         mut ndp_watch,
+        #[cfg(feature = "lldp")]
+        mut lldp_watch,
+        #[cfg(feature = "cdp")]
+        mut cdp_watch,
     } = monitor;
     // Borrow the monitor name as `&str` for the run loop's
     // dispatch sites. The owned `Box<str>` lives in this stack
@@ -556,6 +560,47 @@ pub(crate) async fn run_loop(monitor: Monitor, stop: StopCondition) -> Result<()
                 {
                     packet_err = Some(e);
                 }
+                // Issue #28: LLDP — L2 neighbor discovery, parsed per-frame
+                // like ARP, same in-borrow synchronous shape.
+                #[cfg(feature = "lldp")]
+                if let Some(watch) = lldp_watch.as_mut()
+                    && packet_err.is_none()
+                    && let Err(e) = dispatch_lldp(
+                        watch,
+                        view,
+                        sink.as_mut(),
+                        &mut state_map,
+                        &mut counters,
+                        &mut flow_states,
+                        &label_table,
+                        source,
+                        monitor_name_borrow,
+                        handler_error_policy,
+                        &health,
+                    )
+                {
+                    packet_err = Some(e);
+                }
+                // Issue #28: CDP — Cisco L2 discovery (802.3 LLC/SNAP).
+                #[cfg(feature = "cdp")]
+                if let Some(watch) = cdp_watch.as_mut()
+                    && packet_err.is_none()
+                    && let Err(e) = dispatch_cdp(
+                        watch,
+                        view,
+                        sink.as_mut(),
+                        &mut state_map,
+                        &mut counters,
+                        &mut flow_states,
+                        &label_table,
+                        source,
+                        monitor_name_borrow,
+                        handler_error_policy,
+                        &health,
+                    )
+                {
+                    packet_err = Some(e);
+                }
                 driver.track_into(view, &mut events)
             })
             .await?;
@@ -708,6 +753,10 @@ pub(crate) async fn replay_loop(
         mut arp_watch, // ARP detection works on offline replay too
         #[cfg(feature = "ndp")]
         mut ndp_watch,
+        #[cfg(feature = "lldp")]
+        mut lldp_watch,
+        #[cfg(feature = "cdp")]
+        mut cdp_watch,
     } = monitor;
     let monitor_name_borrow: Option<&str> = monitor_name.as_deref();
 
@@ -773,6 +822,39 @@ pub(crate) async fn replay_loop(
         #[cfg(feature = "ndp")]
         if let Some(watch) = ndp_watch.as_mut() {
             dispatch_ndp(
+                watch,
+                view,
+                sink.as_mut(),
+                &mut state_map,
+                &mut counters,
+                &mut flow_states,
+                &label_table,
+                SourceIdx(0),
+                monitor_name_borrow,
+                handler_error_policy,
+                &health,
+            )?;
+        }
+        // Issue #28: LLDP/CDP L2 discovery on offline replay.
+        #[cfg(feature = "lldp")]
+        if let Some(watch) = lldp_watch.as_mut() {
+            dispatch_lldp(
+                watch,
+                view,
+                sink.as_mut(),
+                &mut state_map,
+                &mut counters,
+                &mut flow_states,
+                &label_table,
+                SourceIdx(0),
+                monitor_name_borrow,
+                handler_error_policy,
+                &health,
+            )?;
+        }
+        #[cfg(feature = "cdp")]
+        if let Some(watch) = cdp_watch.as_mut() {
+            dispatch_cdp(
                 watch,
                 view,
                 sink.as_mut(),
@@ -1812,6 +1894,122 @@ fn dispatch_ndp(
         for handler in &watch.anomaly_handlers {
             guard!(handler(&anomaly, &mut ctx), "ndp-anomaly");
         }
+    }
+    Ok(())
+}
+
+/// Issue #28: parse one L2 frame as LLDP and feed `on_lldp` — the IEEE
+/// 802.1AB sibling of [`dispatch_arp`]. `flowscope::lldp::parse_frame` takes
+/// the FULL Ethernet frame (it validates the LLDP multicast dst MAC +
+/// EtherType `0x88cc`), so non-LLDP frames cost one cheap header check + an
+/// early return. Synchronous — borrows drop before any `.await` (preserves
+/// `Send`). No anomaly pipeline in v1.
+#[cfg(feature = "lldp")]
+#[allow(clippy::too_many_arguments)]
+fn dispatch_lldp(
+    watch: &mut crate::monitor::lldp::LldpWatch,
+    view: PacketView<'_>,
+    sink: &mut dyn AnomalySink,
+    state_map: &mut StateMap,
+    counters: &mut CounterRegistry,
+    flow_states: &mut crate::ctx::FlowStateRegistry,
+    label_table: &flowscope::well_known::LabelTable,
+    source: SourceIdx,
+    monitor_name: Option<&str>,
+    policy: HandlerErrorPolicy,
+    health: &crate::monitor::health::HealthState,
+) -> Result<()> {
+    let Some(msg) = flowscope::lldp::parse_frame(view.frame) else {
+        return Ok(());
+    };
+
+    let mut ctx = Ctx {
+        flow: None, // LLDP is L2 — no 5-tuple flow key.
+        ts: view.timestamp,
+        source,
+        monitor_name,
+        state_map,
+        sink,
+        counters,
+        flow_states,
+        label_table,
+        tracker: None,
+        arp_table: None,
+    };
+
+    macro_rules! guard {
+        ($res:expr, $what:literal) => {
+            if let Err(e) = $res {
+                match policy {
+                    HandlerErrorPolicy::Propagate => return Err(e),
+                    HandlerErrorPolicy::Isolate => {
+                        health.record_handler_error();
+                        tracing::warn!(error = %e, concat!($what, " handler error isolated"));
+                    }
+                }
+            }
+        };
+    }
+
+    for handler in &watch.msg_handlers {
+        guard!(handler(&msg, &mut ctx), "lldp");
+    }
+    Ok(())
+}
+
+/// Issue #28: parse one L2 frame as CDP and feed `on_cdp`. Like LLDP,
+/// `flowscope::cdp::parse_frame` validates the full Ethernet + LLC/SNAP header
+/// (dst MAC `01:00:0c:cc:cc:cc`, OUI `00:00:0c`, PID `0x2000`), so non-CDP
+/// frames return early. No anomaly pipeline in v1.
+#[cfg(feature = "cdp")]
+#[allow(clippy::too_many_arguments)]
+fn dispatch_cdp(
+    watch: &mut crate::monitor::cdp::CdpWatch,
+    view: PacketView<'_>,
+    sink: &mut dyn AnomalySink,
+    state_map: &mut StateMap,
+    counters: &mut CounterRegistry,
+    flow_states: &mut crate::ctx::FlowStateRegistry,
+    label_table: &flowscope::well_known::LabelTable,
+    source: SourceIdx,
+    monitor_name: Option<&str>,
+    policy: HandlerErrorPolicy,
+    health: &crate::monitor::health::HealthState,
+) -> Result<()> {
+    let Some(msg) = flowscope::cdp::parse_frame(view.frame) else {
+        return Ok(());
+    };
+
+    let mut ctx = Ctx {
+        flow: None, // CDP is L2 — no 5-tuple flow key.
+        ts: view.timestamp,
+        source,
+        monitor_name,
+        state_map,
+        sink,
+        counters,
+        flow_states,
+        label_table,
+        tracker: None,
+        arp_table: None,
+    };
+
+    macro_rules! guard {
+        ($res:expr, $what:literal) => {
+            if let Err(e) = $res {
+                match policy {
+                    HandlerErrorPolicy::Propagate => return Err(e),
+                    HandlerErrorPolicy::Isolate => {
+                        health.record_handler_error();
+                        tracing::warn!(error = %e, concat!($what, " handler error isolated"));
+                    }
+                }
+            }
+        };
+    }
+
+    for handler in &watch.msg_handlers {
+        guard!(handler(&msg, &mut ctx), "cdp");
     }
     Ok(())
 }

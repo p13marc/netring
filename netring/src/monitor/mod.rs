@@ -56,12 +56,16 @@ pub mod arp;
 // L3 IPv6 Neighbor Discovery — the ARP sibling (feature `ndp`).
 pub mod async_handler;
 pub(crate) mod backend;
+#[cfg(feature = "cdp")]
+pub mod cdp;
 pub mod dispatcher;
 pub mod effect;
 #[cfg(feature = "tls")]
 pub mod fingerprint;
 pub mod handler;
 pub mod health;
+#[cfg(feature = "lldp")]
+pub mod lldp;
 #[cfg(feature = "ndp")]
 pub mod ndp;
 pub mod registry;
@@ -273,6 +277,14 @@ pub struct Monitor {
     /// NDP hook was registered.
     #[cfg(feature = "ndp")]
     pub(crate) ndp_watch: Option<ndp::NdpWatch>,
+    /// Issue #28: live LLDP detector state (L2 neighbor discovery). `Some` when
+    /// any LLDP hook was registered.
+    #[cfg(feature = "lldp")]
+    pub(crate) lldp_watch: Option<lldp::LldpWatch>,
+    /// Issue #28: live CDP detector state (the Cisco L2 sibling). `Some` when
+    /// any CDP hook was registered.
+    #[cfg(feature = "cdp")]
+    pub(crate) cdp_watch: Option<cdp::CdpWatch>,
 }
 
 /// How the run loop reacts when a handler (detector / sink / async handler)
@@ -674,6 +686,18 @@ pub struct MonitorBuilder {
     /// Issue #24: set once any NDP hook is registered.
     #[cfg(feature = "ndp")]
     ndp_enabled: bool,
+    /// Issue #28: `on_lldp` raw-message handlers.
+    #[cfg(feature = "lldp")]
+    lldp_msg_handlers: Vec<lldp::LldpMsgHandler>,
+    /// Issue #28: set once any LLDP hook is registered.
+    #[cfg(feature = "lldp")]
+    lldp_enabled: bool,
+    /// Issue #28: `on_cdp` raw-message handlers.
+    #[cfg(feature = "cdp")]
+    cdp_msg_handlers: Vec<cdp::CdpMsgHandler>,
+    /// Issue #28: set once any CDP hook is registered.
+    #[cfg(feature = "cdp")]
+    cdp_enabled: bool,
 }
 
 impl MonitorBuilder {
@@ -1581,6 +1605,46 @@ impl MonitorBuilder {
         self
     }
 
+    /// Issue #28: register a handler fired once per parsed **LLDP** frame
+    /// ([`flowscope::LldpMessage`] + `&mut Ctx`) — the IEEE 802.1AB neighbor
+    /// announcement (chassis id, port id, system name, capabilities). LLDP is
+    /// L2 (EtherType `0x88cc`, no 5-tuple), so it's parsed per-frame in the
+    /// drain like [`on_arp`](Self::on_arp), and arming it contributes a precise
+    /// `EtherType(0x88cc)` term to the kernel prefilter.
+    ///
+    /// **Live-capture note:** LLDP/CDP are link-local multicast — the interface
+    /// must actually receive them (promiscuous mode, or membership of the LLDP
+    /// multicast groups); many host stacks filter them by default.
+    #[cfg(feature = "lldp")]
+    pub fn on_lldp<F>(mut self, handler: F) -> Self
+    where
+        F: Fn(&flowscope::LldpMessage, &mut Ctx<'_>) -> Result<()> + Send + 'static,
+    {
+        self.lldp_enabled = true;
+        self.lldp_msg_handlers.push(Box::new(handler));
+        self
+    }
+
+    /// Issue #28: register a handler fired once per parsed **CDP** frame
+    /// ([`flowscope::CdpMessage`] + `&mut Ctx`) — the Cisco neighbor
+    /// announcement (device id, platform, software version, capabilities,
+    /// addresses).
+    ///
+    /// CDP rides 802.3 LLC/SNAP (dst MAC `01:00:0c:cc:cc:cc`), whose L2 field
+    /// is a frame *length*, not an EtherType — it can't be expressed in the
+    /// cBPF atom model, so **arming a CDP hook forces the kernel prefilter to
+    /// capture-all** (fail-open). Pair CDP with other interests sparingly. The
+    /// same live-capture multicast caveat as [`on_lldp`](Self::on_lldp) applies.
+    #[cfg(feature = "cdp")]
+    pub fn on_cdp<F>(mut self, handler: F) -> Self
+    where
+        F: Fn(&flowscope::CdpMessage, &mut Ctx<'_>) -> Result<()> + Send + 'static,
+    {
+        self.cdp_enabled = true;
+        self.cdp_msg_handlers.push(Box::new(handler));
+        self
+    }
+
     /// 0.21 F: register `P` for broadcast delivery.
     ///
     /// Calls [`Protocol::register_broadcast`] on the underlying
@@ -1975,6 +2039,37 @@ impl MonitorBuilder {
         None
     }
 
+    /// Issue #28: an armed LLDP hook contributes a precise `EtherType(0x88cc)`
+    /// term (same pushdown shape as ARP's `0x0806`), so a pure-LLDP monitor
+    /// sheds everything else in-kernel. `None` when no LLDP hook is armed.
+    #[cfg(feature = "lldp")]
+    #[inline]
+    fn lldp_interest(&self) -> Option<subscription::Predicate> {
+        self.lldp_enabled.then_some(subscription::Predicate::Atom(
+            subscription::Atom::EtherType(0x88cc),
+        ))
+    }
+    #[cfg(not(feature = "lldp"))]
+    #[inline]
+    fn lldp_interest(&self) -> Option<subscription::Predicate> {
+        None
+    }
+
+    /// Issue #28: CDP rides 802.3 LLC/SNAP, which has no EtherType term the
+    /// cBPF atom model can match — so an armed CDP hook returns
+    /// `Predicate::Always`, forcing the union to capture-all (fail-open). `None`
+    /// when no CDP hook is armed (so non-CDP monitors are unaffected).
+    #[cfg(feature = "cdp")]
+    #[inline]
+    fn cdp_interest(&self) -> Option<subscription::Predicate> {
+        self.cdp_enabled.then_some(subscription::Predicate::Always)
+    }
+    #[cfg(not(feature = "cdp"))]
+    #[inline]
+    fn cdp_interest(&self) -> Option<subscription::Predicate> {
+        None
+    }
+
     /// The classic-BPF **kernel prefilter** this monitor compiles to (0.25
     /// S2): the conservative OR-union of **every** consumer's traffic interest
     /// — packet subs, registered handlers (via `Event::traffic_class`),
@@ -2015,6 +2110,10 @@ impl MonitorBuilder {
             // Issue #24: NDP rides ICMPv6 (proto 58) — add it to the union so a
             // pure-NDP monitor sheds non-ICMPv6 at the kernel.
             .chain(self.ndp_interest())
+            // Issue #28: LLDP rides EtherType 0x88cc (precise); CDP rides 802.3
+            // LLC/SNAP (no EtherType term → fail-open capture-all).
+            .chain(self.lldp_interest())
+            .chain(self.cdp_interest())
             .chain(wants_all.then_some(subscription::Predicate::Always));
 
         subscription::kernel_filter::compile_union(interests)
@@ -2360,6 +2459,18 @@ impl MonitorBuilder {
                 let mut w = ndp::NdpWatch::new(self.ndp_config);
                 w.msg_handlers = self.ndp_msg_handlers;
                 w.anomaly_handlers = self.ndp_anomaly_handlers;
+                w
+            }),
+            #[cfg(feature = "lldp")]
+            lldp_watch: self.lldp_enabled.then(|| {
+                let mut w = lldp::LldpWatch::new();
+                w.msg_handlers = self.lldp_msg_handlers;
+                w
+            }),
+            #[cfg(feature = "cdp")]
+            cdp_watch: self.cdp_enabled.then(|| {
+                let mut w = cdp::CdpWatch::new();
+                w.msg_handlers = self.cdp_msg_handlers;
                 w
             }),
         })

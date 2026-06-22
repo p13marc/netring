@@ -47,17 +47,19 @@
   `monitor_quic_sni`. (flowscope 0.18 exposes SNI/ALPN/version but no JA4 on
   QUIC yet.)
 - **Passive asset inventory** (issue
-  [#28](https://github.com/p13marc/netring/issues/28), parts 2b + 2c) — a
+  [#28](https://github.com/p13marc/netring/issues/28), parts 2b–2d) — a
   MAC-keyed device inventory built from the discovery protocols, via two new
   builder methods (feature `asset`):
   - **`MonitorBuilder::asset_inventory(capacity)`** — enables a bounded LRU
     `flowscope::Inventory`, fed automatically from each frame's **ARP / NDP /
-    LLDP / CDP** (L2/L3) **and DHCP / SSDP / NetBIOS-NS** (UDP discovery
+    LLDP / CDP** (L2/L3) **and DHCP / SSDP / NetBIOS-NS / mDNS** (UDP discovery
     datagrams) — whichever source features are compiled in — folded into an
     `Asset` (MAC, IPs, hostname, platform, fingerprint, capabilities,
     `seen_via`). The UDP sources are parsed straight from the frame's UDP
     payload, keyed by DHCP's own `client_mac` or the Ethernet source MAC, so no
-    IP→MAC resolution is needed.
+    IP→MAC resolution is needed. (mDNS — feature `mdns` — feeds the inventory
+    only; it isn't a standalone `on::<P>` marker since it yields the same
+    `DnsMessage` as `Dns`, which would collide in the type-keyed dispatcher.)
   - **`MonitorBuilder::on_asset(|asset, ctx| …)`** — an **inventory-event**
     stream: fires when an observation creates a *new* asset or *changes* an
     existing one (a freshly-learned IP / hostname / platform), staying quiet on
@@ -67,9 +69,9 @@
   `asset` + at least one source feature is enough. Prelude exports `Asset` /
   `Inventory` / `AssetCapabilities` / `AssetFingerprints` / `AssetSourceSet`.
   Example `monitor_asset_inventory`; cap-free `asset_inventory` (LLDP, new-or-
-  changed dedup) + `asset_inventory_udp` (SSDP, keyed by src MAC) pcap tests.
-  mDNS is the one remaining source not yet wired (it needs a `DnsResponse`
-  extraction step) — a small follow-up.
+  changed dedup) + `asset_inventory_udp` (SSDP, keyed by src MAC) +
+  `asset_inventory_mdns` (mDNS `.local` hostname) pcap tests. All eight
+  discovery sources now feed the inventory.
 - **LLDP + CDP L2 link-layer discovery** (issue
   [#28](https://github.com/p13marc/netring/issues/28), part 2a) — two new opt-in
   per-frame hooks mirroring `on_arp` / `on_ndp`, for the network-infrastructure

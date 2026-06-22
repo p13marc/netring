@@ -146,8 +146,13 @@ ad-protocols = ["smb", "kerberos", "ldap", "rdp"]
 dhcp = ["flow", "flowscope/dhcp"]
 ssdp = ["flow", "flowscope/ssdp"]
 netbios-ns = ["flow", "flowscope/netbios-ns"]
+# mDNS (UDP/5353) — feeds the asset `Inventory` via per-frame DnsResponse
+# extraction (no standalone `on::<P>` marker — it yields the same `DnsMessage`
+# as `Dns`, which would collide in the type-keyed dispatcher). Pulls flowscope's
+# `mdns` module (→ `dns`).
+mdns = ["flow", "flowscope/mdns"]
 # Umbrella for the asset-discovery protocol set.
-asset-protocols = ["dhcp", "ssdp", "netbios-ns"]
+asset-protocols = ["dhcp", "ssdp", "netbios-ns", "mdns"]
 # Tier-2 protocols (issue #30). SSH (+ HASSH fingerprint) is the first; more
 # (FTP/SMTP/SNMP/NTP/…) land here as flowscope ships parsers.
 ssh = ["flow", "flowscope/ssh"]
@@ -560,7 +565,7 @@ required-features = ["tokio", "lldp", "cdp", "emit"]
 [[example]]
 name = "monitor_asset_inventory"
 path = "examples/monitor/asset_inventory.rs"
-required-features = ["tokio", "asset", "arp", "ndp", "lldp", "cdp", "dhcp", "ssdp", "netbios-ns"]
+required-features = ["tokio", "asset", "arp", "ndp", "lldp", "cdp", "dhcp", "ssdp", "netbios-ns", "mdns"]
 
 [[example]]
 name = "monitor_metrics_export"

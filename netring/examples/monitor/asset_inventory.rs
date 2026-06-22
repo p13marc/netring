@@ -2,9 +2,11 @@
 //!
 //! Enables the asset [`Inventory`](netring::prelude::Inventory) and prints each
 //! device as it's discovered or its record changes. The inventory is fed by
-//! whichever L2/L3 discovery protocols are compiled in — ARP & NDP (host
-//! presence + IP↔MAC bindings) and LLDP & CDP (switches / routers / APs). No
-//! active probing; every fact is leaked by the device itself.
+//! whichever discovery protocols are compiled in — ARP & NDP (host presence +
+//! IP↔MAC bindings), LLDP & CDP (switches / routers / APs), and the UDP
+//! broadcast/discovery datagrams DHCP, SSDP & NetBIOS-NS (hostnames, firmware
+//! banners, fingerprints). No active probing; every fact is leaked by the
+//! device itself.
 //!
 //! `on_asset` is an inventory-event stream: it fires when an observation
 //! creates a new [`Asset`](netring::prelude::Asset) or changes an existing one

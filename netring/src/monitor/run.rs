@@ -2140,6 +2140,45 @@ fn absorb_frame_assets(
         mac.copy_from_slice(&view.frame[6..12]);
         feed!(flowscope::Asset::from_cdp(&m, flowscope::MacAddr(mac)));
     }
+    // Issue #28 (part 2c): the UDP discovery datagrams — parsed straight from
+    // this frame's UDP payload (rather than the L7 protocol-slot drain) so the
+    // device's L2 source MAC is right there in the Ethernet header. DHCP carries
+    // its own `client_mac`; SSDP / NetBIOS-NS are keyed by the frame's src MAC.
+    #[cfg(any(feature = "dhcp", feature = "ssdp", feature = "netbios-ns"))]
+    if let Ok(layers) = view.layers()
+        && let Some(udp) = layers.udp()
+    {
+        let payload = udp.payload();
+        let (sp, dp) = (udp.src_port(), udp.dst_port());
+        // A parsed UDP datagram implies a full Ethernet header — src MAC present.
+        #[cfg(any(feature = "ssdp", feature = "netbios-ns"))]
+        let src_mac = {
+            let mut smac = [0u8; 6];
+            smac.copy_from_slice(&view.frame[6..12]);
+            flowscope::MacAddr(smac)
+        };
+
+        #[cfg(feature = "dhcp")]
+        if (sp == 67 || sp == 68 || dp == 67 || dp == 68)
+            && let Some(m) = flowscope::dhcp::parse(payload)
+            && let Some(a) = flowscope::Asset::from_dhcp(&m)
+        {
+            feed!(a);
+        }
+        #[cfg(feature = "ssdp")]
+        if (sp == 1900 || dp == 1900)
+            && let Some(m) = flowscope::ssdp::parse(payload)
+        {
+            feed!(flowscope::Asset::from_ssdp(&m, src_mac));
+        }
+        #[cfg(feature = "netbios-ns")]
+        if (sp == 137 || dp == 137)
+            && let Some(m) = flowscope::netbios_ns::parse(payload)
+            && let Some(a) = flowscope::Asset::from_netbios_ns(&m, src_mac)
+        {
+            feed!(a);
+        }
+    }
     Ok(())
 }
 

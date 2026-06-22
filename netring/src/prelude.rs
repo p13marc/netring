@@ -89,30 +89,34 @@ pub use crate::correlate::{
     BurstDetector, Ewma, KeyIndexed, RollingRate, TimeBucketedCounter, TimeBucketedSet, TopK,
 };
 
+// `MacAddr` is the L2 address type used by ARP / NDP / LLDP / CDP and the asset
+// inventory; export it once whenever any MAC-bearing feature is on.
+#[cfg(any(
+    feature = "arp",
+    feature = "ndp",
+    feature = "lldp",
+    feature = "cdp",
+    feature = "asset"
+))]
+pub use flowscope::MacAddr;
+
 // ─── ARP (issue #12, feature `arp`) ──────────────────────────────
 #[cfg(feature = "arp")]
 pub use crate::monitor::arp::{ArpAnomaly, ArpAnomalyKind};
 #[cfg(feature = "arp")]
-pub use flowscope::{ArpMessage, ArpOp, MacAddr};
+pub use flowscope::{ArpMessage, ArpOp};
 
 // ─── NDP (issue #24, feature `ndp`) ──────────────────────────────
 #[cfg(feature = "ndp")]
 pub use crate::monitor::ndp::{NdpAnomaly, NdpAnomalyKind};
 #[cfg(feature = "ndp")]
 pub use flowscope::{NdpKind, NdpMessage};
-// `MacAddr` is also exported under `arp`; re-export it here for ndp-only builds.
-#[cfg(all(feature = "ndp", not(feature = "arp")))]
-pub use flowscope::MacAddr;
 
 // ─── LLDP / CDP L2 discovery (issue #28, features `lldp` / `cdp`) ─
-#[cfg(feature = "lldp")]
-pub use flowscope::{ChassisId, LldpMessage, PortId};
-// `MacAddr` (used by `ChassisId::MacAddress`) is also exported under arp/ndp;
-// re-export here only for lldp-only builds to avoid a duplicate import.
-#[cfg(all(feature = "lldp", not(feature = "arp"), not(feature = "ndp")))]
-pub use flowscope::MacAddr;
 #[cfg(feature = "cdp")]
 pub use flowscope::{CdpAddress, CdpCapabilities, CdpMessage};
+#[cfg(feature = "lldp")]
+pub use flowscope::{ChassisId, LldpMessage, PortId};
 
 // ─── Asset inventory (issue #28, feature `asset`) ────────────────
 #[cfg(feature = "asset")]

@@ -104,6 +104,16 @@ pub use flowscope::{NdpKind, NdpMessage};
 #[cfg(all(feature = "ndp", not(feature = "arp")))]
 pub use flowscope::MacAddr;
 
+// ─── LLDP / CDP L2 discovery (issue #28, features `lldp` / `cdp`) ─
+#[cfg(feature = "lldp")]
+pub use flowscope::{ChassisId, LldpMessage, PortId};
+// `MacAddr` (used by `ChassisId::MacAddress`) is also exported under arp/ndp;
+// re-export here only for lldp-only builds to avoid a duplicate import.
+#[cfg(all(feature = "lldp", not(feature = "arp"), not(feature = "ndp")))]
+pub use flowscope::MacAddr;
+#[cfg(feature = "cdp")]
+pub use flowscope::{CdpAddress, CdpCapabilities, CdpMessage};
+
 // ─── Bandwidth + reports + well-known labels (0.22) ──────────────
 pub use crate::monitor::{BandwidthReport, BandwidthSnapshot};
 #[cfg(feature = "serde")]

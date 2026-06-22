@@ -120,6 +120,12 @@ arp = ["flow", "flowscope/arp"]
 # — the ARP sibling. Pulls flowscope's `ndp` module; parsed per-frame (ICMPv6
 # NS/NA) in the Monitor drain. See `MonitorBuilder::on_ndp` / `on_ndp_anomaly`.
 ndp = ["flow", "flowscope/ndp"]
+# L2 link-layer discovery (issue #28). LLDP (EtherType 0x88cc) and CDP (802.3
+# LLC/SNAP) are parsed per-frame in the Monitor drain like ARP/NDP. See
+# `MonitorBuilder::on_lldp` / `on_cdp`. CDP can't be kernel-prefiltered (no
+# EtherType term) → arming it forces capture-all.
+lldp = ["flow", "flowscope/lldp"]
+cdp = ["flow", "flowscope/cdp"]
 # Lateral-movement / Active Directory L7 protocols (issue #29). Each pulls the
 # matching flowscope 0.18 passive parser and surfaces a `Protocol` marker
 # (`Smb`/`Kerberos`/`Ldap`/`Rdp`) usable via `.protocol::<P>()` + `.on::<P>()`.
@@ -180,13 +186,13 @@ monitor-lite = ["tokio", "channel", "flow"]
 # Full Monitor + detector! experience for app users.
 monitor = [
     "tokio", "channel", "flow", "parse", "metrics",
-    "http", "dns", "tls", "icmp", "arp", "ndp", "ad-protocols", "asset-protocols", "ssh",
+    "http", "dns", "tls", "icmp", "arp", "ndp", "lldp", "cdp", "ad-protocols", "asset-protocols", "ssh",
     "emit", "serde",
 ]
 # Maximal app-tier umbrella (every shipped sink + parser + flowscope bonus).
 monitor-quickstart = [
     "tokio", "channel", "flow", "parse", "pcap", "metrics",
-    "http", "dns", "tls", "icmp", "arp", "ndp", "ad-protocols", "asset-protocols", "ssh",
+    "http", "dns", "tls", "icmp", "arp", "ndp", "lldp", "cdp", "ad-protocols", "asset-protocols", "ssh",
     "emit", "eve-sink", "file-hash", "serde",
 ]
 
@@ -531,6 +537,11 @@ required-features = ["tokio", "asset-protocols", "emit"]
 name = "monitor_ssh_hassh"
 path = "examples/monitor/ssh_hassh.rs"
 required-features = ["tokio", "ssh", "emit"]
+
+[[example]]
+name = "monitor_l2_discovery"
+path = "examples/monitor/l2_discovery.rs"
+required-features = ["tokio", "lldp", "cdp", "emit"]
 
 [[example]]
 name = "monitor_metrics_export"

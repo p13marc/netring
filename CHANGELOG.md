@@ -5,6 +5,15 @@
 > Depends on flowscope **0.18**. Additive over 0.26 (existing code compiles
 > unchanged).
 
+### Fixed
+
+- **BPF nested-OR error UX** ([#38](https://github.com/p13marc/netring/issues/38))
+  — the typed cBPF compiler rejected a nested `or()`/`negate()` inside an `or()`
+  branch with a misleading `ConflictingProtocols` error that gave no hint. It
+  now returns a dedicated `BuildError::NestedOr` with an actionable message
+  ("flatten to a single OR of AND-chains, e.g. `a.or(b).or(c)` not
+  `a.or(|x| x.or(...))`").
+
 ### Added
 
 - **Reassembler-hardening config on `MonitorBuilder`**

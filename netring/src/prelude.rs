@@ -114,6 +114,10 @@ pub use flowscope::MacAddr;
 #[cfg(feature = "cdp")]
 pub use flowscope::{CdpAddress, CdpCapabilities, CdpMessage};
 
+// ─── Asset inventory (issue #28, feature `asset`) ────────────────
+#[cfg(feature = "asset")]
+pub use flowscope::{Asset, AssetCapabilities, AssetFingerprints, AssetSourceSet, Inventory};
+
 // ─── Bandwidth + reports + well-known labels (0.22) ──────────────
 pub use crate::monitor::{BandwidthReport, BandwidthSnapshot};
 #[cfg(feature = "serde")]

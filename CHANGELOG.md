@@ -32,6 +32,26 @@
 
 ### Added
 
+- **Passive asset inventory** (issue
+  [#28](https://github.com/p13marc/netring/issues/28), part 2b) — a MAC-keyed
+  device inventory built from the L2/L3 discovery protocols, via two new
+  builder methods (feature `asset`):
+  - **`MonitorBuilder::asset_inventory(capacity)`** — enables a bounded LRU
+    `flowscope::Inventory`, fed automatically from each frame's ARP / NDP /
+    LLDP / CDP (whichever source features are compiled in), folded into an
+    `Asset` (MAC, IPs, hostname, platform, capabilities, `seen_via`).
+  - **`MonitorBuilder::on_asset(|asset, ctx| …)`** — an **inventory-event**
+    stream: fires when an observation creates a *new* asset or *changes* an
+    existing one (a freshly-learned IP / hostname / platform), staying quiet on
+    repeat-identical frames.
+
+  The inventory is fed independently of the `on_arp`/`on_ndp`/`on_lldp`/`on_cdp`
+  hooks — enabling `asset` + at least one source feature is enough. Prelude
+  exports `Asset` / `Inventory` / `AssetCapabilities` / `AssetFingerprints` /
+  `AssetSourceSet`. Example `monitor_asset_inventory`; cap-free `asset_inventory`
+  pcap test (asserts new-or-changed dedup). DHCP (richest single source) and the
+  UDP datagram protocols (SSDP / NetBIOS-NS / mDNS) don't feed the inventory yet
+  — they're drained on the L7 path and need IP→MAC resolution (a follow-up).
 - **LLDP + CDP L2 link-layer discovery** (issue
   [#28](https://github.com/p13marc/netring/issues/28), part 2a) — two new opt-in
   per-frame hooks mirroring `on_arp` / `on_ndp`, for the network-infrastructure

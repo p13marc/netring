@@ -126,6 +126,11 @@ ndp = ["flow", "flowscope/ndp"]
 # EtherType term) → arming it forces capture-all.
 lldp = ["flow", "flowscope/lldp"]
 cdp = ["flow", "flowscope/cdp"]
+# Passive asset inventory (issue #28). A MAC-keyed `Inventory` fed by the L2/L3
+# discovery hooks that are also enabled (arp/ndp/lldp/cdp). See
+# `MonitorBuilder::asset_inventory` / `on_asset`. Combine with at least one
+# source feature for the inventory to be fed.
+asset = ["flow", "flowscope/asset"]
 # Lateral-movement / Active Directory L7 protocols (issue #29). Each pulls the
 # matching flowscope 0.18 passive parser and surfaces a `Protocol` marker
 # (`Smb`/`Kerberos`/`Ldap`/`Rdp`) usable via `.protocol::<P>()` + `.on::<P>()`.
@@ -186,13 +191,13 @@ monitor-lite = ["tokio", "channel", "flow"]
 # Full Monitor + detector! experience for app users.
 monitor = [
     "tokio", "channel", "flow", "parse", "metrics",
-    "http", "dns", "tls", "icmp", "arp", "ndp", "lldp", "cdp", "ad-protocols", "asset-protocols", "ssh",
+    "http", "dns", "tls", "icmp", "arp", "ndp", "lldp", "cdp", "asset", "ad-protocols", "asset-protocols", "ssh",
     "emit", "serde",
 ]
 # Maximal app-tier umbrella (every shipped sink + parser + flowscope bonus).
 monitor-quickstart = [
     "tokio", "channel", "flow", "parse", "pcap", "metrics",
-    "http", "dns", "tls", "icmp", "arp", "ndp", "lldp", "cdp", "ad-protocols", "asset-protocols", "ssh",
+    "http", "dns", "tls", "icmp", "arp", "ndp", "lldp", "cdp", "asset", "ad-protocols", "asset-protocols", "ssh",
     "emit", "eve-sink", "file-hash", "serde",
 ]
 
@@ -542,6 +547,11 @@ required-features = ["tokio", "ssh", "emit"]
 name = "monitor_l2_discovery"
 path = "examples/monitor/l2_discovery.rs"
 required-features = ["tokio", "lldp", "cdp", "emit"]
+
+[[example]]
+name = "monitor_asset_inventory"
+path = "examples/monitor/asset_inventory.rs"
+required-features = ["tokio", "asset", "arp", "ndp", "lldp", "cdp"]
 
 [[example]]
 name = "monitor_metrics_export"

@@ -53,6 +53,8 @@ use crate::protocol::event_typed::{Event, Tick};
 // L2 ARP visibility + spoof/binding-change detection (feature `arp`).
 #[cfg(feature = "arp")]
 pub mod arp;
+#[cfg(feature = "asset")]
+pub mod asset;
 // L3 IPv6 Neighbor Discovery — the ARP sibling (feature `ndp`).
 pub mod async_handler;
 pub(crate) mod backend;
@@ -285,6 +287,10 @@ pub struct Monitor {
     /// any CDP hook was registered.
     #[cfg(feature = "cdp")]
     pub(crate) cdp_watch: Option<cdp::CdpWatch>,
+    /// Issue #28: the passive asset inventory + `on_asset` handlers. `Some`
+    /// when `asset_inventory` / `on_asset` was called.
+    #[cfg(feature = "asset")]
+    pub(crate) asset_watch: Option<asset::AssetWatch>,
 }
 
 /// How the run loop reacts when a handler (detector / sink / async handler)
@@ -698,6 +704,16 @@ pub struct MonitorBuilder {
     /// Issue #28: set once any CDP hook is registered.
     #[cfg(feature = "cdp")]
     cdp_enabled: bool,
+    /// Issue #28: `on_asset` handlers fed by the asset inventory.
+    #[cfg(feature = "asset")]
+    asset_handlers: Vec<asset::AssetHandler>,
+    /// Issue #28: inventory LRU capacity (`None` until enabled; resolved to
+    /// [`asset::DEFAULT_ASSET_CAPACITY`] at build when enabled without one).
+    #[cfg(feature = "asset")]
+    asset_capacity: Option<usize>,
+    /// Issue #28: set once `asset_inventory` / `on_asset` is called.
+    #[cfg(feature = "asset")]
+    asset_enabled: bool,
 }
 
 impl MonitorBuilder {
@@ -1645,6 +1661,41 @@ impl MonitorBuilder {
         self
     }
 
+    /// Issue #28: enable the passive **asset inventory** with an explicit LRU
+    /// `capacity` (MAC-keyed; oldest-contributed entries evicted when full).
+    ///
+    /// The inventory is fed by whichever L2/L3 discovery hooks are also armed —
+    /// [`on_arp`](Self::on_arp) / [`on_ndp`](Self::on_ndp) /
+    /// [`on_lldp`](Self::on_lldp) / [`on_cdp`](Self::on_cdp) — each parsed frame
+    /// is folded into an [`Asset`](flowscope::Asset). Consume updates via
+    /// [`on_asset`](Self::on_asset). Without any source hook the inventory stays
+    /// empty (nothing feeds it).
+    ///
+    /// DHCP and the UDP datagram discovery protocols (SSDP / NetBIOS-NS / mDNS)
+    /// don't feed the inventory yet — they're drained on the L7 path and need
+    /// IP→MAC resolution (a follow-up).
+    #[cfg(feature = "asset")]
+    pub fn asset_inventory(mut self, capacity: usize) -> Self {
+        self.asset_enabled = true;
+        self.asset_capacity = Some(capacity);
+        self
+    }
+
+    /// Issue #28: register a handler fired once per **inventory event** — when a
+    /// discovery observation creates a new [`Asset`](flowscope::Asset) or
+    /// changes an existing one (a freshly-learned IP, hostname, platform, …).
+    /// Repeat-identical frames don't re-fire it. Implies
+    /// [`asset_inventory`](Self::asset_inventory) (default capacity if not set).
+    #[cfg(feature = "asset")]
+    pub fn on_asset<F>(mut self, handler: F) -> Self
+    where
+        F: Fn(&flowscope::Asset, &mut Ctx<'_>) -> Result<()> + Send + 'static,
+    {
+        self.asset_enabled = true;
+        self.asset_handlers.push(Box::new(handler));
+        self
+    }
+
     /// 0.21 F: register `P` for broadcast delivery.
     ///
     /// Calls [`Protocol::register_broadcast`] on the underlying
@@ -2471,6 +2522,13 @@ impl MonitorBuilder {
             cdp_watch: self.cdp_enabled.then(|| {
                 let mut w = cdp::CdpWatch::new();
                 w.msg_handlers = self.cdp_msg_handlers;
+                w
+            }),
+            #[cfg(feature = "asset")]
+            asset_watch: self.asset_enabled.then(|| {
+                let cap = self.asset_capacity.unwrap_or(asset::DEFAULT_ASSET_CAPACITY);
+                let mut w = asset::AssetWatch::new(cap);
+                w.handlers = self.asset_handlers;
                 w
             }),
         })

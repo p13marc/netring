@@ -218,6 +218,8 @@ pub(crate) async fn run_loop(monitor: Monitor, stop: StopCondition) -> Result<()
         mut lldp_watch,
         #[cfg(feature = "cdp")]
         mut cdp_watch,
+        #[cfg(feature = "asset")]
+        mut asset_watch,
     } = monitor;
     // Borrow the monitor name as `&str` for the run loop's
     // dispatch sites. The owned `Box<str>` lives in this stack
@@ -601,6 +603,27 @@ pub(crate) async fn run_loop(monitor: Monitor, stop: StopCondition) -> Result<()
                 {
                     packet_err = Some(e);
                 }
+                // Issue #28: feed the asset inventory from this frame's L2/L3
+                // discovery protocols (independent of the on_arp/on_ndp hooks).
+                #[cfg(feature = "asset")]
+                if let Some(aw) = asset_watch.as_mut()
+                    && packet_err.is_none()
+                    && let Err(e) = absorb_frame_assets(
+                        aw,
+                        view,
+                        sink.as_mut(),
+                        &mut state_map,
+                        &mut counters,
+                        &mut flow_states,
+                        &label_table,
+                        source,
+                        monitor_name_borrow,
+                        handler_error_policy,
+                        &health,
+                    )
+                {
+                    packet_err = Some(e);
+                }
                 driver.track_into(view, &mut events)
             })
             .await?;
@@ -757,6 +780,8 @@ pub(crate) async fn replay_loop(
         mut lldp_watch,
         #[cfg(feature = "cdp")]
         mut cdp_watch,
+        #[cfg(feature = "asset")]
+        mut asset_watch,
     } = monitor;
     let monitor_name_borrow: Option<&str> = monitor_name.as_deref();
 
@@ -856,6 +881,23 @@ pub(crate) async fn replay_loop(
         if let Some(watch) = cdp_watch.as_mut() {
             dispatch_cdp(
                 watch,
+                view,
+                sink.as_mut(),
+                &mut state_map,
+                &mut counters,
+                &mut flow_states,
+                &label_table,
+                SourceIdx(0),
+                monitor_name_borrow,
+                handler_error_policy,
+                &health,
+            )?;
+        }
+        // Issue #28: asset inventory on offline replay.
+        #[cfg(feature = "asset")]
+        if let Some(aw) = asset_watch.as_mut() {
+            absorb_frame_assets(
+                aw,
                 view,
                 sink.as_mut(),
                 &mut state_map,
@@ -2010,6 +2052,93 @@ fn dispatch_cdp(
 
     for handler in &watch.msg_handlers {
         guard!(handler(&msg, &mut ctx), "cdp");
+    }
+    Ok(())
+}
+
+/// Issue #28: feed the passive asset [`Inventory`](flowscope::Inventory) from
+/// one frame's L2/L3 discovery protocols. Independent of the `on_arp`/`on_ndp`
+/// hooks — it re-parses the frame for whichever source features are compiled in
+/// (ARP / NDP / LLDP / CDP), folds each into an `Asset` keyed by MAC, and fires
+/// `on_asset` only when the merged record is new or changed. The re-parse is a
+/// cheap header check that early-returns on non-discovery frames.
+#[cfg(feature = "asset")]
+#[allow(clippy::too_many_arguments)]
+fn absorb_frame_assets(
+    aw: &mut crate::monitor::asset::AssetWatch,
+    view: PacketView<'_>,
+    sink: &mut dyn AnomalySink,
+    state_map: &mut StateMap,
+    counters: &mut CounterRegistry,
+    flow_states: &mut crate::ctx::FlowStateRegistry,
+    label_table: &flowscope::well_known::LabelTable,
+    source: SourceIdx,
+    monitor_name: Option<&str>,
+    policy: HandlerErrorPolicy,
+    health: &crate::monitor::health::HealthState,
+) -> Result<()> {
+    let mut ctx = Ctx {
+        flow: None, // asset records are L2-keyed — no 5-tuple flow key.
+        ts: view.timestamp,
+        source,
+        monitor_name,
+        state_map,
+        sink,
+        counters,
+        flow_states,
+        label_table,
+        tracker: None,
+        arp_table: None,
+    };
+
+    macro_rules! guard {
+        ($res:expr) => {
+            if let Err(e) = $res {
+                match policy {
+                    HandlerErrorPolicy::Propagate => return Err(e),
+                    HandlerErrorPolicy::Isolate => {
+                        health.record_handler_error();
+                        tracing::warn!(error = %e, "asset handler error isolated");
+                    }
+                }
+            }
+        };
+    }
+    // Absorb one update; fire `on_asset` only if the inventory record changed.
+    macro_rules! feed {
+        ($update:expr) => {
+            if let Some(merged) = aw.absorb($update, view.timestamp) {
+                for handler in &aw.handlers {
+                    guard!(handler(&merged, &mut ctx));
+                }
+            }
+        };
+    }
+
+    #[cfg(feature = "arp")]
+    if let Some(m) = flowscope::arp::parse_frame(view.frame) {
+        feed!(flowscope::Asset::from_arp(&m));
+    }
+    #[cfg(feature = "ndp")]
+    if let Ok(layers) = view.layers()
+        && let Some(icmp) = layers.icmpv6()
+        && let Some(m) = flowscope::ndp::parse_icmpv6(icmp.bytes())
+        && let Some(a) = flowscope::Asset::from_ndp(&m)
+    {
+        feed!(a);
+    }
+    #[cfg(feature = "lldp")]
+    if let Some(m) = flowscope::lldp::parse_frame(view.frame)
+        && let Some(a) = flowscope::Asset::from_lldp(&m)
+    {
+        feed!(a);
+    }
+    #[cfg(feature = "cdp")]
+    if let Some(m) = flowscope::cdp::parse_frame(view.frame) {
+        // `parse_frame` validated frame.len() >= 22, so the src MAC is present.
+        let mut mac = [0u8; 6];
+        mac.copy_from_slice(&view.frame[6..12]);
+        feed!(flowscope::Asset::from_cdp(&m, flowscope::MacAddr(mac)));
     }
     Ok(())
 }

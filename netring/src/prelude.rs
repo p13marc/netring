@@ -75,6 +75,8 @@ pub use crate::anomaly::Severity;
 pub use crate::anomaly::eve_sink::EveSink;
 #[cfg(feature = "metrics")]
 pub use crate::anomaly::metrics_sink::MetricsSink;
+#[cfg(feature = "ocsf-sink")]
+pub use crate::anomaly::ocsf_sink::OcsfSink;
 #[cfg(feature = "serde")]
 pub use crate::anomaly::shipped_sinks::StdoutJsonSink;
 pub use crate::anomaly::shipped_sinks::{ChannelSink, StdoutSink, TracingSink};

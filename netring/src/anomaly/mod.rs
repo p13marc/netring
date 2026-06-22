@@ -37,6 +37,8 @@ pub mod eve_sink;
 pub mod key;
 #[cfg(feature = "metrics")]
 pub mod metrics_sink;
+#[cfg(feature = "ocsf-sink")]
+pub mod ocsf_sink;
 mod rule;
 #[cfg(feature = "syslog")]
 pub mod syslog_sink;

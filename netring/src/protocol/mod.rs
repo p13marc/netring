@@ -33,6 +33,8 @@ pub use builtin::Kerberos;
 pub use builtin::Ldap;
 #[cfg(feature = "netbios-ns")]
 pub use builtin::Nbns;
+#[cfg(feature = "quic")]
+pub use builtin::Quic;
 #[cfg(feature = "rdp")]
 pub use builtin::Rdp;
 #[cfg(feature = "smb")]

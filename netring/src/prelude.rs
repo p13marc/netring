@@ -33,6 +33,8 @@ pub use crate::protocol::builtin::Kerberos;
 pub use crate::protocol::builtin::Ldap;
 #[cfg(feature = "netbios-ns")]
 pub use crate::protocol::builtin::Nbns;
+#[cfg(feature = "quic")]
+pub use crate::protocol::builtin::Quic;
 #[cfg(feature = "rdp")]
 pub use crate::protocol::builtin::Rdp;
 #[cfg(feature = "smb")]
@@ -117,6 +119,10 @@ pub use flowscope::{NdpKind, NdpMessage};
 pub use flowscope::{CdpAddress, CdpCapabilities, CdpMessage};
 #[cfg(feature = "lldp")]
 pub use flowscope::{ChassisId, LldpMessage, PortId};
+
+// ─── QUIC (issue #14, feature `quic`) ────────────────────────────
+#[cfg(feature = "quic")]
+pub use flowscope::{QuicInitial, QuicVersion};
 
 // ─── Asset inventory (issue #28, feature `asset`) ────────────────
 #[cfg(feature = "asset")]

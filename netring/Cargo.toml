@@ -551,7 +551,7 @@ required-features = ["tokio", "lldp", "cdp", "emit"]
 [[example]]
 name = "monitor_asset_inventory"
 path = "examples/monitor/asset_inventory.rs"
-required-features = ["tokio", "asset", "arp", "ndp", "lldp", "cdp"]
+required-features = ["tokio", "asset", "arp", "ndp", "lldp", "cdp", "dhcp", "ssdp", "netbios-ns"]
 
 [[example]]
 name = "monitor_metrics_export"

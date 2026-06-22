@@ -32,6 +32,20 @@
 
 ### Added
 
+- **Threat-intel IOC matching** (issue
+  [#48](https://github.com/p13marc/netring/issues/48)) — a new `IocSet`
+  (`netring::monitor::ioc`, prelude-exported) holds indicators of compromise —
+  bad IPs, bad domains (**subdomain-aware**, case-insensitive), and bad JA3/JA4
+  TLS fingerprints — loaded from a feed (Zeek Intel / Suricata dataset / MISP).
+  Arm it with **`MonitorBuilder::ioc(set)`**: the Monitor then passively matches
+  every flow destination/source IP, DNS query name, TLS SNI + JA3/JA4, and HTTP
+  `Host` against the set and emits an `ioc_match` anomaly per hit
+  (`Severity::Critical`, observations `ioc_kind` / `indicator` / `observed`) —
+  no active lookups. Flow-IP matching is always on; the DNS / TLS / HTTP arms
+  light up with those features (and auto-register the protocol). `IocSet`'s
+  matcher methods (`matches_ip` / `matches_domain` / `matches_ja4` /
+  `matches_ja3`) are public for use in your own handlers. Example `monitor_ioc`;
+  cap-free `ioc_match` pcap test (IP + domain hits).
 - **QUIC Initial visibility** (issue
   [#14](https://github.com/p13marc/netring/issues/14)) — new opt-in `Quic`
   `Protocol` marker (feature `quic`, UDP/443) surfacing flowscope 0.18's passive

@@ -558,6 +558,11 @@ path = "examples/monitor/quic_sni.rs"
 required-features = ["tokio", "quic", "emit"]
 
 [[example]]
+name = "monitor_ioc"
+path = "examples/monitor/ioc_match.rs"
+required-features = ["tokio", "dns", "tls", "http"]
+
+[[example]]
 name = "monitor_l2_discovery"
 path = "examples/monitor/l2_discovery.rs"
 required-features = ["tokio", "lldp", "cdp", "emit"]

@@ -39,6 +39,8 @@ pub use builtin::Rdp;
 pub use builtin::Smb;
 #[cfg(feature = "ssdp")]
 pub use builtin::Ssdp;
+#[cfg(feature = "ssh")]
+pub use builtin::Ssh;
 pub use builtin::{Icmp, Tcp, Udp};
 #[cfg(feature = "tls")]
 pub use builtin::{Tls, TlsHandshake};

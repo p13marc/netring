@@ -39,6 +39,8 @@ pub use crate::protocol::builtin::Rdp;
 pub use crate::protocol::builtin::Smb;
 #[cfg(feature = "ssdp")]
 pub use crate::protocol::builtin::Ssdp;
+#[cfg(feature = "ssh")]
+pub use crate::protocol::builtin::Ssh;
 pub use crate::protocol::builtin::{Tcp, Udp};
 #[cfg(feature = "tls")]
 pub use crate::protocol::builtin::{Tls, TlsHandshake};

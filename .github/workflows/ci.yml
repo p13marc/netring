@@ -37,6 +37,7 @@ jobs:
             "--features ndp" \
             "--features ad-protocols" \
             "--features asset-protocols" \
+            "--features ssh" \
             "--features tokio,flow,dns,http"; do
             echo "::group::clippy -p netring $f"
             cargo clippy -p netring $f -- -D warnings
@@ -95,7 +96,7 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
       - name: Monitor lib tests (flow surface)
-        run: cargo test -p netring --features "tokio,channel,flow,parse,http,dns,tls,ja4plus,icmp,arp,ndp,ad-protocols,asset-protocols" --lib
+        run: cargo test -p netring --features "tokio,channel,flow,parse,http,dns,tls,ja4plus,icmp,arp,ndp,ad-protocols,asset-protocols,ssh" --lib
       # 0.25: the flow-gated *integration* tests that validate the new surface
       # but open NO live socket (pcap replay / build-time filter checks /
       # compile-time Send assertions) — these were never run in CI before. They
@@ -104,11 +105,11 @@ jobs:
       # (incl. the effect path). Cap-free, so they run here, not in the root job.
       - name: Monitor integration tests (cap-free)
         run: |
-          cargo test -p netring --features "tokio,channel,flow,parse,pcap,http,dns,tls,ja4plus,arp,ndp,ad-protocols,asset-protocols" \
+          cargo test -p netring --features "tokio,channel,flow,parse,pcap,http,dns,tls,ja4plus,arp,ndp,ad-protocols,asset-protocols,ssh" \
             --test monitor_replay --test monitor_kernel_prefilter --test monitor_send \
             --test monitor_run_until_idle --test monitor_drain_timeout --test monitor_name_in_ctx \
             --test arp_replay --test ndp_replay --test monitor_reassembler_config \
-            --test ad_protocols --test asset_protocols
+            --test ad_protocols --test asset_protocols --test ssh_protocol
 
   # ── Integration tests (need CAP_NET_RAW) ──────────────────────────────────
   test-integration:
@@ -263,6 +264,8 @@ jobs:
       - run: cargo build -p netring --example monitor_lateral_movement --features tokio,ad-protocols,emit
       # Issue #28: the asset-discovery example needs the asset protocols + emit.
       - run: cargo build -p netring --example monitor_asset_discovery --features tokio,asset-protocols,emit
+      # Issue #30: the SSH/HASSH example needs the ssh + emit features.
+      - run: cargo build -p netring --example monitor_ssh_hassh --features tokio,ssh,emit
 
   # ── License + advisory checks (cargo-deny) ───────────────────────────────
   deny:

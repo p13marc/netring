@@ -88,6 +88,8 @@ pub use flowscope::icmp::{DestUnreachableKind, MtuSignalKind};
 
 // ─── Common external types ───────────────────────────────────────
 pub use flowscope::{EndReason, FlowSide, L4Proto, Timestamp};
+// Issue #34: reassembler-hardening config enums for `MonitorBuilder`.
+pub use flowscope::{MemcapPolicy, TcpOverlapPolicy};
 pub use std::time::Duration;
 
 // ─── The detector! macro ────────────────────────────────────────

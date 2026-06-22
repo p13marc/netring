@@ -602,6 +602,12 @@ pub struct MonitorBuilder {
     /// [`Self::label_table`]; moved into [`Monitor::label_table`] at
     /// build.
     label_table: Option<flowscope::well_known::LabelTable>,
+    /// Issue #34: the central flow tracker's config (flowscope 0.18). Carries
+    /// the reassembler-hardening knobs — TCP overlap-resolution policy,
+    /// reassembly memcap + policy, active/idle threshold. Applied to the
+    /// `DriverBuilder` at build. Default mirrors flowscope's defaults
+    /// (`TcpOverlapPolicy::First`, no memcap, 1s active/idle threshold).
+    tracker_config: flowscope::FlowTrackerConfig,
     /// 0.22 §2.3: set once `bandwidth_by_app` / `bandwidth_windowed` /
     /// `on_bandwidth` has installed the recorder, so repeated calls
     /// (e.g. `on_bandwidth` after an explicit `bandwidth_windowed`)
@@ -668,6 +674,52 @@ impl MonitorBuilder {
     pub fn label_table(mut self, table: flowscope::well_known::LabelTable) -> Self {
         self.label_table = Some(table);
         self
+    }
+
+    /// Issue #34: set the **TCP overlap-resolution policy** for the
+    /// reassembler — which segment's bytes win when two segments carry
+    /// different data for the same sequence range.
+    ///
+    /// Without an explicit policy the analyzer is, by construction, evadable
+    /// (Ptacek–Newsham): an attacker can make the monitor reassemble a
+    /// *different* byte stream than the destination host. Match the policy to
+    /// the monitored hosts' OS family. Default
+    /// [`TcpOverlapPolicy::First`](flowscope::TcpOverlapPolicy::First) (BSD —
+    /// the safest when host OS is unknown); use
+    /// [`HigherSeq`](flowscope::TcpOverlapPolicy::HigherSeq) for Linux-heavy
+    /// segments, [`Last`](flowscope::TcpOverlapPolicy::Last) for Windows.
+    pub fn tcp_overlap_policy(mut self, policy: flowscope::TcpOverlapPolicy) -> Self {
+        self.tracker_config.tcp_overlap_policy = policy;
+        self
+    }
+
+    /// Issue #34: bound the reassembler's buffered memory and choose what
+    /// happens when the cap is hit — the defense against state-holding DoS
+    /// (an attacker streaming deliberate gaps to force unbounded buffers).
+    ///
+    /// `bytes` is the global reassembly memcap; `policy` governs the response
+    /// (e.g. [`MemcapPolicy::DropFlow`](flowscope::MemcapPolicy)). Default is
+    /// unbounded ([`MemcapPolicy::Ignore`](flowscope::MemcapPolicy)) — set a
+    /// cap for any internet-facing deployment.
+    pub fn reassembly_memcap(mut self, bytes: u64, policy: flowscope::MemcapPolicy) -> Self {
+        self.tracker_config.reassembly_memcap = Some(bytes);
+        self.tracker_config.reassembly_memcap_policy = policy;
+        self
+    }
+
+    /// Issue #34: the active/idle threshold for CICFlowMeter-style
+    /// active/idle-period accounting (flowscope 0.18 `ml_features`). A gap
+    /// longer than this between packets ends an "active" period and starts an
+    /// "idle" one. Default `1s` (CICFlowMeter). `None` disables the split.
+    pub fn active_idle_threshold(mut self, threshold: Option<Duration>) -> Self {
+        self.tracker_config.active_idle_threshold = threshold;
+        self
+    }
+
+    /// Issue #34: inspect the flow-tracker config this builder will apply
+    /// (overlap policy, memcap, active/idle threshold) — for tests / debugging.
+    pub fn tracker_config(&self) -> &flowscope::FlowTrackerConfig {
+        &self.tracker_config
     }
 
     /// Set the capture interface(s). Phase F.1 enables N > 1 —
@@ -2064,10 +2116,13 @@ impl MonitorBuilder {
                 .into());
             }
         }
-        let driver = self
+        // Issue #34: apply the reassembler-hardening config (overlap policy,
+        // memcap, active/idle threshold) to the central tracker before build.
+        let mut driver_builder = self
             .driver_builder
-            .unwrap_or_else(|| Driver::builder(FiveTuple::bidirectional()))
-            .build();
+            .unwrap_or_else(|| Driver::builder(FiveTuple::bidirectional()));
+        driver_builder.config(self.tracker_config);
+        let driver = driver_builder.build();
         let mut dispatcher = self.handlers.into_dispatcher()?;
         dispatcher.set_catch_panics(self.catch_handler_panics);
         let base_sink: Box<dyn AnomalySink> = self.sink.unwrap_or_else(|| Box::new(NoopSink));

@@ -2,11 +2,18 @@
 
 ## Unreleased
 
-> Depends on flowscope **0.17**. Additive over 0.26 (existing code compiles
+> Depends on flowscope **0.18**. Additive over 0.26 (existing code compiles
 > unchanged).
 
 ### Added
 
+- **Reassembler-hardening config on `MonitorBuilder`**
+  ([#34](https://github.com/p13marc/netring/issues/34)) — surfaces flowscope
+  0.18's reassembler hardening: `tcp_overlap_policy(..)` (the Ptacek–Newsham
+  overlap-resolution policy; default BSD `First`), `reassembly_memcap(bytes,
+  policy)` (state-holding-DoS bound), and `active_idle_threshold(..)`
+  (CICFlowMeter active/idle accounting). `tracker_config()` inspects the
+  resolved config. Prelude re-exports `TcpOverlapPolicy` / `MemcapPolicy`.
 - **ARP visibility + spoof/binding-change detection** — new opt-in `arp`
   feature ([#12](https://github.com/p13marc/netring/issues/12)). ARP is L2
   (no 5-tuple), so the Monitor parses each frame for ARP inside the zero-copy

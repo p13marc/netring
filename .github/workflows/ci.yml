@@ -112,7 +112,7 @@ jobs:
             --test monitor_replay --test monitor_kernel_prefilter --test monitor_send \
             --test monitor_run_until_idle --test monitor_drain_timeout --test monitor_name_in_ctx \
             --test arp_replay --test ndp_replay --test lldp_replay --test cdp_replay --test asset_inventory --test asset_inventory_udp --test asset_inventory_mdns --test monitor_reassembler_config \
-            --test ad_protocols --test asset_protocols --test ssh_protocol --test quic_protocol
+            --test ad_protocols --test asset_protocols --test ssh_protocol --test quic_protocol --test ioc_match
 
   # ── Integration tests (need CAP_NET_RAW) ──────────────────────────────────
   test-integration:
@@ -271,6 +271,8 @@ jobs:
       - run: cargo build -p netring --example monitor_ssh_hassh --features tokio,ssh,emit
       # Issue #14: the QUIC SNI example needs quic + emit.
       - run: cargo build -p netring --example monitor_quic_sni --features tokio,quic,emit
+      # Issue #48: the IOC example needs dns/tls/http for all match arms.
+      - run: cargo build -p netring --example monitor_ioc --features tokio,dns,tls,http
       # Issue #28: the L2-discovery example needs lldp + cdp + emit.
       - run: cargo build -p netring --example monitor_l2_discovery --features tokio,lldp,cdp,emit
       # Issue #28: the asset-inventory example needs asset + the discovery sources.

@@ -66,6 +66,7 @@ pub mod effect;
 pub mod fingerprint;
 pub mod handler;
 pub mod health;
+pub mod ioc;
 #[cfg(feature = "lldp")]
 pub mod lldp;
 #[cfg(feature = "ndp")]
@@ -1905,6 +1906,110 @@ impl MonitorBuilder {
                 }
             },
         )
+    }
+
+    /// Issue #48: arm a threat-intel [`IocSet`](ioc::IocSet). The Monitor then
+    /// passively matches every flow destination/source IP, DNS query name, TLS
+    /// SNI + JA3/JA4, and HTTP `Host` against the set, emitting an `ioc_match`
+    /// anomaly (`Severity::Critical`, observations `ioc_kind` / `indicator` /
+    /// `observed`) to the [`sink`](Self::sink) on each hit — no active lookups.
+    ///
+    /// Always matches flow IPs; the DNS / TLS / HTTP arms are active only when
+    /// the corresponding feature is enabled (and auto-register that protocol).
+    /// Domain matching is subdomain-aware (see [`ioc::IocSet`]).
+    ///
+    /// ```no_run
+    /// # #[cfg(feature = "tokio")] fn demo() {
+    /// use netring::monitor::{Monitor, ioc::IocSet};
+    /// use netring::prelude::StdoutSink;
+    /// Monitor::builder()
+    ///     .interface("eth0")
+    ///     .ioc(IocSet::new().domain("evil.example").ja4("t13d…"))
+    ///     .sink(StdoutSink::default());
+    /// # }
+    /// ```
+    pub fn ioc(mut self, set: ioc::IocSet) -> Self {
+        use crate::protocol::builtin::{Tcp, Udp};
+        use crate::protocol::event_typed::FlowStarted;
+        use std::sync::Arc;
+
+        let set = Arc::new(set);
+
+        // Flow IP matching (Tcp + Udp lifecycle) — always available.
+        if !self
+            .declared_protocols
+            .contains_key(&std::any::TypeId::of::<Tcp>())
+        {
+            self = self.protocol::<Tcp>();
+        }
+        let s = Arc::clone(&set);
+        self = self.on_ctx::<FlowStarted<Tcp>>(move |evt: &FlowStarted<Tcp>, ctx: &mut Ctx<'_>| {
+            ioc::check_flow_ip(&s, evt.key, ctx);
+            Ok(())
+        });
+        if !self
+            .declared_protocols
+            .contains_key(&std::any::TypeId::of::<Udp>())
+        {
+            self = self.protocol::<Udp>();
+        }
+        let s = Arc::clone(&set);
+        self = self.on_ctx::<FlowStarted<Udp>>(move |evt: &FlowStarted<Udp>, ctx: &mut Ctx<'_>| {
+            ioc::check_flow_ip(&s, evt.key, ctx);
+            Ok(())
+        });
+
+        #[cfg(feature = "dns")]
+        {
+            use crate::protocol::builtin::Dns;
+            if !self
+                .declared_protocols
+                .contains_key(&std::any::TypeId::of::<Dns>())
+            {
+                self = self.protocol::<Dns>();
+            }
+            let s = Arc::clone(&set);
+            self =
+                self.on_ctx::<Dns>(move |msg: &flowscope::dns::DnsMessage, ctx: &mut Ctx<'_>| {
+                    ioc::check_dns(&s, msg, ctx);
+                    Ok(())
+                });
+        }
+        #[cfg(feature = "tls")]
+        {
+            use crate::protocol::builtin::TlsHandshake;
+            if !self
+                .declared_protocols
+                .contains_key(&std::any::TypeId::of::<TlsHandshake>())
+            {
+                self = self.protocol::<TlsHandshake>();
+            }
+            let s = Arc::clone(&set);
+            self = self.on_ctx::<TlsHandshake>(
+                move |hs: &flowscope::tls::TlsHandshake, ctx: &mut Ctx<'_>| {
+                    ioc::check_tls(&s, hs, ctx);
+                    Ok(())
+                },
+            );
+        }
+        #[cfg(feature = "http")]
+        {
+            use crate::protocol::builtin::Http;
+            if !self
+                .declared_protocols
+                .contains_key(&std::any::TypeId::of::<Http>())
+            {
+                self = self.protocol::<Http>();
+            }
+            let s = Arc::clone(&set);
+            self = self.on_ctx::<Http>(
+                move |msg: &flowscope::http::HttpMessage, ctx: &mut Ctx<'_>| {
+                    ioc::check_http(&s, msg, ctx);
+                    Ok(())
+                },
+            );
+        }
+        self
     }
 
     // 0.22: the deprecated three-generic `on_with_marker` is removed —

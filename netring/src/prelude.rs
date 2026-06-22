@@ -15,6 +15,9 @@ pub use crate::monitor::{Handler, Monitor, MonitorBuilder};
 // ─── Async + middleware (Phase D) ────────────────────────────────
 pub use crate::monitor::AsyncHandler;
 
+// ─── Threat-intel IOC matching (issue #48) ───────────────────────
+pub use crate::monitor::ioc::IocSet;
+
 // ─── Protocol markers (built-in) ─────────────────────────────────
 #[cfg(all(feature = "http", feature = "ja4plus"))]
 pub use crate::monitor::HttpFingerprint;

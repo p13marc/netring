@@ -14,6 +14,17 @@
   policy)` (state-holding-DoS bound), and `active_idle_threshold(..)`
   (CICFlowMeter active/idle accounting). `tracker_config()` inspects the
   resolved config. Prelude re-exports `TcpOverlapPolicy` / `MemcapPolicy`.
+- **NDP (IPv6 Neighbor Discovery) visibility + spoof detection** — new opt-in
+  `ndp` feature ([#24](https://github.com/p13marc/netring/issues/24)), the IPv6
+  sibling of `arp`. The Monitor walks each frame to its ICMPv6 NS/NA message
+  (via flowscope 0.18's `ndp` module) in the zero-copy drain, learns
+  `IPv6 → MAC` bindings into a `NeighborTable`, and surfaces
+  `MonitorBuilder::on_ndp` (raw `NdpMessage` feed) + `on_ndp_anomaly`
+  (`SpoofSuspected` = unsolicited override NA carrying a MAC, the SLAAC-poisoning
+  vector; `BindingChanged`; opt-in `Unsolicited` / `NewBinding`), with
+  `ndp_allow` / `ndp_warmup` / `ndp_report_*` tuning. Arming an NDP hook narrows
+  the kernel prefilter to ICMPv6 (proto 58). In the `monitor` umbrellas; prelude
+  exports `NdpAnomaly`/`NdpAnomalyKind` + `NdpMessage`/`NdpKind`.
 - **ARP visibility + spoof/binding-change detection** — new opt-in `arp`
   feature ([#12](https://github.com/p13marc/netring/issues/12)). ARP is L2
   (no 5-tuple), so the Monitor parses each frame for ARP inside the zero-copy

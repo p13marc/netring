@@ -77,6 +77,15 @@ pub use crate::monitor::arp::{ArpAnomaly, ArpAnomalyKind};
 #[cfg(feature = "arp")]
 pub use flowscope::{ArpMessage, ArpOp, MacAddr};
 
+// ─── NDP (issue #24, feature `ndp`) ──────────────────────────────
+#[cfg(feature = "ndp")]
+pub use crate::monitor::ndp::{NdpAnomaly, NdpAnomalyKind};
+#[cfg(feature = "ndp")]
+pub use flowscope::{NdpKind, NdpMessage};
+// `MacAddr` is also exported under `arp`; re-export it here for ndp-only builds.
+#[cfg(all(feature = "ndp", not(feature = "arp")))]
+pub use flowscope::MacAddr;
+
 // ─── Bandwidth + reports + well-known labels (0.22) ──────────────
 pub use crate::monitor::{BandwidthReport, BandwidthSnapshot};
 #[cfg(feature = "serde")]

@@ -212,6 +212,8 @@ pub(crate) async fn run_loop(monitor: Monitor, stop: StopCondition) -> Result<()
         injected_xdp,
         #[cfg(feature = "arp")]
         mut arp_watch,
+        #[cfg(feature = "ndp")]
+        mut ndp_watch,
     } = monitor;
     // Borrow the monitor name as `&str` for the run loop's
     // dispatch sites. The owned `Box<str>` lives in this stack
@@ -533,6 +535,27 @@ pub(crate) async fn run_loop(monitor: Monitor, stop: StopCondition) -> Result<()
                 {
                     packet_err = Some(e);
                 }
+                // Issue #24: NDP — walk the frame to ICMPv6 and drive the
+                // detector, same in-borrow synchronous shape as ARP.
+                #[cfg(feature = "ndp")]
+                if let Some(watch) = ndp_watch.as_mut()
+                    && packet_err.is_none()
+                    && let Err(e) = dispatch_ndp(
+                        watch,
+                        view,
+                        sink.as_mut(),
+                        &mut state_map,
+                        &mut counters,
+                        &mut flow_states,
+                        &label_table,
+                        source,
+                        monitor_name_borrow,
+                        handler_error_policy,
+                        &health,
+                    )
+                {
+                    packet_err = Some(e);
+                }
                 driver.track_into(view, &mut events)
             })
             .await?;
@@ -683,6 +706,8 @@ pub(crate) async fn replay_loop(
             injected_xdp: _, // pcap replay has no live AF_XDP backend
         #[cfg(feature = "arp")]
         mut arp_watch, // ARP detection works on offline replay too
+        #[cfg(feature = "ndp")]
+        mut ndp_watch,
     } = monitor;
     let monitor_name_borrow: Option<&str> = monitor_name.as_deref();
 
@@ -731,6 +756,23 @@ pub(crate) async fn replay_loop(
         #[cfg(feature = "arp")]
         if let Some(watch) = arp_watch.as_mut() {
             dispatch_arp(
+                watch,
+                view,
+                sink.as_mut(),
+                &mut state_map,
+                &mut counters,
+                &mut flow_states,
+                &label_table,
+                SourceIdx(0),
+                monitor_name_borrow,
+                handler_error_policy,
+                &health,
+            )?;
+        }
+        // Issue #24: NDP detection on offline replay.
+        #[cfg(feature = "ndp")]
+        if let Some(watch) = ndp_watch.as_mut() {
+            dispatch_ndp(
                 watch,
                 view,
                 sink.as_mut(),
@@ -1698,6 +1740,77 @@ fn dispatch_arp(
     if let Some(anomaly) = anomaly {
         for handler in &watch.anomaly_handlers {
             guard!(handler(&anomaly, &mut ctx), "arp-anomaly");
+        }
+    }
+    Ok(())
+}
+
+/// Issue #24: walk one frame to its ICMPv6 message and drive the NDP detector
+/// — the IPv6 sibling of [`dispatch_arp`]. NDP rides ICMPv6, so unlike ARP's
+/// free L2 `parse_frame` this parses the layer stack (`view.layers()`) to reach
+/// the ICMPv6 slice. Non-ICMPv6 frames cost the layers parse + an early return.
+/// Synchronous — borrows drop before any `.await` (preserves `Send`).
+#[cfg(feature = "ndp")]
+#[allow(clippy::too_many_arguments)]
+fn dispatch_ndp(
+    watch: &mut crate::monitor::ndp::NdpWatch,
+    view: PacketView<'_>,
+    sink: &mut dyn AnomalySink,
+    state_map: &mut StateMap,
+    counters: &mut CounterRegistry,
+    flow_states: &mut crate::ctx::FlowStateRegistry,
+    label_table: &flowscope::well_known::LabelTable,
+    source: SourceIdx,
+    monitor_name: Option<&str>,
+    policy: HandlerErrorPolicy,
+    health: &crate::monitor::health::HealthState,
+) -> Result<()> {
+    // Walk to ICMPv6; only NS/NA (types 135/136) parse into an NdpMessage.
+    let Ok(layers) = view.layers() else {
+        return Ok(());
+    };
+    let Some(icmp) = layers.icmpv6() else {
+        return Ok(());
+    };
+    let Some(msg) = flowscope::ndp::parse_icmpv6(icmp.bytes()) else {
+        return Ok(());
+    };
+    let anomaly = watch.observe(&msg, view.timestamp);
+
+    let mut ctx = Ctx {
+        flow: None, // NDP is L3 control plane — no 5-tuple flow key.
+        ts: view.timestamp,
+        source,
+        monitor_name,
+        state_map,
+        sink,
+        counters,
+        flow_states,
+        label_table,
+        tracker: None,
+        arp_table: None, // the ARP (IPv4) table; NDP's IPv6 table isn't exposed on Ctx.
+    };
+
+    macro_rules! guard {
+        ($res:expr, $what:literal) => {
+            if let Err(e) = $res {
+                match policy {
+                    HandlerErrorPolicy::Propagate => return Err(e),
+                    HandlerErrorPolicy::Isolate => {
+                        health.record_handler_error();
+                        tracing::warn!(error = %e, concat!($what, " handler error isolated"));
+                    }
+                }
+            }
+        };
+    }
+
+    for handler in &watch.msg_handlers {
+        guard!(handler(&msg, &mut ctx), "ndp");
+    }
+    if let Some(anomaly) = anomaly {
+        for handler in &watch.anomaly_handlers {
+            guard!(handler(&anomaly, &mut ctx), "ndp-anomaly");
         }
     }
     Ok(())

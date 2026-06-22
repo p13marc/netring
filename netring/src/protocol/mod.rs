@@ -16,7 +16,7 @@ pub use event_typed::{
     ParserClosed, Side, Tick,
 };
 
-// Re-export the 7 built-in `Protocol` markers at the protocol
+// Re-export the built-in `Protocol` markers at the protocol
 // module level so `use netring::protocol::Http;` works (without
 // the intermediate `::builtin::` path). The markers also live at
 // `netring::protocol::builtin::*` and `netring::prelude::*` for
@@ -25,6 +25,14 @@ pub use event_typed::{
 pub use builtin::Dns;
 #[cfg(feature = "http")]
 pub use builtin::Http;
+#[cfg(feature = "kerberos")]
+pub use builtin::Kerberos;
+#[cfg(feature = "ldap")]
+pub use builtin::Ldap;
+#[cfg(feature = "rdp")]
+pub use builtin::Rdp;
+#[cfg(feature = "smb")]
+pub use builtin::Smb;
 pub use builtin::{Icmp, Tcp, Udp};
 #[cfg(feature = "tls")]
 pub use builtin::{Tls, TlsHandshake};

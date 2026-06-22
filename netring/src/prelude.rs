@@ -23,6 +23,14 @@ pub use crate::protocol::builtin::Dns;
 #[cfg(feature = "http")]
 pub use crate::protocol::builtin::Http;
 pub use crate::protocol::builtin::Icmp;
+#[cfg(feature = "kerberos")]
+pub use crate::protocol::builtin::Kerberos;
+#[cfg(feature = "ldap")]
+pub use crate::protocol::builtin::Ldap;
+#[cfg(feature = "rdp")]
+pub use crate::protocol::builtin::Rdp;
+#[cfg(feature = "smb")]
+pub use crate::protocol::builtin::Smb;
 pub use crate::protocol::builtin::{Tcp, Udp};
 #[cfg(feature = "tls")]
 pub use crate::protocol::builtin::{Tls, TlsHandshake};

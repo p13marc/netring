@@ -74,6 +74,8 @@ pub use arp::{ArpAnomaly, ArpAnomalyKind};
 pub use async_handler::{AsyncHandler, BoxFuture};
 pub use dispatcher::{Dispatcher, MAX_EVENT_TYPES};
 pub use effect::{EffectHandler, Effects};
+#[cfg(all(feature = "http", feature = "ja4plus"))]
+pub use fingerprint::HttpFingerprint;
 #[cfg(feature = "tls")]
 pub use fingerprint::TlsFingerprint;
 pub use handler::{CtxOnly, Handler, PayloadCtx, PayloadOnly};
@@ -1730,6 +1732,62 @@ impl MonitorBuilder {
             move |hs: &flowscope::tls::TlsHandshake, ctx: &mut Ctx<'_>| {
                 let fp = TlsFingerprint::from_handshake(hs, ctx.flow);
                 handler(&fp, ctx)
+            },
+        )
+    }
+
+    /// Register a handler fired once per HTTP **request**, handed an
+    /// [`HttpFingerprint`] bundle
+    /// (the JA4H FoxIO fingerprint + method / host / user-agent + flow key).
+    ///
+    /// The HTTP analogue of [`on_fingerprint`](Self::on_fingerprint): it
+    /// auto-registers the [`Http`](crate::protocol::builtin::Http) protocol if
+    /// it isn't already declared, then wraps an `on_ctx::<Http>` handler that
+    /// computes JA4H over each `HttpMessage::Request` and skips responses.
+    ///
+    /// JA4H is **FoxIO License 1.1** (non-commercial; patent pending), so this
+    /// method is gated behind the opt-in `ja4plus` feature (alongside JA4S /
+    /// JA4X) — commercial use requires a FoxIO OEM license.
+    ///
+    /// ```no_run
+    /// # #[cfg(all(feature = "http", feature = "ja4plus", feature = "tokio"))]
+    /// # fn demo() {
+    /// use netring::monitor::Monitor;
+    /// Monitor::builder()
+    ///     .interface("eth0")
+    ///     .on_http_fingerprint(|fp, _ctx| {
+    ///         println!("{} {:?} ja4h={}", fp.method.as_deref().unwrap_or("?"), fp.host, fp.ja4h);
+    ///         Ok(())
+    ///     });
+    /// # }
+    /// ```
+    #[cfg(all(feature = "http", feature = "ja4plus"))]
+    pub fn on_http_fingerprint<F>(mut self, handler: F) -> Self
+    where
+        F: Fn(&crate::monitor::fingerprint::HttpFingerprint, &mut Ctx<'_>) -> Result<()>
+            + Send
+            + Sync
+            + 'static,
+    {
+        use crate::monitor::fingerprint::HttpFingerprint;
+        use crate::protocol::builtin::Http;
+        // Register the HTTP protocol once (a second `.protocol::<Http>()` would
+        // install a duplicate session parser).
+        if !self
+            .declared_protocols
+            .contains_key(&std::any::TypeId::of::<Http>())
+        {
+            self = self.protocol::<Http>();
+        }
+        self.on_ctx::<Http>(
+            move |msg: &flowscope::http::HttpMessage, ctx: &mut Ctx<'_>| {
+                // JA4H is a *client* fingerprint — only requests carry it.
+                if let flowscope::http::HttpMessage::Request(req) = msg {
+                    let fp = HttpFingerprint::from_request(req, ctx.flow);
+                    handler(&fp, ctx)
+                } else {
+                    Ok(())
+                }
             },
         )
     }

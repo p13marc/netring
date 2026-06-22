@@ -16,6 +16,8 @@ pub use crate::monitor::{Handler, Monitor, MonitorBuilder};
 pub use crate::monitor::AsyncHandler;
 
 // ─── Protocol markers (built-in) ─────────────────────────────────
+#[cfg(all(feature = "http", feature = "ja4plus"))]
+pub use crate::monitor::HttpFingerprint;
 #[cfg(feature = "tls")]
 pub use crate::monitor::TlsFingerprint;
 #[cfg(feature = "dhcp")]

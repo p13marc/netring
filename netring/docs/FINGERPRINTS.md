@@ -1,23 +1,28 @@
-# TLS fingerprinting (JA3 / JA4 / JA4S)
+# Fingerprinting (JA3 / JA4 / JA4S / JA4X / JA4H)
 
-netring surfaces passive TLS fingerprints from the unencrypted handshake,
-computed by [flowscope](https://github.com/p13marc/flowscope)'s TLS
-observer. Fingerprints identify the **software stack** on each side of a
-connection without decryption — the basis for IOC matching, asset
-inventory, and anomaly detection.
+netring surfaces passive fingerprints from unencrypted protocol metadata,
+computed by [flowscope](https://github.com/p13marc/flowscope)'s observers.
+Fingerprints identify the **software stack** on each side of a connection
+without decryption — the basis for IOC matching, asset inventory, and
+anomaly detection.
 
 ## What each fingerprint identifies
 
 | Fingerprint | Source | Identifies | Format |
 |-------------|--------|-----------|--------|
-| **JA3**  | ClientHello | client stack (legacy, MD5) | 32 hex chars |
-| **JA4**  | ClientHello | client stack (FoxIO, sorted, GREASE-stripped) | `t13d1516h2_8daaf6152771_b186095e22b6` |
-| **JA4S** | ServerHello | **server** stack (FoxIO) | `t130200_1301_a56c5b993250` |
+| **JA3**  | TLS ClientHello | client stack (legacy, MD5) | 32 hex chars |
+| **JA4**  | TLS ClientHello | client stack (FoxIO, sorted, GREASE-stripped) | `t13d1516h2_8daaf6152771_b186095e22b6` |
+| **JA4S** | TLS ServerHello | **server** stack (FoxIO) | `t130200_1301_a56c5b993250` |
+| **JA4X** | TLS leaf X.509 cert | **certificate** issuer/subject/extension OIDs (FoxIO) | `a564fbbd9b48_5e2c5a8f4f17_8c0e391b6d8b` |
+| **JA4H** | HTTP request | client stack from the **request** (method/headers/cookies, FoxIO) | `ge11nn05enus_…_…_…` |
 
 JA4 and JA4S are complementary: JA4 says "what client software dialed
 out," JA4S says "what server software answered." A JA4 + JA4S **pair**
 pins a specific client↔server combination — far more specific than either
-alone.
+alone. **JA4X** fingerprints the server's leaf certificate (issuer / subject
+/ extension OID sets) — it survives across IPs/SNIs sharing a cert and is
+`None` for TLS 1.3 (the certificate is encrypted). **JA4H** is the HTTP
+analogue of JA4 — the client fingerprint derived from a plaintext request.
 
 ### JA4 vs JA4S construction
 
@@ -32,8 +37,8 @@ alone.
 ## Using fingerprints in a Monitor
 
 The ergonomic entry point is `on_fingerprint`, which bundles SNI, ALPN,
-JA3, JA4, JA4S, and the flow key into one [`TlsFingerprint`] per completed
-handshake:
+JA3, JA4, JA4S, JA4X, and the flow key into one [`TlsFingerprint`] per
+completed handshake:
 
 ```rust,no_run
 use netring::prelude::*;
@@ -44,6 +49,25 @@ let monitor = Monitor::builder()
         if let Some(ja4s) = &fp.ja4s {
             println!("server {ja4s} for sni={:?}", fp.sni);
         }
+        if let Some(ja4x) = &fp.ja4x {
+            println!("cert {ja4x}");
+        }
+        Ok(())
+    })
+    .build()?;
+```
+
+For the HTTP client fingerprint, `on_http_fingerprint` mirrors the same
+shape — it auto-registers the `Http` protocol and hands you an
+[`HttpFingerprint`] (JA4H + method / host / user-agent + flow key) per
+request:
+
+```rust,no_run
+use netring::prelude::*;
+let monitor = Monitor::builder()
+    .interface("eth0")
+    .on_http_fingerprint(|fp, _ctx| {
+        println!("{} host={:?} ja4h={}", fp.method.as_deref().unwrap_or("?"), fp.host, fp.ja4h);
         Ok(())
     })
     .build()?;
@@ -54,7 +78,7 @@ For the lower-level view, `on::<TlsHandshake>(|hs| …)` hands you the full
 ECH state). `TlsFingerprint` is the identity-focused subset.
 
 See [`examples/monitor/ja4_fingerprint.rs`](../examples/monitor/ja4_fingerprint.rs)
-for a JA4/JA4S blocklist IOC matcher.
+for a JA4 / JA4S / JA4X / JA4H blocklist IOC matcher.
 
 ## ⚠️ Licensing — JA4S is **not** BSD; read before using commercially
 
@@ -63,7 +87,7 @@ The licenses **differ by fingerprint**, and this matters:
 | Fingerprint | License | Commercial use |
 |---|---|---|
 | **JA3**, **JA4** (TLS *client*) | BSD-3-Clause, no patent | Free for any use, including resale |
-| **JA4S** (TLS *server*) | **FoxIO License 1.1**, **patent-pending** | Internal / academic **OK**; **vendors selling or providing value to paying customers need an OEM license from FoxIO** — *even without exposing the fingerprint* |
+| **JA4S** (TLS *server*), **JA4X** (cert), **JA4H** (HTTP) | **FoxIO License 1.1**, **patent-pending** | Internal / academic **OK**; **vendors selling or providing value to paying customers need an OEM license from FoxIO** — *even without exposing the fingerprint* |
 
 JA4S is part of the **JA4+** suite (JA4S/JA4H/JA4L/JA4X/JA4SSH/…), which
 FoxIO licenses under the [FoxIO License 1.1] and describes as patent-pending.
@@ -76,7 +100,8 @@ JA4S, get an OEM license. Read the FoxIO [License FAQ] first.
 **`ja4plus`** cargo feature (off by default, and excluded from the `monitor` /
 `all-parsers` umbrellas). The default TLS fingerprint surface — JA3 + JA4
 (client), enabled by the `tls` feature — is BSD-only / royalty-free, and the
-`TlsFingerprint.ja4s` field doesn't even exist without `ja4plus`. You opt into
+`TlsFingerprint.ja4s` / `.ja4x` fields (and the entire `HttpFingerprint` type +
+`on_http_fingerprint` hook for JA4H) don't even exist without `ja4plus`. You opt into
 the FoxIO-licensed JA4S consciously; enabling `ja4plus` pulls flowscope's
 `ja4plus` (FoxIO License 1.1) into your build.
 

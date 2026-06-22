@@ -41,15 +41,20 @@ let mut cap = Capture::builder()
 ### Three reception modes
 
 ```rust,no_run
-// 1. Flat iterator (zero-copy, blocks indefinitely)
-for pkt in cap.packets().take(1000) {
+// 1. Lending iterator (zero-copy, blocks indefinitely)
+//    Each packet borrows `&mut pkts`, so it cannot escape the loop body or
+//    be `.collect()`ed — that constraint is what makes the zero-copy view
+//    sound (it can't dangle into a recycled ring block).
+let mut pkts = cap.packets();
+while let Some(pkt) = pkts.next_packet() {
     let data: &[u8] = pkt.data();        // borrows from ring
     let _ts = pkt.timestamp();           // nanosecond kernel timestamp
     let _owned = pkt.to_owned();         // copy out for long-lived storage
 }
 
-// 2. Bounded iterator
-for pkt in cap.packets_for(Duration::from_secs(5)) { /* ... */ }
+// 2. Bounded lending iterator
+let mut pkts = cap.packets_for(Duration::from_secs(5));
+while let Some(_pkt) = pkts.next_packet() { /* ... */ }
 
 // 3. Block-level batches with sequence-gap detection
 while let Some(batch) = cap.next_batch_blocking(Duration::from_millis(100))? {

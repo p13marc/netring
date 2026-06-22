@@ -22,8 +22,12 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let mut cap = Capture::open(&iface)?;
     let mut writer = CaptureWriter::create(File::create(&out)?)?;
 
-    for pkt in cap.packets().take(count) {
+    let mut pkts = cap.packets();
+    let mut seen = 0;
+    while seen < count {
+        let Some(pkt) = pkts.next_packet() else { break };
         writer.write_packet(&pkt)?;
+        seen += 1;
     }
 
     eprintln!("Done. Inspect with `tcpdump -r {out}` or `wireshark {out}`.");

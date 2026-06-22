@@ -30,7 +30,8 @@
 //! prog.attach(cap.as_fd())?;
 //!
 //! // Only packets passing the eBPF filter arrive
-//! for pkt in cap.packets() {
+//! let mut pkts = cap.packets();
+//! while let Some(pkt) = pkts.next_packet() {
 //!     println!("{} bytes (filtered)", pkt.len());
 //! }
 //! ```

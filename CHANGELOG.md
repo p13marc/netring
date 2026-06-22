@@ -32,6 +32,16 @@
 
 ### Added
 
+- **OCSF Detection Finding sink** (issue
+  [#50](https://github.com/p13marc/netring/issues/50)) — `OcsfSink` (feature
+  `ocsf-sink`, prelude-exported) is an `AnomalySink` that maps each anomaly to
+  one Open Cybersecurity Schema Framework **Detection Finding** (`class_uid`
+  2004, `category_uid` 2) NDJSON line. Severity → OCSF `severity_id`, the 5-tuple
+  → `src_endpoint` / `dst_endpoint` + `connection_info`, observation labels →
+  `unmapped`; `metadata.version` is the OCSF schema version. Targetable by AWS
+  Security Lake, Splunk's OCSF add-on, and any OCSF 1.x consumer — point it at
+  `OcsfSink::stdout()` and pipe. Pulls only `serde_json`. Example `monitor_ocsf`
+  (IOC matches → OCSF findings).
 - **Threat-intel IOC matching** (issue
   [#48](https://github.com/p13marc/netring/issues/48)) — a new `IocSet`
   (`netring::monitor::ioc`, prelude-exported) holds indicators of compromise —

@@ -41,6 +41,7 @@ jobs:
             "--features lldp,cdp" \
             "--features asset,lldp" \
             "--features quic" \
+            "--features ocsf-sink" \
             "--features tokio,flow,dns,http"; do
             echo "::group::clippy -p netring $f"
             cargo clippy -p netring $f -- -D warnings
@@ -99,7 +100,7 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
       - name: Monitor lib tests (flow surface)
-        run: cargo test -p netring --features "tokio,channel,flow,parse,http,dns,tls,ja4plus,icmp,arp,ndp,lldp,cdp,asset,ad-protocols,asset-protocols,ssh,quic" --lib
+        run: cargo test -p netring --features "tokio,channel,flow,parse,http,dns,tls,ja4plus,icmp,arp,ndp,lldp,cdp,asset,ad-protocols,asset-protocols,ssh,quic,ocsf-sink" --lib
       # 0.25: the flow-gated *integration* tests that validate the new surface
       # but open NO live socket (pcap replay / build-time filter checks /
       # compile-time Send assertions) — these were never run in CI before. They
@@ -273,6 +274,8 @@ jobs:
       - run: cargo build -p netring --example monitor_quic_sni --features tokio,quic,emit
       # Issue #48: the IOC example needs dns/tls/http for all match arms.
       - run: cargo build -p netring --example monitor_ioc --features tokio,dns,tls,http
+      # Issue #50: the OCSF example needs ocsf-sink + dns/tls.
+      - run: cargo build -p netring --example monitor_ocsf --features tokio,ocsf-sink,dns,tls
       # Issue #28: the L2-discovery example needs lldp + cdp + emit.
       - run: cargo build -p netring --example monitor_l2_discovery --features tokio,lldp,cdp,emit
       # Issue #28: the asset-inventory example needs asset + the discovery sources.

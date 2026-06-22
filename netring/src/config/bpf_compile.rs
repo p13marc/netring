@@ -150,13 +150,11 @@ pub(crate) fn compile(builder: BpfFilterBuilder) -> Result<BpfFilter, BuildError
         if branch.fragments.is_empty() {
             return Err(BuildError::EmptyOr);
         }
-        // Nested OR/NOT inside an OR branch is rejected for now —
-        // keeps the linker simple. Users can flatten by hand.
+        // Nested OR/NOT inside an OR branch isn't lowerable by the flat-DNF
+        // linker. Issue #38: a dedicated, actionable error (was a misleading
+        // `ConflictingProtocols` that gave the user no hint to flatten).
         if !branch.or_branches.is_empty() || branch.negated {
-            return Err(BuildError::ConflictingProtocols {
-                a: "or() branch with its own or()/negate()",
-                b: "<flatten the chain>",
-            });
+            return Err(BuildError::NestedOr);
         }
         blocks.push(compile_block(&branch.fragments)?);
     }
@@ -1146,6 +1144,21 @@ mod tests {
             .tcp()
             .or(|b| b.udp().or(|b| b.icmp()));
         let err = compile(b).unwrap_err();
-        assert!(matches!(err, BuildError::ConflictingProtocols { .. }));
+        // Issue #38: a dedicated, actionable error (was `ConflictingProtocols`).
+        assert!(matches!(err, BuildError::NestedOr));
+        // The message must tell the user to flatten.
+        let msg = err.to_string();
+        assert!(msg.contains("flatten"), "actionable message: {msg}");
+    }
+
+    #[test]
+    fn flattened_or_chain_compiles() {
+        // The hand-flatten the NestedOr error suggests: a.or(b).or(c) — one OR
+        // level, three branches — compiles where the nested form is rejected.
+        let b = BpfFilterBuilder::new()
+            .tcp()
+            .or(|b| b.udp())
+            .or(|b| b.icmp());
+        assert!(compile(b).is_ok(), "flat OR-of-AND compiles");
     }
 }

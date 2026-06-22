@@ -220,6 +220,22 @@ pub enum BuildError {
     #[error("OR of zero branches")]
     EmptyOr,
 
+    /// An `or()` branch nested its own `or()` / `negate()`. The typed cBPF
+    /// compiler only handles a flat OR of AND-chains (disjunctive normal
+    /// form), so nested disjunction/negation inside a branch must be
+    /// flattened by hand. For example, rewrite
+    /// `a.or(|b| b.tcp().or(|c| c.udp()))` as
+    /// `a.or(|b| b.tcp()).or(|c| c.udp())` — one OR level, three branches.
+    /// (The runtime `.expr()` parser and the subscription `Predicate` AST do
+    /// this normalization for you; only the hand-built `BpfFilterBuilder`
+    /// chain hits this.)
+    #[error(
+        "nested or()/negate() inside an or() branch is not supported by the typed cBPF \
+         compiler — flatten to a single OR of AND-chains, e.g. `a.or(b).or(c)` not \
+         `a.or(|x| x.or(...))`"
+    )]
+    NestedOr,
+
     /// Forward jump distance exceeds the 8-bit relative offset
     /// representable in `BpfInsn::jt` / `jf`. Realistically only
     /// reachable with very wide OR chains.

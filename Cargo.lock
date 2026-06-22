@@ -683,6 +683,8 @@ dependencies = [
  "etherparse",
  "hex",
  "httparse",
+ "kerberos-parser",
+ "ldap-parser",
  "lru",
  "md-5",
  "serde",
@@ -1114,10 +1116,32 @@ dependencies = [
 ]
 
 [[package]]
+name = "kerberos-parser"
+version = "0.9.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "9b3b09400a16aeeb6a39dcfcd74f8e879e1327cabed1a13203ae5b0237eb8a87"
+dependencies = [
+ "der-parser",
+ "nom",
+ "rusticata-macros",
+]
+
+[[package]]
 name = "lazy_static"
 version = "1.5.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "bbd2bcb4c963f2ddae06a2efc7e9f3591312473c50c6685e1f298068316e66fe"
+
+[[package]]
+name = "ldap-parser"
+version = "0.5.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "db3356a3bd19e90fdc8b29f32c48e21b1bb1c5d129c1df7000ce3071c6f9e6b1"
+dependencies = [
+ "asn1-rs",
+ "rusticata-macros",
+ "thiserror 2.0.18",
+]
 
 [[package]]
 name = "leb128fmt"

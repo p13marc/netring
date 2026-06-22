@@ -32,6 +32,31 @@
 
 ### Added
 
+- **Lateral-movement / Active Directory protocol visibility**
+  ([#29](https://github.com/p13marc/netring/issues/29)) — four new opt-in L7
+  `Protocol` markers surfacing flowscope 0.18's passive AD parsers, each usable
+  via `.protocol::<P>()` + `.on::<P>(|msg, ctx| …)`:
+  - **`Smb`** (feature `smb`, TCP/445) → `flowscope::smb::SmbMessage`: admin-share
+    access (`tree_connect_is_admin_share`), abused named pipes
+    (`create_is_admin_named_pipe`), DCE-RPC binds incl. `drsuapi` (DCSync), and
+    `ntlm_auth` identity.
+  - **`Kerberos`** (feature `kerberos`, TCP/88) → `flowscope::kerberos::KerberosMessage`:
+    `kerberoast_suspect` (RC4-HMAC TGS-REQ, T1558.003), offered `etypes`, and
+    `error_code` brute-force/enumeration signals.
+  - **`Ldap`** (feature `ldap`, TCP/389) → `flowscope::ldap::LdapMessage`:
+    `search_attributes_spn_query` (GetUserSPNs / BloodHound), `bind_auth_kind`
+    (cleartext Simple vs SASL), and `result_code`.
+  - **`Rdp`** (feature `rdp`, TCP/3389) → `flowscope::rdp::RdpMessage`: the
+    `mstshash=` `cookie_username` (T1021.001) and NLA/CredSSP downgrades via the
+    negotiated `RdpProtocols`.
+
+  All four are `MessageProtocol`s (their flow lifecycle is the underlying TCP
+  flow). New umbrella feature `ad-protocols = [smb, kerberos, ldap, rdp]`, folded
+  into `all-parsers` and the `monitor` / `monitor-quickstart` umbrellas. Prelude
+  exports `Smb`/`Kerberos`/`Ldap`/`Rdp`. Example `monitor_lateral_movement`
+  emits an anomaly per high-signal indicator. Parsers are passive and
+  metadata-only (no payload decryption, no active probing). Kerberos surfaces the
+  TCP/88 path; UDP/88 is a follow-up.
 - **Reassembler-hardening config on `MonitorBuilder`**
   ([#34](https://github.com/p13marc/netring/issues/34)) — surfaces flowscope
   0.18's reassembler hardening: `tcp_overlap_policy(..)` (the Ptacek–Newsham

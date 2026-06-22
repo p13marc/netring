@@ -13,6 +13,14 @@ mod udp;
 mod dns;
 #[cfg(feature = "http")]
 mod http;
+#[cfg(feature = "kerberos")]
+mod kerberos;
+#[cfg(feature = "ldap")]
+mod ldap;
+#[cfg(feature = "rdp")]
+mod rdp;
+#[cfg(feature = "smb")]
+mod smb;
 #[cfg(feature = "tls")]
 mod tls;
 #[cfg(feature = "tls")]
@@ -26,6 +34,14 @@ pub use udp::Udp;
 pub use dns::Dns;
 #[cfg(feature = "http")]
 pub use http::Http;
+#[cfg(feature = "kerberos")]
+pub use kerberos::Kerberos;
+#[cfg(feature = "ldap")]
+pub use ldap::Ldap;
+#[cfg(feature = "rdp")]
+pub use rdp::Rdp;
+#[cfg(feature = "smb")]
+pub use smb::Smb;
 #[cfg(feature = "tls")]
 pub use tls::Tls;
 #[cfg(feature = "tls")]

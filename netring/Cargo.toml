@@ -120,7 +120,16 @@ arp = ["flow", "flowscope/arp"]
 # — the ARP sibling. Pulls flowscope's `ndp` module; parsed per-frame (ICMPv6
 # NS/NA) in the Monitor drain. See `MonitorBuilder::on_ndp` / `on_ndp_anomaly`.
 ndp = ["flow", "flowscope/ndp"]
-all-parsers = ["http", "dns", "tls", "icmp"]
+# Lateral-movement / Active Directory L7 protocols (issue #29). Each pulls the
+# matching flowscope 0.18 passive parser and surfaces a `Protocol` marker
+# (`Smb`/`Kerberos`/`Ldap`/`Rdp`) usable via `.protocol::<P>()` + `.on::<P>()`.
+smb = ["flow", "flowscope/smb"]
+kerberos = ["flow", "flowscope/kerberos"]
+ldap = ["flow", "flowscope/ldap"]
+rdp = ["flow", "flowscope/rdp"]
+# Umbrella for the lateral-movement protocol set.
+ad-protocols = ["smb", "kerberos", "ldap", "rdp"]
+all-parsers = ["http", "dns", "tls", "icmp", "smb", "kerberos", "ldap", "rdp"]
 
 # JA4S server fingerprint (`TlsFingerprint.ja4s`). Part of the JA4+ suite,
 # licensed under the FoxIO License 1.1 (source-available, non-commercial;
@@ -155,13 +164,13 @@ monitor-lite = ["tokio", "channel", "flow"]
 # Full Monitor + detector! experience for app users.
 monitor = [
     "tokio", "channel", "flow", "parse", "metrics",
-    "http", "dns", "tls", "icmp", "arp", "ndp",
+    "http", "dns", "tls", "icmp", "arp", "ndp", "ad-protocols",
     "emit", "serde",
 ]
 # Maximal app-tier umbrella (every shipped sink + parser + flowscope bonus).
 monitor-quickstart = [
     "tokio", "channel", "flow", "parse", "pcap", "metrics",
-    "http", "dns", "tls", "icmp", "arp", "ndp",
+    "http", "dns", "tls", "icmp", "arp", "ndp", "ad-protocols",
     "emit", "eve-sink", "file-hash", "serde",
 ]
 
@@ -491,6 +500,11 @@ required-features = ["tokio", "arp", "emit"]
 name = "monitor_ndp_watch"
 path = "examples/monitor/ndp_watch.rs"
 required-features = ["tokio", "ndp", "emit"]
+
+[[example]]
+name = "monitor_lateral_movement"
+path = "examples/monitor/lateral_movement.rs"
+required-features = ["tokio", "ad-protocols", "emit"]
 
 [[example]]
 name = "monitor_metrics_export"

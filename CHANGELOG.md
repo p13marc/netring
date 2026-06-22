@@ -32,6 +32,18 @@
 
 ### Added
 
+- **SSH protocol visibility + HASSH** (issue
+  [#30](https://github.com/p13marc/netring/issues/30), first Tier-2 protocol) —
+  new opt-in `Ssh` `Protocol` marker (feature `ssh`, TCP/22) surfacing
+  flowscope 0.18's passive SSH parser via `.protocol::<Ssh>()` + `.on::<Ssh>()`.
+  Each `flowscope::ssh::SshMessage` carries the version `Banner` and the decoded
+  `KexInit` algorithm name-lists with the **HASSH** handshake fingerprint
+  (`SshKexInit::hassh`, client or HASSHServer per `from_client`) — the SSH
+  analogue of JA3/JA4. Parsing stops at `SSH_MSG_NEWKEYS` (the rest is
+  encrypted). `Ssh` is a `MessageProtocol` (flow lifecycle is the underlying
+  TCP flow); folded into `all-parsers` + the `monitor` / `monitor-quickstart`
+  umbrellas; prelude exports `Ssh`. Example `monitor_ssh_hassh`. (The remaining
+  Tier-2 protocols — FTP/SMTP/SNMP/NTP/… — land as flowscope ships parsers.)
 - **JA4X + JA4H fingerprint surfacing** (issue
   [#31](https://github.com/p13marc/netring/issues/31)) — completes the FoxIO
   JA4+ family alongside the existing JA4 / JA4S:

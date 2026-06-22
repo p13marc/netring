@@ -151,6 +151,7 @@ headline API with kernel filter pushdown.
 | `monitor_arp_watch` | **L2 ARP** (feature `arp`): raw ARP feed via `on_arp` + spoof/binding-change anomalies via `on_arp_anomaly` (`SpoofSuspected`/`BindingChanged`), with `arp_allow`/`arp_warmup` |
 | `monitor_lateral_movement` | **Active Directory / lateral movement** (feature `ad-protocols`): `.protocol::<Smb\|Kerberos\|Ldap\|Rdp>()` + `.on::<P>()` emitting anomalies for admin-share/DCSync (SMB), Kerberoasting (Kerberos), GetUserSPNs (LDAP), and RDP target usernames |
 | `monitor_asset_discovery` | **Passive asset discovery** (feature `asset-protocols`): `.protocol::<Dhcp\|Ssdp\|Nbns>()` + `.on::<P>()` surfacing DHCP hostname/fingerprint, SSDP/UPnP firmware banners, and NetBIOS names — device facts leaked onto the LAN with no active probing |
+| `monitor_ssh_hassh` | **SSH visibility + HASSH** (feature `ssh`): `.protocol::<Ssh>()` + `.on::<Ssh>()` surfacing the SSH version banner and the HASSH / HASSHServer handshake fingerprints (the SSH analogue of JA3/JA4) |
 
 All take an `<iface>` argument (default `lo`) and an optional
 `<seconds>` deadline. Pair with `synthetic_traffic` for

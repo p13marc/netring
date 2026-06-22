@@ -137,10 +137,14 @@ ssdp = ["flow", "flowscope/ssdp"]
 netbios-ns = ["flow", "flowscope/netbios-ns"]
 # Umbrella for the asset-discovery protocol set.
 asset-protocols = ["dhcp", "ssdp", "netbios-ns"]
+# Tier-2 protocols (issue #30). SSH (+ HASSH fingerprint) is the first; more
+# (FTP/SMTP/SNMP/NTP/…) land here as flowscope ships parsers.
+ssh = ["flow", "flowscope/ssh"]
 all-parsers = [
     "http", "dns", "tls", "icmp",
     "smb", "kerberos", "ldap", "rdp",
     "dhcp", "ssdp", "netbios-ns",
+    "ssh",
 ]
 
 # JA4S server fingerprint (`TlsFingerprint.ja4s`). Part of the JA4+ suite,
@@ -176,13 +180,13 @@ monitor-lite = ["tokio", "channel", "flow"]
 # Full Monitor + detector! experience for app users.
 monitor = [
     "tokio", "channel", "flow", "parse", "metrics",
-    "http", "dns", "tls", "icmp", "arp", "ndp", "ad-protocols", "asset-protocols",
+    "http", "dns", "tls", "icmp", "arp", "ndp", "ad-protocols", "asset-protocols", "ssh",
     "emit", "serde",
 ]
 # Maximal app-tier umbrella (every shipped sink + parser + flowscope bonus).
 monitor-quickstart = [
     "tokio", "channel", "flow", "parse", "pcap", "metrics",
-    "http", "dns", "tls", "icmp", "arp", "ndp", "ad-protocols", "asset-protocols",
+    "http", "dns", "tls", "icmp", "arp", "ndp", "ad-protocols", "asset-protocols", "ssh",
     "emit", "eve-sink", "file-hash", "serde",
 ]
 
@@ -522,6 +526,11 @@ required-features = ["tokio", "ad-protocols", "emit"]
 name = "monitor_asset_discovery"
 path = "examples/monitor/asset_discovery.rs"
 required-features = ["tokio", "asset-protocols", "emit"]
+
+[[example]]
+name = "monitor_ssh_hassh"
+path = "examples/monitor/ssh_hassh.rs"
+required-features = ["tokio", "ssh", "emit"]
 
 [[example]]
 name = "monitor_metrics_export"

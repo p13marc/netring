@@ -27,6 +27,8 @@ mod rdp;
 mod smb;
 #[cfg(feature = "ssdp")]
 mod ssdp;
+#[cfg(feature = "ssh")]
+mod ssh;
 #[cfg(feature = "tls")]
 mod tls;
 #[cfg(feature = "tls")]
@@ -54,6 +56,8 @@ pub use rdp::Rdp;
 pub use smb::Smb;
 #[cfg(feature = "ssdp")]
 pub use ssdp::Ssdp;
+#[cfg(feature = "ssh")]
+pub use ssh::Ssh;
 #[cfg(feature = "tls")]
 pub use tls::Tls;
 #[cfg(feature = "tls")]

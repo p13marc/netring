@@ -32,6 +32,20 @@
 
 ### Added
 
+- **QUIC Initial visibility** (issue
+  [#14](https://github.com/p13marc/netring/issues/14)) — new opt-in `Quic`
+  `Protocol` marker (feature `quic`, UDP/443) surfacing flowscope 0.18's passive
+  QUIC Initial parser via `.protocol::<Quic>()` + `.on::<Quic>()`. As traffic
+  moves off TCP+TLS onto QUIC / HTTP-3, a TLS-SNI tap goes blind; this recovers
+  the destination hostname from the **QUIC Initial** packet, whose protection
+  secret is a published RFC 9001 §5.2 constant — so the ClientHello inside is
+  passive-readable **without any decryption keys**. Each
+  `flowscope::QuicInitial` exposes `version`, `sni`, and `alpn` (`["h3", …]`).
+  `Quic` is a `MessageProtocol` (flow lifecycle is the underlying UDP flow);
+  folded into `all-parsers` + the `monitor` / `monitor-quickstart` umbrellas;
+  prelude exports `Quic` + `QuicInitial` / `QuicVersion`. Example
+  `monitor_quic_sni`. (flowscope 0.18 exposes SNI/ALPN/version but no JA4 on
+  QUIC yet.)
 - **Passive asset inventory** (issue
   [#28](https://github.com/p13marc/netring/issues/28), parts 2b + 2c) — a
   MAC-keyed device inventory built from the discovery protocols, via two new

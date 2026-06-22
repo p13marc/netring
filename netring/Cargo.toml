@@ -151,11 +151,15 @@ asset-protocols = ["dhcp", "ssdp", "netbios-ns"]
 # Tier-2 protocols (issue #30). SSH (+ HASSH fingerprint) is the first; more
 # (FTP/SMTP/SNMP/NTP/…) land here as flowscope ships parsers.
 ssh = ["flow", "flowscope/ssh"]
+# QUIC Initial-packet visibility (issue #14) — on-path SNI/ALPN/version from the
+# passive-decryptable QUIC Initial, no decryption keys needed. `Quic` marker on
+# UDP/443 → `flowscope::QuicInitial`.
+quic = ["flow", "flowscope/quic"]
 all-parsers = [
     "http", "dns", "tls", "icmp",
     "smb", "kerberos", "ldap", "rdp",
     "dhcp", "ssdp", "netbios-ns",
-    "ssh",
+    "ssh", "quic",
 ]
 
 # JA4S server fingerprint (`TlsFingerprint.ja4s`). Part of the JA4+ suite,
@@ -191,13 +195,13 @@ monitor-lite = ["tokio", "channel", "flow"]
 # Full Monitor + detector! experience for app users.
 monitor = [
     "tokio", "channel", "flow", "parse", "metrics",
-    "http", "dns", "tls", "icmp", "arp", "ndp", "lldp", "cdp", "asset", "ad-protocols", "asset-protocols", "ssh",
+    "http", "dns", "tls", "icmp", "arp", "ndp", "lldp", "cdp", "asset", "ad-protocols", "asset-protocols", "ssh", "quic",
     "emit", "serde",
 ]
 # Maximal app-tier umbrella (every shipped sink + parser + flowscope bonus).
 monitor-quickstart = [
     "tokio", "channel", "flow", "parse", "pcap", "metrics",
-    "http", "dns", "tls", "icmp", "arp", "ndp", "lldp", "cdp", "asset", "ad-protocols", "asset-protocols", "ssh",
+    "http", "dns", "tls", "icmp", "arp", "ndp", "lldp", "cdp", "asset", "ad-protocols", "asset-protocols", "ssh", "quic",
     "emit", "eve-sink", "file-hash", "serde",
 ]
 
@@ -542,6 +546,11 @@ required-features = ["tokio", "asset-protocols", "emit"]
 name = "monitor_ssh_hassh"
 path = "examples/monitor/ssh_hassh.rs"
 required-features = ["tokio", "ssh", "emit"]
+
+[[example]]
+name = "monitor_quic_sni"
+path = "examples/monitor/quic_sni.rs"
+required-features = ["tokio", "quic", "emit"]
 
 [[example]]
 name = "monitor_l2_discovery"

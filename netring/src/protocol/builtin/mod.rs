@@ -21,6 +21,8 @@ mod kerberos;
 mod ldap;
 #[cfg(feature = "netbios-ns")]
 mod nbns;
+#[cfg(feature = "quic")]
+mod quic;
 #[cfg(feature = "rdp")]
 mod rdp;
 #[cfg(feature = "smb")]
@@ -50,6 +52,8 @@ pub use kerberos::Kerberos;
 pub use ldap::Ldap;
 #[cfg(feature = "netbios-ns")]
 pub use nbns::Nbns;
+#[cfg(feature = "quic")]
+pub use quic::Quic;
 #[cfg(feature = "rdp")]
 pub use rdp::Rdp;
 #[cfg(feature = "smb")]

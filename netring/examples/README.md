@@ -150,6 +150,7 @@ headline API with kernel filter pushdown.
 | `monitor_label_table` | `LabelTable::new().set(...)` + `MonitorBuilder::label_table` — custom well-known port → app-label map feeding `on_bandwidth` |
 | `monitor_arp_watch` | **L2 ARP** (feature `arp`): raw ARP feed via `on_arp` + spoof/binding-change anomalies via `on_arp_anomaly` (`SpoofSuspected`/`BindingChanged`), with `arp_allow`/`arp_warmup` |
 | `monitor_lateral_movement` | **Active Directory / lateral movement** (feature `ad-protocols`): `.protocol::<Smb\|Kerberos\|Ldap\|Rdp>()` + `.on::<P>()` emitting anomalies for admin-share/DCSync (SMB), Kerberoasting (Kerberos), GetUserSPNs (LDAP), and RDP target usernames |
+| `monitor_asset_discovery` | **Passive asset discovery** (feature `asset-protocols`): `.protocol::<Dhcp\|Ssdp\|Nbns>()` + `.on::<P>()` surfacing DHCP hostname/fingerprint, SSDP/UPnP firmware banners, and NetBIOS names — device facts leaked onto the LAN with no active probing |
 
 All take an `<iface>` argument (default `lo`) and an optional
 `<seconds>` deadline. Pair with `synthetic_traffic` for

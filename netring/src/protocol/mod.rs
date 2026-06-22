@@ -21,6 +21,8 @@ pub use event_typed::{
 // the intermediate `::builtin::` path). The markers also live at
 // `netring::protocol::builtin::*` and `netring::prelude::*` for
 // users who prefer those paths.
+#[cfg(feature = "dhcp")]
+pub use builtin::Dhcp;
 #[cfg(feature = "dns")]
 pub use builtin::Dns;
 #[cfg(feature = "http")]
@@ -29,10 +31,14 @@ pub use builtin::Http;
 pub use builtin::Kerberos;
 #[cfg(feature = "ldap")]
 pub use builtin::Ldap;
+#[cfg(feature = "netbios-ns")]
+pub use builtin::Nbns;
 #[cfg(feature = "rdp")]
 pub use builtin::Rdp;
 #[cfg(feature = "smb")]
 pub use builtin::Smb;
+#[cfg(feature = "ssdp")]
+pub use builtin::Ssdp;
 pub use builtin::{Icmp, Tcp, Udp};
 #[cfg(feature = "tls")]
 pub use builtin::{Tls, TlsHandshake};

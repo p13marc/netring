@@ -23,7 +23,10 @@ fn main() -> Result<(), netring::Error> {
 
     // Measure inter-packet latency via timestamps
     let mut prev_nsec: Option<u64> = None;
-    for pkt in cap.packets().take(100) {
+    let mut pkts = cap.packets();
+    let mut seen = 0;
+    while seen < 100 {
+        let Some(pkt) = pkts.next_packet() else { break };
         let ts = pkt.timestamp();
         let now_nsec = ts.sec as u64 * 1_000_000_000 + ts.nsec as u64;
 
@@ -40,6 +43,7 @@ fn main() -> Result<(), netring::Error> {
             println!("[{}.{:09}] {} bytes  (first)", ts.sec, ts.nsec, pkt.len());
         }
         prev_nsec = Some(now_nsec);
+        seen += 1;
     }
 
     Ok(())

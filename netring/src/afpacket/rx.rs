@@ -24,9 +24,10 @@ use crate::traits::PacketSource;
 /// # Examples
 ///
 /// ```no_run
-/// // Simplest form — captures forever, blocks on each iteration.
+/// // Simplest form — a lending loop, blocks on each packet.
 /// let mut cap = netring::Capture::open("lo")?;
-/// for pkt in cap.packets().take(10) {
+/// let mut pkts = cap.packets();
+/// while let Some(pkt) = pkts.next_packet() {
 ///     println!("{} bytes", pkt.len());
 /// }
 /// # Ok::<(), netring::Error>(())
@@ -118,21 +119,30 @@ impl Capture {
     /// Blocking iterator over received packets.
     ///
     /// Handles block advancement and retirement automatically. Each
-    /// [`Packet`] is a zero-copy view into the mmap ring. The iterator
-    /// blocks (using the configured [`poll_timeout`](CaptureBuilder::poll_timeout))
-    /// and retries indefinitely; it returns `None` only on I/O error —
-    /// inspect via [`Packets::take_error`].
+    /// [`Packets`] is a **lending iterator** — pull each packet with
+    /// [`next_packet`](Packets::next_packet) (or [`for_each`](Packets::for_each)).
+    /// It blocks (using the configured
+    /// [`poll_timeout`](CaptureBuilder::poll_timeout)) and retries indefinitely;
+    /// `next_packet` returns `None` only on I/O error — inspect via
+    /// [`Packets::take_error`].
     ///
-    /// # Soundness — do not collect across blocks
+    /// # Soundness
     ///
-    /// Each [`Packet`] borrows from the *current* ring block. The iterator
-    /// returns a block to the kernel before yielding packets from the next
-    /// block, so any `Packet` retained from a prior block becomes a dangling
-    /// reference. Use [`Packet::to_owned()`] when you need to keep a packet:
+    /// Each [`Packet`] is a zero-copy view into the *current* ring block, which
+    /// is recycled to the kernel on the next call. `next_packet` borrows
+    /// `&mut self`, so the borrow checker forbids holding two packets at once or
+    /// collecting them into a `Vec` — the constraint that makes it sound. (This
+    /// replaced an earlier `Iterator` impl whose `.collect()` could dangle into
+    /// recycled blocks.) [`to_owned`](Packet::to_owned) a packet to retain it:
     ///
     /// ```no_run
     /// # let mut cap = netring::Capture::open("lo").unwrap();
-    /// let owned: Vec<_> = cap.packets().take(100).map(|p| p.to_owned()).collect();
+    /// let mut owned = Vec::new();
+    /// let mut pkts = cap.packets();
+    /// while owned.len() < 100 {
+    ///     let Some(pkt) = pkts.next_packet() else { break };
+    ///     owned.push(pkt.to_owned());
+    /// }
     /// ```
     ///
     /// # Bounded iteration
@@ -397,17 +407,59 @@ impl<'cap> Packets<'cap> {
     }
 }
 
-impl<'cap> Iterator for Packets<'cap> {
-    type Item = Packet<'cap>;
-
-    fn next(&mut self) -> Option<Packet<'cap>> {
+impl<'cap> Packets<'cap> {
+    /// Lend the next captured packet, borrowed from the mmap ring.
+    ///
+    /// This is a **lending** accessor, not [`Iterator`]: the returned
+    /// [`Packet`] borrows `&mut self`, so the borrow checker forbids holding
+    /// two at once or collecting them — exactly the constraint that makes it
+    /// sound. The previous packet's block is recycled to the kernel on the next
+    /// call, so a borrowed packet must not outlive that call; the `&mut self`
+    /// borrow enforces this at compile time.
+    ///
+    /// Copy a packet out of the ring with [`Packet::to_owned`] if you need to
+    /// retain it past the next call. For the high-throughput zero-copy path use
+    /// [`Capture::next_batch`]; for a simple processing loop use
+    /// [`Self::for_each`].
+    ///
+    /// ```no_run
+    /// # use netring::Capture;
+    /// # fn f(cap: &mut Capture) {
+    /// let mut pkts = cap.packets();
+    /// while let Some(pkt) = pkts.next_packet() {
+    ///     println!("{} bytes at {:?}", pkt.len(), pkt.timestamp());
+    /// }
+    /// # }
+    /// ```
+    ///
+    /// Retaining a packet across calls is a **compile error** (the old
+    /// `Iterator`-based `.collect()` was an unsoundness — it let packets escape
+    /// into recycled ring blocks):
+    ///
+    /// ```compile_fail
+    /// # use netring::Capture;
+    /// # fn f(cap: &mut Capture) {
+    /// let mut pkts = cap.packets();
+    /// let a = pkts.next_packet();
+    /// let b = pkts.next_packet(); // error: cannot borrow `pkts` while `a` lives
+    /// let _ = (a, b);
+    /// # }
+    /// ```
+    pub fn next_packet(&mut self) -> Option<Packet<'_>> {
         loop {
             if let Some(it) = self.iter.as_mut() {
                 if let Some(pkt) = it.next() {
-                    // SAFETY: see the lifetime erasure note in the
-                    // PacketBatch transmute below — the transmute back
-                    // to 'cap re-imposes the right upper bound.
-                    let pkt: Packet<'cap> = unsafe { std::mem::transmute(pkt) };
+                    // SAFETY: `pkt` borrows the `'static`-erased batch stored in
+                    // `self.batch` (see the `PacketBatch` transmute below). We
+                    // re-impose the **`&mut self`** lifetime as the upper bound:
+                    // the returned packet cannot outlive this `&mut self` borrow,
+                    // and `self.batch` is not recycled until the next
+                    // `next_packet`/`for_each` call — which needs `&mut self`
+                    // again, so it can't run while this packet is alive. This is
+                    // the lending-iterator pattern; binding to `&mut self`
+                    // (instead of the old, unsound `'cap`) is what closes the
+                    // use-after-free that `.collect()` could trigger.
+                    let pkt: Packet<'_> = unsafe { std::mem::transmute(pkt) };
                     return Some(pkt);
                 }
                 // BatchIter exhausted — drop the batch before requesting
@@ -458,6 +510,25 @@ impl<'cap> Iterator for Packets<'cap> {
                     return None;
                 }
             }
+        }
+    }
+
+    /// Process every packet (until the deadline / a spurious empty wake ends
+    /// the run) with a closure — ergonomic internal iteration that keeps the
+    /// zero-copy borrow without the lending-loop boilerplate. The closure
+    /// receives each [`Packet`] bounded to that call, so it can read or
+    /// [`to_owned`](Packet::to_owned) it but not retain the borrow.
+    ///
+    /// ```no_run
+    /// # use netring::Capture;
+    /// # fn f(cap: &mut Capture) {
+    /// let mut count = 0u64;
+    /// cap.packets().for_each(|pkt| { count += pkt.len() as u64; });
+    /// # }
+    /// ```
+    pub fn for_each(&mut self, mut f: impl FnMut(Packet<'_>)) {
+        while let Some(pkt) = self.next_packet() {
+            f(pkt);
         }
     }
 }

@@ -17,14 +17,20 @@ fn main() -> Result<(), netring::Error> {
         .ignore_outgoing(true)
         .build()?;
 
-    for pkt in cap.packets().take(100) {
-        println!(
-            "[{}.{:09}] {} bytes (wire: {})",
-            pkt.timestamp().sec,
-            pkt.timestamp().nsec,
-            pkt.len(),
-            pkt.original_len(),
-        );
+    {
+        let mut pkts = cap.packets();
+        let mut seen = 0;
+        while seen < 100 {
+            let Some(pkt) = pkts.next_packet() else { break };
+            println!(
+                "[{}.{:09}] {} bytes (wire: {})",
+                pkt.timestamp().sec,
+                pkt.timestamp().nsec,
+                pkt.len(),
+                pkt.original_len(),
+            );
+            seen += 1;
+        }
     }
 
     let stats = cap.stats()?;

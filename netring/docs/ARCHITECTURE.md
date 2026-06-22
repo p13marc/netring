@@ -39,12 +39,13 @@ let mut cap = Capture::builder()             // configured
     .promiscuous(true)
     .build()?;
 
-for pkt in cap.packets().take(100) { /* zero-copy */ }
+let mut pkts = cap.packets();
+while let Some(pkt) = pkts.next_packet() { /* zero-copy */ }
 // or
 while let Some(batch) = cap.next_batch_blocking(timeout)? { /* batches */ }
 ```
 
-The same type exposes both the flat iterator (`packets()`) and the
+The same type exposes both the lending iterator (`packets()`) and the
 batch-level access (`next_batch`, `next_batch_blocking`). Old user code
 referencing `AfPacketRx` / `AfPacketTx` still compiles via deprecated type
 aliases.

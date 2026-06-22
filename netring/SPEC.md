@@ -186,7 +186,8 @@ for packet in cap.packets() {
 ///
 /// ```no_run
 /// let mut cap = netring::Capture::new("lo")?;
-/// for pkt in cap.packets().take(10) {
+/// let mut pkts = cap.packets();
+/// while let Some(pkt) = pkts.next_packet() {
 ///     println!("{} bytes", pkt.len());
 /// }
 /// # Ok::<(), netring::Error>(())
@@ -1072,10 +1073,12 @@ fn main() -> Result<(), netring::Error> {
         .ignore_outgoing(true)
         .build()?;
 
-    for pkt in cap.packets().take(1000) {
+    let mut pkts = cap.packets();
+    while let Some(pkt) = pkts.next_packet() {
         println!("[{}.{:09}] {} bytes",
             pkt.timestamp().sec, pkt.timestamp().nsec, pkt.len());
     }
+    drop(pkts);
 
     println!("{:?}", cap.stats()?);
     Ok(())
@@ -1132,7 +1135,8 @@ fn main() -> Result<(), netring::Error> {
                 .build()
                 .unwrap();
 
-            for pkt in cap.packets() {
+            let mut pkts = cap.packets();
+            while let Some(pkt) = pkts.next_packet() {
                 process(pkt.data());
             }
         })
@@ -1199,8 +1203,10 @@ let prog: &mut SocketFilter = bpf.program_mut("my_filter")?.try_into()?;
 prog.load()?;
 prog.attach(cap.as_fd())?;  // AsFd — no raw fd needed
 
-for pkt in cap.packets() {
+let mut pkts = cap.packets();
+while let Some(pkt) = pkts.next_packet() {
     // Only packets passing the eBPF filter arrive here
+    let _ = pkt;
 }
 ```
 

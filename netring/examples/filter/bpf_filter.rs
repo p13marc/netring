@@ -36,14 +36,20 @@ fn main() -> Result<(), netring::Error> {
 
     eprintln!("Capturing 50 matching packets... (Ctrl-C to stop early)");
 
-    for pkt in cap.packets().take(50) {
-        println!(
-            "[{}.{:09}] {} bytes (wire: {})",
-            pkt.timestamp().sec,
-            pkt.timestamp().nsec,
-            pkt.len(),
-            pkt.original_len(),
-        );
+    {
+        let mut pkts = cap.packets();
+        let mut seen = 0;
+        while seen < 50 {
+            let Some(pkt) = pkts.next_packet() else { break };
+            println!(
+                "[{}.{:09}] {} bytes (wire: {})",
+                pkt.timestamp().sec,
+                pkt.timestamp().nsec,
+                pkt.len(),
+                pkt.original_len(),
+            );
+            seen += 1;
+        }
     }
 
     let stats = cap.stats()?;

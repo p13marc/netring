@@ -15,8 +15,12 @@
 //! let mut cap = Capture::open("eth0")?;
 //! let mut writer = CaptureWriter::create(File::create("out.pcap")?)?;
 //!
-//! for pkt in cap.packets().take(1000) {
+//! let mut pkts = cap.packets();
+//! let mut n = 0;
+//! while n < 1000 {
+//!     let Some(pkt) = pkts.next_packet() else { break };
 //!     writer.write_packet(&pkt)?;
+//!     n += 1;
 //! }
 //! # Ok(()) }
 //! ```

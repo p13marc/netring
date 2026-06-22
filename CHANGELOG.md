@@ -7,6 +7,22 @@
 
 ### Fixed
 
+- **`Capture::packets()` use-after-free soundness hole** (**breaking**;
+  [#35](https://github.com/p13marc/netring/issues/35)) — `Packets` was an
+  `Iterator<Item = Packet<'cap>>`, decoupling each packet's lifetime from the
+  `&mut self` borrow that produced it. That let safe code `.collect()` (or
+  otherwise retain) packets that borrow into mmap ring blocks the kernel recycles
+  on the next pull — a real dangling read. `Packets` is now a **lending
+  iterator**: the `Iterator` impl is removed in favor of
+  `Packets::next_packet(&mut self) -> Option<Packet<'_>>` (plus
+  `Packets::for_each(|pkt| ..)` for the common loop). Binding each packet to the
+  per-call `&mut self` borrow makes holding two packets, or collecting them,
+  a compile error — closing the hole with zero runtime cost. **Migration:**
+  replace `for pkt in cap.packets() { .. }` with
+  `let mut pkts = cap.packets(); while let Some(pkt) = pkts.next_packet() { .. }`
+  (or `cap.packets().for_each(|pkt| ..)`); to retain packets, `pkt.to_owned()`
+  into a `Vec` inside the loop. `packets_for` / `packets_until` change the same
+  way. The zero-copy batch path (`Capture::next_batch`) is unaffected.
 - **BPF nested-OR error UX** ([#38](https://github.com/p13marc/netring/issues/38))
   — the typed cBPF compiler rejected a nested `or()`/`negate()` inside an `or()`
   branch with a misleading `ConflictingProtocols` error that gave no hint. It

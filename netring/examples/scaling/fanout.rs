@@ -41,9 +41,13 @@ fn main() -> Result<(), netring::Error> {
                     .build()
                     .expect("build capture");
 
-                for pkt in cap.packets().take(100) {
+                let mut pkts = cap.packets();
+                let mut seen = 0;
+                while seen < 100 {
+                    let Some(pkt) = pkts.next_packet() else { break };
                     let _ = pkt.data();
                     counter.fetch_add(1, Ordering::Relaxed);
+                    seen += 1;
                 }
             })
         })

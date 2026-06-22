@@ -17,7 +17,12 @@ fn packets_for_terminates_on_idle_lo() {
 
     let target = Duration::from_millis(200);
     let start = Instant::now();
-    let _count = cap.packets_for(target).count();
+    let mut pkts = cap.packets_for(target);
+    let mut count = 0u64;
+    while pkts.next_packet().is_some() {
+        count += 1;
+    }
+    let _ = count;
     let elapsed = start.elapsed();
 
     // Allow a generous wall-clock margin (CI runners are noisy).
@@ -41,8 +46,8 @@ fn packets_until_past_deadline_yields_none() {
         .build()
         .expect("build capture");
 
-    // Deadline already in the past — should return None on first next().
+    // Deadline already in the past — should return None on first pull.
     let past = Instant::now() - Duration::from_secs(1);
-    let mut iter = cap.packets_until(past);
-    assert!(iter.next().is_none());
+    let mut pkts = cap.packets_until(past);
+    assert!(pkts.next_packet().is_none());
 }

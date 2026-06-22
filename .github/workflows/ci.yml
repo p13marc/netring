@@ -104,7 +104,7 @@ jobs:
           cargo test -p netring --features "tokio,channel,flow,parse,pcap,http,dns,tls,ja4plus,arp" \
             --test monitor_replay --test monitor_kernel_prefilter --test monitor_send \
             --test monitor_run_until_idle --test monitor_drain_timeout --test monitor_name_in_ctx \
-            --test arp_replay
+            --test arp_replay --test monitor_reassembler_config
 
   # ── Integration tests (need CAP_NET_RAW) ──────────────────────────────────
   test-integration:

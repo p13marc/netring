@@ -18,6 +18,8 @@ pub use crate::monitor::AsyncHandler;
 // ─── Protocol markers (built-in) ─────────────────────────────────
 #[cfg(feature = "tls")]
 pub use crate::monitor::TlsFingerprint;
+#[cfg(feature = "dhcp")]
+pub use crate::protocol::builtin::Dhcp;
 #[cfg(feature = "dns")]
 pub use crate::protocol::builtin::Dns;
 #[cfg(feature = "http")]
@@ -27,10 +29,14 @@ pub use crate::protocol::builtin::Icmp;
 pub use crate::protocol::builtin::Kerberos;
 #[cfg(feature = "ldap")]
 pub use crate::protocol::builtin::Ldap;
+#[cfg(feature = "netbios-ns")]
+pub use crate::protocol::builtin::Nbns;
 #[cfg(feature = "rdp")]
 pub use crate::protocol::builtin::Rdp;
 #[cfg(feature = "smb")]
 pub use crate::protocol::builtin::Smb;
+#[cfg(feature = "ssdp")]
+pub use crate::protocol::builtin::Ssdp;
 pub use crate::protocol::builtin::{Tcp, Udp};
 #[cfg(feature = "tls")]
 pub use crate::protocol::builtin::{Tls, TlsHandshake};

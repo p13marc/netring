@@ -32,6 +32,29 @@
 
 ### Added
 
+- **Asset-discovery protocol visibility** (issue
+  [#28](https://github.com/p13marc/netring/issues/28), part 1) — three new
+  opt-in L7 datagram `Protocol` markers surfacing flowscope 0.18's passive
+  broadcast/discovery parsers, usable via `.protocol::<P>()` + `.on::<P>()`:
+  - **`Dhcp`** (feature `dhcp`, UDP/67–68) → `flowscope::dhcp::DhcpMessage`:
+    `client_mac` → `hostname` (opt 12), `vendor_class` (opt 60), and the
+    Fingerbank-style `fingerprint()` (opt 55 + opt 60) — the richest single
+    asset-discovery signal on a LAN.
+  - **`Ssdp`** (feature `ssdp`, UDP/1900) → `flowscope::ssdp::SsdpMessage`:
+    UPnP `server` banner, `location` URL, `usn` / `st` service type.
+  - **`Nbns`** (feature `netbios-ns`, UDP/137) → `flowscope::netbios_ns::NbnsMessage`:
+    `queried_name` / `name_suffix` and `answer_addresses` (legacy Windows
+    hostnames; also the NBT-NS poisoning channel).
+
+  All three are `MessageProtocol`s (the flow lifecycle is the underlying UDP
+  flow). New umbrella feature `asset-protocols = [dhcp, ssdp, netbios-ns]`,
+  folded into `all-parsers` and the `monitor` / `monitor-quickstart`
+  umbrellas. Prelude exports `Dhcp`/`Ssdp`/`Nbns`. Example
+  `monitor_asset_discovery`. Parsers are passive and metadata-only.
+  (mDNS, the L2 LLDP/CDP parsers, and the `asset::Inventory` aggregator that
+  ties all sources to a MAC-keyed device record are a follow-up — mDNS yields
+  the same `DnsMessage` as `Dns`, so it belongs in the absorb-based inventory
+  path, not a type-dispatched `on::<P>` marker.)
 - **Lateral-movement / Active Directory protocol visibility**
   ([#29](https://github.com/p13marc/netring/issues/29)) — four new opt-in L7
   `Protocol` markers surfacing flowscope 0.18's passive AD parsers, each usable

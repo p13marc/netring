@@ -34,6 +34,7 @@ jobs:
             "--features af-xdp" \
             "--features monitor-lite" \
             "--features arp" \
+            "--features ndp" \
             "--features tokio,flow,dns,http"; do
             echo "::group::clippy -p netring $f"
             cargo clippy -p netring $f -- -D warnings
@@ -92,7 +93,7 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
       - name: Monitor lib tests (flow surface)
-        run: cargo test -p netring --features "tokio,channel,flow,parse,http,dns,tls,icmp,arp" --lib
+        run: cargo test -p netring --features "tokio,channel,flow,parse,http,dns,tls,icmp,arp,ndp" --lib
       # 0.25: the flow-gated *integration* tests that validate the new surface
       # but open NO live socket (pcap replay / build-time filter checks /
       # compile-time Send assertions) — these were never run in CI before. They
@@ -101,10 +102,10 @@ jobs:
       # (incl. the effect path). Cap-free, so they run here, not in the root job.
       - name: Monitor integration tests (cap-free)
         run: |
-          cargo test -p netring --features "tokio,channel,flow,parse,pcap,http,dns,tls,ja4plus,arp" \
+          cargo test -p netring --features "tokio,channel,flow,parse,pcap,http,dns,tls,ja4plus,arp,ndp" \
             --test monitor_replay --test monitor_kernel_prefilter --test monitor_send \
             --test monitor_run_until_idle --test monitor_drain_timeout --test monitor_name_in_ctx \
-            --test arp_replay --test monitor_reassembler_config
+            --test arp_replay --test ndp_replay --test monitor_reassembler_config
 
   # ── Integration tests (need CAP_NET_RAW) ──────────────────────────────────
   test-integration:
@@ -254,6 +255,7 @@ jobs:
       - run: cargo build -p netring --examples --features tokio,channel
       # Issue #12: the ARP example needs the `arp` + `emit` features.
       - run: cargo build -p netring --example monitor_arp_watch --features tokio,arp,emit
+      - run: cargo build -p netring --example monitor_ndp_watch --features tokio,ndp,emit
 
   # ── License + advisory checks (cargo-deny) ───────────────────────────────
   deny:

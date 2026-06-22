@@ -53,6 +53,7 @@ use crate::protocol::event_typed::{Event, Tick};
 // L2 ARP visibility + spoof/binding-change detection (feature `arp`).
 #[cfg(feature = "arp")]
 pub mod arp;
+// L3 IPv6 Neighbor Discovery — the ARP sibling (feature `ndp`).
 pub mod async_handler;
 pub(crate) mod backend;
 pub mod dispatcher;
@@ -61,6 +62,8 @@ pub mod effect;
 pub mod fingerprint;
 pub mod handler;
 pub mod health;
+#[cfg(feature = "ndp")]
+pub mod ndp;
 pub mod registry;
 pub mod run;
 pub mod telemetry;
@@ -75,6 +78,8 @@ pub use effect::{EffectHandler, Effects};
 pub use fingerprint::TlsFingerprint;
 pub use handler::{CtxOnly, Handler, PayloadCtx, PayloadOnly};
 pub use health::{MonitorHealth, MonitorHealthSnapshot};
+#[cfg(feature = "ndp")]
+pub use ndp::{NdpAnomaly, NdpAnomalyKind};
 pub use registry::{HandlerRegistry, ProtocolSlot, TypedBroadcastProtocolSlot, TypedProtocolSlot};
 pub use telemetry::{CaptureHealth, CaptureTelemetry};
 pub use tick::TickRegistration;
@@ -262,6 +267,10 @@ pub struct Monitor {
     /// the ARP parse.
     #[cfg(feature = "arp")]
     pub(crate) arp_watch: Option<arp::ArpWatch>,
+    /// Issue #24: live NDP detector state (the ARP sibling). `Some` when any
+    /// NDP hook was registered.
+    #[cfg(feature = "ndp")]
+    pub(crate) ndp_watch: Option<ndp::NdpWatch>,
 }
 
 /// How the run loop reacts when a handler (detector / sink / async handler)
@@ -651,6 +660,18 @@ pub struct MonitorBuilder {
     /// [`arp::ArpWatch`] and arms the per-frame parse.
     #[cfg(feature = "arp")]
     arp_enabled: bool,
+    /// Issue #24: NDP detector config (the ARP sibling).
+    #[cfg(feature = "ndp")]
+    ndp_config: ndp::NdpConfig,
+    /// Issue #24: `on_ndp` raw-message handlers.
+    #[cfg(feature = "ndp")]
+    ndp_msg_handlers: Vec<ndp::NdpMsgHandler>,
+    /// Issue #24: `on_ndp_anomaly` derived-anomaly handlers.
+    #[cfg(feature = "ndp")]
+    ndp_anomaly_handlers: Vec<ndp::NdpAnomalyHandler>,
+    /// Issue #24: set once any NDP hook is registered.
+    #[cfg(feature = "ndp")]
+    ndp_enabled: bool,
 }
 
 impl MonitorBuilder {
@@ -1489,6 +1510,75 @@ impl MonitorBuilder {
         self
     }
 
+    /// Issue #24: observe every parsed [`NdpMessage`](flowscope::NdpMessage)
+    /// (IPv6 Neighbor Solicitation / Advertisement) — the raw NDP feed. The
+    /// IPv6 sibling of [`Self::on_arp`]. Parsed per-frame in the drain (walk
+    /// the layers to ICMPv6 types 135/136); arming an NDP hook narrows the
+    /// kernel prefilter to ICMPv6 (proto 58) rather than capture-all.
+    #[cfg(feature = "ndp")]
+    pub fn on_ndp<F>(mut self, handler: F) -> Self
+    where
+        F: Fn(&flowscope::NdpMessage, &mut Ctx<'_>) -> Result<()> + Send + 'static,
+    {
+        self.ndp_enabled = true;
+        self.ndp_msg_handlers.push(Box::new(handler));
+        self
+    }
+
+    /// Issue #24: receive derived [`NdpAnomaly`]s — the IPv6 neighbour security
+    /// signal. `SpoofSuspected` (unsolicited override NA carrying a MAC — the
+    /// SLAAC-poisoning vector) + `BindingChanged`; opt-in `Unsolicited` /
+    /// `NewBinding`. The IPv6 sibling of [`Self::on_arp_anomaly`].
+    #[cfg(feature = "ndp")]
+    pub fn on_ndp_anomaly<F>(mut self, handler: F) -> Self
+    where
+        F: Fn(&ndp::NdpAnomaly, &mut Ctx<'_>) -> Result<()> + Send + 'static,
+    {
+        self.ndp_enabled = true;
+        self.ndp_anomaly_handlers.push(Box::new(handler));
+        self
+    }
+
+    /// Issue #24: trust an `IPv6 → MAC` binding — it never raises an NDP
+    /// anomaly (gateways, known SLAAC hosts). Arms NDP detection.
+    #[cfg(feature = "ndp")]
+    pub fn ndp_allow(mut self, ip: std::net::Ipv6Addr, mac: flowscope::MacAddr) -> Self {
+        self.ndp_enabled = true;
+        self.ndp_config.allow.insert((ip, mac));
+        self
+    }
+
+    /// Issue #24: warm-up window suppressing learning-dependent NDP anomalies
+    /// ([`BindingChanged`](ndp::NdpAnomalyKind::BindingChanged) /
+    /// [`NewBinding`](ndp::NdpAnomalyKind::NewBinding)). Default
+    /// [`DEFAULT_NDP_WARMUP`](ndp::DEFAULT_NDP_WARMUP) (5 s); `SpoofSuspected`
+    /// is unaffected.
+    #[cfg(feature = "ndp")]
+    pub fn ndp_warmup(mut self, window: Duration) -> Self {
+        self.ndp_enabled = true;
+        self.ndp_config.warmup = window;
+        self
+    }
+
+    /// Issue #24: also emit [`ndp::NdpAnomalyKind::Unsolicited`]
+    /// for benign unsolicited override NAs (off by default — noisy).
+    #[cfg(feature = "ndp")]
+    pub fn ndp_report_unsolicited(mut self, enabled: bool) -> Self {
+        self.ndp_enabled = true;
+        self.ndp_config.report_unsolicited = enabled;
+        self
+    }
+
+    /// Issue #24: also emit [`ndp::NdpAnomalyKind::NewBinding`]
+    /// for first-seen post-warm-up bindings (off by default — noisy on a first
+    /// sweep).
+    #[cfg(feature = "ndp")]
+    pub fn ndp_report_new_binding(mut self, enabled: bool) -> Self {
+        self.ndp_enabled = true;
+        self.ndp_config.report_new_binding = enabled;
+        self
+    }
+
     /// 0.21 F: register `P` for broadcast delivery.
     ///
     /// Calls [`Protocol::register_broadcast`] on the underlying
@@ -1809,6 +1899,24 @@ impl MonitorBuilder {
         None
     }
 
+    /// Issue #24: the kernel-filter interest contributed by an armed NDP hook —
+    /// `Proto(IcmpV6)` so the prefilter passes ICMPv6 (NDP rides types 135/136)
+    /// up to `on_ndp`/`on_ndp_anomaly`. Cheaper than ARP's EtherType term — no
+    /// fail-open needed. `None` when no NDP hook is armed.
+    #[cfg(feature = "ndp")]
+    #[inline]
+    fn ndp_interest(&self) -> Option<subscription::Predicate> {
+        self.ndp_enabled
+            .then_some(subscription::Predicate::Atom(subscription::Atom::Proto(
+                flowscope::L4Proto::IcmpV6,
+            )))
+    }
+    #[cfg(not(feature = "ndp"))]
+    #[inline]
+    fn ndp_interest(&self) -> Option<subscription::Predicate> {
+        None
+    }
+
     /// The classic-BPF **kernel prefilter** this monitor compiles to (0.25
     /// S2): the conservative OR-union of **every** consumer's traffic interest
     /// — packet subs, registered handlers (via `Event::traffic_class`),
@@ -1846,6 +1954,9 @@ impl MonitorBuilder {
             // `ethertype arp OR (the IP interests)`. The union stays a superset
             // (fail-open) — this only *narrows* toward what's actually wanted.
             .chain(self.arp_interest())
+            // Issue #24: NDP rides ICMPv6 (proto 58) — add it to the union so a
+            // pure-NDP monitor sheds non-ICMPv6 at the kernel.
+            .chain(self.ndp_interest())
             .chain(wants_all.then_some(subscription::Predicate::Always));
 
         subscription::kernel_filter::compile_union(interests)
@@ -2184,6 +2295,13 @@ impl MonitorBuilder {
                 let mut w = arp::ArpWatch::new(self.arp_config);
                 w.msg_handlers = self.arp_msg_handlers;
                 w.anomaly_handlers = self.arp_anomaly_handlers;
+                w
+            }),
+            #[cfg(feature = "ndp")]
+            ndp_watch: self.ndp_enabled.then(|| {
+                let mut w = ndp::NdpWatch::new(self.ndp_config);
+                w.msg_handlers = self.ndp_msg_handlers;
+                w.anomaly_handlers = self.ndp_anomaly_handlers;
                 w
             }),
         })

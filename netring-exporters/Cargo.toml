@@ -21,6 +21,9 @@ default = ["otlp"]
 otlp = ["dep:ureq", "dep:serde_json"]
 # Kafka producer (librdkafka via rdkafka — pulls a C dependency).
 kafka = ["dep:rdkafka", "dep:serde_json"]
+# Columnar Parquet flow export (issue #51). Heaviest tree (arrow + parquet),
+# so opt-in — a `FlowExporter` writing flow records as ZSTD-compressed Parquet.
+parquet = ["dep:arrow", "dep:parquet"]
 
 [dependencies]
 # `flow` + `tokio` expose the Monitor's anomaly-sink surface the exporters
@@ -35,11 +38,15 @@ tracing = { workspace = true }
 ureq = { version = "2", optional = true, default-features = false, features = ["tls"] }
 # Kafka producer (heavy C dep, opt-in).
 rdkafka = { version = "0.36", optional = true }
+arrow = { version = "59.0.0", optional = true }
+parquet = { version = "59.0.0", optional = true }
 
 [dev-dependencies]
 serde_json = "1"
 # For the example's `#[tokio::main]` runtime.
 tokio = { version = "1", features = ["rt-multi-thread", "macros", "signal"] }
+# Parquet round-trip test reads back an in-memory buffer (Bytes: ChunkReader).
+bytes = "1"
 
 # Gate the OTLP example so it's skipped when building with only the `kafka`
 # feature (it uses OtlpAnomalySink, which lives behind `otlp`).
@@ -50,3 +57,7 @@ required-features = ["otlp"]
 [[example]]
 name = "otlp_metrics"
 required-features = ["otlp"]
+
+[[example]]
+name = "parquet_flows"
+required-features = ["parquet"]

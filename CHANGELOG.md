@@ -43,6 +43,18 @@
 
 ### Added
 
+- **Parquet columnar flow export** (`netring-exporters`; issue
+  [#51](https://github.com/p13marc/netring/issues/51)) — new `ParquetFlowExporter`
+  behind a `parquet` feature implements netring's `FlowExporter`, so
+  `MonitorBuilder::export_flows(ParquetFlowExporter::create("flows.parquet")?)`
+  writes every completed flow as a row in a ZSTD-compressed Parquet file with a
+  flat OTel/OCSF-style schema (`network.protocol.name`, `source.address`/`port`,
+  `destination.*`, `source.packets`/`bytes`, `flow.start`/`end` as
+  Timestamp(ns), nullable `flow.end_reason`) — queryable with DataFusion /
+  DuckDB / Polars / Tenzir / Security Lake. Records batch into Arrow row groups;
+  the Parquet footer is written on drop (monitor shutdown). Built on `arrow` +
+  `parquet` 59 (the heaviest tree, hence the opt-in feature, kept in the
+  companion crate).
 - **Sigma rule evaluation** (issue
   [#46](https://github.com/p13marc/netring/issues/46)) — new `sigma` feature +
   `MonitorBuilder::sigma(SigmaRuleSet)` evaluate vendor-neutral

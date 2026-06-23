@@ -27,6 +27,7 @@
 //! |---|---|---|
 //! | `otlp` (default) | [`OtlpAnomalySink`] | OTLP/HTTP-JSON `logs` over blocking HTTP (`ureq`) |
 //! | `otlp` (default) | [`OtlpMetricsExporter`] | OTLP/HTTP-JSON `metrics` (capture counters) over `ureq` |
+//! | `parquet` | [`ParquetFlowExporter`] | columnar Parquet flow export (`arrow` + `parquet`) |
 //! | `kafka` | [`KafkaSink`] | Kafka producer (`rdkafka` → librdkafka C dependency) |
 //!
 //! [`OtlpMetricsExporter`] is **not** an `AnomalySink` — it pushes capture
@@ -42,6 +43,11 @@ mod otlp;
 pub use metrics::OtlpMetricsExporter;
 #[cfg(feature = "otlp")]
 pub use otlp::OtlpAnomalySink;
+
+#[cfg(feature = "parquet")]
+mod parquet;
+#[cfg(feature = "parquet")]
+pub use parquet::ParquetFlowExporter;
 
 #[cfg(feature = "kafka")]
 mod kafka;

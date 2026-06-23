@@ -12,6 +12,7 @@ into `MonitorBuilder::sink(...)`; the metrics exporter rides an
 |---|---|---|
 | `otlp` (default) | `OtlpAnomalySink` | OTLP/HTTP-JSON `logs` over a blocking HTTP client (`ureq`) |
 | `otlp` (default) | `OtlpMetricsExporter` | OTLP/HTTP-JSON `metrics` (capture counters) over `ureq` |
+| `parquet` | `ParquetFlowExporter` | columnar Parquet flow export (`arrow` + `parquet`) |
 | `kafka` | `KafkaSink` | Kafka producer (`rdkafka` → librdkafka, a C dependency) |
 
 ```rust

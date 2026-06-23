@@ -139,30 +139,27 @@ impl AnyBackend {
         Ok(last_ts)
     }
 
-    /// Cumulative capture statistics for telemetry.
-    ///
-    /// AF_PACKET accumulates the destructive kernel reads internally.
-    /// AF_XDP's `XDP_STATISTICS` exposes only drop counters (no RX packet
-    /// count), so `packets` is reported as 0 and `drops` aggregates the
-    /// RX drop sources.
-    pub(crate) fn cumulative_stats(&self) -> Result<CaptureStats> {
+    /// Cumulative capture statistics **plus** the per-source
+    /// [`DropBreakdown`](crate::stats::DropBreakdown) — the un-collapsed
+    /// "where did packets drop" detail (issue #39). Returns both from a
+    /// single counter read so AF_PACKET's destructive `tp_drops` read
+    /// isn't double-consumed.
+    pub(crate) fn detailed_stats(&self) -> Result<(CaptureStats, crate::stats::DropBreakdown)> {
         match self {
-            AnyBackend::AfPacket(cap) => cap.cumulative_stats(),
+            AnyBackend::AfPacket(cap) => {
+                let stats = cap.cumulative_stats()?;
+                let detail = crate::stats::DropBreakdown::AfPacket {
+                    freezes: stats.freeze_count as u64,
+                };
+                Ok((stats, detail))
+            }
             #[cfg(feature = "af-xdp")]
             AnyBackend::Xdp(xdp) => {
                 let s = xdp.statistics()?;
-                Ok(CaptureStats {
-                    packets: 0,
-                    drops: s
-                        .rx_dropped
-                        .saturating_add(s.rx_ring_full)
-                        .saturating_add(s.rx_fill_ring_empty_descs)
-                        .min(u32::MAX as u64) as u32,
-                    freeze_count: 0,
-                })
+                Ok((s.to_capture_stats(), s.into()))
             }
             #[cfg(all(feature = "af-xdp", feature = "xdp-loader"))]
-            AnyBackend::XdpMq(cap) => cap.cumulative_stats(),
+            AnyBackend::XdpMq(cap) => cap.detailed_stats(),
         }
     }
 }

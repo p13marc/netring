@@ -1344,7 +1344,7 @@ fn sample_and_fire_capture_stats(
     let mut total_packets: u64 = 0;
     let mut total_drops: u64 = 0;
     for (i, cap) in caps.iter().enumerate() {
-        let cum = match cap.cumulative_stats() {
+        let (cum, detail) = match cap.detailed_stats() {
             Ok(s) => s,
             Err(e) => {
                 tracing::warn!(
@@ -1355,7 +1355,7 @@ fn sample_and_fire_capture_stats(
                 continue;
             }
         };
-        let telemetry = sampler.sample(i, cum);
+        let telemetry = sampler.sample(i, cum, detail);
         total_packets += telemetry.packets;
         total_drops += telemetry.drops;
         let mut ctx = Ctx::new(

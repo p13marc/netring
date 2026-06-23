@@ -32,6 +32,23 @@
 
 ### Added
 
+- **Honest per-source drop accounting** (issue
+  [#39](https://github.com/p13marc/netring/issues/39)) — a silent drop is a
+  monitoring blind spot, so `CaptureTelemetry` (and the `capture_health` report)
+  now carry a `detail: DropBreakdown` field that distinguishes *where* packets
+  were lost, per source. `DropBreakdown::AfPacket { freezes }` for an AF_PACKET
+  source; `DropBreakdown::Xdp { rx_dropped, rx_invalid_descs, rx_ring_full,
+  rx_fill_ring_empty_descs, tx_invalid_descs, tx_ring_empty_descs }` for an
+  AF_XDP source — previously the AF_XDP arm collapsed `rx_dropped` +
+  `rx_ring_full` + `rx_fill_ring_empty_descs` into one number and **discarded**
+  `rx_invalid_descs` entirely, erasing the difference between "consumer too slow"
+  (queue pressure) and "driver/descriptor fault" (invalid descs). The flat
+  `drops` counter (and the windowed `drop_rate`) still tracks only the
+  queue-pressure sources so it stays a backpressure signal; `DropBreakdown` is
+  the full picture, with `DropBreakdown::total_rx_drops()` for the honest wide
+  RX-loss total. `DropBreakdown` derives `Serialize` (feature `serde`) so it
+  rides the JSON report line. `CaptureTelemetry` / `CaptureHealth` are now
+  `#[non_exhaustive]`.
 - **nDPI-style flow-risk scoring** (issue
   [#49](https://github.com/p13marc/netring/issues/49)) — new
   `MonitorBuilder::flow_risk()` arms passive, **deterministic** risk checks over

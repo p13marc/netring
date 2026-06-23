@@ -156,22 +156,18 @@ impl AsyncXdpCapture {
         c
     }
 
-    /// Aggregate drop counters across every queue (for Monitor telemetry).
-    /// Like the single-socket arm, `packets` is 0 (AF_XDP's `XDP_STATISTICS`
-    /// exposes no RX packet count) and `drops` sums the RX drop sources.
-    pub(crate) fn cumulative_stats(&self) -> Result<crate::stats::CaptureStats> {
-        let mut drops: u64 = 0;
+    /// Aggregate per-queue `XDP_STATISTICS` into both the unified
+    /// [`CaptureStats`](crate::stats::CaptureStats) **and** the
+    /// un-collapsed [`DropBreakdown`](crate::stats::DropBreakdown) in one
+    /// pass over the sockets (issue #39). `XDP_STATISTICS` is
+    /// non-destructive, so summing is monotonic and repeatable.
+    pub(crate) fn detailed_stats(
+        &self,
+    ) -> Result<(crate::stats::CaptureStats, crate::stats::DropBreakdown)> {
+        let mut agg = crate::afxdp::XdpStats::default();
         for s in &self.sockets {
-            let st = s.statistics()?;
-            drops = drops
-                .saturating_add(st.rx_dropped)
-                .saturating_add(st.rx_ring_full)
-                .saturating_add(st.rx_fill_ring_empty_descs);
+            agg = agg.saturating_add(s.statistics()?);
         }
-        Ok(crate::stats::CaptureStats {
-            packets: 0,
-            drops: drops.min(u32::MAX as u64) as u32,
-            freeze_count: 0,
-        })
+        Ok((agg.to_capture_stats(), agg.into()))
     }
 }

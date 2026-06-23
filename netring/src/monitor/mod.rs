@@ -79,6 +79,7 @@ pub mod run;
 pub mod telemetry;
 pub mod tick;
 
+pub use crate::stats::DropBreakdown;
 #[cfg(feature = "arp")]
 pub use arp::{ArpAnomaly, ArpAnomalyKind};
 pub use async_handler::{AsyncHandler, BoxFuture};

@@ -27,15 +27,29 @@
 //!
 //! [`pcap-file`]: https://crates.io/crates/pcap-file
 
+use std::borrow::Cow;
 use std::io::Write;
 use std::time::Duration;
 
+use pcap_file::DataLink;
 use pcap_file::pcap::{PcapHeader, PcapPacket, PcapWriter};
+use pcap_file::pcapng::PcapNgWriter;
+use pcap_file::pcapng::blocks::enhanced_packet::EnhancedPacketBlock;
+use pcap_file::pcapng::blocks::interface_description::{
+    InterfaceDescriptionBlock, InterfaceDescriptionOption,
+};
 
 use crate::packet::{OwnedPacket, Packet};
 
 /// Linktype for raw Ethernet frames (DLT_EN10MB / 1).
 const LINKTYPE_ETHERNET: u32 = 1;
+
+/// `if_tsresol` value selecting **nanosecond** timestamp resolution
+/// (10⁻⁹ s): a single byte whose low 7 bits are the negative power of ten
+/// (MSB 0 = base-10). pcapng's default when the option is absent is `6`
+/// (microseconds), so writing nanosecond values without setting this makes
+/// every external reader (Wireshark, tcpdump) misread them 1000× off.
+const IF_TSRESOL_NANOS: u8 = 9;
 
 /// Streams [`Packet`] / [`OwnedPacket`] values to a PCAP file.
 ///
@@ -133,6 +147,119 @@ impl<W: Write> CaptureWriter<W> {
     }
 }
 
+/// Streams [`Packet`] / [`OwnedPacket`] values to a **pcapng** file
+/// (issue #41).
+///
+/// pcapng is the IETF successor to classic pcap: it carries explicit
+/// per-interface nanosecond resolution, multiple interfaces per file, and
+/// per-packet metadata. This writer emits the minimal well-formed stream —
+/// a Section Header Block, one Interface Description Block (Ethernet link
+/// type, **nanosecond** `if_tsresol`), then one Enhanced Packet Block per
+/// frame.
+///
+/// Mirrors [`CaptureWriter`]'s surface, and like it implements the internal
+/// `TapWriter` trait so it drops straight into the stream types'
+/// `with_pcap_tap(writer)` mid-pipeline recording.
+///
+/// ```no_run
+/// # #[cfg(feature = "pcap")]
+/// # fn _ex() -> Result<(), Box<dyn std::error::Error>> {
+/// use netring::Capture;
+/// use netring::pcap::CaptureWriterNg;
+/// use std::fs::File;
+///
+/// let mut cap = Capture::open("eth0")?;
+/// let mut writer = CaptureWriterNg::create(File::create("out.pcapng")?)?;
+/// let mut pkts = cap.packets();
+/// while let Some(pkt) = pkts.next_packet() {
+///     writer.write_packet(&pkt)?;
+/// }
+/// # Ok(()) }
+/// ```
+///
+/// The nanosecond timestamps are only as precise as the capturing clock —
+/// see [`Packet::timestamp_clock`](crate::Packet::timestamp_clock) (issue
+/// #40); with the default software stamp the low-order nanoseconds reflect
+/// kernel software resolution, not wire arrival.
+pub struct CaptureWriterNg<W: Write> {
+    inner: PcapNgWriter<W>,
+}
+
+impl<W: Write> CaptureWriterNg<W> {
+    /// Open a pcapng writer over `out` using `DLT_EN10MB` (Ethernet).
+    ///
+    /// Writes the Section Header Block and a single Interface Description
+    /// Block (nanosecond `if_tsresol`) immediately.
+    pub fn create(out: W) -> Result<Self, pcap_file::PcapError> {
+        Self::new_with_linktype(out, LINKTYPE_ETHERNET)
+    }
+
+    /// Open a pcapng writer with a custom link-type code (see the
+    /// [PCAP linktype list](https://www.tcpdump.org/linktypes.html)).
+    pub fn new_with_linktype(out: W, linktype: u32) -> Result<Self, pcap_file::PcapError> {
+        // `PcapNgWriter::new` emits the Section Header Block.
+        let mut inner = PcapNgWriter::new(out)?;
+        // One interface, `interface_id` 0, snaplen 0 (= unlimited), with
+        // explicit nanosecond timestamp resolution.
+        let mut idb = InterfaceDescriptionBlock::new(DataLink::from(linktype), 0);
+        idb.options
+            .push(InterfaceDescriptionOption::IfTsResol(IF_TSRESOL_NANOS));
+        inner.write_pcapng_block(idb)?;
+        Ok(Self { inner })
+    }
+
+    /// Write one zero-copy packet as an Enhanced Packet Block.
+    pub fn write_packet(&mut self, pkt: &Packet<'_>) -> Result<(), pcap_file::PcapError> {
+        self.write_epb(
+            pkt.timestamp(),
+            pkt.original_len(),
+            Cow::Borrowed(pkt.data()),
+        )
+    }
+
+    /// Write a snaplen-truncated copy of one zero-copy packet. `orig_len`
+    /// keeps the full wire length (standard `tcpdump -s` semantics).
+    pub fn write_packet_truncated(
+        &mut self,
+        pkt: &Packet<'_>,
+        caplen: usize,
+    ) -> Result<(), pcap_file::PcapError> {
+        let data = pkt.data();
+        let captured = if caplen < data.len() {
+            &data[..caplen]
+        } else {
+            data
+        };
+        self.write_epb(pkt.timestamp(), pkt.original_len(), Cow::Borrowed(captured))
+    }
+
+    /// Write one owned packet as an Enhanced Packet Block.
+    pub fn write_owned(&mut self, pkt: &OwnedPacket) -> Result<(), pcap_file::PcapError> {
+        self.write_epb(pkt.timestamp, pkt.original_len, Cow::Borrowed(&pkt.data))
+    }
+
+    fn write_epb(
+        &mut self,
+        ts: crate::packet::Timestamp,
+        original_len: usize,
+        data: Cow<'_, [u8]>,
+    ) -> Result<(), pcap_file::PcapError> {
+        let block = EnhancedPacketBlock {
+            interface_id: 0,
+            timestamp: Duration::new(ts.sec as u64, ts.nsec),
+            original_len: original_len as u32,
+            data,
+            options: vec![],
+        };
+        self.inner.write_pcapng_block(block).map(|_| ())
+    }
+
+    /// Unwrap into the inner writer.
+    pub fn into_inner(self) -> W {
+        self.inner.into_inner()
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -210,5 +337,74 @@ mod tests {
             record.timestamp, expected,
             "nanosecond precision lost across pcap round-trip"
         );
+    }
+
+    // ── pcapng (issue #41) ──────────────────────────────────────────
+
+    #[test]
+    fn pcapng_writes_shb_then_idb_with_nanosecond_resolution() {
+        use pcap_file::pcapng::{Block, PcapNgReader};
+
+        let mut buf = Vec::new();
+        {
+            let cursor = Cursor::new(&mut buf);
+            let _w = CaptureWriterNg::create(cursor).expect("create");
+        }
+        // pcapng magic: Section Header Block type 0x0A0D0D0A.
+        let block_type = u32::from_le_bytes([buf[0], buf[1], buf[2], buf[3]]);
+        assert_eq!(block_type, 0x0A0D_0D0A, "pcapng SHB magic missing");
+
+        // The IDB must declare Ethernet + nanosecond resolution, else
+        // external tools (Wireshark) read the ns timestamps 1000x off.
+        let cursor = Cursor::new(&buf);
+        let mut reader = PcapNgReader::new(cursor).expect("reader");
+        let mut saw_idb = false;
+        while let Some(block) = reader.next_block() {
+            if let Block::InterfaceDescription(idb) = block.expect("block") {
+                assert_eq!(idb.linktype, DataLink::ETHERNET);
+                assert!(
+                    idb.options
+                        .iter()
+                        .any(|o| matches!(o, InterfaceDescriptionOption::IfTsResol(9))),
+                    "IDB missing nanosecond if_tsresol (=9)"
+                );
+                saw_idb = true;
+                break;
+            }
+        }
+        assert!(saw_idb, "no Interface Description Block written");
+    }
+
+    #[test]
+    fn pcapng_round_trip_owned_packet_preserves_data_ts_and_len() {
+        use pcap_file::pcapng::{Block, PcapNgReader};
+
+        let ts_in = Timestamp::new(1_700_000_000, 123_456_789);
+        let mut buf = Vec::new();
+        {
+            let cursor = Cursor::new(&mut buf);
+            let mut w = CaptureWriterNg::create(cursor).expect("create");
+            let mut pkt = make_owned(vec![9, 8, 7, 6, 5]);
+            pkt.timestamp = ts_in;
+            w.write_owned(&pkt).expect("write");
+        }
+
+        let cursor = Cursor::new(&buf);
+        let mut reader = PcapNgReader::new(cursor).expect("reader");
+        let mut epb_seen = 0;
+        while let Some(block) = reader.next_block() {
+            if let Block::EnhancedPacket(epb) = block.expect("block") {
+                assert_eq!(epb.interface_id, 0);
+                assert_eq!(epb.data.as_ref(), &[9, 8, 7, 6, 5]);
+                assert_eq!(epb.original_len, 100);
+                assert_eq!(
+                    epb.timestamp,
+                    Duration::new(ts_in.sec as u64, ts_in.nsec),
+                    "nanosecond timestamp lost across pcapng round-trip"
+                );
+                epb_seen += 1;
+            }
+        }
+        assert_eq!(epb_seen, 1, "expected exactly one Enhanced Packet Block");
     }
 }

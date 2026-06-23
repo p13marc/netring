@@ -52,6 +52,7 @@ impl PacketStatus {
 /// IRQ coalescing, NAPI batching, and the kernel→user copy) can be tens of
 /// microseconds to milliseconds off the wire arrival.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+#[non_exhaustive]
 pub enum TimestampClock {
     /// No timestamp-source flag was set — the kernel's default software
     /// stamp (taken in the RX softirq). The common case unless a hardware

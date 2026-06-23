@@ -102,6 +102,7 @@ fn prefix_mask_u32(prefix: u8) -> u32 {
 
 /// Errors from [`IpNet::from_str`].
 #[derive(Debug, thiserror::Error, PartialEq, Eq)]
+#[non_exhaustive]
 pub enum ParseIpNetError {
     /// The address portion didn't parse.
     #[error("invalid IP address: {0}")]

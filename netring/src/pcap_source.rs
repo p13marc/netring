@@ -56,6 +56,7 @@ use crate::packet::{OwnedPacket, PacketDirection, PacketStatus, Timestamp};
 
 /// Detected pcap file format.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
 pub enum PcapFormat {
     /// Legacy PCAP (DLT_EN10MB by default).
     LegacyPcap,

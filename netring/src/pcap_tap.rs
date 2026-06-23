@@ -36,6 +36,7 @@ use crate::pcap::CaptureWriter;
 
 /// What to do when a pcap tap encounters a write error mid-capture.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+#[non_exhaustive]
 pub enum TapErrorPolicy {
     /// Log the error via `tracing::warn!` and continue capturing.
     /// Subsequent packets are still tapped (until the next error).

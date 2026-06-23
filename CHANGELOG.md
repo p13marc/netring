@@ -419,6 +419,21 @@
 
 ### Changed
 
+- **`#[non_exhaustive]` on the growing public enums** (1.0 API-stability sweep,
+  issue [#37](https://github.com/p13marc/netring/issues/37)) — adding a variant
+  to a public enum is a breaking change unless it is `#[non_exhaustive]`, and the
+  attribute itself **cannot be added after 1.0 without a major bump**. So ahead
+  of 1.0, every public enum that is expected to gain variants is now
+  `#[non_exhaustive]`: the error/policy enums (`Error`, `error::BuildError`,
+  `LoaderError`, `SigmaError`, `ParseIpNetError`, `BroadcastRecvError`,
+  `HandlerErrorPolicy`, `BackendErrorPolicy`), the capture-config / mode enums
+  (`FanoutMode`, `TimestampSource`, `RingProfile`, `XdpMode`, `Queues`,
+  `PcapFormat`, `TapErrorPolicy`, `BridgeAction`, `TrafficClass`), and the
+  value/telemetry enums (`Severity`, `TimestampClock`, `DropBreakdown`).
+  **Downstream impact:** an exhaustive `match` on any of these now needs a
+  wildcard `_` arm; existing-variant *construction* is unaffected. Enums with a
+  natural catch-all (`PacketDirection::Unknown`) and the `#[repr(C)]` FFI mirrors
+  (`BpfInsn`, the `ethtool_*` structs) are deliberately left exhaustive.
 - **flowscope 0.16 → 0.18.** 0.17 brought `MacAddr`, the `arp` module, the
   `NeighborTable`, `RxMetadata` on a now-`#[non_exhaustive]` `PacketView`, and
   `detect::fingerprint`. **0.18** is a huge additive release — ~25 new protocol

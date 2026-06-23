@@ -252,6 +252,7 @@ pub enum Dispatch {
 /// trait can declare it; the Monitor maps it to a
 /// [`Predicate`](crate::monitor::subscription::Predicate) at build time.
 #[derive(Debug, Clone)]
+#[non_exhaustive]
 pub enum TrafficClass {
     /// Wants **all** traffic — the conservative default. Forces capture-all
     /// (no kernel narrowing) when any consumer needs it.

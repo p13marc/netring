@@ -31,6 +31,7 @@ use crate::stats::CaptureStats;
 
 /// Action returned by a bridge filter callback.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[non_exhaustive]
 pub enum BridgeAction {
     /// Forward the packet to the other interface.
     Forward,

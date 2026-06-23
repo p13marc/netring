@@ -50,6 +50,7 @@ impl From<ffi::tpacket_stats_v3> for CaptureStats {
 /// `rx_invalid_descs` and the TX counters are visible **only** here.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[cfg_attr(feature = "serde", derive(serde::Serialize))]
+#[non_exhaustive]
 pub enum DropBreakdown {
     /// AF_PACKET (TPACKET_V3) drop accounting.
     AfPacket {

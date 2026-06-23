@@ -372,3 +372,7 @@ jobs:
         run: |
           cargo clippy -p netring-exporters --no-default-features --features kafka --all-targets -- --deny warnings
           cargo test -p netring-exporters --no-default-features --features kafka
+      - name: Parquet feature — clippy + test
+        run: |
+          cargo clippy -p netring-exporters --no-default-features --features parquet --all-targets -- --deny warnings
+          cargo test -p netring-exporters --no-default-features --features parquet

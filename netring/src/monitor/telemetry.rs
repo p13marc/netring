@@ -17,7 +17,7 @@ use std::time::Duration;
 
 use crate::ctx::{Ctx, SourceIdx};
 use crate::error::Result;
-use crate::stats::CaptureStats;
+use crate::stats::{CaptureStats, DropBreakdown};
 
 /// A per-source snapshot of capture health, delivered to an
 /// [`on_capture_stats`](crate::monitor::MonitorBuilder::on_capture_stats)
@@ -35,6 +35,7 @@ use crate::stats::CaptureStats;
 /// a long-running capture, and `cumulative_stats` already accumulates
 /// across the destructive `u32` reads.
 #[derive(Debug, Clone, Copy, PartialEq)]
+#[non_exhaustive]
 pub struct CaptureTelemetry {
     /// Which capture source produced this sample — the interface's
     /// index in builder `.interfaces([...])` registration order.
@@ -56,6 +57,12 @@ pub struct CaptureTelemetry {
     /// [`lifetime_drop_rate`](Self::lifetime_drop_rate), which averages
     /// over the whole run.
     pub drop_rate: f64,
+    /// Per-source breakdown of **where** the drops happened (issue #39):
+    /// [`DropBreakdown::AfPacket`] for an AF_PACKET source,
+    /// [`DropBreakdown::Xdp`] for an AF_XDP source (with each drop cause
+    /// kept distinct). The flat [`drops`](Self::drops) tells you *how
+    /// many*; this tells you *why*.
+    pub detail: DropBreakdown,
 }
 
 impl CaptureTelemetry {
@@ -132,6 +139,7 @@ impl CaptureTelemetry {
 /// `Serialize` onto internal types.
 #[derive(Debug, Clone, Copy, PartialEq)]
 #[cfg_attr(feature = "serde", derive(serde::Serialize))]
+#[non_exhaustive]
 pub struct CaptureHealth {
     /// Capture source index (interface registration order).
     pub source: u8,
@@ -145,6 +153,10 @@ pub struct CaptureHealth {
     pub drop_rate: f64,
     /// Cumulative drop rate over the whole run, `[0.0, 1.0]`.
     pub lifetime_drop_rate: f64,
+    /// Per-source drop breakdown (issue #39) — serializes as a tagged
+    /// object (`{"AfPacket":{…}}` / `{"Xdp":{…}}`) so the report line is
+    /// self-describing about *where* loss occurred.
+    pub detail: DropBreakdown,
 }
 
 impl crate::report::Report for CaptureHealth {
@@ -160,6 +172,7 @@ impl From<CaptureTelemetry> for CaptureHealth {
             freezes: t.freezes,
             drop_rate: t.drop_rate,
             lifetime_drop_rate: t.lifetime_drop_rate(),
+            detail: t.detail,
         }
     }
 }
@@ -186,8 +199,14 @@ impl TelemetrySampler {
     /// [`CaptureTelemetry`], computing the windowed drop rate against
     /// the previous reading. `cum` must be the source's *cumulative*
     /// stats (e.g. from [`Capture::cumulative_stats`](crate::Capture)),
-    /// not a destructive single read.
-    pub(crate) fn sample(&mut self, source: usize, cum: CaptureStats) -> CaptureTelemetry {
+    /// not a destructive single read. `detail` is the matching
+    /// per-source [`DropBreakdown`] read in the same pass.
+    pub(crate) fn sample(
+        &mut self,
+        source: usize,
+        cum: CaptureStats,
+        detail: DropBreakdown,
+    ) -> CaptureTelemetry {
         let packets = cum.packets as u64;
         let drops = cum.drops as u64;
 
@@ -213,6 +232,7 @@ impl TelemetrySampler {
             drops,
             freezes: cum.freeze_count as u64,
             drop_rate,
+            detail,
         }
     }
 }
@@ -254,12 +274,20 @@ mod tests {
         }
     }
 
+    /// AF_PACKET drop breakdown for a given freeze count — the detail
+    /// companion to [`stats`] in these sampler tests.
+    fn afp(freezes: u32) -> DropBreakdown {
+        DropBreakdown::AfPacket {
+            freezes: freezes as u64,
+        }
+    }
+
     #[test]
     fn windowed_drop_rate_uses_the_delta_not_the_lifetime_total() {
         let mut s = TelemetrySampler::new(1);
 
         // First window: 1000 delivered, 0 dropped → clean.
-        let t0 = s.sample(0, stats(1000, 0, 0));
+        let t0 = s.sample(0, stats(1000, 0, 0), afp(0));
         assert_eq!(t0.packets, 1000);
         assert_eq!(t0.drops, 0);
         assert_eq!(t0.drop_rate, 0.0);
@@ -267,7 +295,7 @@ mod tests {
 
         // Second window: +100 delivered, +900 dropped. Lifetime totals
         // are now 1100/900 (45% lifetime), but the *window* lost 90%.
-        let t1 = s.sample(0, stats(1100, 900, 3));
+        let t1 = s.sample(0, stats(1100, 900, 3), afp(3));
         assert_eq!(t1.packets, 1100);
         assert_eq!(t1.drops, 900);
         assert_eq!(t1.freezes, 3);
@@ -288,9 +316,9 @@ mod tests {
     #[test]
     fn idle_window_reports_zero_drop_rate_not_nan() {
         let mut s = TelemetrySampler::new(1);
-        let _ = s.sample(0, stats(500, 10, 0));
+        let _ = s.sample(0, stats(500, 10, 0), afp(0));
         // No new traffic since the last sample: window delta is 0/0.
-        let t = s.sample(0, stats(500, 10, 0));
+        let t = s.sample(0, stats(500, 10, 0), afp(0));
         assert_eq!(t.drop_rate, 0.0);
         assert!(!t.drop_rate.is_nan());
     }
@@ -298,11 +326,11 @@ mod tests {
     #[test]
     fn counter_going_backwards_saturates_to_zero_window() {
         let mut s = TelemetrySampler::new(1);
-        let _ = s.sample(0, stats(1000, 50, 0));
+        let _ = s.sample(0, stats(1000, 50, 0), afp(0));
         // Pathological reset: cumulative appears to drop. Saturating
         // sub yields a 0-delta window instead of an underflow panic /
         // garbage rate.
-        let t = s.sample(0, stats(10, 1, 0));
+        let t = s.sample(0, stats(10, 1, 0), afp(0));
         assert_eq!(t.drop_rate, 0.0);
         assert_eq!(t.packets, 10);
     }
@@ -310,8 +338,8 @@ mod tests {
     #[test]
     fn capture_health_flattens_telemetry_including_lifetime_rate() {
         let mut s = TelemetrySampler::new(1);
-        let _ = s.sample(0, stats(1000, 0, 0));
-        let t = s.sample(0, stats(1100, 900, 3));
+        let _ = s.sample(0, stats(1000, 0, 0), afp(0));
+        let t = s.sample(0, stats(1100, 900, 3), afp(3));
         let h = CaptureHealth::from(t);
         assert_eq!(h.source, 0);
         assert_eq!(h.packets, 1100);
@@ -328,7 +356,7 @@ mod tests {
         // no-ops — recording must succeed regardless (mirrors
         // `metrics::tests::record_does_not_panic_with_no_recorder`).
         let mut s = TelemetrySampler::new(1);
-        let t = s.sample(0, stats(1000, 10, 0));
+        let t = s.sample(0, stats(1000, 10, 0), afp(0));
         t.record_metrics();
     }
 
@@ -342,21 +370,49 @@ mod tests {
             freezes: 0,
             drop_rate: 0.25,
             lifetime_drop_rate: 0.14,
+            detail: DropBreakdown::AfPacket { freezes: 0 },
         };
         let line = serde_json::to_string(&h).expect("serialize");
         assert!(line.contains("\"source\":1"));
         assert!(line.contains("\"packets\":42"));
         assert!(line.contains("\"drop_rate\":0.25"));
+        // The drop breakdown rides the same JSON line.
+        assert!(line.contains("\"detail\""));
+        assert!(line.contains("\"AfPacket\""));
+    }
+
+    #[test]
+    fn xdp_detail_is_carried_through_the_sample_uncollapsed() {
+        let mut s = TelemetrySampler::new(1);
+        let detail = DropBreakdown::Xdp {
+            rx_dropped: 1,
+            rx_invalid_descs: 2,
+            rx_ring_full: 3,
+            rx_fill_ring_empty_descs: 4,
+            tx_invalid_descs: 5,
+            tx_ring_empty_descs: 6,
+        };
+        // The unified `drops` is whatever the backend computed (the
+        // queue-pressure total); the sampler folds it into the windowed
+        // rate but must carry the per-source breakdown through verbatim.
+        let t = s.sample(0, stats(0, 8, 0), detail);
+        assert_eq!(t.detail, detail);
+        match t.detail {
+            DropBreakdown::Xdp {
+                rx_invalid_descs, ..
+            } => assert_eq!(rx_invalid_descs, 2),
+            _ => panic!("expected an Xdp breakdown"),
+        }
     }
 
     #[test]
     fn sources_are_tracked_independently() {
         let mut s = TelemetrySampler::new(2);
-        let _ = s.sample(0, stats(100, 0, 0));
-        let _ = s.sample(1, stats(0, 0, 0));
+        let _ = s.sample(0, stats(100, 0, 0), afp(0));
+        let _ = s.sample(1, stats(0, 0, 0), afp(0));
         // Source 0 stays clean; source 1 takes all the loss.
-        let a = s.sample(0, stats(200, 0, 0));
-        let b = s.sample(1, stats(100, 100, 0));
+        let a = s.sample(0, stats(200, 0, 0), afp(0));
+        let b = s.sample(1, stats(100, 100, 0), afp(0));
         assert_eq!(a.source, SourceIdx(0));
         assert_eq!(a.drop_rate, 0.0);
         assert_eq!(b.source, SourceIdx(1));

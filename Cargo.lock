@@ -1056,6 +1056,7 @@ checksum = "2212e001e53c94b693beecedbba7f2adec3762ebddd3e9958b1018a8bfcdc8b8"
 dependencies = [
  "ahash",
  "arrayvec",
+ "base64",
  "bitflags",
  "bytes",
  "crossbeam-queue",

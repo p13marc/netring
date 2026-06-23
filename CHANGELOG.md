@@ -455,6 +455,15 @@
   `Ring*`/builder configs) are deliberately **left exhaustive** — `#[non_exhaustive]`
   forbids cross-crate struct literals entirely (even `..Default::default()`), so
   marking a construction-oriented struct would break its intended use.
+- **Sealed the L7 capability markers** (1.0 sweep, issue
+  [#37](https://github.com/p13marc/netring/issues/37)) — `HasSni`, `HasHttpHost`,
+  and `HasQname` (which gate the session-tier `.sni_glob()` / `.http_host_glob()`
+  / `.dns_qname_glob()` combinators) are now sealed, so only netring's builtin
+  protocol markers can implement them. This stops a downstream
+  `impl HasSni for MyProto {}` from emitting a `.sni_glob(..)` filter against a
+  message that carries no SNI, and lets the markers' bounds evolve post-1.0
+  without a major bump. No effect on existing code — they were only ever
+  implemented in-crate.
 - **flowscope 0.16 → 0.18.** 0.17 brought `MacAddr`, the `arp` module, the
   `NeighborTable`, `RxMetadata` on a now-`#[non_exhaustive]` `PacketView`, and
   `detect::fingerprint`. **0.18** is a huge additive release — ~25 new protocol

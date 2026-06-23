@@ -260,21 +260,43 @@ impl<P: FlowProtocol> SubscriptionBuilder<FlowTier<P>> {
 
 // ---- session-tier combinators (gated by which L7 field P exposes) -------
 
+/// Seals the L7 capability markers below so only netring can assert that a
+/// protocol's session message carries SNI / an HTTP host / a DNS qname — a
+/// downstream `impl HasSni for MyProto {}` would let the session-tier builder
+/// emit a `.sni_glob(..)` filter against a message that has no such field.
+mod sealed {
+    pub trait Sealed {}
+}
+
 /// Protocols whose session messages carry a TLS SNI. Gates
 /// [`SubscriptionBuilder::sni_glob`] to only those tiers.
-pub trait HasSni: MessageProtocol {}
+///
+/// Sealed: implemented only by netring's builtin protocol markers.
+pub trait HasSni: MessageProtocol + sealed::Sealed {}
+#[cfg(feature = "tls")]
+impl sealed::Sealed for crate::protocol::builtin::Tls {}
 #[cfg(feature = "tls")]
 impl HasSni for crate::protocol::builtin::Tls {}
+#[cfg(feature = "tls")]
+impl sealed::Sealed for crate::protocol::builtin::TlsHandshake {}
 #[cfg(feature = "tls")]
 impl HasSni for crate::protocol::builtin::TlsHandshake {}
 
 /// Protocols whose session messages carry an HTTP `Host` header.
-pub trait HasHttpHost: MessageProtocol {}
+///
+/// Sealed: implemented only by netring's builtin protocol markers.
+pub trait HasHttpHost: MessageProtocol + sealed::Sealed {}
+#[cfg(feature = "http")]
+impl sealed::Sealed for crate::protocol::builtin::Http {}
 #[cfg(feature = "http")]
 impl HasHttpHost for crate::protocol::builtin::Http {}
 
 /// Protocols whose session messages carry a DNS query name.
-pub trait HasQname: MessageProtocol {}
+///
+/// Sealed: implemented only by netring's builtin protocol markers.
+pub trait HasQname: MessageProtocol + sealed::Sealed {}
+#[cfg(feature = "dns")]
+impl sealed::Sealed for crate::protocol::builtin::Dns {}
 #[cfg(feature = "dns")]
 impl HasQname for crate::protocol::builtin::Dns {}
 

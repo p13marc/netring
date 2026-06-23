@@ -1067,11 +1067,13 @@ dependencies = [
  "lru",
  "md-5",
  "quic-parser",
+ "radius-parser",
  "serde",
  "serde_json",
  "sha2",
  "simple-dns",
  "smallvec",
+ "snmp-parser",
  "tls-parser",
  "x509-parser",
 ]
@@ -2287,6 +2289,15 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "f8dcc9c7d52a811697d2151c701e0d08956f92b0e24136cf4cf27b57a6a0d9bf"
 
 [[package]]
+name = "radius-parser"
+version = "0.5.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "7253cb65bbc67e1be200a6259973e02c54d018acda6201db45bc4755bd69d420"
+dependencies = [
+ "nom",
+]
+
+[[package]]
 name = "rand"
 version = "0.8.6"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2746,6 +2757,18 @@ name = "snap"
 version = "1.1.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "1b6b67fb9a61334225b5b790716f609cd58395f895b3fe8b328786812a40bc3b"
+
+[[package]]
+name = "snmp-parser"
+version = "0.11.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "0edee72a0990df1c39eb951d9495e3aa5f78569eea497767960d2450dafd7999"
+dependencies = [
+ "asn1-rs",
+ "nom",
+ "rusticata-macros",
+ "thiserror 2.0.18",
+]
 
 [[package]]
 name = "socket2"

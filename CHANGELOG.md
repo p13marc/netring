@@ -43,6 +43,17 @@
 
 ### Added
 
+- **Tier-2 UDP infrastructure protocols** (issue
+  [#30](https://github.com/p13marc/netring/issues/30)) — new `ntp` / `snmp` /
+  `tftp` / `radius` features (and an `infra-protocols` umbrella) surface
+  flowscope 0.18's passive datagram parsers as `Protocol` markers usable via
+  `.protocol::<P>()` + `.on::<P>()`: **`Ntp`** (UDP/123 — mode/stratum/version,
+  rogue-time-source + mode-6/7 amplification signal), **`Snmp`** (UDP/161+162 —
+  version/PDU + the **cleartext community string** for v1/v2c), **`Tftp`**
+  (UDP/69 — opcode/filename, an unauthenticated config-exfil vector), and
+  **`Radius`** (UDP/1812+1813 — code + attributes, auth-fabric visibility). New
+  `monitor_infra_protocols` example. (SSH/HASSH already shipped; the TCP-session
+  Tier-2 set — FTP/SMTP/Modbus/DNP3/STUN/WireGuard — follows in a later batch.)
 - **CICFlowMeter ML-feature export** (issue
   [#32](https://github.com/p13marc/netring/issues/32)) — new `ml-features`
   feature + `MonitorBuilder::on_ml_features(|f: &flowscope::CicFlowFeatures| …)`

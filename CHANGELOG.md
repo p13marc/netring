@@ -43,6 +43,19 @@
 
 ### Added
 
+- **pcapng capture-to-disk** (issue
+  [#41](https://github.com/p13marc/netring/issues/41)) — new
+  `pcap::CaptureWriterNg` writes captured frames to a **pcapng** file (the IETF
+  successor to classic pcap): a Section Header Block, one Interface Description
+  Block with explicit **nanosecond** `if_tsresol`, then an Enhanced Packet Block
+  per frame. Mirrors `CaptureWriter`'s surface (`create` / `new_with_linktype` /
+  `write_packet` / `write_packet_truncated` / `write_owned` / `into_inner`) and
+  implements the internal `TapWriter` trait, so it drops into the stream types'
+  `with_pcap_tap(writer)` mid-pipeline recording. Setting `if_tsresol=9` is
+  load-bearing: pcapng defaults to microseconds, so external tools
+  (Wireshark/tcpdump) would otherwise misread the nanosecond timestamps 1000×
+  off. (Rotation, multi-interface IDBs, ISB drop counters, and zstd/lz4
+  compression are tracked as follow-ups.)
 - **RX timestamp-source reporting** (issue
   [#40](https://github.com/p13marc/netring/issues/40)) — new
   `Packet::timestamp_clock() -> TimestampClock` (and a `timestamp_clock` field on

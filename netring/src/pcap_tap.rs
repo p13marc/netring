@@ -78,6 +78,19 @@ impl<W: std::io::Write + Send + 'static> TapWriter for CaptureWriter<W> {
     }
 }
 
+impl<W: std::io::Write + Send + 'static> TapWriter for crate::pcap::CaptureWriterNg<W> {
+    fn write(
+        &mut self,
+        pkt: &Packet<'_>,
+        snaplen: Option<u32>,
+    ) -> Result<(), pcap_file::PcapError> {
+        match snaplen {
+            Some(cap) => self.write_packet_truncated(pkt, cap as usize),
+            None => self.write_packet(pkt),
+        }
+    }
+}
+
 /// Owned pcap tap — a writer plus its error policy.
 ///
 /// Constructed by `with_pcap_tap` / `with_pcap_tap_policy` on each

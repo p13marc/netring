@@ -951,6 +951,8 @@ impl XdpSocket {
                 Some(data) => packets.push(OwnedPacket {
                     data: data.to_vec(),
                     timestamp: Timestamp::default(),
+                    // AF_XDP RX-metadata HW timestamps are future work (issue #13).
+                    timestamp_clock: crate::packet::TimestampClock::None,
                     original_len: desc.len as usize,
                     // AF_XDP doesn't surface AF_PACKET-style metadata; the
                     // RX metadata BPF extension would, but is not yet wired.

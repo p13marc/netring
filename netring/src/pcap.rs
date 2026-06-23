@@ -143,6 +143,7 @@ mod tests {
         OwnedPacket {
             data,
             timestamp: Timestamp::new(1234, 567_890_000),
+            timestamp_clock: crate::packet::TimestampClock::None,
             original_len: 100,
             status: PacketStatus::default(),
             direction: PacketDirection::Host,

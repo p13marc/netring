@@ -82,6 +82,21 @@ pub use libc::TP_STATUS_VLAN_VALID;
 /// TCP GSO segment — not exported by `libc` as of 0.2.183.
 pub const TP_STATUS_GSO_TCP: u32 = 0x100;
 
+// ── RX timestamp source flags (in `tp_status`) ─────────────────────────────
+// Which clock produced `tp_sec`/`tp_nsec`. The kernel sets exactly one of
+// these (or none → its default software stamp). Issue #40.
+
+pub use libc::TP_STATUS_TS_RAW_HARDWARE; // 1 << 31
+pub use libc::TP_STATUS_TS_SOFTWARE; // 1 << 29
+pub use libc::TP_STATUS_TS_SYS_HARDWARE; // 1 << 30
+
+// ── SOF_TIMESTAMPING_* selectors (PACKET_TIMESTAMP setsockopt value) ────────
+// `PACKET_TIMESTAMP` takes a bitmask of these to choose the RX timestamp
+// source; only the hardware bits are meaningful (0/unset = software default).
+
+pub use libc::SOF_TIMESTAMPING_RAW_HARDWARE; // 1 << 6
+pub use libc::SOF_TIMESTAMPING_SYS_HARDWARE; // 1 << 5 (deprecated in-kernel)
+
 // ── TX frame status flags ──────────────────────────────────────────────────
 
 /// Frame is available for userspace to write.
@@ -235,6 +250,13 @@ mod tests {
         assert_eq!(TP_STATUS_CSUM_VALID, 1 << 7);
         assert_eq!(TP_STATUS_GSO_TCP, 1 << 8);
         assert_eq!(TPACKET_V3_INT, 2);
+        // RX timestamp-source flags (issue #40), per uapi/linux/if_packet.h.
+        assert_eq!(TP_STATUS_TS_SOFTWARE, 1 << 29);
+        assert_eq!(TP_STATUS_TS_SYS_HARDWARE, 1 << 30);
+        assert_eq!(TP_STATUS_TS_RAW_HARDWARE, 1u32 << 31);
+        // SOF_TIMESTAMPING selectors per uapi/linux/net_tstamp.h.
+        assert_eq!(SOF_TIMESTAMPING_SYS_HARDWARE, 1 << 5);
+        assert_eq!(SOF_TIMESTAMPING_RAW_HARDWARE, 1 << 6);
     }
 
     #[test]

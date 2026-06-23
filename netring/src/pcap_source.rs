@@ -330,6 +330,8 @@ fn pcap_packet_to_owned(data: &[u8], orig_len: u32, timestamp: Timestamp) -> Own
     OwnedPacket {
         data: data.to_vec(),
         timestamp,
+        // Pcap files carry a timestamp but not its clock source.
+        timestamp_clock: crate::packet::TimestampClock::None,
         original_len: orig_len as usize,
         status: PacketStatus::default(),
         // Pcap files don't record direction — use Host as the

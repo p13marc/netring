@@ -76,6 +76,8 @@ pub mod p0f;
 pub mod registry;
 pub mod risk;
 pub mod run;
+#[cfg(feature = "sigma")]
+pub mod sigma;
 pub mod telemetry;
 pub mod tick;
 
@@ -2044,6 +2046,108 @@ impl MonitorBuilder {
                 },
             );
         }
+        self
+    }
+
+    /// Issue #46: arm a [`SigmaRuleSet`](sigma::SigmaRuleSet). The Monitor
+    /// evaluates the loaded Sigma rules against the typed L7 records it parses —
+    /// DNS queries (`dns`-category rules), HTTP requests (`proxy` / `webserver`
+    /// / `web`), and TLS handshakes (`firewall` / `network` / `tls`) — and emits
+    /// a `sigma_match` anomaly (`rule` / `title` / `sigma_level` observations) at
+    /// the ruleset's [`severity`](sigma::SigmaRuleSet::severity) per hit.
+    ///
+    /// Only the L7 arms whose rules are present *and* whose parser feature is
+    /// enabled are wired (auto-registering that protocol). A bucket with rules
+    /// but no matching feature is warned about at build, not silently dropped.
+    ///
+    /// ```no_run
+    /// # #[cfg(all(feature = "sigma", feature = "dns", feature = "tokio"))] fn demo() {
+    /// use netring::monitor::{Monitor, sigma::SigmaRuleSet};
+    /// use netring::prelude::StdoutSink;
+    /// let rules = SigmaRuleSet::from_dir("/etc/netring/sigma").unwrap();
+    /// Monitor::builder().interface("eth0").sigma(rules).sink(StdoutSink::default());
+    /// # }
+    /// ```
+    #[cfg(feature = "sigma")]
+    pub fn sigma(mut self, rules: sigma::SigmaRuleSet) -> Self {
+        use std::sync::Arc;
+
+        let rules = Arc::new(rules);
+
+        #[cfg(feature = "dns")]
+        if rules.has_dns() {
+            use crate::protocol::builtin::Dns;
+            if !self
+                .declared_protocols
+                .contains_key(&std::any::TypeId::of::<Dns>())
+            {
+                self = self.protocol::<Dns>();
+            }
+            let r = Arc::clone(&rules);
+            self =
+                self.on_ctx::<Dns>(move |msg: &flowscope::dns::DnsMessage, ctx: &mut Ctx<'_>| {
+                    sigma::eval_dns(&r, msg, ctx);
+                    Ok(())
+                });
+        }
+        #[cfg(not(feature = "dns"))]
+        if rules.has_dns() {
+            tracing::warn!(
+                "sigma: DNS-category rules loaded but the `dns` feature is disabled — \
+                 they will not be evaluated"
+            );
+        }
+
+        #[cfg(feature = "http")]
+        if rules.has_http() {
+            use crate::protocol::builtin::Http;
+            if !self
+                .declared_protocols
+                .contains_key(&std::any::TypeId::of::<Http>())
+            {
+                self = self.protocol::<Http>();
+            }
+            let r = Arc::clone(&rules);
+            self = self.on_ctx::<Http>(
+                move |msg: &flowscope::http::HttpMessage, ctx: &mut Ctx<'_>| {
+                    sigma::eval_http(&r, msg, ctx);
+                    Ok(())
+                },
+            );
+        }
+        #[cfg(not(feature = "http"))]
+        if rules.has_http() {
+            tracing::warn!(
+                "sigma: HTTP-category rules loaded but the `http` feature is disabled — \
+                 they will not be evaluated"
+            );
+        }
+
+        #[cfg(feature = "tls")]
+        if rules.has_tls() {
+            use crate::protocol::builtin::TlsHandshake;
+            if !self
+                .declared_protocols
+                .contains_key(&std::any::TypeId::of::<TlsHandshake>())
+            {
+                self = self.protocol::<TlsHandshake>();
+            }
+            let r = Arc::clone(&rules);
+            self = self.on_ctx::<TlsHandshake>(
+                move |hs: &flowscope::tls::TlsHandshake, ctx: &mut Ctx<'_>| {
+                    sigma::eval_tls(&r, hs, ctx);
+                    Ok(())
+                },
+            );
+        }
+        #[cfg(not(feature = "tls"))]
+        if rules.has_tls() {
+            tracing::warn!(
+                "sigma: TLS-category rules loaded but the `tls` feature is disabled — \
+                 they will not be evaluated"
+            );
+        }
+
         self
     }
 

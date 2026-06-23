@@ -18,6 +18,10 @@ pub use crate::monitor::AsyncHandler;
 // ─── Threat-intel IOC matching (issue #48) ───────────────────────
 pub use crate::monitor::ioc::IocSet;
 
+// ─── Sigma rule evaluation (issue #46) ───────────────────────────
+#[cfg(feature = "sigma")]
+pub use crate::monitor::sigma::SigmaRuleSet;
+
 // ─── Protocol markers (built-in) ─────────────────────────────────
 #[cfg(all(feature = "http", feature = "ja4plus"))]
 pub use crate::monitor::HttpFingerprint;

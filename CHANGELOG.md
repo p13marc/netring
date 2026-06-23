@@ -43,6 +43,24 @@
 
 ### Added
 
+- **Sigma rule evaluation** (issue
+  [#46](https://github.com/p13marc/netring/issues/46)) — new `sigma` feature +
+  `MonitorBuilder::sigma(SigmaRuleSet)` evaluate vendor-neutral
+  [Sigma](https://sigmahq.io) detection rules against the typed L7 records the
+  Monitor already parses, emitting a `sigma_match` anomaly per hit (observations
+  `rule` / `title` / `sigma_level`). Backed by the pure-Rust `sigma-rust`
+  evaluator (no tokio). Rules are bucketed by `logsource.category` — `dns` →
+  DNS queries, `proxy`/`webserver`/`web` → HTTP requests,
+  `firewall`/`network`/`tls` → TLS handshakes — and each event is evaluated only
+  against its bucket; a rule whose category isn't one of these is **rejected at
+  load** rather than silently ignored. Field names follow the common community
+  taxonomy with multiple aliases per field (e.g. `host` / `cs-host` /
+  `http.host`) so off-the-shelf rules match without remapping. Load via
+  `SigmaRuleSet::from_yaml_str` / `from_dir`. Matches are emitted at the
+  ruleset's configurable `severity` (default `Warning`); per-rule Sigma-level→
+  severity mapping awaits an upstream `Level` export. Only arms whose parser
+  feature is enabled are wired (others warn at build). Example
+  `monitor_sigma_rules`.
 - **OTLP metrics exporter** (`netring-exporters` 0.2.0; issue
   [#52](https://github.com/p13marc/netring/issues/52)) — new
   `OtlpMetricsExporter` pushes the per-source capture counters to an OTLP/HTTP

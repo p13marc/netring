@@ -63,6 +63,11 @@ arrayvec = "0.7"
 # tree slim for users not running the bench.
 dhat = { version = "0.3", optional = true }
 
+# Optional Sigma rule evaluator (issue #46), gated on the `sigma` feature.
+# Pure-Rust, no-tokio; parses Sigma YAML + evaluates rules against typed
+# key/value events. Pulls a YAML parser (serde_norway) + regex.
+sigma-rust = { version = "0.7", optional = true }
+
 [dev-dependencies]
 env_logger = "0.11"
 tempfile = "3"
@@ -191,6 +196,10 @@ eve-sink = ["emit", "dep:serde_json", "flowscope/emit-eve"]
 # OCSF (Open Cybersecurity Schema Framework) Detection Finding sink (issue #50).
 # Maps each anomaly to an OCSF 2004 NDJSON line; pulls only `serde_json`.
 ocsf-sink = ["dep:serde_json"]
+# Sigma rule evaluation over flow/session records (issue #46). Pulls the
+# pure-Rust `sigma-rust` evaluator. The DNS / HTTP / TLS rule arms are active
+# only when the matching parser feature is also enabled (like `ioc`).
+sigma = ["flow", "dep:sigma-rust"]
 # RFC 5424 syslog anomaly sink (hand-rolled, no deps).
 syslog = []
 # IPFIX / NetFlow v10 flow exporter (RFC 7011, hand-rolled, no deps).
@@ -577,6 +586,11 @@ required-features = ["tokio", "tls", "http", "emit"]
 name = "monitor_ioc"
 path = "examples/monitor/ioc_match.rs"
 required-features = ["tokio", "dns", "tls", "http"]
+
+[[example]]
+name = "monitor_sigma_rules"
+path = "examples/monitor/sigma_rules.rs"
+required-features = ["sigma", "dns", "tls", "http", "tokio", "emit"]
 
 [[example]]
 name = "monitor_ocsf"

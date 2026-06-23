@@ -43,6 +43,18 @@
 
 ### Added
 
+- **CICFlowMeter ML-feature export** (issue
+  [#32](https://github.com/p13marc/netring/issues/32)) — new `ml-features`
+  feature + `MonitorBuilder::on_ml_features(|f: &flowscope::CicFlowFeatures| …)`
+  delivers the CICFlowMeter feature vector for **every flow at flow end**:
+  totals / throughput **plus** the per-packet inter-arrival (IAT) and
+  active/idle features that the summary `FlowRecord` discards. Built from the
+  live `flowscope::FlowStats` the tracker holds at flow end (through flowscope's
+  IANA-IE-keyed `ipfix::FlowRecord` → `CicFlowFeatures::from_flow_record` +
+  `with_iat`), so none of the rich per-packet timing is lost. `CicFlowFeatures`
+  is `Serialize`, so the handler can write a labelled CSV/JSON dataset for
+  offline ML training. Example `monitor_ml_features`. (Per-packet nPrint matrix
+  export is tracked separately in #72.)
 - **Parquet columnar flow export** (`netring-exporters`; issue
   [#51](https://github.com/p13marc/netring/issues/51)) — new `ParquetFlowExporter`
   behind a `parquet` feature implements netring's `FlowExporter`, so

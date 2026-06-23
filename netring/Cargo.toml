@@ -200,6 +200,9 @@ ocsf-sink = ["dep:serde_json"]
 # pure-Rust `sigma-rust` evaluator. The DNS / HTTP / TLS rule arms are active
 # only when the matching parser feature is also enabled (like `ioc`).
 sigma = ["flow", "dep:sigma-rust"]
+# CICFlowMeter ML-feature export (issue #32). `on_ml_features` delivers
+# flowscope's `CicFlowFeatures` (totals + IAT + active/idle) per flow at end.
+ml-features = ["flow", "flowscope/ml-features"]
 # RFC 5424 syslog anomaly sink (hand-rolled, no deps).
 syslog = []
 # IPFIX / NetFlow v10 flow exporter (RFC 7011, hand-rolled, no deps).
@@ -591,6 +594,11 @@ required-features = ["tokio", "dns", "tls", "http"]
 name = "monitor_sigma_rules"
 path = "examples/monitor/sigma_rules.rs"
 required-features = ["sigma", "dns", "tls", "http", "tokio", "emit"]
+
+[[example]]
+name = "monitor_ml_features"
+path = "examples/monitor/ml_features_export.rs"
+required-features = ["ml-features", "tokio"]
 
 [[example]]
 name = "monitor_ocsf"

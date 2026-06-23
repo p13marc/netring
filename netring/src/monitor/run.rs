@@ -202,6 +202,7 @@ pub(crate) async fn run_loop(monitor: Monitor, stop: StopCondition) -> Result<()
         mut capture_stats,
         health,
         mut flow_exporters,
+        mut ml_feature_handlers,
         flow_active_timeout,
         packet_subs,
         kernel_prefilter,
@@ -679,6 +680,7 @@ pub(crate) async fn run_loop(monitor: Monitor, stop: StopCondition) -> Result<()
             &label_table,
             handler_error_policy,
             &mut flow_exporters,
+            &mut ml_feature_handlers,
             &health,
             arp_table_ref,
         )
@@ -726,6 +728,7 @@ pub(crate) async fn run_loop(monitor: Monitor, stop: StopCondition) -> Result<()
             &label_table,
             handler_error_policy,
             &mut flow_exporters,
+            &mut ml_feature_handlers,
             &health,
         )
         .await?;
@@ -786,6 +789,7 @@ pub(crate) async fn replay_loop(
         capture_stats: _,        // pcap replay has no kernel ring to sample
         health,
         mut flow_exporters,
+        mut ml_feature_handlers,
         flow_active_timeout: _, // active-timeout export is a live-loop concern
         packet_subs,
         // pcap replay has no kernel filter to set (the source isn't a socket).
@@ -974,6 +978,7 @@ pub(crate) async fn replay_loop(
             &label_table,
             handler_error_policy,
             &mut flow_exporters,
+            &mut ml_feature_handlers,
             &health,
             arp_table_ref,
         )
@@ -1018,6 +1023,7 @@ pub(crate) async fn replay_loop(
             &label_table,
             handler_error_policy,
             &mut flow_exporters,
+            &mut ml_feature_handlers,
             &health,
         )
         .await?;
@@ -1063,6 +1069,7 @@ async fn drain_phase(
     label_table: &flowscope::well_known::LabelTable,
     policy: HandlerErrorPolicy,
     flow_exporters: &mut [Box<dyn crate::export::FlowExporter>],
+    ml_feature_handlers: &mut [crate::monitor::ml_features::FlowEndHandler],
     health: &crate::monitor::health::HealthState,
 ) -> Result<()> {
     // Step 1: drain the central tracker.
@@ -1082,6 +1089,16 @@ async fn drain_phase(
             let record = crate::export::FlowRecord::from_ended(key, stats, *reason);
             for exporter in flow_exporters.iter_mut() {
                 exporter.export(&record);
+            }
+        }
+        // Issue #32: ML-feature delivery for flows drained at shutdown.
+        if !ml_feature_handlers.is_empty()
+            && let FsEvent::FlowEnded {
+                key, stats, reason, ..
+            } = &evt
+        {
+            for handler in ml_feature_handlers.iter_mut() {
+                handler(key, stats, *reason);
             }
         }
         let res = match dispatch_lifecycle(
@@ -1397,6 +1414,7 @@ async fn dispatch_tracked_events(
     label_table: &flowscope::well_known::LabelTable,
     policy: HandlerErrorPolicy,
     flow_exporters: &mut [Box<dyn crate::export::FlowExporter>],
+    ml_feature_handlers: &mut [crate::monitor::ml_features::FlowEndHandler],
     health: &crate::monitor::health::HealthState,
     arp_table: ArpTableRef<'_>,
 ) -> Result<()> {
@@ -1413,6 +1431,18 @@ async fn dispatch_tracked_events(
             let record = crate::export::FlowRecord::from_ended(key, stats, *reason);
             for exporter in flow_exporters.iter_mut() {
                 exporter.export(&record);
+            }
+        }
+        // Issue #32: deliver the CICFlowMeter feature vector for the ended
+        // flow, built from the live `stats` (so the IAT / active-idle block
+        // survives, unlike the summary record). Empty handler list = no cost.
+        if !ml_feature_handlers.is_empty()
+            && let FsEvent::FlowEnded {
+                key, stats, reason, ..
+            } = &evt
+        {
+            for handler in ml_feature_handlers.iter_mut() {
+                handler(key, stats, *reason);
             }
         }
         // Sync handlers first, then async — but on the SAME event, so one error

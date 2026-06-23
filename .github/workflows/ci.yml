@@ -45,6 +45,7 @@ jobs:
             "--features ocsf-sink" \
             "--features sigma" \
             "--features sigma,dns,http,tls" \
+            "--features ml-features" \
             "--features tokio,flow,dns,http"; do
             echo "::group::clippy -p netring $f"
             cargo clippy -p netring $f -- -D warnings
@@ -112,11 +113,11 @@ jobs:
       # (incl. the effect path). Cap-free, so they run here, not in the root job.
       - name: Monitor integration tests (cap-free)
         run: |
-          cargo test -p netring --features "tokio,channel,flow,parse,pcap,http,dns,tls,ja4plus,arp,ndp,lldp,cdp,asset,p0f,ad-protocols,asset-protocols,ssh,quic,sigma" \
+          cargo test -p netring --features "tokio,channel,flow,parse,pcap,http,dns,tls,ja4plus,arp,ndp,lldp,cdp,asset,p0f,ad-protocols,asset-protocols,ssh,quic,sigma,ml-features" \
             --test monitor_replay --test monitor_kernel_prefilter --test monitor_send \
             --test monitor_run_until_idle --test monitor_drain_timeout --test monitor_name_in_ctx \
             --test arp_replay --test ndp_replay --test lldp_replay --test cdp_replay --test asset_inventory --test asset_inventory_udp --test asset_inventory_mdns --test monitor_reassembler_config \
-            --test ad_protocols --test asset_protocols --test ssh_protocol --test quic_protocol --test ioc_match --test p0f_replay --test flow_risk --test sigma_match
+            --test ad_protocols --test asset_protocols --test ssh_protocol --test quic_protocol --test ioc_match --test p0f_replay --test flow_risk --test sigma_match --test ml_features
 
   # ── Integration tests (need CAP_NET_RAW) ──────────────────────────────────
   test-integration:
@@ -283,6 +284,8 @@ jobs:
       - run: cargo build -p netring --example monitor_ioc --features tokio,dns,tls,http
       # Issue #46: the Sigma example needs sigma + dns/tls/http + emit.
       - run: cargo build -p netring --example monitor_sigma_rules --features sigma,dns,tls,http,tokio,emit
+      # Issue #32: the ML-features example needs ml-features + tokio.
+      - run: cargo build -p netring --example monitor_ml_features --features ml-features,tokio
       # Issue #50: the OCSF example needs ocsf-sink + dns/tls.
       - run: cargo build -p netring --example monitor_ocsf --features tokio,ocsf-sink,dns,tls
       # Issue #28: the L2-discovery example needs lldp + cdp + emit.

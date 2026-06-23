@@ -12,6 +12,7 @@
 ///
 /// Returned by [`XdpSocket::statistics()`](crate::XdpSocket::statistics).
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+#[non_exhaustive]
 pub struct XdpStats {
     /// RX descriptors dropped because the fill ring was empty.
     ///

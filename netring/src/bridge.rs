@@ -54,6 +54,7 @@ pub enum BridgeDirection {
 /// (TX ring full, packet too large for the TX frame). Kernel-side drops
 /// (RX ring full) are reflected in `a_to_b.drops` / `b_to_a.drops`.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+#[non_exhaustive]
 pub struct BridgeStats {
     /// Statistics for A→B direction.
     pub a_to_b: CaptureStats,

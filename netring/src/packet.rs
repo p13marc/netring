@@ -10,6 +10,7 @@ pub use flowscope::Timestamp;
 
 /// Decoded per-packet status flags from `tpacket3_hdr.tp_status`.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+#[non_exhaustive]
 pub struct PacketStatus {
     /// Frame was truncated (too large for the ring frame).
     pub truncated: bool,
@@ -102,6 +103,7 @@ impl TimestampClock {
 /// flow tracking, and PCAP-style export — the trade-off is ~50 bytes per
 /// owned packet vs the bare-data minimum.
 #[derive(Debug, Clone)]
+#[non_exhaustive]
 pub struct OwnedPacket {
     /// Raw packet bytes (from MAC header).
     pub data: Vec<u8>,

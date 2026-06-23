@@ -7,6 +7,17 @@
 
 ### Fixed
 
+- **`PACKET_TIMESTAMP` hardware request silently ignored** (issue
+  [#40](https://github.com/p13marc/netring/issues/40)) —
+  `TimestampSource::{RawHardware, SysHardware}` mapped to the bare ints `1` /
+  `2`, which are `SOF_TIMESTAMPING_TX_HARDWARE` / `_TX_SOFTWARE` (TX flags), not
+  the RX-hardware selectors `PACKET_TIMESTAMP` actually reads. Requesting a
+  hardware RX timestamp therefore did nothing and the capture stayed on the
+  software clock. Now emits `SOF_TIMESTAMPING_RAW_HARDWARE` (64) /
+  `_SYS_HARDWARE` (32). Selecting a hardware source still requires the NIC to
+  have device-level HW timestamping enabled; the kernel falls back to software
+  per-packet otherwise — read the actual clock back via the new
+  `Packet::timestamp_clock()`.
 - **`Capture::packets()` use-after-free soundness hole** (**breaking**;
   [#35](https://github.com/p13marc/netring/issues/35)) — `Packets` was an
   `Iterator<Item = Packet<'cap>>`, decoupling each packet's lifetime from the
@@ -32,6 +43,18 @@
 
 ### Added
 
+- **RX timestamp-source reporting** (issue
+  [#40](https://github.com/p13marc/netring/issues/40)) — new
+  `Packet::timestamp_clock() -> TimestampClock` (and a `timestamp_clock` field on
+  `OwnedPacket`) reports **which** clock produced a frame's timestamp:
+  `RawHardware` (NIC PHC, taken at the MAC/PHY — immune to IRQ/NAPI/scheduler/
+  copy jitter), `SysHardware`, `Software` (kernel softirq), or `None`. Decoded
+  from `tp_status`, so it reflects the *actual* source — a hardware request
+  silently falls back to software per-packet when the NIC/driver can't honor it,
+  and only this tells you which you got. `TimestampClock::is_hardware()`
+  classifies the jitter-immune sources. Note raw hardware timestamps are in the
+  NIC's PTP clock base (often TAI, not UTC). AF_XDP/pcap sources report `None`
+  (AF_XDP RX-metadata HW timestamps are tracked in #13).
 - **Honest per-source drop accounting** (issue
   [#39](https://github.com/p13marc/netring/issues/39)) — a silent drop is a
   monitoring blind spot, so `CaptureTelemetry` (and the `capture_health` report)

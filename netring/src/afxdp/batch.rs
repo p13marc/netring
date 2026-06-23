@@ -81,6 +81,8 @@ impl<'a> XdpPacket<'a> {
         crate::OwnedPacket {
             data: self.data.to_vec(),
             timestamp: crate::Timestamp::default(),
+            // AF_XDP RX-metadata HW timestamps are future work (issue #13).
+            timestamp_clock: crate::packet::TimestampClock::None,
             original_len: self.len(),
             status: crate::packet::PacketStatus::default(),
             direction: crate::packet::PacketDirection::Unknown(0),

@@ -43,6 +43,58 @@ impl PacketStatus {
     }
 }
 
+/// Which clock produced a packet's [`timestamp`](Packet::timestamp) (issue #40).
+///
+/// AF_PACKET stamps each frame and records the source in `tp_status`. A
+/// hardware request silently falls back to software per-packet when the NIC
+/// or driver can't honor it, so the *actual* source is only knowable here —
+/// critical for forensic / PTP timing where a software stamp (taken after
+/// IRQ coalescing, NAPI batching, and the kernel→user copy) can be tens of
+/// microseconds to milliseconds off the wire arrival.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub enum TimestampClock {
+    /// No timestamp-source flag was set — the kernel's default software
+    /// stamp (taken in the RX softirq). The common case unless a hardware
+    /// source was both requested *and* honored.
+    #[default]
+    None,
+    /// Kernel software timestamp (`TP_STATUS_TS_SOFTWARE`).
+    Software,
+    /// System-adjusted hardware timestamp (`TP_STATUS_TS_SYS_HARDWARE`).
+    /// Deprecated in the kernel; present for completeness.
+    SysHardware,
+    /// Raw NIC hardware timestamp (`TP_STATUS_TS_RAW_HARDWARE`) — taken at
+    /// the MAC/PHY, immune to IRQ/NAPI/scheduler/copy jitter.
+    ///
+    /// The value is in the NIC's PTP Hardware Clock base, which is often
+    /// **TAI, not UTC**, and not system time — don't compare it to a
+    /// software clock without translating through the PHC offset.
+    RawHardware,
+}
+
+impl TimestampClock {
+    /// Decode the timestamp source from a raw `tp_status` bitmask.
+    #[inline]
+    pub fn from_status(status: u32) -> Self {
+        if status & ffi::TP_STATUS_TS_RAW_HARDWARE != 0 {
+            Self::RawHardware
+        } else if status & ffi::TP_STATUS_TS_SYS_HARDWARE != 0 {
+            Self::SysHardware
+        } else if status & ffi::TP_STATUS_TS_SOFTWARE != 0 {
+            Self::Software
+        } else {
+            Self::None
+        }
+    }
+
+    /// `true` for a NIC hardware clock (`RawHardware` / `SysHardware`) — the
+    /// jitter-immune sources. `false` for software / none.
+    #[inline]
+    pub fn is_hardware(self) -> bool {
+        matches!(self, Self::RawHardware | Self::SysHardware)
+    }
+}
+
 /// An owned copy of a captured packet, independent of the ring buffer.
 ///
 /// Created via [`Packet::to_owned()`]. Carries enough metadata for DPI,
@@ -54,6 +106,10 @@ pub struct OwnedPacket {
     pub data: Vec<u8>,
     /// Kernel timestamp.
     pub timestamp: Timestamp,
+    /// Which clock produced [`timestamp`](Self::timestamp) (issue #40).
+    /// `TimestampClock::None` for sources that don't report it (pcap replay,
+    /// AF_XDP).
+    pub timestamp_clock: TimestampClock,
     /// Original packet length on the wire (may exceed `data.len()` if truncated).
     pub original_len: usize,
     /// Decoded per-packet status flags from `tp_status`.
@@ -145,6 +201,15 @@ impl<'a> Packet<'a> {
     #[inline]
     pub fn timestamp(&self) -> Timestamp {
         Timestamp::new(self.hdr.tp_sec, self.hdr.tp_nsec)
+    }
+
+    /// Which clock produced [`timestamp()`](Self::timestamp) — decoded from
+    /// `tp_status` (issue #40). A hardware request can silently fall back to
+    /// software per-packet, so this reports the *actual* source, not the
+    /// requested one. See [`TimestampClock`].
+    #[inline]
+    pub fn timestamp_clock(&self) -> TimestampClock {
+        TimestampClock::from_status(self.hdr.tp_status)
     }
 
     /// Captured length (may be < [`original_len()`](Packet::original_len) if truncated).
@@ -253,6 +318,7 @@ impl<'a> Packet<'a> {
         OwnedPacket {
             data: self.data.to_vec(),
             timestamp: self.timestamp(),
+            timestamp_clock: self.timestamp_clock(),
             original_len: self.original_len(),
             status: self.status(),
             direction: PacketDirection::from_raw(sll.sll_pkttype),
@@ -574,10 +640,47 @@ mod tests {
     }
 
     #[test]
+    fn timestamp_clock_decodes_priority_raw_over_sys_over_software() {
+        use crate::afpacket::ffi;
+        assert_eq!(TimestampClock::from_status(0), TimestampClock::None);
+        assert_eq!(
+            TimestampClock::from_status(ffi::TP_STATUS_TS_SOFTWARE),
+            TimestampClock::Software
+        );
+        assert_eq!(
+            TimestampClock::from_status(ffi::TP_STATUS_TS_SYS_HARDWARE),
+            TimestampClock::SysHardware
+        );
+        assert_eq!(
+            TimestampClock::from_status(ffi::TP_STATUS_TS_RAW_HARDWARE),
+            TimestampClock::RawHardware
+        );
+        // Raw wins if multiple bits are set (it's the most precise).
+        let both = ffi::TP_STATUS_TS_RAW_HARDWARE | ffi::TP_STATUS_TS_SOFTWARE;
+        assert_eq!(
+            TimestampClock::from_status(both),
+            TimestampClock::RawHardware
+        );
+        // Coexists with unrelated status bits (e.g. VLAN_VALID) without confusion.
+        let mixed = ffi::TP_STATUS_TS_SOFTWARE | ffi::TP_STATUS_VLAN_VALID;
+        assert_eq!(TimestampClock::from_status(mixed), TimestampClock::Software);
+    }
+
+    #[test]
+    fn timestamp_clock_is_hardware_classifies_sources() {
+        assert!(TimestampClock::RawHardware.is_hardware());
+        assert!(TimestampClock::SysHardware.is_hardware());
+        assert!(!TimestampClock::Software.is_hardware());
+        assert!(!TimestampClock::None.is_hardware());
+        assert_eq!(TimestampClock::default(), TimestampClock::None);
+    }
+
+    #[test]
     fn owned_packet_clone() {
         let pkt = OwnedPacket {
             data: vec![0xDE, 0xAD],
             timestamp: Timestamp::new(1, 2),
+            timestamp_clock: TimestampClock::Software,
             original_len: 100,
             status: PacketStatus::default(),
             direction: PacketDirection::Host,

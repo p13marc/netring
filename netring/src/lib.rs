@@ -99,6 +99,7 @@ pub use error::Error;
 pub use interface::{InterfaceInfo, interface_info};
 pub use packet::{
     BatchIter, OwnedPacket, Packet, PacketBatch, PacketDirection, PacketStatus, Timestamp,
+    TimestampClock,
 };
 // Always re-exported — needed for `Packet::view()`.
 pub use flowscope::PacketView;

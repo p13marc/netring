@@ -82,12 +82,26 @@ pub enum TimestampSource {
 }
 
 impl TimestampSource {
-    /// Kernel constant for `PACKET_TIMESTAMP` setsockopt.
+    /// The `PACKET_TIMESTAMP` setsockopt value selecting this source.
+    ///
+    /// `PACKET_TIMESTAMP` takes a bitmask of `SOF_TIMESTAMPING_*` flags;
+    /// only the hardware bits are meaningful, and an unset/zero value means
+    /// the kernel's default software stamp. The earlier mapping returned the
+    /// bare ordinals `1`/`2`, which are `SOF_TIMESTAMPING_TX_HARDWARE` /
+    /// `_TX_SOFTWARE` (TX flags) — so requesting a hardware source silently
+    /// did nothing and the capture stayed on the software clock (issue #40).
+    ///
+    /// Note: selecting a hardware source here is necessary but not
+    /// sufficient — the NIC must also have hardware timestamping enabled at
+    /// the device level (`SIOCSHWTSTAMP` / `ethtool -T`), and the kernel
+    /// silently falls back to software per-packet when it can't honor the
+    /// request. Read the actual clock back via
+    /// [`Packet::timestamp_clock`](crate::Packet::timestamp_clock).
     pub(crate) const fn as_raw(self) -> libc::c_int {
         match self {
             Self::Software => 0,
-            Self::RawHardware => 1,
-            Self::SysHardware => 2,
+            Self::RawHardware => crate::afpacket::ffi::SOF_TIMESTAMPING_RAW_HARDWARE as libc::c_int,
+            Self::SysHardware => crate::afpacket::ffi::SOF_TIMESTAMPING_SYS_HARDWARE as libc::c_int,
         }
     }
 }
@@ -175,6 +189,25 @@ mod tests {
     fn timestamp_source_default() {
         assert_eq!(TimestampSource::default(), TimestampSource::Software);
         assert_eq!(TimestampSource::Software.as_raw(), 0);
+    }
+
+    #[test]
+    fn timestamp_source_hardware_emits_sof_flags_not_bare_ordinals() {
+        use crate::afpacket::ffi;
+        // Regression for issue #40: these must be the SOF_TIMESTAMPING
+        // hardware selectors (64 / 32), NOT the bare ordinals 1 / 2 (which
+        // are the unrelated TX_HARDWARE / TX_SOFTWARE flags and left HW
+        // requests silently on the software clock).
+        assert_eq!(
+            TimestampSource::RawHardware.as_raw(),
+            ffi::SOF_TIMESTAMPING_RAW_HARDWARE as libc::c_int
+        );
+        assert_eq!(
+            TimestampSource::SysHardware.as_raw(),
+            ffi::SOF_TIMESTAMPING_SYS_HARDWARE as libc::c_int
+        );
+        assert_ne!(TimestampSource::RawHardware.as_raw(), 1);
+        assert_ne!(TimestampSource::SysHardware.as_raw(), 2);
     }
 
     #[test]

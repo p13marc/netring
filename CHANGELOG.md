@@ -43,6 +43,12 @@
 
 ### Added
 
+- **Wider feature-matrix CI** (1.0 sweep, issue
+  [#37](https://github.com/p13marc/netring/issues/37)) — the clippy
+  feature-combination loop now also builds the `monitor`, `all-parsers`, and
+  `ot-protocols` umbrellas in isolation, catching broken gating in the umbrella
+  definitions users actually enable (previously only `monitor-lite` and the
+  individual leaf features were exercised). (CI-only; no API change.)
 - **Expanded miri + fuzz coverage of the unsafe paths** (issue
   [#36](https://github.com/p13marc/netring/issues/36)) — the miri (Tree Borrows)
   job now also checks the AF_XDP producer/consumer ring index/wrap arithmetic

@@ -47,7 +47,10 @@ jobs:
             "--features sigma,dns,http,tls" \
             "--features ml-features" \
             "--features infra-protocols" \
+            "--features ot-protocols" \
             "--features ftp,smtp,modbus,dnp3,stun,wireguard" \
+            "--features all-parsers" \
+            "--features monitor" \
             "--features tokio,flow,dns,http"; do
             echo "::group::clippy -p netring $f"
             cargo clippy -p netring $f -- -D warnings

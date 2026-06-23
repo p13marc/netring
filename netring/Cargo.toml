@@ -569,6 +569,11 @@ path = "examples/monitor/p0f.rs"
 required-features = ["tokio", "p0f", "emit"]
 
 [[example]]
+name = "monitor_flow_risk"
+path = "examples/monitor/flow_risk.rs"
+required-features = ["tokio", "tls", "http", "emit"]
+
+[[example]]
 name = "monitor_ioc"
 path = "examples/monitor/ioc_match.rs"
 required-features = ["tokio", "dns", "tls", "http"]

@@ -30,6 +30,7 @@
 //!                 println!("flow ended: {reason:?}");
 //!                 break;
 //!             }
+//!             _ => {} // ConversationChunk is #[non_exhaustive]
 //!         }
 //!     }
 //!     # break;
@@ -72,6 +73,7 @@ use crate::traits::PacketSource;
 
 /// One byte-chunk or terminal close marker for a conversation.
 #[derive(Debug, Clone)]
+#[non_exhaustive]
 pub enum ConversationChunk {
     /// Bytes flowing from the Initiator (first-seen direction).
     Initiator(Bytes),

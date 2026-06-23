@@ -444,6 +444,17 @@
   wildcard `_` arm; existing-variant *construction* is unaffected. Enums with a
   natural catch-all (`PacketDirection::Unknown`) and the `#[repr(C)]` FFI mirrors
   (`BpfInsn`, the `ethtool_*` structs) are deliberately left exhaustive.
+- **`#[non_exhaustive]` on the library-produced output structs** (1.0 sweep,
+  issue [#37](https://github.com/p13marc/netring/issues/37)) — the telemetry /
+  decoded-output structs the library *returns* and the user only *reads* are now
+  `#[non_exhaustive]` so future fields land additively: `CaptureStats`,
+  `XdpStats`, `BridgeStats`, `PacketStatus`, `OwnedPacket`, `AnomalyContext`
+  (plus the `ConversationChunk` enum). **Downstream impact:** an exhaustive
+  `match` on `ConversationChunk` needs a `_` arm. Config structs the user is
+  meant to *construct* by literal (`AsyncPcapConfig`, `BusyPollConfig`, the
+  `Ring*`/builder configs) are deliberately **left exhaustive** — `#[non_exhaustive]`
+  forbids cross-crate struct literals entirely (even `..Default::default()`), so
+  marking a construction-oriented struct would break its intended use.
 - **flowscope 0.16 → 0.18.** 0.17 brought `MacAddr`, the `arp` module, the
   `NeighborTable`, `RxMetadata` on a now-`#[non_exhaustive]` `PacketView`, and
   `detect::fingerprint`. **0.18** is a huge additive release — ~25 new protocol

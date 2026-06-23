@@ -383,6 +383,7 @@ fn json_string(out: &mut String, value: &str) {
 /// thresholds in [`metrics`](Self::metrics).
 #[derive(Debug, Clone, Default)]
 #[cfg_attr(feature = "serde", derive(serde::Serialize))]
+#[non_exhaustive]
 pub struct AnomalyContext {
     /// `(label, value)` observations — e.g. `("qname",
     /// "example.com")`.

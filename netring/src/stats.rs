@@ -7,6 +7,7 @@ use std::fmt;
 ///
 /// Reading stats via [`stats()`](crate::traits::PacketSource::stats) resets the kernel counters.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+#[non_exhaustive]
 pub struct CaptureStats {
     /// Total packets received (passed filter).
     pub packets: u32,

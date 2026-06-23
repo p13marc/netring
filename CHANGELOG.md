@@ -43,6 +43,17 @@
 
 ### Added
 
+- **OTLP metrics exporter** (`netring-exporters` 0.2.0; issue
+  [#52](https://github.com/p13marc/netring/issues/52)) — new
+  `OtlpMetricsExporter` pushes the per-source capture counters to an OTLP/HTTP
+  collector's `/v1/metrics` endpoint as JSON over blocking `ureq` (mirroring
+  `OtlpAnomalySink`'s transport — **no gRPC/protobuf, no new dependency**). The
+  cumulative `packets` / `drops` / `freezes` map to OTLP **cumulative monotonic
+  Sums** (`netring.capture.*`, anchored by a fixed `startTimeUnixNano`); the
+  windowed `drop_rate` is a **Gauge**; each data point carries a `source`
+  attribute. It is **not** an `AnomalySink` — wire it into an
+  `on_capture_stats(period, handler)` closure (`exporter.export(t)`), which
+  warns-and-continues on a collector failure. New `otlp_metrics` example.
 - **pcapng capture-to-disk** (issue
   [#41](https://github.com/p13marc/netring/issues/41)) — new
   `pcap::CaptureWriterNg` writes captured frames to a **pcapng** file (the IETF

@@ -1,6 +1,6 @@
 [package]
 name = "netring-exporters"
-version = "0.1.1"
+version = "0.2.0"
 edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
@@ -45,4 +45,8 @@ tokio = { version = "1", features = ["rt-multi-thread", "macros", "signal"] }
 # feature (it uses OtlpAnomalySink, which lives behind `otlp`).
 [[example]]
 name = "otlp_anomalies"
+required-features = ["otlp"]
+
+[[example]]
+name = "otlp_metrics"
 required-features = ["otlp"]

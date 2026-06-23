@@ -26,10 +26,20 @@
 //! | Feature | Sink | Transport |
 //! |---|---|---|
 //! | `otlp` (default) | [`OtlpAnomalySink`] | OTLP/HTTP-JSON `logs` over blocking HTTP (`ureq`) |
+//! | `otlp` (default) | [`OtlpMetricsExporter`] | OTLP/HTTP-JSON `metrics` (capture counters) over `ureq` |
 //! | `kafka` | [`KafkaSink`] | Kafka producer (`rdkafka` → librdkafka C dependency) |
+//!
+//! [`OtlpMetricsExporter`] is **not** an `AnomalySink` — it pushes capture
+//! telemetry from an
+//! [`on_capture_stats`](netring::monitor::MonitorBuilder::on_capture_stats)
+//! handler; see its docs for the wiring recipe.
 
 #[cfg(feature = "otlp")]
+mod metrics;
+#[cfg(feature = "otlp")]
 mod otlp;
+#[cfg(feature = "otlp")]
+pub use metrics::OtlpMetricsExporter;
 #[cfg(feature = "otlp")]
 pub use otlp::OtlpAnomalySink;
 

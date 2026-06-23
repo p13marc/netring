@@ -220,6 +220,8 @@ pub(crate) async fn run_loop(monitor: Monitor, stop: StopCondition) -> Result<()
         mut cdp_watch,
         #[cfg(feature = "asset")]
         mut asset_watch,
+        #[cfg(feature = "p0f")]
+        mut p0f_watch,
     } = monitor;
     // Borrow the monitor name as `&str` for the run loop's
     // dispatch sites. The owned `Box<str>` lives in this stack
@@ -624,6 +626,27 @@ pub(crate) async fn run_loop(monitor: Monitor, stop: StopCondition) -> Result<()
                 {
                     packet_err = Some(e);
                 }
+                // Issue #31: p0f — extract the TCP/OS fingerprint from a
+                // SYN / SYN-ACK, same in-borrow synchronous shape as ARP.
+                #[cfg(feature = "p0f")]
+                if let Some(watch) = p0f_watch.as_mut()
+                    && packet_err.is_none()
+                    && let Err(e) = dispatch_p0f(
+                        watch,
+                        view,
+                        sink.as_mut(),
+                        &mut state_map,
+                        &mut counters,
+                        &mut flow_states,
+                        &label_table,
+                        source,
+                        monitor_name_borrow,
+                        handler_error_policy,
+                        &health,
+                    )
+                {
+                    packet_err = Some(e);
+                }
                 driver.track_into(view, &mut events)
             })
             .await?;
@@ -782,6 +805,8 @@ pub(crate) async fn replay_loop(
         mut cdp_watch,
         #[cfg(feature = "asset")]
         mut asset_watch,
+        #[cfg(feature = "p0f")]
+        mut p0f_watch,
     } = monitor;
     let monitor_name_borrow: Option<&str> = monitor_name.as_deref();
 
@@ -898,6 +923,23 @@ pub(crate) async fn replay_loop(
         if let Some(aw) = asset_watch.as_mut() {
             absorb_frame_assets(
                 aw,
+                view,
+                sink.as_mut(),
+                &mut state_map,
+                &mut counters,
+                &mut flow_states,
+                &label_table,
+                SourceIdx(0),
+                monitor_name_borrow,
+                handler_error_policy,
+                &health,
+            )?;
+        }
+        // Issue #31: p0f fingerprinting on offline replay.
+        #[cfg(feature = "p0f")]
+        if let Some(watch) = p0f_watch.as_mut() {
+            dispatch_p0f(
+                watch,
                 view,
                 sink.as_mut(),
                 &mut state_map,
@@ -2191,6 +2233,67 @@ fn absorb_frame_assets(
         {
             feed!(a);
         }
+    }
+    Ok(())
+}
+
+/// Issue #31: extract the passive p0f TCP/OS fingerprint from one frame and feed
+/// `on_p0f`. `flowscope::tcp_fingerprint::fingerprint_from_layers` self-filters
+/// to SYN / SYN-ACK (returns `None` for everything else), so non-handshake
+/// frames cost a layers parse + early return. Synchronous — borrows drop before
+/// any `.await` (preserves `Send`). No anomaly pipeline in v1.
+#[cfg(feature = "p0f")]
+#[allow(clippy::too_many_arguments)]
+fn dispatch_p0f(
+    watch: &mut crate::monitor::p0f::P0fWatch,
+    view: PacketView<'_>,
+    sink: &mut dyn AnomalySink,
+    state_map: &mut StateMap,
+    counters: &mut CounterRegistry,
+    flow_states: &mut crate::ctx::FlowStateRegistry,
+    label_table: &flowscope::well_known::LabelTable,
+    source: SourceIdx,
+    monitor_name: Option<&str>,
+    policy: HandlerErrorPolicy,
+    health: &crate::monitor::health::HealthState,
+) -> Result<()> {
+    let Ok(layers) = view.layers() else {
+        return Ok(());
+    };
+    let Some(fp) = flowscope::tcp_fingerprint::fingerprint_from_layers(&layers) else {
+        return Ok(());
+    };
+
+    let mut ctx = Ctx {
+        flow: None, // p0f is a per-packet artifact — no 5-tuple flow key.
+        ts: view.timestamp,
+        source,
+        monitor_name,
+        state_map,
+        sink,
+        counters,
+        flow_states,
+        label_table,
+        tracker: None,
+        arp_table: None,
+    };
+
+    macro_rules! guard {
+        ($res:expr) => {
+            if let Err(e) = $res {
+                match policy {
+                    HandlerErrorPolicy::Propagate => return Err(e),
+                    HandlerErrorPolicy::Isolate => {
+                        health.record_handler_error();
+                        tracing::warn!(error = %e, "p0f handler error isolated");
+                    }
+                }
+            }
+        };
+    }
+
+    for handler in &watch.handlers {
+        guard!(handler(&fp, &mut ctx));
     }
     Ok(())
 }

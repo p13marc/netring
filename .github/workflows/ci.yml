@@ -41,6 +41,7 @@ jobs:
             "--features lldp,cdp" \
             "--features asset,lldp" \
             "--features quic" \
+            "--features p0f" \
             "--features ocsf-sink" \
             "--features tokio,flow,dns,http"; do
             echo "::group::clippy -p netring $f"
@@ -100,7 +101,7 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
       - name: Monitor lib tests (flow surface)
-        run: cargo test -p netring --features "tokio,channel,flow,parse,http,dns,tls,ja4plus,icmp,arp,ndp,lldp,cdp,asset,ad-protocols,asset-protocols,ssh,quic,ocsf-sink" --lib
+        run: cargo test -p netring --features "tokio,channel,flow,parse,http,dns,tls,ja4plus,icmp,arp,ndp,lldp,cdp,asset,p0f,ad-protocols,asset-protocols,ssh,quic,ocsf-sink" --lib
       # 0.25: the flow-gated *integration* tests that validate the new surface
       # but open NO live socket (pcap replay / build-time filter checks /
       # compile-time Send assertions) — these were never run in CI before. They
@@ -109,11 +110,11 @@ jobs:
       # (incl. the effect path). Cap-free, so they run here, not in the root job.
       - name: Monitor integration tests (cap-free)
         run: |
-          cargo test -p netring --features "tokio,channel,flow,parse,pcap,http,dns,tls,ja4plus,arp,ndp,lldp,cdp,asset,ad-protocols,asset-protocols,ssh,quic" \
+          cargo test -p netring --features "tokio,channel,flow,parse,pcap,http,dns,tls,ja4plus,arp,ndp,lldp,cdp,asset,p0f,ad-protocols,asset-protocols,ssh,quic" \
             --test monitor_replay --test monitor_kernel_prefilter --test monitor_send \
             --test monitor_run_until_idle --test monitor_drain_timeout --test monitor_name_in_ctx \
             --test arp_replay --test ndp_replay --test lldp_replay --test cdp_replay --test asset_inventory --test asset_inventory_udp --test asset_inventory_mdns --test monitor_reassembler_config \
-            --test ad_protocols --test asset_protocols --test ssh_protocol --test quic_protocol --test ioc_match
+            --test ad_protocols --test asset_protocols --test ssh_protocol --test quic_protocol --test ioc_match --test p0f_replay
 
   # ── Integration tests (need CAP_NET_RAW) ──────────────────────────────────
   test-integration:
@@ -272,6 +273,8 @@ jobs:
       - run: cargo build -p netring --example monitor_ssh_hassh --features tokio,ssh,emit
       # Issue #14: the QUIC SNI example needs quic + emit.
       - run: cargo build -p netring --example monitor_quic_sni --features tokio,quic,emit
+      # Issue #31: the p0f example needs p0f + emit.
+      - run: cargo build -p netring --example monitor_p0f --features tokio,p0f,emit
       # Issue #48: the IOC example needs dns/tls/http for all match arms.
       - run: cargo build -p netring --example monitor_ioc --features tokio,dns,tls,http
       # Issue #50: the OCSF example needs ocsf-sink + dns/tls.

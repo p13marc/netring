@@ -69,6 +69,7 @@ pub mod health;
 pub mod ioc;
 #[cfg(feature = "lldp")]
 pub mod lldp;
+pub mod ml_features;
 #[cfg(feature = "ndp")]
 pub mod ndp;
 #[cfg(feature = "p0f")]
@@ -248,6 +249,11 @@ pub struct Monitor {
     /// [`crate::export::FlowRecord`] for every `FlowEnded` and hands it
     /// to each. Empty (the common case) is zero cost.
     pub(crate) flow_exporters: Vec<Box<dyn crate::export::FlowExporter>>,
+    /// Issue #32: flow-end ML-feature handlers registered via
+    /// [`MonitorBuilder::on_ml_features`]. Each is called with the live
+    /// `(key, stats, reason)` at flow end; the `CicFlowFeatures` construction
+    /// is baked into the boxed closure. Empty (the common case) is zero cost.
+    pub(crate) ml_feature_handlers: Vec<ml_features::FlowEndHandler>,
     /// 0.25 W1c: active-timeout period for interim flow-record export. When
     /// `Some` (and exporters exist), the run loop emits ongoing `FlowRecord`s
     /// for long-lived flows every period. See [`MonitorBuilder::export_active_timeout`].
@@ -603,6 +609,9 @@ pub struct MonitorBuilder {
     /// 0.24 Phase D1: flow exporters registered via
     /// [`Self::export_flows`]. Moved into [`Monitor::flow_exporters`].
     flow_exporters: Vec<Box<dyn crate::export::FlowExporter>>,
+    /// Issue #32: flow-end ML-feature handlers registered via
+    /// [`Self::on_ml_features`]. Moved into [`Monitor::ml_feature_handlers`].
+    ml_feature_handlers: Vec<ml_features::FlowEndHandler>,
     /// 0.25 W1c: active-timeout period set via [`Self::export_active_timeout`].
     flow_active_timeout: Option<std::time::Duration>,
     /// 0.21 D.1: TypeIds of protocol markers registered via
@@ -1166,6 +1175,40 @@ impl MonitorBuilder {
         E: crate::export::FlowExporter + 'static,
     {
         self.flow_exporters.push(Box::new(exporter));
+        self
+    }
+
+    /// Issue #32: register a handler that receives the CICFlowMeter
+    /// [`CicFlowFeatures`](flowscope::CicFlowFeatures) vector for **every flow
+    /// at flow end** — totals / throughput plus the per-packet inter-arrival
+    /// (IAT) and active/idle features that the summary
+    /// [`FlowRecord`](crate::export::FlowRecord) discards.
+    ///
+    /// The features are built from the live `flowscope::FlowStats` the tracker
+    /// holds at flow end, so nothing is lost to the summary record. Pair with
+    /// `serde` (`CicFlowFeatures` is `Serialize`) to write a labelled
+    /// CSV/JSON dataset for offline ML training.
+    ///
+    /// ```no_run
+    /// # #[cfg(all(feature = "ml-features", feature = "tokio"))] fn demo() {
+    /// use netring::monitor::Monitor;
+    /// use netring::protocol::builtin::Tcp;
+    /// Monitor::builder()
+    ///     .interface("eth0")
+    ///     .protocol::<Tcp>()
+    ///     .on_ml_features(|f: &flowscope::CicFlowFeatures| {
+    ///         // serialize `f` to your ML pipeline
+    ///         let _ = f;
+    ///     });
+    /// # }
+    /// ```
+    #[cfg(feature = "ml-features")]
+    pub fn on_ml_features<F>(mut self, handler: F) -> Self
+    where
+        F: FnMut(&flowscope::CicFlowFeatures) + Send + 'static,
+    {
+        self.ml_feature_handlers
+            .push(ml_features::make_handler(handler));
         self
     }
 
@@ -2803,6 +2846,7 @@ impl MonitorBuilder {
             capture_stats: self.capture_stats,
             health: health::HealthState::new(),
             flow_exporters: self.flow_exporters,
+            ml_feature_handlers: self.ml_feature_handlers,
             flow_active_timeout: self.flow_active_timeout,
             packet_subs: self.packet_subs,
             kernel_prefilter,

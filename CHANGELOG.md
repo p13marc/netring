@@ -43,6 +43,16 @@
 
 ### Added
 
+- **Expanded miri + fuzz coverage of the unsafe paths** (issue
+  [#36](https://github.com/p13marc/netring/issues/36)) — the miri (Tree Borrows)
+  job now also checks the AF_XDP producer/consumer ring index/wrap arithmetic
+  (`afxdp::ring`, heap-backed `MockRing` — no mmap) and the disjoint-`&mut`
+  raw-pointer `Ctx` projections (`ctx::split`). A new `bpf_interp_raw` fuzz
+  target drives the cBPF software interpreter with **arbitrary raw bytecode**
+  (hostile opcodes / jump offsets / `k`), bypassing the validating builder that
+  the existing BPF fuzz targets go through — proving the interpreter never
+  panics, reads out of bounds, or hangs on adversarial programs. (Test-only; no
+  API change.)
 - **Tier-2 application / OT / VPN protocols** (issue
   [#30](https://github.com/p13marc/netring/issues/30)) — new `ftp` / `smtp` /
   `modbus` / `dnp3` / `stun` / `wireguard` features surface flowscope 0.18's

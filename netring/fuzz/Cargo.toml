@@ -38,6 +38,13 @@ doc = false
 bench = false
 
 [[bin]]
+name = "bpf_interp_raw"
+path = "fuzz_targets/bpf_interp_raw.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
 name = "expr_parse"
 path = "fuzz_targets/expr_parse.rs"
 test = false

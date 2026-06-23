@@ -345,6 +345,11 @@ jobs:
           cargo +nightly miri test -p netring --features "tokio,flow,http,dns,tls" --lib monitor::dispatcher
           cargo +nightly miri test -p netring --features "tokio,flow,http,dns,tls" --lib monitor::registry
           cargo +nightly miri test -p netring --features "tokio,flow,http,dns,tls" --lib monitor::subscription
+          # 0.27 (#36): the AF_XDP producer/consumer ring index/wrap arithmetic
+          # (heap-backed MockRing, no mmap) and the disjoint-`&mut` raw-pointer
+          # projections of `Ctx` (ctx::split) — both pure-logic unsafe under TB.
+          cargo +nightly miri test -p netring --features af-xdp --lib afxdp::ring
+          cargo +nightly miri test -p netring --features "tokio,flow,http,dns,tls" --lib ctx::split
 
   # ── cargo-fuzz smoke: BPF compiler + interpreter against adversarial input ─
   fuzz:
@@ -362,6 +367,9 @@ jobs:
           cargo +nightly fuzz run bpf_matches -- -runs=200000 -max_total_time=60
           cargo +nightly fuzz run bpf_builder -- -runs=200000 -max_total_time=60
           cargo +nightly fuzz run expr_parse -- -runs=200000 -max_total_time=60
+          # 0.27 (#36): the raw cBPF interpreter against arbitrary bytecode
+          # (hostile opcodes / jumps / k), bypassing the validating builder.
+          cargo +nightly fuzz run bpf_interp_raw -- -runs=200000 -max_total_time=60
 
   # ── netring-exporters companion crate (OTLP + Kafka) ──────────────────────
   exporters:

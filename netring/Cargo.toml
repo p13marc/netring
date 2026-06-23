@@ -161,9 +161,16 @@ netbios-ns = ["flow", "flowscope/netbios-ns"]
 mdns = ["flow", "flowscope/mdns"]
 # Umbrella for the asset-discovery protocol set.
 asset-protocols = ["dhcp", "ssdp", "netbios-ns", "mdns"]
-# Tier-2 protocols (issue #30). SSH (+ HASSH fingerprint) is the first; more
-# (FTP/SMTP/SNMP/NTP/…) land here as flowscope ships parsers.
+# Tier-2 protocols (issue #30). Each pulls the matching flowscope 0.18 passive
+# parser and surfaces a `Protocol` marker usable via `.protocol::<P>()` +
+# `.on::<P>()`. SSH (+ HASSH) was first; the UDP infrastructure set follows.
 ssh = ["flow", "flowscope/ssh"]
+ntp = ["flow", "flowscope/ntp"]
+snmp = ["flow", "flowscope/snmp"]
+tftp = ["flow", "flowscope/tftp"]
+radius = ["flow", "flowscope/radius"]
+# Umbrella for the UDP infrastructure-protocol set (NTP/SNMP/TFTP/RADIUS).
+infra-protocols = ["ntp", "snmp", "tftp", "radius"]
 # QUIC Initial-packet visibility (issue #14) — on-path SNI/ALPN/version from the
 # passive-decryptable QUIC Initial, no decryption keys needed. `Quic` marker on
 # UDP/443 → `flowscope::QuicInitial`.
@@ -599,6 +606,11 @@ required-features = ["sigma", "dns", "tls", "http", "tokio", "emit"]
 name = "monitor_ml_features"
 path = "examples/monitor/ml_features_export.rs"
 required-features = ["ml-features", "tokio"]
+
+[[example]]
+name = "monitor_infra_protocols"
+path = "examples/monitor/infra_protocols.rs"
+required-features = ["infra-protocols", "tokio", "emit"]
 
 [[example]]
 name = "monitor_ocsf"

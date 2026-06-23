@@ -21,16 +21,24 @@ mod kerberos;
 mod ldap;
 #[cfg(feature = "netbios-ns")]
 mod nbns;
+#[cfg(feature = "ntp")]
+mod ntp;
 #[cfg(feature = "quic")]
 mod quic;
+#[cfg(feature = "radius")]
+mod radius;
 #[cfg(feature = "rdp")]
 mod rdp;
 #[cfg(feature = "smb")]
 mod smb;
+#[cfg(feature = "snmp")]
+mod snmp;
 #[cfg(feature = "ssdp")]
 mod ssdp;
 #[cfg(feature = "ssh")]
 mod ssh;
+#[cfg(feature = "tftp")]
+mod tftp;
 #[cfg(feature = "tls")]
 mod tls;
 #[cfg(feature = "tls")]
@@ -52,16 +60,24 @@ pub use kerberos::Kerberos;
 pub use ldap::Ldap;
 #[cfg(feature = "netbios-ns")]
 pub use nbns::Nbns;
+#[cfg(feature = "ntp")]
+pub use ntp::Ntp;
 #[cfg(feature = "quic")]
 pub use quic::Quic;
+#[cfg(feature = "radius")]
+pub use radius::Radius;
 #[cfg(feature = "rdp")]
 pub use rdp::Rdp;
 #[cfg(feature = "smb")]
 pub use smb::Smb;
+#[cfg(feature = "snmp")]
+pub use snmp::Snmp;
 #[cfg(feature = "ssdp")]
 pub use ssdp::Ssdp;
 #[cfg(feature = "ssh")]
 pub use ssh::Ssh;
+#[cfg(feature = "tftp")]
+pub use tftp::Tftp;
 #[cfg(feature = "tls")]
 pub use tls::Tls;
 #[cfg(feature = "tls")]

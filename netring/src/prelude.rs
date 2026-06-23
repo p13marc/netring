@@ -40,16 +40,24 @@ pub use crate::protocol::builtin::Kerberos;
 pub use crate::protocol::builtin::Ldap;
 #[cfg(feature = "netbios-ns")]
 pub use crate::protocol::builtin::Nbns;
+#[cfg(feature = "ntp")]
+pub use crate::protocol::builtin::Ntp;
 #[cfg(feature = "quic")]
 pub use crate::protocol::builtin::Quic;
+#[cfg(feature = "radius")]
+pub use crate::protocol::builtin::Radius;
 #[cfg(feature = "rdp")]
 pub use crate::protocol::builtin::Rdp;
 #[cfg(feature = "smb")]
 pub use crate::protocol::builtin::Smb;
+#[cfg(feature = "snmp")]
+pub use crate::protocol::builtin::Snmp;
 #[cfg(feature = "ssdp")]
 pub use crate::protocol::builtin::Ssdp;
 #[cfg(feature = "ssh")]
 pub use crate::protocol::builtin::Ssh;
+#[cfg(feature = "tftp")]
+pub use crate::protocol::builtin::Tftp;
 pub use crate::protocol::builtin::{Tcp, Udp};
 #[cfg(feature = "tls")]
 pub use crate::protocol::builtin::{Tls, TlsHandshake};

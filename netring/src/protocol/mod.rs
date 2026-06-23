@@ -33,16 +33,24 @@ pub use builtin::Kerberos;
 pub use builtin::Ldap;
 #[cfg(feature = "netbios-ns")]
 pub use builtin::Nbns;
+#[cfg(feature = "ntp")]
+pub use builtin::Ntp;
 #[cfg(feature = "quic")]
 pub use builtin::Quic;
+#[cfg(feature = "radius")]
+pub use builtin::Radius;
 #[cfg(feature = "rdp")]
 pub use builtin::Rdp;
 #[cfg(feature = "smb")]
 pub use builtin::Smb;
+#[cfg(feature = "snmp")]
+pub use builtin::Snmp;
 #[cfg(feature = "ssdp")]
 pub use builtin::Ssdp;
 #[cfg(feature = "ssh")]
 pub use builtin::Ssh;
+#[cfg(feature = "tftp")]
+pub use builtin::Tftp;
 pub use builtin::{Icmp, Tcp, Udp};
 #[cfg(feature = "tls")]
 pub use builtin::{Tls, TlsHandshake};

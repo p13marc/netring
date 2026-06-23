@@ -19,6 +19,7 @@ use crate::error::Error;
 ///
 /// AF_XDP is one socket per queue; this selects how many [`XdpCapture`] opens.
 #[derive(Debug, Clone)]
+#[non_exhaustive]
 pub enum Queues {
     /// A single queue id. The historical default (queue 0).
     Single(u32),

@@ -24,6 +24,10 @@ fn severity_number(s: Severity) -> u8 {
         Severity::Warning => 13,
         Severity::Error => 17,
         Severity::Critical => 21,
+        // `Severity` is `#[non_exhaustive]`: a future level maps to OTLP
+        // UNSPECIFIED (0) until this exporter learns its number, rather than
+        // guessing a wrong one.
+        _ => 0,
     }
 }
 

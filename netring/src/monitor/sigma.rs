@@ -39,6 +39,7 @@ use crate::protocol::FlowKey;
 
 /// Error loading a [`SigmaRuleSet`].
 #[derive(Debug)]
+#[non_exhaustive]
 pub enum SigmaError {
     /// A rule's YAML failed to parse.
     Parse(String),

@@ -2,6 +2,7 @@
 
 /// All errors returned by netring.
 #[derive(Debug, thiserror::Error)]
+#[non_exhaustive]
 pub enum Error {
     /// Failed to create the AF_PACKET socket.
     #[error("socket creation failed")]
@@ -70,6 +71,7 @@ pub type Result<T> = std::result::Result<T, Error>;
 /// Build-time errors for the 0.20 `Monitor` API. Surfaced from
 /// [`crate::monitor::MonitorBuilder::build`].
 #[derive(Debug, thiserror::Error)]
+#[non_exhaustive]
 pub enum BuildError {
     /// `.interface(...)` / `.interfaces(...)` was not called.
     #[error(

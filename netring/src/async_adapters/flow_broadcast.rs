@@ -89,6 +89,7 @@ pub struct FlowSubscriber<K> {
 
 /// Errors produced by a [`FlowSubscriber`].
 #[derive(Debug, thiserror::Error)]
+#[non_exhaustive]
 pub enum BroadcastRecvError {
     /// This subscriber fell behind the channel buffer; `n` events
     /// were dropped between the last yielded item and this point.

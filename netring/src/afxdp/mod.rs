@@ -85,6 +85,7 @@ use crate::packet::{OwnedPacket, Timestamp};
 /// Pick the mode that matches your traffic direction. For asymmetric splits or
 /// shared-UMEM setups, use [`XdpMode::Custom`].
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
+#[non_exhaustive]
 pub enum XdpMode {
     /// Receive only. All UMEM frames are pre-staged to the fill ring; `send()`
     /// will always return `Ok(false)` because no frames are reachable from the

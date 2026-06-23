@@ -57,6 +57,7 @@ pub(crate) fn check_program_conflict(
 
 /// Errors specific to the XDP loader.
 #[derive(Debug, thiserror::Error)]
+#[non_exhaustive]
 pub enum LoaderError {
     /// Wrapper around any aya error.
     #[error("XDP loader (aya): {0}")]

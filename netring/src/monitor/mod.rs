@@ -313,6 +313,7 @@ pub struct Monitor {
 /// How the run loop reacts when a handler (detector / sink / async handler)
 /// returns an error. See [`MonitorBuilder::handler_error_policy`].
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+#[non_exhaustive]
 pub enum HandlerErrorPolicy {
     /// Propagate the error and stop the monitor (the default; historic behavior).
     #[default]
@@ -325,6 +326,7 @@ pub enum HandlerErrorPolicy {
 /// How the run loop reacts when a capture backend errors (e.g. a readiness or
 /// receive failure). See [`MonitorBuilder::backend_error_policy`].
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+#[non_exhaustive]
 pub enum BackendErrorPolicy {
     /// Propagate the error and stop the monitor (the default).
     #[default]

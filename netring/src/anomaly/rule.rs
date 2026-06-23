@@ -41,6 +41,7 @@ impl From<Severity> for flowscope::event::Severity {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Default)]
 #[cfg_attr(feature = "serde", derive(serde::Serialize))]
 #[cfg_attr(feature = "serde", serde(rename_all = "snake_case"))]
+#[non_exhaustive]
 pub enum Severity {
     /// Informational — pattern of interest, no immediate action.
     #[default]

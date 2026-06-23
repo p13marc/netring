@@ -17,6 +17,7 @@ pub use ipnet::{IpNet, ParseIpNetError};
 
 /// Fanout distribution mode for multi-socket packet sharing.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[non_exhaustive]
 pub enum FanoutMode {
     /// Distribute by flow hash (src/dst IP+port).
     Hash,
@@ -71,6 +72,7 @@ bitflags::bitflags! {
 
 /// Kernel timestamp source.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+#[non_exhaustive]
 pub enum TimestampSource {
     /// Software timestamp (default).
     #[default]
@@ -126,6 +128,7 @@ impl TimestampSource {
 ///     .unwrap();
 /// ```
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[non_exhaustive]
 pub enum RingProfile {
     /// Balanced defaults. 4 MiB blocks × 64 (256 MiB), 60ms timeout.
     /// Good for general-purpose capture up to ~500 Kpps.

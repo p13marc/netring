@@ -32,6 +32,21 @@
 
 ### Added
 
+- **Passive TCP/OS fingerprinting — p0f** (issue
+  [#31](https://github.com/p13marc/netring/issues/31)) — new opt-in
+  `MonitorBuilder::on_p0f` hook (feature `p0f`) firing once per TCP **SYN /
+  SYN-ACK** with a [`flowscope::TcpFingerprint`]: the stack defaults in the
+  handshake (initial TTL, window, MSS, option layout, quirks) identify the
+  sender's OS without touching the payload, and
+  [`to_p0f_signature`](flowscope::TcpFingerprint::to_p0f_signature) yields the
+  canonical p0f-3 string for matching a signature database. `direction`
+  separates the client (`Syn`) from the server (`SynAck`). Computed per-packet
+  in the zero-copy drain (and the pcap replay loop) like `on_arp`; arming it
+  narrows the kernel prefilter to TCP. Prelude exports `TcpFingerprint` /
+  `TcpDirection`; folded into the `monitor` / `monitor-quickstart` umbrellas.
+  Example `monitor_p0f`; cap-free `p0f_replay` pcap test. This completes the
+  #31 fingerprint family (JA3/JA4/JA4S/JA4X/JA4H + p0f; HASSH is reachable via
+  the SSH marker from #30).
 - **OCSF Detection Finding sink** (issue
   [#50](https://github.com/p13marc/netring/issues/50)) — `OcsfSink` (feature
   `ocsf-sink`, prelude-exported) is an `AnomalySink` that maps each anomaly to

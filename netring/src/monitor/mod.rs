@@ -71,6 +71,8 @@ pub mod ioc;
 pub mod lldp;
 #[cfg(feature = "ndp")]
 pub mod ndp;
+#[cfg(feature = "p0f")]
+pub mod p0f;
 pub mod registry;
 pub mod run;
 pub mod telemetry;
@@ -292,6 +294,10 @@ pub struct Monitor {
     /// when `asset_inventory` / `on_asset` was called.
     #[cfg(feature = "asset")]
     pub(crate) asset_watch: Option<asset::AssetWatch>,
+    /// Issue #31: passive TCP/OS fingerprint (p0f) handlers. `Some` when any
+    /// `on_p0f` hook was registered.
+    #[cfg(feature = "p0f")]
+    pub(crate) p0f_watch: Option<p0f::P0fWatch>,
 }
 
 /// How the run loop reacts when a handler (detector / sink / async handler)
@@ -715,6 +721,12 @@ pub struct MonitorBuilder {
     /// Issue #28: set once `asset_inventory` / `on_asset` is called.
     #[cfg(feature = "asset")]
     asset_enabled: bool,
+    /// Issue #31: `on_p0f` TCP-fingerprint handlers.
+    #[cfg(feature = "p0f")]
+    p0f_handlers: Vec<p0f::P0fHandler>,
+    /// Issue #31: set once any `on_p0f` hook is registered.
+    #[cfg(feature = "p0f")]
+    p0f_enabled: bool,
 }
 
 impl MonitorBuilder {
@@ -1662,6 +1674,27 @@ impl MonitorBuilder {
         self
     }
 
+    /// Issue #31: register a handler fired once per **TCP SYN / SYN-ACK** with
+    /// the passive [`p0f`] OS fingerprint
+    /// ([`flowscope::TcpFingerprint`] + `&mut Ctx`). The stack defaults in the
+    /// SYN (initial TTL, window, MSS, option layout, quirks) identify the
+    /// sender's OS without touching the payload; the fingerprint's
+    /// [`to_p0f_signature`](flowscope::TcpFingerprint::to_p0f_signature) is the
+    /// canonical p0f-3 string for matching against a signature database.
+    ///
+    /// Computed per-packet in the zero-copy drain (like [`on_arp`](Self::on_arp));
+    /// arming it narrows the kernel prefilter to TCP. `direction` distinguishes
+    /// the client (`Syn`) from the server (`SynAck`).
+    #[cfg(feature = "p0f")]
+    pub fn on_p0f<F>(mut self, handler: F) -> Self
+    where
+        F: Fn(&flowscope::TcpFingerprint, &mut Ctx<'_>) -> Result<()> + Send + 'static,
+    {
+        self.p0f_enabled = true;
+        self.p0f_handlers.push(Box::new(handler));
+        self
+    }
+
     /// Issue #28: enable the passive **asset inventory** with an explicit LRU
     /// `capacity` (MAC-keyed; oldest-contributed entries evicted when full).
     ///
@@ -2226,6 +2259,23 @@ impl MonitorBuilder {
         None
     }
 
+    /// Issue #31: an armed p0f hook only needs TCP (SYN/SYN-ACK), so it
+    /// contributes a `Proto(Tcp)` term — a pure-p0f monitor sheds non-TCP at
+    /// the kernel. `None` when no p0f hook is armed.
+    #[cfg(feature = "p0f")]
+    #[inline]
+    fn p0f_interest(&self) -> Option<subscription::Predicate> {
+        self.p0f_enabled
+            .then_some(subscription::Predicate::Atom(subscription::Atom::Proto(
+                flowscope::L4Proto::Tcp,
+            )))
+    }
+    #[cfg(not(feature = "p0f"))]
+    #[inline]
+    fn p0f_interest(&self) -> Option<subscription::Predicate> {
+        None
+    }
+
     /// The classic-BPF **kernel prefilter** this monitor compiles to (0.25
     /// S2): the conservative OR-union of **every** consumer's traffic interest
     /// — packet subs, registered handlers (via `Event::traffic_class`),
@@ -2270,6 +2320,8 @@ impl MonitorBuilder {
             // LLC/SNAP (no EtherType term → fail-open capture-all).
             .chain(self.lldp_interest())
             .chain(self.cdp_interest())
+            // Issue #31: p0f only needs TCP SYN/SYN-ACK → `Proto(Tcp)`.
+            .chain(self.p0f_interest())
             .chain(wants_all.then_some(subscription::Predicate::Always));
 
         subscription::kernel_filter::compile_union(interests)
@@ -2634,6 +2686,12 @@ impl MonitorBuilder {
                 let cap = self.asset_capacity.unwrap_or(asset::DEFAULT_ASSET_CAPACITY);
                 let mut w = asset::AssetWatch::new(cap);
                 w.handlers = self.asset_handlers;
+                w
+            }),
+            #[cfg(feature = "p0f")]
+            p0f_watch: self.p0f_enabled.then(|| {
+                let mut w = p0f::P0fWatch::new();
+                w.handlers = self.p0f_handlers;
                 w
             }),
         })

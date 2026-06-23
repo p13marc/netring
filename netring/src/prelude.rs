@@ -129,6 +129,10 @@ pub use flowscope::{ChassisId, LldpMessage, PortId};
 #[cfg(feature = "quic")]
 pub use flowscope::{QuicInitial, QuicVersion};
 
+// ─── p0f passive TCP/OS fingerprint (issue #31, feature `p0f`) ────
+#[cfg(feature = "p0f")]
+pub use flowscope::{TcpDirection, TcpFingerprint};
+
 // ─── Asset inventory (issue #28, feature `asset`) ────────────────
 #[cfg(feature = "asset")]
 pub use flowscope::{Asset, AssetCapabilities, AssetFingerprints, AssetSourceSet, Inventory};

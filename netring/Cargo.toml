@@ -131,6 +131,9 @@ cdp = ["flow", "flowscope/cdp"]
 # `MonitorBuilder::asset_inventory` / `on_asset`. Combine with at least one
 # source feature for the inventory to be fed.
 asset = ["flow", "flowscope/asset"]
+# Passive TCP/OS fingerprinting — p0f (issue #31). Per-SYN fingerprint extracted
+# in the Monitor drain; see `MonitorBuilder::on_p0f` → `flowscope::TcpFingerprint`.
+p0f = ["flow", "flowscope/tcp_fingerprint"]
 # Lateral-movement / Active Directory L7 protocols (issue #29). Each pulls the
 # matching flowscope 0.18 passive parser and surfaces a `Protocol` marker
 # (`Smb`/`Kerberos`/`Ldap`/`Rdp`) usable via `.protocol::<P>()` + `.on::<P>()`.
@@ -203,13 +206,13 @@ monitor-lite = ["tokio", "channel", "flow"]
 # Full Monitor + detector! experience for app users.
 monitor = [
     "tokio", "channel", "flow", "parse", "metrics",
-    "http", "dns", "tls", "icmp", "arp", "ndp", "lldp", "cdp", "asset", "ad-protocols", "asset-protocols", "ssh", "quic",
+    "http", "dns", "tls", "icmp", "arp", "ndp", "lldp", "cdp", "asset", "p0f", "ad-protocols", "asset-protocols", "ssh", "quic",
     "emit", "serde",
 ]
 # Maximal app-tier umbrella (every shipped sink + parser + flowscope bonus).
 monitor-quickstart = [
     "tokio", "channel", "flow", "parse", "pcap", "metrics",
-    "http", "dns", "tls", "icmp", "arp", "ndp", "lldp", "cdp", "asset", "ad-protocols", "asset-protocols", "ssh", "quic",
+    "http", "dns", "tls", "icmp", "arp", "ndp", "lldp", "cdp", "asset", "p0f", "ad-protocols", "asset-protocols", "ssh", "quic",
     "emit", "eve-sink", "ocsf-sink", "file-hash", "serde",
 ]
 
@@ -559,6 +562,11 @@ required-features = ["tokio", "ssh", "emit"]
 name = "monitor_quic_sni"
 path = "examples/monitor/quic_sni.rs"
 required-features = ["tokio", "quic", "emit"]
+
+[[example]]
+name = "monitor_p0f"
+path = "examples/monitor/p0f.rs"
+required-features = ["tokio", "p0f", "emit"]
 
 [[example]]
 name = "monitor_ioc"

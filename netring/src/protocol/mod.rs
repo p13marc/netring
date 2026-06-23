@@ -23,14 +23,20 @@ pub use event_typed::{
 // users who prefer those paths.
 #[cfg(feature = "dhcp")]
 pub use builtin::Dhcp;
+#[cfg(feature = "dnp3")]
+pub use builtin::Dnp3;
 #[cfg(feature = "dns")]
 pub use builtin::Dns;
+#[cfg(feature = "ftp")]
+pub use builtin::Ftp;
 #[cfg(feature = "http")]
 pub use builtin::Http;
 #[cfg(feature = "kerberos")]
 pub use builtin::Kerberos;
 #[cfg(feature = "ldap")]
 pub use builtin::Ldap;
+#[cfg(feature = "modbus")]
+pub use builtin::Modbus;
 #[cfg(feature = "netbios-ns")]
 pub use builtin::Nbns;
 #[cfg(feature = "ntp")]
@@ -43,14 +49,20 @@ pub use builtin::Radius;
 pub use builtin::Rdp;
 #[cfg(feature = "smb")]
 pub use builtin::Smb;
+#[cfg(feature = "smtp")]
+pub use builtin::Smtp;
 #[cfg(feature = "snmp")]
 pub use builtin::Snmp;
 #[cfg(feature = "ssdp")]
 pub use builtin::Ssdp;
 #[cfg(feature = "ssh")]
 pub use builtin::Ssh;
+#[cfg(feature = "stun")]
+pub use builtin::Stun;
 #[cfg(feature = "tftp")]
 pub use builtin::Tftp;
+#[cfg(feature = "wireguard")]
+pub use builtin::WireGuard;
 pub use builtin::{Icmp, Tcp, Udp};
 #[cfg(feature = "tls")]
 pub use builtin::{Tls, TlsHandshake};

@@ -43,6 +43,17 @@
 
 ### Added
 
+- **Tier-2 application / OT / VPN protocols** (issue
+  [#30](https://github.com/p13marc/netring/issues/30)) — new `ftp` / `smtp` /
+  `modbus` / `dnp3` / `stun` / `wireguard` features surface flowscope 0.18's
+  passive parsers as `Protocol` markers (`.protocol::<P>()` + `.on::<P>()`):
+  **`Ftp`** (TCP/21) and **`Smtp`** (TCP/25+587) — cleartext creds + mail/file
+  exfil; **`Modbus`** (TCP/502) and **`Dnp3`** (TCP/20000), grouped under an
+  `ot-protocols` umbrella — OT/ICS visibility for unauthorized PLC/RTU control;
+  **`Stun`** (UDP/3478) and **`WireGuard`** (UDP/51820) — NAT-traversal +
+  VPN-tunnel endpoints / covert channels. New `monitor_app_protocols` example.
+  Together with the UDP-infrastructure set and SSH/HASSH, this completes the
+  Tier-2 passive-visibility surfacing.
 - **Tier-2 UDP infrastructure protocols** (issue
   [#30](https://github.com/p13marc/netring/issues/30)) — new `ntp` / `snmp` /
   `tftp` / `radius` features (and an `infra-protocols` umbrella) surface

@@ -171,6 +171,15 @@ tftp = ["flow", "flowscope/tftp"]
 radius = ["flow", "flowscope/radius"]
 # Umbrella for the UDP infrastructure-protocol set (NTP/SNMP/TFTP/RADIUS).
 infra-protocols = ["ntp", "snmp", "tftp", "radius"]
+# Mail / file-transfer (TCP) + NAT-traversal / VPN (UDP) Tier-2 protocols.
+ftp = ["flow", "flowscope/ftp"]
+smtp = ["flow", "flowscope/smtp"]
+stun = ["flow", "flowscope/stun"]
+wireguard = ["flow", "flowscope/wireguard"]
+# OT/ICS protocols (industrial control). Modbus/TCP + DNP3.
+modbus = ["flow", "flowscope/modbus"]
+dnp3 = ["flow", "flowscope/dnp3"]
+ot-protocols = ["modbus", "dnp3"]
 # QUIC Initial-packet visibility (issue #14) — on-path SNI/ALPN/version from the
 # passive-decryptable QUIC Initial, no decryption keys needed. `Quic` marker on
 # UDP/443 → `flowscope::QuicInitial`.
@@ -611,6 +620,11 @@ required-features = ["ml-features", "tokio"]
 name = "monitor_infra_protocols"
 path = "examples/monitor/infra_protocols.rs"
 required-features = ["infra-protocols", "tokio", "emit"]
+
+[[example]]
+name = "monitor_app_protocols"
+path = "examples/monitor/app_protocols.rs"
+required-features = ["ftp", "smtp", "modbus", "dnp3", "stun", "wireguard", "tokio", "emit"]
 
 [[example]]
 name = "monitor_ocsf"

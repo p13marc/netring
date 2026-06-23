@@ -74,6 +74,7 @@ pub mod ndp;
 #[cfg(feature = "p0f")]
 pub mod p0f;
 pub mod registry;
+pub mod risk;
 pub mod run;
 pub mod telemetry;
 pub mod tick;
@@ -2041,6 +2042,56 @@ impl MonitorBuilder {
                     Ok(())
                 },
             );
+        }
+        self
+    }
+
+    /// Issue #49: arm the built-in nDPI-style **flow-risk** checks. The Monitor
+    /// passively flags deterministic security risks and emits a `flow_risk`
+    /// anomaly per hit (observation `risk` = the flag). v1: `obsolete_tls`
+    /// (negotiated SSLv3 / TLS 1.0 / 1.1) and `cleartext_http_credentials`
+    /// (`Authorization: Basic` over plaintext HTTP). The TLS / HTTP arms are
+    /// active only with the corresponding feature (and auto-register the
+    /// protocol). See [`risk`].
+    ///
+    /// ```no_run
+    /// # #[cfg(all(feature = "tls", feature = "tokio"))] fn demo() {
+    /// use netring::monitor::Monitor;
+    /// use netring::prelude::StdoutSink;
+    /// Monitor::builder().interface("eth0").flow_risk().sink(StdoutSink::default());
+    /// # }
+    /// ```
+    #[cfg(any(feature = "tls", feature = "http"))]
+    pub fn flow_risk(mut self) -> Self {
+        #[cfg(feature = "tls")]
+        {
+            use crate::protocol::builtin::TlsHandshake;
+            if !self
+                .declared_protocols
+                .contains_key(&std::any::TypeId::of::<TlsHandshake>())
+            {
+                self = self.protocol::<TlsHandshake>();
+            }
+            self = self.on_ctx::<TlsHandshake>(
+                |hs: &flowscope::tls::TlsHandshake, ctx: &mut Ctx<'_>| {
+                    risk::check_tls_risk(hs, ctx);
+                    Ok(())
+                },
+            );
+        }
+        #[cfg(feature = "http")]
+        {
+            use crate::protocol::builtin::Http;
+            if !self
+                .declared_protocols
+                .contains_key(&std::any::TypeId::of::<Http>())
+            {
+                self = self.protocol::<Http>();
+            }
+            self = self.on_ctx::<Http>(|msg: &flowscope::http::HttpMessage, ctx: &mut Ctx<'_>| {
+                risk::check_http_risk(msg, ctx);
+                Ok(())
+            });
         }
         self
     }

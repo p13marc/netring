@@ -32,6 +32,24 @@
 
 ### Added
 
+- **nDPI-style flow-risk scoring** (issue
+  [#49](https://github.com/p13marc/netring/issues/49)) — new
+  `MonitorBuilder::flow_risk()` arms passive, **deterministic** risk checks over
+  the parsed fields and emits a `flow_risk` anomaly per hit (observation `risk`).
+  v1 ships the two clearest, judgment-free signals (no threshold tuning, no
+  false-positive heuristics):
+  - **`obsolete_tls`** (`Severity::Warning`) — a handshake whose *negotiated*
+    version is SSLv3 / TLS 1.0 / TLS 1.1 (deprecated, RFC 8996). Uses the
+    ServerHello `supported_versions` negotiated version, so TLS 1.3 isn't
+    mis-flagged by a legacy record-layer version.
+  - **`cleartext_http_credentials`** (`Severity::Error`) — an HTTP request
+    carrying `Authorization: Basic`, i.e. a password base64'd over plaintext.
+
+  The TLS / HTTP arms are active only with the corresponding feature (and
+  auto-register the protocol). Module `netring::monitor::risk`; example
+  `monitor_flow_risk`; the risk logic is unit-tested directly (weak vs. modern
+  TLS, Basic vs. Bearer auth). Scored/heuristic flags (DGA domains, self-signed
+  certs, …) are follow-ups — they warrant their own threshold tuning.
 - **Passive TCP/OS fingerprinting — p0f** (issue
   [#31](https://github.com/p13marc/netring/issues/31)) — new opt-in
   `MonitorBuilder::on_p0f` hook (feature `p0f`) firing once per TCP **SYN /

@@ -1,0 +1,56 @@
+# Deeper, scheduled fuzzing pass over netring's untrusted-input surfaces
+# (#36). The per-PR `fuzz` job in ci.yml is a fast 60s/target smoke; this runs
+# each target far longer on a nightly cron to find the deep bugs the smoke
+# can't, persisting the evolved corpus and uploading any crash artifact.
+name: fuzz (nightly deep run)
+
+on:
+  schedule:
+    # 04:17 UTC daily — off the top of the hour to dodge the cron stampede.
+    - cron: "17 4 * * *"
+  workflow_dispatch:
+    inputs:
+      minutes_per_target:
+        description: "Wall-clock minutes per fuzz target"
+        required: false
+        default: "10"
+
+permissions:
+  contents: read
+
+jobs:
+  fuzz-deep:
+    name: fuzz deep (${{ matrix.target }})
+    runs-on: ubuntu-latest
+    # Don't let one wedged target hold the whole matrix; each target is capped
+    # below, this is just a backstop.
+    timeout-minutes: 30
+    strategy:
+      fail-fast: false
+      matrix:
+        target:
+          - bpf_matches
+          - bpf_builder
+          - bpf_interp_raw
+          - expr_parse
+          - ipnet_parse
+    steps:
+      - uses: actions/checkout@v5
+      - uses: dtolnay/rust-toolchain@nightly
+      - uses: Swatinem/rust-cache@v2
+      - name: install cargo-fuzz
+        run: cargo install cargo-fuzz --locked
+      - name: deep fuzz ${{ matrix.target }}
+        working-directory: netring
+        env:
+          MINUTES: ${{ github.event.inputs.minutes_per_target || '10' }}
+        run: |
+          cargo +nightly fuzz run "${{ matrix.target }}" -- \
+            -max_total_time=$(( MINUTES * 60 )) -timeout=30 -rss_limit_mb=4096
+      - name: upload crash artifacts
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: fuzz-crash-${{ matrix.target }}
+          path: netring/fuzz/artifacts/${{ matrix.target }}/
+          if-no-files-found: ignore

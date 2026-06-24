@@ -139,8 +139,15 @@
   target drives the cBPF software interpreter with **arbitrary raw bytecode**
   (hostile opcodes / jump offsets / `k`), bypassing the validating builder that
   the existing BPF fuzz targets go through — proving the interpreter never
-  panics, reads out of bounds, or hangs on adversarial programs. (Test-only; no
-  API change.)
+  panics, reads out of bounds, or hangs on adversarial programs. A new
+  `ipnet_parse` fuzz target covers the zero-dep `IpNet` (CIDR) parser — the
+  other hand-rolled untrusted-input surface (operator-supplied config / CLI /
+  control-plane nets) — asserting no-panic, a `Display`→re-parse round-trip, and
+  that `contains` is total across both families and every prefix. A new
+  scheduled **nightly deep-fuzz workflow** (`.github/workflows/fuzz-nightly.yml`)
+  runs every target far longer than the per-PR 60s smoke (matrix, ~10 min each,
+  crash artifacts uploaded) to find the deep bugs the smoke can't. (Test-only;
+  no API change.)
 - **Tier-2 application / OT / VPN protocols** (issue
   [#30](https://github.com/p13marc/netring/issues/30)) — new `ftp` / `smtp` /
   `modbus` / `dnp3` / `stun` / `wireguard` features surface flowscope 0.18's

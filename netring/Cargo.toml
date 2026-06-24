@@ -219,6 +219,10 @@ sigma = ["flow", "dep:sigma-rust"]
 # CICFlowMeter ML-feature export (issue #32). `on_ml_features` delivers
 # flowscope's `CicFlowFeatures` (totals + IAT + active/idle) per flow at end.
 ml-features = ["flow", "flowscope/ml-features"]
+# nPrint per-flow header-bit matrix export (issue #72). `on_nprint` delivers
+# flowscope's `NPrintMatrix` (one ternary row per packet) per flow at end.
+# Per-packet retention is heavy (~43 KiB/flow) — opt-in, never in an umbrella.
+nprint = ["flow", "parse", "flowscope/ml-features-nprint"]
 # RFC 5424 syslog anomaly sink (hand-rolled, no deps).
 syslog = []
 # IPFIX / NetFlow v10 flow exporter (RFC 7011, hand-rolled, no deps).
@@ -615,6 +619,11 @@ required-features = ["sigma", "dns", "tls", "http", "tokio", "emit"]
 name = "monitor_ml_features"
 path = "examples/monitor/ml_features_export.rs"
 required-features = ["ml-features", "tokio"]
+
+[[example]]
+name = "monitor_nprint"
+path = "examples/monitor/nprint_export.rs"
+required-features = ["nprint", "tokio"]
 
 [[example]]
 name = "monitor_infra_protocols"

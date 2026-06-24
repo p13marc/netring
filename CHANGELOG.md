@@ -43,6 +43,20 @@
 
 ### Added
 
+- **nPrint per-flow matrix export** (`nprint` feature, issue
+  [#72](https://github.com/p13marc/netring/issues/72)) — surfaces flowscope's
+  [nPrint](https://nprint.github.io/) (CCS 2021) per-packet header-bit
+  representation as a **per-flow matrix** for model-agnostic ML pipelines.
+  `MonitorBuilder::nprint(NPrintConfig)` arms accumulation; every packet of every
+  tracked flow is decoded into one ternary row (`-1`/`0`/`1`) and appended to
+  that flow's `NPrintMatrix`, delivered to `on_nprint(|key, &NPrintMatrix|)` at
+  flow end. Both directions fold into one matrix under the same canonical key the
+  tracker uses for `FlowEnded`. Per-packet retention is heavy (~43 KiB per flow
+  at the 100-packet default), so the live-flow set is bounded by
+  `max_tracked_nprint_flows` (default `DEFAULT_NPRINT_MAX_FLOWS` = 10 000); past
+  the cap, *new* flows are skipped while tracked flows keep filling — capture is
+  never blocked. Opt-in and never in an umbrella; the no-`nprint` path is
+  unchanged (dhat Δ0). New example `monitor_nprint` dumps the matrix as CSV.
 - **Wider feature-matrix CI** (1.0 sweep, issue
   [#37](https://github.com/p13marc/netring/issues/37)) — the clippy
   feature-combination loop now also builds the `monitor`, `all-parsers`, and

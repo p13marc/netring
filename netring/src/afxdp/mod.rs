@@ -39,6 +39,8 @@ pub(crate) mod ffi;
 #[cfg(feature = "af-xdp")]
 mod ring;
 #[cfg(feature = "af-xdp")]
+pub mod rss;
+#[cfg(feature = "af-xdp")]
 mod socket;
 mod stats;
 #[cfg(feature = "af-xdp")]

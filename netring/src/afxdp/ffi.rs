@@ -82,6 +82,45 @@ pub struct ethtool_ifreq {
     pub ifr_data: *mut libc::c_void,
 }
 
+// ── ethtool RSS hash configuration (symmetric RSS, issue #43) ────────────────
+// Vendored from <linux/ethtool.h>. Used by `crate::xdp::rss` to make the NIC's
+// RX-side hashing direction-symmetric so both halves of a bidirectional flow
+// land on the same RSS queue (and thus the same sharded capture worker).
+
+/// ethtool sub-command: get the RX flow-hash (RSS) configuration.
+pub const ETHTOOL_GRSSH: u32 = 0x0000_0046;
+/// ethtool sub-command: set the RX flow-hash (RSS) configuration.
+pub const ETHTOOL_SRSSH: u32 = 0x0000_0047;
+
+/// `input_xfrm`: XOR-fold the source/destination fields before hashing, making
+/// the hash symmetric (`hash(a→b) == hash(b→a)`). Kernel ≥ 6.8; driver-gated.
+pub const RXH_XFRM_SYM_XOR: u8 = 1 << 0;
+/// `input_xfrm` sentinel: leave the transform unchanged on `ETHTOOL_SRSSH`.
+pub const RXH_XFRM_NO_CHANGE: u8 = 0xff;
+/// `hfunc` sentinel: leave the hash function unchanged on `ETHTOOL_SRSSH`.
+pub const ETH_RSS_HASH_NO_CHANGE: u8 = 0;
+/// `indir_size` sentinel: leave the indirection table unchanged.
+pub const ETH_RXFH_INDIR_NO_CHANGE: u32 = 0xffff_ffff;
+
+/// Header of `struct ethtool_rxfh` from `<linux/ethtool.h>`. The on-wire struct
+/// has a trailing flexible `__u32 rss_config[]` holding the indirection table
+/// (`indir_size` × `u32`) followed by the hash key (`key_size` bytes) — callers
+/// allocate `size_of::<ethtool_rxfh>() + indir_size*4 + key_size` and treat the
+/// tail as raw bytes.
+#[repr(C)]
+#[derive(Debug, Default, Clone, Copy)]
+pub struct ethtool_rxfh {
+    pub cmd: u32,
+    pub rss_context: u32,
+    pub indir_size: u32,
+    pub key_size: u32,
+    pub hfunc: u8,
+    pub input_xfrm: u8,
+    pub rsvd8: [u8; 2],
+    pub rsvd32: u32,
+    // `rss_config[]` flexible array follows in the heap buffer.
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

@@ -122,6 +122,14 @@ pub mod xdp {
     pub use crate::afxdp::{Queues, interface_numa_node, queue_count};
     #[cfg(feature = "xdp-loader")]
     pub use crate::afxdp::{XdpCapture, XdpCaptureBuilder, XdpCaptureGuard};
+
+    /// Symmetric RSS / fanout flow coherence (issue #43) — make both directions
+    /// of a bidirectional flow hash to the same RX queue.
+    pub mod rss {
+        pub use crate::afxdp::rss::{
+            RssConfig, RssMode, SYMMETRIC_RSS_KEY, rss_flow_hash, toeplitz,
+        };
+    }
 }
 
 // Async / channel adapters

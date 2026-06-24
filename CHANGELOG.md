@@ -43,6 +43,20 @@
 
 ### Added
 
+- **Symmetric RSS / fanout flow coherence** (`af-xdp`, issue
+  [#43](https://github.com/p13marc/netring/issues/43)) — `netring::xdp::rss`.
+  NIC receive-side scaling hashes the 4-tuple asymmetrically by default, so a
+  per-queue sharded capture (`XdpShardedRunner`, a `PACKET_FANOUT` group)
+  silently splits a bidirectional flow across two workers. `RssConfig::set_symmetric()`
+  makes the NIC hash `A→B` and `B→A` to the **same** RX queue — preferring the
+  kernel's `RXH_XFRM_SYM_XOR` transform (kernel ≥ 6.8) and falling back to
+  programming the symmetric Toeplitz key (`SYMMETRIC_RSS_KEY`) via
+  `ETHTOOL_SRSSH`. It **errors** rather than warns when neither is available, so
+  a sharded deployment never silently runs with split flows. `toeplitz` +
+  `rss_flow_hash` reproduce the NIC's Toeplitz hash in software (golden-tested
+  against the canonical Microsoft RSS vector) so coherence can be verified
+  offline. The ioctl paths need a real RSS NIC (`lo` has none) and follow the
+  existing `SIOCETHTOOL` pattern; the hash + key are pure and unit-tested.
 - **RITA-style robust beacon detector** (issue
   [#47](https://github.com/p13marc/netring/issues/47)) — flowscope 0.19's
   `detect::patterns::RitaBeaconDetector` scores periodic C2 with the RITA v5

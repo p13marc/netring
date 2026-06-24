@@ -46,6 +46,22 @@ let monitor = Monitor::builder()
     .build()?;
 ```
 
+## Examples
+
+Runnable demos under [`examples/`](examples) (each prints what it would send, so
+they run without a live collector/broker):
+
+| Example | Feature | What it shows |
+|---|---|---|
+| `otlp_anomalies` | `otlp` | `OtlpAnomalySink` → OTLP/HTTP-JSON logs to `/v1/logs`, dropped into `.sink(..)` |
+| `otlp_metrics` | `otlp` | `OtlpMetricsExporter` mapping `CaptureTelemetry` (packets/drops/freezes → Sums, drop_rate → Gauge) to `/v1/metrics`, driven from `on_capture_stats` |
+| `parquet_flows` | `parquet` | `ParquetFlowExporter` (impl `netring::export::FlowExporter`) writing flow records as ZSTD-compressed Parquet with a flat OTel/OCSF-named schema |
+
+```sh
+cargo run -p netring-exporters --example otlp_metrics --features otlp
+cargo run -p netring-exporters --example parquet_flows --features parquet
+```
+
 ## Why a separate crate?
 
 `rdkafka` pulls **librdkafka** (a C library) and `ureq` pulls a TLS stack —

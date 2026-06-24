@@ -1,6 +1,6 @@
 [package]
 name = "netring"
-version = "0.26.0"
+version = "0.27.0"
 edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
@@ -627,6 +627,11 @@ required-features = ["tokio", "dns", "tls", "http"]
 name = "monitor_sigma_rules"
 path = "examples/monitor/sigma_rules.rs"
 required-features = ["sigma", "dns", "tls", "http", "tokio", "emit"]
+
+[[example]]
+name = "monitor_sigma_reload"
+path = "examples/monitor/sigma_hot_reload.rs"
+required-features = ["sigma", "dns", "tls", "http", "tokio"]
 
 [[example]]
 name = "monitor_ml_features"

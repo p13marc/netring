@@ -11,7 +11,7 @@ Flow/session logic lives in the companion crate
 
 ```toml
 [dependencies]
-netring = { version = "0.25", features = ["tokio"] }
+netring = { version = "0.27", features = ["tokio"] }
 ```
 
 ```rust,ignore
@@ -37,8 +37,15 @@ loop {
 - **Async-first.** tokio adapters with a `Send + 'static` run loop you can
   `tokio::spawn`; a runtime-agnostic channel adapter too.
 - **Batteries included.** Typed BPF builder, flow/session tracking, L7 parsers
-  (HTTP/TLS/DNS/ICMP), TLS fingerprinting (JA3/JA4), and a fluent Monitor with
-  detectors, middleware, sinks, and exporters.
+  (HTTP/TLS/DNS/ICMP/QUIC + Tier-2: SSH, FTP, SMTP, NTP, SNMP, Modbus, DNP3,
+  STUN, WireGuard, SMB/Kerberos/LDAP/RDP), fingerprinting (JA3/JA4/JA4H/JA4X,
+  HASSH, p0f), and a fluent Monitor with detectors, middleware, sinks, and
+  exporters.
+- **Network security monitoring.** Threat-intel IOC matching, YARA-X payload
+  scanning, Sigma rule evaluation (with live hot-reload of IOC/Sigma sets),
+  nDPI-style flow-risk scoring, RITA beacon detection, passive asset inventory
+  (MAC-keyed from ARP/NDP/LLDP/CDP/DHCP/SSDP/mDNS), nPrint + CICFlowMeter ML
+  feature export, and an OCSF Detection-Finding sink for Security Lake / Splunk.
 
 ## The Monitor: subscriptions
 
@@ -157,7 +164,7 @@ usable directly (flat `packets()` iterator or block-level batches). See
 ## Flow & session tracking
 
 ```toml
-netring = { version = "0.25", features = ["tokio", "flow"] }
+netring = { version = "0.27", features = ["tokio", "flow"] }
 ```
 
 ```rust,ignore
@@ -236,9 +243,14 @@ Features are organized as orthogonal axes (full matrix + recipes in
 | `af-xdp` / `xdp-loader` | AF_XDP kernel bypass; `xdp-loader` bundles the redirect program (via `aya`) |
 | `channel` | Runtime-agnostic thread + bounded-channel adapter |
 | `flow` | Flow & session tracking (pulls `flowscope`) |
-| `http` / `dns` / `tls` / `icmp` | L7 parsers; `ja4plus` adds JA4S (FoxIO License) |
+| `http` / `dns` / `tls` / `icmp` / `quic` | L7 parsers; `ja4plus` adds JA4S (FoxIO License) |
+| `arp` / `ndp` / `lldp` / `cdp` / `asset` | L2/discovery: ARP + IPv6 NDP watch, LLDP/CDP, passive `asset::Inventory` |
+| `ssh` / `infra-protocols` / `ot-protocols` / `ftp` / `smtp` / `stun` / `wireguard` | Tier-2 protocol markers (SSH/HASSH, NTP/SNMP/TFTP/RADIUS, Modbus/DNP3, …) |
+| `ad-protocols` / `asset-protocols` | Active-Directory (SMB/Kerberos/LDAP/RDP) + DHCP/SSDP/NBNS device facts |
+| `ioc` / `sigma` / `yara` / `p0f` | Threat-intel IOC, Sigma rules, YARA-X payload scan, p0f OS fingerprint |
+| `nprint` / `ml-features` | Per-flow ML export (nPrint header-bit matrix, CICFlowMeter features) |
 | `pcap` | PCAP/PCAPNG read + write |
-| `eve-sink` / `syslog` / `ipfix` / `metrics` | Suricata EVE / RFC 5424 / RFC 7011 / Prometheus |
+| `eve-sink` / `syslog` / `ipfix` / `metrics` / `ocsf-sink` | Suricata EVE / RFC 5424 / RFC 7011 / Prometheus / OCSF Detection Finding |
 | `monitor` / `monitor-lite` / `monitor-quickstart` | Monitor umbrellas (full / lean / app-tier) |
 
 ## Public API
@@ -267,7 +279,7 @@ Organized by topic under [`examples/`](examples/README.md) — `basic/`,
 `async_basics/`, `filter/`, `scaling/`, `xdp/`, `flow/`, `l7/`, `pcap/`,
 `monitor/`. Each is listed with its required `--features` in
 [examples/README.md](examples/README.md). Start with
-`monitor_subscriptions` for the 0.25 API.
+`monitor_subscriptions` for the typed subscription API.
 
 ## Documentation
 
@@ -278,7 +290,8 @@ Organized by topic under [`examples/`](examples/README.md) — `basic/`,
   [Tuning](docs/TUNING_GUIDE.md) · [Troubleshooting](docs/TROUBLESHOOTING.md)
 - [Writing detectors](docs/WRITING_DETECTORS.md) ·
   [Fingerprints](docs/FINGERPRINTS.md) · [Metrics](docs/METRICS.md)
-- **Migrating:** [0.24 → 0.25](docs/MIGRATING_0.24_TO_0.25.md) ·
+- **Migrating:** [0.26 → 0.27](docs/MIGRATING_0.26_TO_0.27.md) ·
+  [0.24 → 0.25](docs/MIGRATING_0.24_TO_0.25.md) ·
   [earlier guides](docs/INDEX.md#migration-guides)
 
 ## License

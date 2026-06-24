@@ -30,6 +30,7 @@ exporters live in the [`netring-exporters`](../../netring-exporters) crate.
 - [AF_XDP_EVALUATION.md](AF_XDP_EVALUATION.md) — AF_XDP design notes.
 
 ## Migration guides
+- [MIGRATING_0.26_TO_0.27.md](MIGRATING_0.26_TO_0.27.md) — the 1.0 API sweep (`#[non_exhaustive]` enums/output structs, sealed L7 markers), the `Capture::packets()` lending iterator, flowscope 0.19; plus the opt-in NSM stack (threat-intel, YARA, Sigma, OCSF, p0f, QUIC, asset inventory, ML export).
 - [MIGRATING_0.24_TO_0.25.md](MIGRATING_0.24_TO_0.25.md) — subscriptions, async effects, TX symmetry, exporters crate; the one break (`FlowRecord.reason` → `Option`) + JA4S `ja4plus` gating.
 - [MIGRATING_0.23_TO_0.24.md](MIGRATING_0.23_TO_0.24.md) — telemetry/health, exporters, JA4/JA4S, AF_XDP-in-Monitor (additive).
 - [MIGRATING_0.22_TO_0.23.md](MIGRATING_0.22_TO_0.23.md) — `Send` run-loop future.

@@ -1,6 +1,6 @@
 [package]
 name = "netring-exporters"
-version = "0.2.0"
+version = "0.3.0"
 edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
@@ -28,7 +28,7 @@ parquet = ["dep:arrow", "dep:parquet"]
 [dependencies]
 # `flow` + `tokio` expose the Monitor's anomaly-sink surface the exporters
 # implement (netring::anomaly::{sink::AnomalySink, Severity, key::Key}).
-netring = { path = "../netring", version = "0.26", default-features = false, features = [
+netring = { path = "../netring", version = "0.27", default-features = false, features = [
     "flow",
     "tokio",
 ] }

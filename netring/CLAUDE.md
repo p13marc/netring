@@ -20,11 +20,10 @@ built on AF_PACKET with TPACKET_V3 (block-based mmap ring buffers) and AF_XDP.
 
 ## Implementation Status
 
-**0.27.0 — RELEASE-READY on `master`** ("1.0 API sweep, threat-intel, ML
-features & Tier-2 protocols"). Version bumped to 0.27.0; CHANGELOG `## 0.27.0`
-banner + `docs/MIGRATING_0.26_TO_0.27.md` written; depends on **flowscope 0.19**.
-The actual `cargo publish` + `git tag 0.27.0` remain the maintainer's hands-on
-action (then publish `netring-exporters` 0.3.0). This is the **pre-1.0
+**0.27.0 — RELEASED 2026-06-24** ("1.0 API sweep, threat-intel, ML features &
+Tier-2 protocols"). Published to crates.io (tag `0.27.0`) alongside
+**`netring-exporters` 0.3.0**; depends on **flowscope 0.19**. Migration:
+`docs/MIGRATING_0.26_TO_0.27.md`. This is the **pre-1.0
 stabilization release** — mostly additive, with three breaking changes from the
 1.0 API sweep ([#37]) and one soundness fix ([#35]):
 

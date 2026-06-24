@@ -385,6 +385,9 @@ jobs:
           # 0.27 (#36): the raw cBPF interpreter against arbitrary bytecode
           # (hostile opcodes / jumps / k), bypassing the validating builder.
           cargo +nightly fuzz run bpf_interp_raw -- -runs=200000 -max_total_time=60
+          # 0.27 (#36): the zero-dep IpNet (CIDR) parser — operator-supplied
+          # config/CLI input; asserts no-panic + Display round-trip + total `contains`.
+          cargo +nightly fuzz run ipnet_parse -- -runs=200000 -max_total_time=60
 
   # ── netring-exporters companion crate (OTLP + Kafka) ──────────────────────
   exporters:

@@ -294,6 +294,8 @@ jobs:
       - run: cargo build -p netring --example monitor_ml_features --features ml-features,tokio
       # Issue #72: the nPrint example needs nprint + tokio.
       - run: cargo build -p netring --example monitor_nprint --features nprint,tokio
+      # Issue #47: the RITA beacon example needs flow + tokio.
+      - run: cargo build -p netring --example monitor_rita_beacon --features tokio,flow
       # Issue #30: the infra-protocols example needs infra-protocols + emit.
       - run: cargo build -p netring --example monitor_infra_protocols --features infra-protocols,tokio,emit
       # Issue #30: the app-protocols example needs the six tier-2 app features + emit.

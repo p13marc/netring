@@ -142,6 +142,7 @@ headline API with kernel filter pushdown.
 | `monitor_port_scan` | `pattern_detector!` over `PortScanDetector` (TRW scoring) |
 | `monitor_beacon_detector` | `pattern_detector!` over `BeaconDetector` (period variance) |
 | `monitor_rita_beacon` | `pattern_detector!` over `RitaBeaconDetector` — robust beacon scoring (Bowley skew + MADM, RITA v5); survives jitter/outliers the CV detector misses |
+| `monitor_yara` | **YARA-X payload scanning** (feature `yara`, HEAVY — pulls wasmtime): `.yara(rules)` + `.on_yara_match(|key, m| …)` scanning each flow's accumulated payload at flow end, so signatures span segment boundaries |
 | `monitor_dga_query` | `pattern_detector!` over `DgaScorer` (bigram entropy on DNS) |
 | `monitor_file_hash_dfir` | `Sha256Sink + FileType` (feature `file-hash`) DFIR file hashing |
 | `monitor_ech_adoption` | ECH downgrade detection via `EchOutcome` |

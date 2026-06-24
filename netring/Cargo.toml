@@ -67,6 +67,7 @@ dhat = { version = "0.3", optional = true }
 # Pure-Rust, no-tokio; parses Sigma YAML + evaluates rules against typed
 # key/value events. Pulls a YAML parser (serde_norway) + regex.
 sigma-rust = { version = "0.7", optional = true }
+yara-x = { version = "1.18", default-features = false, optional = true }
 
 [dev-dependencies]
 env_logger = "0.11"
@@ -223,6 +224,11 @@ ml-features = ["flow", "flowscope/ml-features"]
 # flowscope's `NPrintMatrix` (one ternary row per packet) per flow at end.
 # Per-packet retention is heavy (~43 KiB/flow) — opt-in, never in an umbrella.
 nprint = ["flow", "parse", "flowscope/ml-features-nprint"]
+# YARA-X payload scanning over reassembled flows (issue #45). `yara()` scans
+# each flow's accumulated payload at flow end against compiled YARA rules.
+# HEAVY: yara-x pulls the cranelift/wasmtime JIT (~150 transitive crates) even
+# with default-features off. Opt-in only — never in an umbrella.
+yara = ["flow", "parse", "dep:yara-x"]
 # RFC 5424 syslog anomaly sink (hand-rolled, no deps).
 syslog = []
 # IPFIX / NetFlow v10 flow exporter (RFC 7011, hand-rolled, no deps).
@@ -253,6 +259,7 @@ nightly = []
 integration-tests = []
 # Drives the dhat allocation-regression bench (`benches/zero_alloc.rs`).
 bench-zero-alloc = ["dep:dhat", "flow", "tokio", "parse"]
+yara-x = ["dep:yara-x"]
 
 [package.metadata.docs.rs]
 all-features = true
@@ -722,6 +729,11 @@ required-features = ["tokio", "flow"]
 name = "monitor_rita_beacon"
 path = "examples/monitor/rita_beacon_detector.rs"
 required-features = ["tokio", "flow"]
+
+[[example]]
+name = "monitor_yara"
+path = "examples/monitor/yara_scan.rs"
+required-features = ["yara", "tokio"]
 
 [[example]]
 name = "monitor_dga_query"

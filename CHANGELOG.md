@@ -43,6 +43,20 @@
 
 ### Added
 
+- **YARA-X payload scanning over flows** (`yara` feature, issue
+  [#45](https://github.com/p13marc/netring/issues/45)) —
+  `MonitorBuilder::yara(YaraRules)` compiles a set of [YARA](https://virustotal.github.io/yara-x/)
+  rules and scans each flow's accumulated L4 payload at **flow end**, delivering
+  a `YaraMatch` per hit to `on_yara_match(|key, m|)`. Scanning at flow end (over
+  the per-direction payload buffer, not per packet) lets a signature span TCP
+  segment boundaries. Payload is buffered per direction in arrival order (a
+  pragmatic v1 — no full TCP reassembler) and bounded by `max_scan_bytes`
+  (default 1 MiB/direction) and `max_tracked_yara_flows`. Reuses the per-flow
+  byte-accumulator seam (shared with nPrint); the `Send` accumulator builds a
+  scanner inside the flow-end scan since `yara_x::Scanner` is `!Send`. **HEAVY**:
+  yara-x pulls the cranelift/wasmtime JIT (~150 transitive crates) even with
+  default-features off — strictly opt-in, never in an umbrella. New example
+  `monitor_yara`.
 - **Symmetric RSS / fanout flow coherence** (`af-xdp`, issue
   [#43](https://github.com/p13marc/netring/issues/43)) — `netring::xdp::rss`.
   NIC receive-side scaling hashes the 4-tuple asymmetrically by default, so a

@@ -43,6 +43,16 @@
 
 ### Added
 
+- **RITA-style robust beacon detector** (issue
+  [#47](https://github.com/p13marc/netring/issues/47)) — flowscope 0.19's
+  `detect::patterns::RitaBeaconDetector` scores periodic C2 with the RITA v5
+  quartile/median statistics (Bowley skewness + median absolute deviation) on
+  inter-arrival intervals and payload sizes. Unlike the coefficient-of-variation
+  `BeaconDetector`, the median-based scoring survives outliers — a single missed
+  beacon or retransmit storm barely moves the score — so it flags **jittered**
+  C2 (e.g. Cobalt Strike's default jitter) the CV detector misses. Surfaced
+  through the existing `pattern_detector!` macro; new example
+  `monitor_rita_beacon`.
 - **nPrint per-flow matrix export** (`nprint` feature, issue
   [#72](https://github.com/p13marc/netring/issues/72)) — surfaces flowscope's
   [nPrint](https://nprint.github.io/) (CCS 2021) per-packet header-bit

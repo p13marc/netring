@@ -23,7 +23,7 @@ exclude = ["CLAUDE.md", "SPEC.md"]
 # pulls only `bitflags` + `thiserror` — both already in netring's tree.
 # The `parse` feature additionally enables `flowscope/extractors`,
 # `flow` enables `tracker`/`reassembler`/`session`.
-flowscope = { version = "0.18", default-features = false }
+flowscope = { version = "0.19", default-features = false }
 
 libc = { workspace = true }
 nix = { workspace = true }
@@ -716,6 +716,11 @@ required-features = ["tokio", "flow", "http", "ja4plus"]
 [[example]]
 name = "monitor_beacon_detector"
 path = "examples/monitor/beacon_detector.rs"
+required-features = ["tokio", "flow"]
+
+[[example]]
+name = "monitor_rita_beacon"
+path = "examples/monitor/rita_beacon_detector.rs"
 required-features = ["tokio", "flow"]
 
 [[example]]

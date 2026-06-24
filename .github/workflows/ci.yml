@@ -47,6 +47,7 @@ jobs:
             "--features sigma,dns,http,tls" \
             "--features ml-features" \
             "--features nprint" \
+            "--features yara" \
             "--features infra-protocols" \
             "--features ot-protocols" \
             "--features ftp,smtp,modbus,dnp3,stun,wireguard" \
@@ -110,7 +111,7 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
       - name: Monitor lib tests (flow surface)
-        run: cargo test -p netring --features "tokio,channel,flow,parse,pcap,http,dns,tls,ja4plus,icmp,arp,ndp,lldp,cdp,asset,p0f,ad-protocols,asset-protocols,ssh,quic,ocsf-sink,sigma,infra-protocols,ftp,smtp,modbus,dnp3,stun,wireguard,nprint" --lib
+        run: cargo test -p netring --features "tokio,channel,flow,parse,pcap,http,dns,tls,ja4plus,icmp,arp,ndp,lldp,cdp,asset,p0f,ad-protocols,asset-protocols,ssh,quic,ocsf-sink,sigma,infra-protocols,ftp,smtp,modbus,dnp3,stun,wireguard,nprint,yara" --lib
       # 0.25: the flow-gated *integration* tests that validate the new surface
       # but open NO live socket (pcap replay / build-time filter checks /
       # compile-time Send assertions) — these were never run in CI before. They
@@ -119,11 +120,11 @@ jobs:
       # (incl. the effect path). Cap-free, so they run here, not in the root job.
       - name: Monitor integration tests (cap-free)
         run: |
-          cargo test -p netring --features "tokio,channel,flow,parse,pcap,http,dns,tls,ja4plus,arp,ndp,lldp,cdp,asset,p0f,ad-protocols,asset-protocols,ssh,quic,sigma,ml-features,nprint,infra-protocols,ftp,smtp,modbus,dnp3,stun,wireguard" \
+          cargo test -p netring --features "tokio,channel,flow,parse,pcap,http,dns,tls,ja4plus,arp,ndp,lldp,cdp,asset,p0f,ad-protocols,asset-protocols,ssh,quic,sigma,ml-features,nprint,yara,infra-protocols,ftp,smtp,modbus,dnp3,stun,wireguard" \
             --test monitor_replay --test monitor_kernel_prefilter --test monitor_send \
             --test monitor_run_until_idle --test monitor_drain_timeout --test monitor_name_in_ctx \
             --test arp_replay --test ndp_replay --test lldp_replay --test cdp_replay --test asset_inventory --test asset_inventory_udp --test asset_inventory_mdns --test monitor_reassembler_config \
-            --test ad_protocols --test asset_protocols --test ssh_protocol --test quic_protocol --test ioc_match --test p0f_replay --test flow_risk --test sigma_match --test ml_features --test nprint_export --test tier2_infra --test tier2_app
+            --test ad_protocols --test asset_protocols --test ssh_protocol --test quic_protocol --test ioc_match --test p0f_replay --test flow_risk --test sigma_match --test ml_features --test nprint_export --test yara_scan --test tier2_infra --test tier2_app
 
   # ── Integration tests (need CAP_NET_RAW) ──────────────────────────────────
   test-integration:
@@ -294,6 +295,8 @@ jobs:
       - run: cargo build -p netring --example monitor_ml_features --features ml-features,tokio
       # Issue #72: the nPrint example needs nprint + tokio.
       - run: cargo build -p netring --example monitor_nprint --features nprint,tokio
+      # Issue #45: the YARA example needs yara + tokio.
+      - run: cargo build -p netring --example monitor_yara --features yara,tokio
       # Issue #47: the RITA beacon example needs flow + tokio.
       - run: cargo build -p netring --example monitor_rita_beacon --features tokio,flow
       # Issue #30: the infra-protocols example needs infra-protocols + emit.

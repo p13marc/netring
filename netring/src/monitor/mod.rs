@@ -71,11 +71,17 @@ pub mod ioc;
 pub mod lldp;
 pub mod ml_features;
 pub(crate) mod nprint;
-/// Default cap on concurrently-tracked nPrint flows (issue #72) when
-/// [`MonitorBuilder::max_tracked_nprint_flows`] is not set. At ~43 KiB per
-/// full flow this bounds the worst case to a few hundred MiB.
-#[cfg(feature = "nprint")]
+/// Default cap on concurrently-tracked per-flow-accumulator flows (nPrint #72 /
+/// YARA #45) when the corresponding `max_tracked_*_flows` is not set.
+#[cfg(any(feature = "nprint", feature = "yara"))]
 pub const DEFAULT_NPRINT_MAX_FLOWS: usize = 10_000;
+#[cfg(feature = "yara")]
+pub mod yara;
+/// Default per-direction payload scan window (issue #45) when
+/// [`MonitorBuilder::max_scan_bytes`] is not set — 1 MiB, after which a flow's
+/// trailing payload is not scanned (bounds adversarial buffering).
+#[cfg(feature = "yara")]
+pub const DEFAULT_YARA_SCAN_BYTES: usize = 1024 * 1024;
 #[cfg(feature = "ndp")]
 pub mod ndp;
 #[cfg(feature = "p0f")]
@@ -260,11 +266,11 @@ pub struct Monitor {
     /// `(key, stats, reason)` at flow end; the `CicFlowFeatures` construction
     /// is baked into the boxed closure. Empty (the common case) is zero cost.
     pub(crate) ml_feature_handlers: Vec<ml_features::FlowEndHandler>,
-    /// Issue #72: per-flow nPrint matrix accumulator. `Some` only when the
-    /// `nprint` feature is on and `nprint(..)` was called; the run loop feeds
-    /// each packet's view to it in the drain and flushes at `FlowEnded`. The
-    /// trait object keeps `run.rs` feature-agnostic. `None` is zero cost.
-    pub(crate) nprint_acc: Option<Box<dyn nprint::FlowByteAccumulator>>,
+    /// Per-flow byte accumulators — fed each packet's view in the drain and
+    /// flushed at `FlowEnded`. Holds the nPrint matrix accumulator (issue #72)
+    /// and/or the YARA payload scanner (issue #45); the trait object keeps
+    /// `run.rs` feature-agnostic. Empty (the common case) is zero cost.
+    pub(crate) byte_accumulators: Vec<Box<dyn nprint::FlowByteAccumulator>>,
     /// 0.25 W1c: active-timeout period for interim flow-record export. When
     /// `Some` (and exporters exist), the run loop emits ongoing `FlowRecord`s
     /// for long-lived flows every period. See [`MonitorBuilder::export_active_timeout`].
@@ -636,6 +642,21 @@ pub struct MonitorBuilder {
     /// ([`Self::max_tracked_nprint_flows`]); `None` → [`DEFAULT_NPRINT_MAX_FLOWS`].
     #[cfg(feature = "nprint")]
     nprint_max_flows: Option<usize>,
+    /// Issue #45: compiled YARA rules set via [`Self::yara`] (presence arms the
+    /// per-flow payload scanner at build).
+    #[cfg(feature = "yara")]
+    yara_rules: Option<yara::YaraRules>,
+    /// Issue #45: YARA match handlers registered via [`Self::on_yara_match`].
+    #[cfg(feature = "yara")]
+    yara_handlers: Vec<yara::YaraHandler>,
+    /// Issue #45: cap on concurrently-tracked YARA flows; `None` →
+    /// [`DEFAULT_NPRINT_MAX_FLOWS`].
+    #[cfg(feature = "yara")]
+    yara_max_flows: Option<usize>,
+    /// Issue #45: per-direction payload scan cap (bytes); `None` →
+    /// [`DEFAULT_YARA_SCAN_BYTES`].
+    #[cfg(feature = "yara")]
+    yara_max_bytes: Option<usize>,
     /// 0.25 W1c: active-timeout period set via [`Self::export_active_timeout`].
     flow_active_timeout: Option<std::time::Duration>,
     /// 0.21 D.1: TypeIds of protocol markers registered via
@@ -1288,6 +1309,61 @@ impl MonitorBuilder {
     #[cfg(feature = "nprint")]
     pub fn max_tracked_nprint_flows(mut self, max: usize) -> Self {
         self.nprint_max_flows = Some(max);
+        self
+    }
+
+    /// Issue #45: scan each flow's payload with compiled **YARA** rules at flow
+    /// end, delivering a [`YaraMatch`](crate::monitor::yara::YaraMatch) per hit
+    /// to the [`on_yara_match`](Self::on_yara_match) handlers. Scanning at flow
+    /// end (over the accumulated payload, per direction) lets a signature span
+    /// segment boundaries.
+    ///
+    /// ```no_run
+    /// # #[cfg(all(feature = "yara", feature = "tokio"))] fn demo() -> Result<(), Box<dyn std::error::Error>> {
+    /// use netring::monitor::Monitor;
+    /// use netring::monitor::yara::YaraRules;
+    /// use netring::protocol::builtin::Tcp;
+    /// let rules = YaraRules::compile(
+    ///     r#"rule eicar { strings: $a = "EICAR-STANDARD-ANTIVIRUS-TEST-FILE" condition: $a }"#,
+    /// )?;
+    /// Monitor::builder()
+    ///     .interface("eth0")
+    ///     .protocol::<Tcp>()
+    ///     .yara(rules)
+    ///     .on_yara_match(|key, m| eprintln!("{} matched {:?}", m.rule, key));
+    /// # Ok(()) }
+    /// ```
+    #[cfg(feature = "yara")]
+    pub fn yara(mut self, rules: yara::YaraRules) -> Self {
+        self.yara_rules = Some(rules);
+        self
+    }
+
+    /// Issue #45: register a handler for each YARA rule that matches a flow's
+    /// payload. No effect unless [`yara`](Self::yara) armed the scanner.
+    #[cfg(feature = "yara")]
+    pub fn on_yara_match<F>(mut self, handler: F) -> Self
+    where
+        F: FnMut(&crate::protocol::FlowKey, &yara::YaraMatch) + Send + 'static,
+    {
+        self.yara_handlers.push(Box::new(handler));
+        self
+    }
+
+    /// Issue #45: cap the number of concurrently-scanned YARA flows (default
+    /// [`DEFAULT_NPRINT_MAX_FLOWS`]). Past the cap, new flows are skipped.
+    #[cfg(feature = "yara")]
+    pub fn max_tracked_yara_flows(mut self, max: usize) -> Self {
+        self.yara_max_flows = Some(max);
+        self
+    }
+
+    /// Issue #45: cap the per-direction payload scanned per flow (default
+    /// [`DEFAULT_YARA_SCAN_BYTES`]). Payload past the window is not buffered or
+    /// scanned — bounds adversarial input.
+    #[cfg(feature = "yara")]
+    pub fn max_scan_bytes(mut self, max: usize) -> Self {
+        self.yara_max_bytes = Some(max);
         self
     }
 
@@ -2888,19 +2964,27 @@ impl MonitorBuilder {
             sink = layer.wrap(sink);
         }
 
-        // Issue #72: arm the per-flow nPrint accumulator iff `nprint(..)` set a
-        // config. The trait object lets the run loop stay feature-agnostic.
+        // Arm the per-flow byte accumulators (issues #72 nPrint, #45 YARA) iff
+        // configured. The trait objects let the run loop stay feature-agnostic.
+        #[allow(unused_mut)]
+        let mut byte_accumulators: Vec<Box<dyn nprint::FlowByteAccumulator>> = Vec::new();
         #[cfg(feature = "nprint")]
-        let nprint_acc: Option<Box<dyn nprint::FlowByteAccumulator>> =
-            self.nprint_config.map(|cfg| {
-                Box::new(nprint::NprintAccumulator::new(
-                    cfg,
-                    self.nprint_max_flows.unwrap_or(DEFAULT_NPRINT_MAX_FLOWS),
-                    self.nprint_handlers,
-                )) as Box<dyn nprint::FlowByteAccumulator>
-            });
-        #[cfg(not(feature = "nprint"))]
-        let nprint_acc: Option<Box<dyn nprint::FlowByteAccumulator>> = None;
+        if let Some(cfg) = self.nprint_config {
+            byte_accumulators.push(Box::new(nprint::NprintAccumulator::new(
+                cfg,
+                self.nprint_max_flows.unwrap_or(DEFAULT_NPRINT_MAX_FLOWS),
+                self.nprint_handlers,
+            )));
+        }
+        #[cfg(feature = "yara")]
+        if let Some(rules) = self.yara_rules {
+            byte_accumulators.push(Box::new(yara::YaraAccumulator::new(
+                rules,
+                self.yara_handlers,
+                self.yara_max_flows.unwrap_or(DEFAULT_NPRINT_MAX_FLOWS),
+                self.yara_max_bytes.unwrap_or(DEFAULT_YARA_SCAN_BYTES),
+            )));
+        }
 
         Ok(Monitor {
             interfaces: self.interfaces,
@@ -2941,7 +3025,7 @@ impl MonitorBuilder {
             health: health::HealthState::new(),
             flow_exporters: self.flow_exporters,
             ml_feature_handlers: self.ml_feature_handlers,
-            nprint_acc,
+            byte_accumulators,
             flow_active_timeout: self.flow_active_timeout,
             packet_subs: self.packet_subs,
             kernel_prefilter,

@@ -43,6 +43,17 @@
 
 ### Added
 
+- **Hot-reload of the IOC blocklist** (issue
+  [#53](https://github.com/p13marc/netring/issues/53)) —
+  `Monitor::reload_handle() -> ReloadHandle` + `ReloadHandle::set_ioc(IocSet)`
+  swap a running monitor's threat-intel set **without dropping packets**. The
+  `ioc(..)` set is held behind a lock-free `arc-swap` RCU cell, so an in-flight
+  flow reads the old-or-new set (never a torn one) and converges within one
+  event; the swap never blocks the capture loop. Grab the handle before
+  `run_*`/`replay` and call `set_ioc` from any task (a feed refresh, file
+  watcher, SIGHUP) — it's `Send + Sync` and cheap to clone. New example
+  `monitor_ioc_reload`. (Hot-reload of Sigma rules / packet filters is a planned
+  follow-up.)
 - **YARA-X payload scanning over flows** (`yara` feature, issue
   [#45](https://github.com/p13marc/netring/issues/45)) —
   `MonitorBuilder::yara(YaraRules)` compiles a set of [YARA](https://virustotal.github.io/yara-x/)

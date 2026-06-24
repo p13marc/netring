@@ -68,6 +68,7 @@ dhat = { version = "0.3", optional = true }
 # key/value events. Pulls a YAML parser (serde_norway) + regex.
 sigma-rust = { version = "0.7", optional = true }
 yara-x = { version = "1.18", default-features = false, optional = true }
+arc-swap = "1"
 
 [dev-dependencies]
 env_logger = "0.11"
@@ -615,6 +616,11 @@ required-features = ["tokio", "tls", "http", "emit"]
 [[example]]
 name = "monitor_ioc"
 path = "examples/monitor/ioc_match.rs"
+required-features = ["tokio", "dns", "tls", "http"]
+
+[[example]]
+name = "monitor_ioc_reload"
+path = "examples/monitor/ioc_hot_reload.rs"
 required-features = ["tokio", "dns", "tls", "http"]
 
 [[example]]

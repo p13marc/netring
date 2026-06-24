@@ -70,6 +70,12 @@ pub mod ioc;
 #[cfg(feature = "lldp")]
 pub mod lldp;
 pub mod ml_features;
+pub(crate) mod nprint;
+/// Default cap on concurrently-tracked nPrint flows (issue #72) when
+/// [`MonitorBuilder::max_tracked_nprint_flows`] is not set. At ~43 KiB per
+/// full flow this bounds the worst case to a few hundred MiB.
+#[cfg(feature = "nprint")]
+pub const DEFAULT_NPRINT_MAX_FLOWS: usize = 10_000;
 #[cfg(feature = "ndp")]
 pub mod ndp;
 #[cfg(feature = "p0f")]
@@ -254,6 +260,11 @@ pub struct Monitor {
     /// `(key, stats, reason)` at flow end; the `CicFlowFeatures` construction
     /// is baked into the boxed closure. Empty (the common case) is zero cost.
     pub(crate) ml_feature_handlers: Vec<ml_features::FlowEndHandler>,
+    /// Issue #72: per-flow nPrint matrix accumulator. `Some` only when the
+    /// `nprint` feature is on and `nprint(..)` was called; the run loop feeds
+    /// each packet's view to it in the drain and flushes at `FlowEnded`. The
+    /// trait object keeps `run.rs` feature-agnostic. `None` is zero cost.
+    pub(crate) nprint_acc: Option<Box<dyn nprint::FlowByteAccumulator>>,
     /// 0.25 W1c: active-timeout period for interim flow-record export. When
     /// `Some` (and exporters exist), the run loop emits ongoing `FlowRecord`s
     /// for long-lived flows every period. See [`MonitorBuilder::export_active_timeout`].
@@ -614,6 +625,17 @@ pub struct MonitorBuilder {
     /// Issue #32: flow-end ML-feature handlers registered via
     /// [`Self::on_ml_features`]. Moved into [`Monitor::ml_feature_handlers`].
     ml_feature_handlers: Vec<ml_features::FlowEndHandler>,
+    /// Issue #72: nPrint config set via [`Self::nprint`] (presence arms the
+    /// per-flow accumulator at build).
+    #[cfg(feature = "nprint")]
+    nprint_config: Option<flowscope::nprint::NPrintConfig>,
+    /// Issue #72: nPrint flow-end handlers registered via [`Self::on_nprint`].
+    #[cfg(feature = "nprint")]
+    nprint_handlers: Vec<nprint::NprintHandler>,
+    /// Issue #72: cap on concurrently-tracked nPrint flows
+    /// ([`Self::max_tracked_nprint_flows`]); `None` → [`DEFAULT_NPRINT_MAX_FLOWS`].
+    #[cfg(feature = "nprint")]
+    nprint_max_flows: Option<usize>,
     /// 0.25 W1c: active-timeout period set via [`Self::export_active_timeout`].
     flow_active_timeout: Option<std::time::Duration>,
     /// 0.21 D.1: TypeIds of protocol markers registered via
@@ -1211,6 +1233,61 @@ impl MonitorBuilder {
     {
         self.ml_feature_handlers
             .push(ml_features::make_handler(handler));
+        self
+    }
+
+    /// Issue #72: arm per-flow **nPrint** accumulation with `config`. Every
+    /// packet of every tracked flow is decoded into a ternary header-bit row
+    /// and appended to that flow's
+    /// [`NPrintMatrix`](flowscope::nprint::NPrintMatrix); the completed matrix
+    /// is delivered to each [`on_nprint`](Self::on_nprint) handler at flow end.
+    ///
+    /// Per-packet retention is heavy (~43 KiB per flow at the 100-packet
+    /// default), so the live-flow set is bounded — see
+    /// [`max_tracked_nprint_flows`](Self::max_tracked_nprint_flows). Calling
+    /// this more than once keeps the **last** config.
+    ///
+    /// ```no_run
+    /// # #[cfg(all(feature = "nprint", feature = "tokio"))] fn demo() {
+    /// use netring::monitor::Monitor;
+    /// use netring::protocol::builtin::Tcp;
+    /// use flowscope::nprint::{NPrintConfig, NPrintMatrix};
+    /// Monitor::builder()
+    ///     .interface("eth0")
+    ///     .protocol::<Tcp>()
+    ///     .nprint(NPrintConfig::default())
+    ///     .on_nprint(|key, m: &NPrintMatrix| {
+    ///         let _ = (key, m.rows()); // dump the matrix to your ML pipeline
+    ///     });
+    /// # }
+    /// ```
+    #[cfg(feature = "nprint")]
+    pub fn nprint(mut self, config: flowscope::nprint::NPrintConfig) -> Self {
+        self.nprint_config = Some(config);
+        self
+    }
+
+    /// Issue #72: register a handler that receives the completed per-flow
+    /// [`NPrintMatrix`](flowscope::nprint::NPrintMatrix) (keyed by its
+    /// [`FlowKey`](crate::protocol::FlowKey)) at flow end. Has no effect unless
+    /// [`nprint`](Self::nprint) arms the accumulator.
+    #[cfg(feature = "nprint")]
+    pub fn on_nprint<F>(mut self, handler: F) -> Self
+    where
+        F: FnMut(&crate::protocol::FlowKey, &flowscope::nprint::NPrintMatrix) + Send + 'static,
+    {
+        self.nprint_handlers.push(Box::new(handler));
+        self
+    }
+
+    /// Issue #72: cap the number of concurrently-tracked nPrint flows (default
+    /// [`DEFAULT_NPRINT_MAX_FLOWS`]). Once the cap is hit, packets for *new*
+    /// flows are skipped — already-tracked flows keep filling and the live
+    /// capture is never blocked. Tune against your memory budget (each flow
+    /// costs up to `max_packets × row_width` bits).
+    #[cfg(feature = "nprint")]
+    pub fn max_tracked_nprint_flows(mut self, max: usize) -> Self {
+        self.nprint_max_flows = Some(max);
         self
     }
 
@@ -2810,6 +2887,21 @@ impl MonitorBuilder {
         for layer in self.layers.into_iter().rev() {
             sink = layer.wrap(sink);
         }
+
+        // Issue #72: arm the per-flow nPrint accumulator iff `nprint(..)` set a
+        // config. The trait object lets the run loop stay feature-agnostic.
+        #[cfg(feature = "nprint")]
+        let nprint_acc: Option<Box<dyn nprint::FlowByteAccumulator>> =
+            self.nprint_config.map(|cfg| {
+                Box::new(nprint::NprintAccumulator::new(
+                    cfg,
+                    self.nprint_max_flows.unwrap_or(DEFAULT_NPRINT_MAX_FLOWS),
+                    self.nprint_handlers,
+                )) as Box<dyn nprint::FlowByteAccumulator>
+            });
+        #[cfg(not(feature = "nprint"))]
+        let nprint_acc: Option<Box<dyn nprint::FlowByteAccumulator>> = None;
+
         Ok(Monitor {
             interfaces: self.interfaces,
             #[cfg(feature = "af-xdp")]
@@ -2849,6 +2941,7 @@ impl MonitorBuilder {
             health: health::HealthState::new(),
             flow_exporters: self.flow_exporters,
             ml_feature_handlers: self.ml_feature_handlers,
+            nprint_acc,
             flow_active_timeout: self.flow_active_timeout,
             packet_subs: self.packet_subs,
             kernel_prefilter,

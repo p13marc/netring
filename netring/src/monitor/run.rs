@@ -203,6 +203,7 @@ pub(crate) async fn run_loop(monitor: Monitor, stop: StopCondition) -> Result<()
         health,
         mut flow_exporters,
         mut ml_feature_handlers,
+        mut nprint_acc,
         flow_active_timeout,
         packet_subs,
         kernel_prefilter,
@@ -648,6 +649,12 @@ pub(crate) async fn run_loop(monitor: Monitor, stop: StopCondition) -> Result<()
                 {
                     packet_err = Some(e);
                 }
+                // Issue #72: append this frame's nPrint row to its flow's
+                // matrix (keyed canonically, matching FlowEnded). Synchronous,
+                // in-borrow — the borrow drops before the dispatch `.await`.
+                if let Some(acc) = nprint_acc.as_mut() {
+                    acc.feed(&view);
+                }
                 driver.track_into(view, &mut events)
             })
             .await?;
@@ -681,6 +688,7 @@ pub(crate) async fn run_loop(monitor: Monitor, stop: StopCondition) -> Result<()
             handler_error_policy,
             &mut flow_exporters,
             &mut ml_feature_handlers,
+            &mut nprint_acc,
             &health,
             arp_table_ref,
         )
@@ -729,6 +737,7 @@ pub(crate) async fn run_loop(monitor: Monitor, stop: StopCondition) -> Result<()
             handler_error_policy,
             &mut flow_exporters,
             &mut ml_feature_handlers,
+            &mut nprint_acc,
             &health,
         )
         .await?;
@@ -790,6 +799,7 @@ pub(crate) async fn replay_loop(
         health,
         mut flow_exporters,
         mut ml_feature_handlers,
+        mut nprint_acc,
         flow_active_timeout: _, // active-timeout export is a live-loop concern
         packet_subs,
         // pcap replay has no kernel filter to set (the source isn't a socket).
@@ -965,6 +975,10 @@ pub(crate) async fn replay_loop(
         let arp_table_ref: ArpTableRef<'_> = None;
 
         events.clear();
+        // Issue #72: append this frame's nPrint row before the tracker keys it.
+        if let Some(acc) = nprint_acc.as_mut() {
+            acc.feed(&view);
+        }
         driver.track_into(view, &mut events);
         dispatch_tracked_events(
             &mut dispatcher,
@@ -979,6 +993,7 @@ pub(crate) async fn replay_loop(
             handler_error_policy,
             &mut flow_exporters,
             &mut ml_feature_handlers,
+            &mut nprint_acc,
             &health,
             arp_table_ref,
         )
@@ -1024,6 +1039,7 @@ pub(crate) async fn replay_loop(
             handler_error_policy,
             &mut flow_exporters,
             &mut ml_feature_handlers,
+            &mut nprint_acc,
             &health,
         )
         .await?;
@@ -1070,6 +1086,7 @@ async fn drain_phase(
     policy: HandlerErrorPolicy,
     flow_exporters: &mut [Box<dyn crate::export::FlowExporter>],
     ml_feature_handlers: &mut [crate::monitor::ml_features::FlowEndHandler],
+    nprint_acc: &mut Option<Box<dyn crate::monitor::nprint::FlowByteAccumulator>>,
     health: &crate::monitor::health::HealthState,
 ) -> Result<()> {
     // Step 1: drain the central tracker.
@@ -1100,6 +1117,12 @@ async fn drain_phase(
             for handler in ml_feature_handlers.iter_mut() {
                 handler(key, stats, *reason);
             }
+        }
+        // Issue #72: nPrint flush for flows drained at shutdown.
+        if let Some(acc) = nprint_acc.as_mut()
+            && let FsEvent::FlowEnded { key, .. } = &evt
+        {
+            acc.flush(key);
         }
         let res = match dispatch_lifecycle(
             dispatcher,
@@ -1415,6 +1438,7 @@ async fn dispatch_tracked_events(
     policy: HandlerErrorPolicy,
     flow_exporters: &mut [Box<dyn crate::export::FlowExporter>],
     ml_feature_handlers: &mut [crate::monitor::ml_features::FlowEndHandler],
+    nprint_acc: &mut Option<Box<dyn crate::monitor::nprint::FlowByteAccumulator>>,
     health: &crate::monitor::health::HealthState,
     arp_table: ArpTableRef<'_>,
 ) -> Result<()> {
@@ -1444,6 +1468,13 @@ async fn dispatch_tracked_events(
             for handler in ml_feature_handlers.iter_mut() {
                 handler(key, stats, *reason);
             }
+        }
+        // Issue #72: hand the completed flow's nPrint matrix to the on_nprint
+        // handlers, then drop it. `None` (no `nprint(..)`) is zero cost.
+        if let Some(acc) = nprint_acc.as_mut()
+            && let FsEvent::FlowEnded { key, .. } = &evt
+        {
+            acc.flush(key);
         }
         // Sync handlers first, then async — but on the SAME event, so one error
         // is isolated per-event under `Isolate` (a malformed flow can't tear

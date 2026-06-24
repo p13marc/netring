@@ -742,6 +742,11 @@ path = "examples/monitor/yara_scan.rs"
 required-features = ["yara", "tokio"]
 
 [[example]]
+name = "monitor_overload"
+path = "examples/monitor/overload_signal.rs"
+required-features = ["tokio", "flow"]
+
+[[example]]
 name = "monitor_dga_query"
 path = "examples/monitor/dga_query.rs"
 required-features = ["tokio", "flow", "dns"]

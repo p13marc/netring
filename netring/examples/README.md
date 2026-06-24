@@ -139,6 +139,7 @@ headline API with kernel filter pushdown.
 | `monitor_resilience` | `BackendErrorPolicy::Reopen` + `catch_handler_panics` — survive a flapping source + a panicking handler (W1e) |
 | `monitor_eve_tls` | Suricata EVE `event_type:"tls"` records via `on_fingerprint` + `EveTlsSink` (W1d) |
 | `monitor_metrics_export` | `MetricsSink` (feature `metrics`) Prometheus counter facade |
+| `monitor_overload` | **Backpressure/overload detection** (#54): `OverloadDetector` driven from `on_capture_stats` turns `CaptureTelemetry::drop_rate` into a debounced `Normal`↔`Emergency` signal (Suricata-style hysteresis — no flapping); react to shedding however you like |
 | `monitor_port_scan` | `pattern_detector!` over `PortScanDetector` (TRW scoring) |
 | `monitor_beacon_detector` | `pattern_detector!` over `BeaconDetector` (period variance) |
 | `monitor_rita_beacon` | `pattern_detector!` over `RitaBeaconDetector` — robust beacon scoring (Bowley skew + MADM, RITA v5); survives jitter/outliers the CV detector misses |

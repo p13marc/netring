@@ -43,6 +43,22 @@
 
 ### Added
 
+- **Backpressure / overload detection with hysteresis** (issue
+  [#54](https://github.com/p13marc/netring/issues/54)) —
+  `netring::monitor::overload::{OverloadDetector, OverloadConfig, OverloadState}`
+  turns the windowed `CaptureTelemetry::drop_rate` into a debounced
+  `Normal`↔`Emergency` signal you drive from `on_capture_stats`. The kernel ring
+  has no upstream backpressure — the NIC keeps sending — so the useful lever is
+  *knowing* when you're shedding and reacting (alert, autoscale, shed at your own
+  sink, bypass elephant flows). `OverloadDetector::observe(drop_rate)` returns
+  `Some(new_state)` only on a transition, so callers act on edges. Hysteresis
+  (Suricata's emergency-mode model) avoids flapping: enter `Emergency` the moment
+  the drop rate crosses `enter_drop_rate` (default 5 %), but only return to
+  `Normal` after it stays below `recover_drop_rate` (default 1 %) for
+  `recover_windows` consecutive samples (default 3) — any spike resets the calm
+  count. Pure, allocation-free, `Send`. This is the detection *signal*; the
+  shedding *action* (kernel deny-map / flow-shunt) is the caller's policy and a
+  planned follow-up. New example `monitor_overload`.
 - **Hot-reload of the IOC blocklist and Sigma rules** (issue
   [#53](https://github.com/p13marc/netring/issues/53)) —
   `Monitor::reload_handle() -> ReloadHandle` + `ReloadHandle::set_ioc(IocSet)` /

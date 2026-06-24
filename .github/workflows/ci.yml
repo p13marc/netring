@@ -301,6 +301,8 @@ jobs:
       - run: cargo build -p netring --example monitor_yara --features yara,tokio
       # Issue #47: the RITA beacon example needs flow + tokio.
       - run: cargo build -p netring --example monitor_rita_beacon --features tokio,flow
+      # Issue #54: the overload-detection example needs flow + tokio.
+      - run: cargo build -p netring --example monitor_overload --features tokio,flow
       # Issue #30: the infra-protocols example needs infra-protocols + emit.
       - run: cargo build -p netring --example monitor_infra_protocols --features infra-protocols,tokio,emit
       # Issue #30: the app-protocols example needs the six tier-2 app features + emit.

@@ -71,6 +71,7 @@ pub mod ioc;
 pub mod lldp;
 pub mod ml_features;
 pub(crate) mod nprint;
+pub mod overload;
 /// Default cap on concurrently-tracked per-flow-accumulator flows (nPrint #72 /
 /// YARA #45) when the corresponding `max_tracked_*_flows` is not set.
 #[cfg(any(feature = "nprint", feature = "yara"))]

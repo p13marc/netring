@@ -43,17 +43,20 @@
 
 ### Added
 
-- **Hot-reload of the IOC blocklist** (issue
+- **Hot-reload of the IOC blocklist and Sigma rules** (issue
   [#53](https://github.com/p13marc/netring/issues/53)) —
-  `Monitor::reload_handle() -> ReloadHandle` + `ReloadHandle::set_ioc(IocSet)`
-  swap a running monitor's threat-intel set **without dropping packets**. The
-  `ioc(..)` set is held behind a lock-free `arc-swap` RCU cell, so an in-flight
-  flow reads the old-or-new set (never a torn one) and converges within one
-  event; the swap never blocks the capture loop. Grab the handle before
-  `run_*`/`replay` and call `set_ioc` from any task (a feed refresh, file
-  watcher, SIGHUP) — it's `Send + Sync` and cheap to clone. New example
-  `monitor_ioc_reload`. (Hot-reload of Sigma rules / packet filters is a planned
-  follow-up.)
+  `Monitor::reload_handle() -> ReloadHandle` + `ReloadHandle::set_ioc(IocSet)` /
+  `set_sigma(SigmaRuleSet)` swap a running monitor's threat-intel set / Sigma
+  rules **without dropping packets**. The `ioc(..)` / `sigma(..)` sets are held
+  behind lock-free `arc-swap` RCU cells, so an in-flight flow reads the
+  old-or-new set (never a torn one) and converges within one event; the swap
+  never blocks the capture loop. Grab the handle before `run_*`/`replay` and call
+  the setters from any task (a feed refresh, file watcher, SIGHUP) — it's
+  `Send + Sync` and cheap to clone. New example `monitor_ioc_reload`. (For Sigma,
+  the *set of L7 categories* whose handlers run is fixed at build from the
+  original ruleset — a reload that adds a rule in a brand-new category won't be
+  evaluated until rebuild. Hot-reload of the cBPF/XDP kernel prefilter is a
+  planned follow-up.)
 - **YARA-X payload scanning over flows** (`yara` feature, issue
   [#45](https://github.com/p13marc/netring/issues/45)) —
   `MonitorBuilder::yara(YaraRules)` compiles a set of [YARA](https://virustotal.github.io/yara-x/)

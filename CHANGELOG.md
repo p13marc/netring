@@ -1,9 +1,13 @@
 # Changelog
 
-## Unreleased
+## 0.27.0 — 2026-06-24 — 1.0 API sweep, threat-intel, ML features & Tier-2 protocols
 
-> Depends on flowscope **0.18**. Additive over 0.26 (existing code compiles
-> unchanged).
+> Depends on flowscope **0.19**. **Contains breaking changes** (the pre-1.0 API
+> sweep): `#[non_exhaustive]` on public enums and library-produced output
+> structs, sealed L7 capability markers, and the `Capture::packets()` lending
+> iterator. Most code compiles unchanged; see
+> [`docs/MIGRATING_0.26_TO_0.27.md`](docs/MIGRATING_0.26_TO_0.27.md) for the
+> three things that may not and their one-line fixes.
 
 ### Fixed
 
@@ -68,7 +72,8 @@
   old-or-new set (never a torn one) and converges within one event; the swap
   never blocks the capture loop. Grab the handle before `run_*`/`replay` and call
   the setters from any task (a feed refresh, file watcher, SIGHUP) — it's
-  `Send + Sync` and cheap to clone. New example `monitor_ioc_reload`. (For Sigma,
+  `Send + Sync` and cheap to clone. New examples `monitor_ioc_reload` and
+  `monitor_sigma_reload`. (For Sigma,
   the *set of L7 categories* whose handlers run is fixed at build from the
   original ruleset — a reload that adds a rule in a brand-new category won't be
   evaluated until rebuild. Hot-reload of the cBPF/XDP kernel prefilter is a
@@ -559,17 +564,19 @@
   message that carries no SNI, and lets the markers' bounds evolve post-1.0
   without a major bump. No effect on existing code — they were only ever
   implemented in-crate.
-- **flowscope 0.16 → 0.18.** 0.17 brought `MacAddr`, the `arp` module, the
+- **flowscope 0.16 → 0.19.** 0.17 brought `MacAddr`, the `arp` module, the
   `NeighborTable`, `RxMetadata` on a now-`#[non_exhaustive]` `PacketView`, and
   `detect::fingerprint`. **0.18** is a huge additive release — ~25 new protocol
   parsers (QUIC, SMB2/3, Kerberos, LDAP, SSH, DHCP, LLDP/CDP, NTP, SSDP, mDNS,
   NetBIOS-NS, FTP, SMTP, WireGuard, Modbus, DNP3, STUN, RDP, SNMP, RADIUS, TFTP),
   the `asset` inventory layer, `ml_features` (CICFlowMeter parity) + `nprint`,
   binary IPFIX export (`ipfix::wire`), p0f/HASSH/JA4H/JA4X fingerprints, and TCP
-  overlap-policy + memcap reassembler hardening. netring consumes only the stable
-  core (arp/tls/http/dns/icmp/driver), so the bump is additive — the one fix is a
-  fallback arm for the now-`#[non_exhaustive]` `L4Proto` in the cBPF lowering
-  (fail-open). Surfacing the new 0.18 capabilities is tracked in follow-up issues.
+  overlap-policy + memcap reassembler hardening. **0.19** adds the robust RITA v5
+  `detect::patterns::RitaBeaconDetector` (surfaced by #47 below). netring consumes
+  only the stable core (arp/tls/http/dns/icmp/driver), so the bump is additive —
+  the one fix is a fallback arm for the now-`#[non_exhaustive]` `L4Proto` in the
+  cBPF lowering (fail-open). This release surfaces those 0.18/0.19 capabilities
+  (see the `### Added` entries above).
 
 ## 0.26.0 — 2026-06-16 — AF_XDP multi-queue capture & promiscuous mode
 

@@ -20,27 +20,43 @@ built on AF_PACKET with TPACKET_V3 (block-based mmap ring buffers) and AF_XDP.
 
 ## Implementation Status
 
-**Unreleased (branch `afxdp-flowscope017-arp`)** — flowscope **0.16 → 0.17**
-bump + **ARP feature** (issue #12). New opt-in `arp` feature: L2 ARP visibility
-+ spoof/binding-change detection. ARP has no 5-tuple, so it's parsed per-frame
-in the Monitor zero-copy drain (and the replay loop), mirroring the packet-tier
-hook — NOT a flow protocol. `MonitorBuilder::on_arp` (raw `ArpMessage` feed) +
-`on_arp_anomaly` (derived `ArpAnomaly`: `SpoofSuspected` via
-`ArpMessage::is_likely_spoof`, `BindingChanged` via flowscope's `NeighborTable`,
-opt-in `Gratuitous`/`NewBinding`), `arp_allow`/`arp_warmup`/
-`arp_report_{gratuitous,new_binding}`. Arming any ARP hook forces capture-all
-(ARP isn't expressible in the 5-tuple cBPF prefilter — fail-open). `arp` is in
-the `monitor` umbrellas; prelude exports `ArpAnomaly`/`ArpAnomalyKind` +
-`ArpMessage`/`ArpOp`/`MacAddr`. `src/monitor/arp.rs` (`ArpWatch` detector +
-`dispatch_arp` in `run.rs`). Example `monitor_arp_watch`; cap-free
-`arp_replay` pcap-replay test (live AF_PACKET TX→RX on lo does NOT loop raw
-injected frames back to the capture, so the live-inject approach was dropped
-for deterministic pcap replay, which drives the same `dispatch_arp` path).
-**Deferred:** `Ctx::arp_table()` (cross-protocol IP→MAC
-lookup — needs a gated field threaded through 13 Ctx sites); the EtherType-aware
-kernel pushdown (today ARP just forces fail-open capture-all).
+**0.27.0 — RELEASE-READY on `master`** ("1.0 API sweep, threat-intel, ML
+features & Tier-2 protocols"). Version bumped to 0.27.0; CHANGELOG `## 0.27.0`
+banner + `docs/MIGRATING_0.26_TO_0.27.md` written; depends on **flowscope 0.19**.
+The actual `cargo publish` + `git tag 0.27.0` remain the maintainer's hands-on
+action (then publish `netring-exporters` 0.3.0). This is the **pre-1.0
+stabilization release** — mostly additive, with three breaking changes from the
+1.0 API sweep ([#37]) and one soundness fix ([#35]):
 
-**0.25.0 — RELEASE-READY on `0.25-dev`** ("Subscriptions, Async Effects,
+- **Breaking (1.0 sweep, #37):** `#[non_exhaustive]` on the growing public enums
+  (`Error`/`BuildError`/`Severity`/`FanoutMode`/`Queues`/… — exhaustive matches
+  need a `_` arm) and on library-produced **output** structs (`CaptureStats`/
+  `OwnedPacket`/`AnomalyContext`/…); construction-oriented config structs stay
+  exhaustive. Sealed the L7 capability markers `HasSni`/`HasHttpHost`/`HasQname`.
+- **Breaking (soundness, #35):** `Capture::packets()` is now a **lending
+  iterator** (`next_packet()`/`for_each()`); the old `for pkt in cap.packets()`
+  + `.collect()` UAF path is a compile error. Zero-copy `next_batch` unaffected.
+- **NSM stack (additive, opt-in features):** threat-intel IOC (`ioc`), YARA-X
+  (`yara`), Sigma (`sigma`) + **live hot-reload** of IOC/Sigma sets via
+  `Monitor::reload_handle()` (`set_ioc`/`set_sigma`, lock-free `arc-swap` RCU),
+  nDPI flow-risk (`flow_risk`), RITA beacon detector, passive `asset::Inventory`
+  (ARP/NDP/LLDP/CDP/DHCP/SSDP/mDNS/NBNS), p0f (`p0f`), QUIC SNI (`quic`), Tier-2
+  protocol markers (SSH/HASSH, NTP/SNMP/TFTP/RADIUS, FTP/SMTP, Modbus/DNP3, STUN/
+  WireGuard) + AD protocols (SMB/Kerberos/LDAP/RDP), nPrint + CICFlowMeter ML
+  export, OCSF Detection-Finding sink (`ocsf-sink`), overload/backpressure
+  detection (`monitor::overload`), symmetric RSS (`netring::xdp::rss`), honest
+  per-source `DropStats`, HW timestamping fix, pcapng writer, and IPv6 NDP watch.
+- **1.0 hardening (#36/#37):** miri over the pure-logic unsafe surface + 5
+  cargo-fuzz targets (bpf compiler/interpreter, `.expr()` parser, `IpNet` parser)
+  with a nightly deep-fuzz workflow.
+- **Companion crate:** `netring-exporters` 0.3.0 adds Parquet (`parquet`) + OTLP
+  metrics alongside the existing OTLP/Kafka anomaly sinks.
+
+Per-feature implementation notes are kept in git history / the CHANGELOG; this
+file documents the durable architecture. Historical dev logs for prior releases
+follow.
+
+**0.25.0 — RELEASED** ("Subscriptions, Async Effects,
 Performance & TX"). Version bumped to 0.25.0; CHANGELOG + `docs/MIGRATING_0.24_TO_0.25.md`
 written; depends on **flowscope 0.16**. The actual `cargo publish` + `git tag
 0.25.0` remain the maintainer's hands-on action. Landed on top of 0.24:

@@ -293,6 +293,7 @@ jobs:
       - run: cargo build -p netring --example monitor_ioc_reload --features tokio,dns,tls,http
       # Issue #46: the Sigma example needs sigma + dns/tls/http + emit.
       - run: cargo build -p netring --example monitor_sigma_rules --features sigma,dns,tls,http,tokio,emit
+      - run: cargo build -p netring --example monitor_sigma_reload --features sigma,dns,tls,http,tokio
       # Issue #32: the ML-features example needs ml-features + tokio.
       - run: cargo build -p netring --example monitor_ml_features --features ml-features,tokio
       # Issue #72: the nPrint example needs nprint + tokio.

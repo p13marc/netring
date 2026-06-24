@@ -271,6 +271,8 @@ pub struct Monitor {
     /// and/or the YARA payload scanner (issue #45); the trait object keeps
     /// `run.rs` feature-agnostic. Empty (the common case) is zero cost.
     pub(crate) byte_accumulators: Vec<Box<dyn nprint::FlowByteAccumulator>>,
+    /// Issue #53: the live IOC set, for [`Self::reload_handle`].
+    pub(crate) ioc_swap: Option<std::sync::Arc<arc_swap::ArcSwap<ioc::IocSet>>>,
     /// 0.25 W1c: active-timeout period for interim flow-record export. When
     /// `Some` (and exporters exist), the run loop emits ongoing `FlowRecord`s
     /// for long-lived flows every period. See [`MonitorBuilder::export_active_timeout`].
@@ -489,6 +491,21 @@ impl Monitor {
         run::run_loop(self, run::StopCondition::Idle(window)).await
     }
 
+    /// A [`ReloadHandle`] for hot-swapping rule sets while the monitor runs
+    /// (issue #53). Obtain it **before** `run_*` / `replay`, then pass it to a
+    /// control task (a unix socket, file watcher, SIGHUP handler) that swaps
+    /// rules without dropping packets. The handle is `Send + Sync` and cheap to
+    /// clone; an in-flight event sees the old-or-new set, never a torn one
+    /// (lock-free RCU via `arc-swap`).
+    ///
+    /// Today it can hot-swap the [`ioc`](MonitorBuilder::ioc) blocklist;
+    /// [`ReloadHandle::set_ioc`] is a no-op if `ioc(..)` wasn't armed.
+    pub fn reload_handle(&self) -> ReloadHandle {
+        ReloadHandle {
+            ioc: self.ioc_swap.clone(),
+        }
+    }
+
     /// Registered detector slugs in builder-registration order.
     /// 0.21 A.9: includes every name from `.detect(detector!{ name: "X", … })`
     /// and `.on_named("X", handler)`. Anonymous `.on::<E>(closure)`
@@ -576,6 +593,37 @@ impl std::fmt::Debug for Monitor {
     }
 }
 
+/// Hot-swaps a running [`Monitor`]'s rule sets without dropping packets
+/// (issue #53). Obtain via [`Monitor::reload_handle`]; clone it freely and call
+/// the setters from any task while the monitor runs. Backed by lock-free RCU
+/// (`arc-swap`): an in-flight event reads the old-or-new set, never a torn one,
+/// and converges within one event.
+#[derive(Clone)]
+pub struct ReloadHandle {
+    ioc: Option<std::sync::Arc<arc_swap::ArcSwap<ioc::IocSet>>>,
+}
+
+impl ReloadHandle {
+    /// Replace the live [`IocSet`](ioc::IocSet) the monitor matches against.
+    /// Returns `false` (a no-op) if the monitor wasn't armed with
+    /// [`MonitorBuilder::ioc`]. Validate/build the new set on the caller side;
+    /// the swap itself is infallible and never blocks the capture loop.
+    pub fn set_ioc(&self, set: ioc::IocSet) -> bool {
+        match &self.ioc {
+            Some(swap) => {
+                swap.store(std::sync::Arc::new(set));
+                true
+            }
+            None => false,
+        }
+    }
+
+    /// Whether this handle can reload an IOC set (i.e. `ioc(..)` was armed).
+    pub fn has_ioc(&self) -> bool {
+        self.ioc.is_some()
+    }
+}
+
 /// Builder for [`Monitor`]. Construct via [`Monitor::builder`].
 #[derive(Default)]
 pub struct MonitorBuilder {
@@ -657,6 +705,10 @@ pub struct MonitorBuilder {
     /// [`DEFAULT_YARA_SCAN_BYTES`].
     #[cfg(feature = "yara")]
     yara_max_bytes: Option<usize>,
+    /// Issue #53: the live, swappable IOC set behind [`Self::ioc`]. `Some` once
+    /// `ioc(..)` is armed; a clone reaches [`Monitor::reload_handle`] so an
+    /// operator can hot-swap the blocklist without dropping packets.
+    ioc_swap: Option<std::sync::Arc<arc_swap::ArcSwap<ioc::IocSet>>>,
     /// 0.25 W1c: active-timeout period set via [`Self::export_active_timeout`].
     flow_active_timeout: Option<std::time::Duration>,
     /// 0.21 D.1: TypeIds of protocol markers registered via
@@ -2168,7 +2220,8 @@ impl MonitorBuilder {
         use crate::protocol::event_typed::FlowStarted;
         use std::sync::Arc;
 
-        let set = Arc::new(set);
+        let set = Arc::new(arc_swap::ArcSwap::from_pointee(set));
+        self.ioc_swap = Some(Arc::clone(&set));
 
         // Flow IP matching (Tcp + Udp lifecycle) — always available.
         if !self
@@ -2179,7 +2232,7 @@ impl MonitorBuilder {
         }
         let s = Arc::clone(&set);
         self = self.on_ctx::<FlowStarted<Tcp>>(move |evt: &FlowStarted<Tcp>, ctx: &mut Ctx<'_>| {
-            ioc::check_flow_ip(&s, evt.key, ctx);
+            ioc::check_flow_ip(&s.load(), evt.key, ctx);
             Ok(())
         });
         if !self
@@ -2190,7 +2243,7 @@ impl MonitorBuilder {
         }
         let s = Arc::clone(&set);
         self = self.on_ctx::<FlowStarted<Udp>>(move |evt: &FlowStarted<Udp>, ctx: &mut Ctx<'_>| {
-            ioc::check_flow_ip(&s, evt.key, ctx);
+            ioc::check_flow_ip(&s.load(), evt.key, ctx);
             Ok(())
         });
 
@@ -2206,7 +2259,7 @@ impl MonitorBuilder {
             let s = Arc::clone(&set);
             self =
                 self.on_ctx::<Dns>(move |msg: &flowscope::dns::DnsMessage, ctx: &mut Ctx<'_>| {
-                    ioc::check_dns(&s, msg, ctx);
+                    ioc::check_dns(&s.load(), msg, ctx);
                     Ok(())
                 });
         }
@@ -2222,7 +2275,7 @@ impl MonitorBuilder {
             let s = Arc::clone(&set);
             self = self.on_ctx::<TlsHandshake>(
                 move |hs: &flowscope::tls::TlsHandshake, ctx: &mut Ctx<'_>| {
-                    ioc::check_tls(&s, hs, ctx);
+                    ioc::check_tls(&s.load(), hs, ctx);
                     Ok(())
                 },
             );
@@ -2239,7 +2292,7 @@ impl MonitorBuilder {
             let s = Arc::clone(&set);
             self = self.on_ctx::<Http>(
                 move |msg: &flowscope::http::HttpMessage, ctx: &mut Ctx<'_>| {
-                    ioc::check_http(&s, msg, ctx);
+                    ioc::check_http(&s.load(), msg, ctx);
                     Ok(())
                 },
             );
@@ -3026,6 +3079,7 @@ impl MonitorBuilder {
             flow_exporters: self.flow_exporters,
             ml_feature_handlers: self.ml_feature_handlers,
             byte_accumulators,
+            ioc_swap: self.ioc_swap,
             flow_active_timeout: self.flow_active_timeout,
             packet_subs: self.packet_subs,
             kernel_prefilter,

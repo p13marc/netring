@@ -273,6 +273,9 @@ pub struct Monitor {
     pub(crate) byte_accumulators: Vec<Box<dyn nprint::FlowByteAccumulator>>,
     /// Issue #53: the live IOC set, for [`Self::reload_handle`].
     pub(crate) ioc_swap: Option<std::sync::Arc<arc_swap::ArcSwap<ioc::IocSet>>>,
+    /// Issue #53: the live Sigma rule set, for [`Self::reload_handle`].
+    #[cfg(feature = "sigma")]
+    pub(crate) sigma_swap: Option<std::sync::Arc<arc_swap::ArcSwap<sigma::SigmaRuleSet>>>,
     /// 0.25 W1c: active-timeout period for interim flow-record export. When
     /// `Some` (and exporters exist), the run loop emits ongoing `FlowRecord`s
     /// for long-lived flows every period. See [`MonitorBuilder::export_active_timeout`].
@@ -503,6 +506,8 @@ impl Monitor {
     pub fn reload_handle(&self) -> ReloadHandle {
         ReloadHandle {
             ioc: self.ioc_swap.clone(),
+            #[cfg(feature = "sigma")]
+            sigma: self.sigma_swap.clone(),
         }
     }
 
@@ -601,6 +606,8 @@ impl std::fmt::Debug for Monitor {
 #[derive(Clone)]
 pub struct ReloadHandle {
     ioc: Option<std::sync::Arc<arc_swap::ArcSwap<ioc::IocSet>>>,
+    #[cfg(feature = "sigma")]
+    sigma: Option<std::sync::Arc<arc_swap::ArcSwap<sigma::SigmaRuleSet>>>,
 }
 
 impl ReloadHandle {
@@ -618,9 +625,35 @@ impl ReloadHandle {
         }
     }
 
+    /// Replace the live [`SigmaRuleSet`](sigma::SigmaRuleSet). Returns `false`
+    /// (a no-op) if the monitor wasn't armed with [`MonitorBuilder::sigma`].
+    ///
+    /// Only the rule *evaluation* hot-swaps; the set of L7 categories whose
+    /// handlers are installed (DNS / HTTP / TLS) is fixed at build from the
+    /// original set, so a reload that adds rules in a **new** category won't be
+    /// evaluated until the monitor is rebuilt. Build the new set (via
+    /// `SigmaRuleSet::from_dir` etc.) on the caller side — compile errors there
+    /// leave the live set untouched.
+    #[cfg(feature = "sigma")]
+    pub fn set_sigma(&self, rules: sigma::SigmaRuleSet) -> bool {
+        match &self.sigma {
+            Some(swap) => {
+                swap.store(std::sync::Arc::new(rules));
+                true
+            }
+            None => false,
+        }
+    }
+
     /// Whether this handle can reload an IOC set (i.e. `ioc(..)` was armed).
     pub fn has_ioc(&self) -> bool {
         self.ioc.is_some()
+    }
+
+    /// Whether this handle can reload a Sigma rule set (i.e. `sigma(..)` was armed).
+    #[cfg(feature = "sigma")]
+    pub fn has_sigma(&self) -> bool {
+        self.sigma.is_some()
     }
 }
 
@@ -709,6 +742,9 @@ pub struct MonitorBuilder {
     /// `ioc(..)` is armed; a clone reaches [`Monitor::reload_handle`] so an
     /// operator can hot-swap the blocklist without dropping packets.
     ioc_swap: Option<std::sync::Arc<arc_swap::ArcSwap<ioc::IocSet>>>,
+    /// Issue #53: the live, swappable Sigma rule set behind [`Self::sigma`].
+    #[cfg(feature = "sigma")]
+    sigma_swap: Option<std::sync::Arc<arc_swap::ArcSwap<sigma::SigmaRuleSet>>>,
     /// 0.25 W1c: active-timeout period set via [`Self::export_active_timeout`].
     flow_active_timeout: Option<std::time::Duration>,
     /// 0.21 D.1: TypeIds of protocol markers registered via
@@ -2323,10 +2359,11 @@ impl MonitorBuilder {
     pub fn sigma(mut self, rules: sigma::SigmaRuleSet) -> Self {
         use std::sync::Arc;
 
-        let rules = Arc::new(rules);
+        let rules = Arc::new(arc_swap::ArcSwap::from_pointee(rules));
+        self.sigma_swap = Some(Arc::clone(&rules));
 
         #[cfg(feature = "dns")]
-        if rules.has_dns() {
+        if rules.load().has_dns() {
             use crate::protocol::builtin::Dns;
             if !self
                 .declared_protocols
@@ -2337,12 +2374,12 @@ impl MonitorBuilder {
             let r = Arc::clone(&rules);
             self =
                 self.on_ctx::<Dns>(move |msg: &flowscope::dns::DnsMessage, ctx: &mut Ctx<'_>| {
-                    sigma::eval_dns(&r, msg, ctx);
+                    sigma::eval_dns(&r.load(), msg, ctx);
                     Ok(())
                 });
         }
         #[cfg(not(feature = "dns"))]
-        if rules.has_dns() {
+        if rules.load().has_dns() {
             tracing::warn!(
                 "sigma: DNS-category rules loaded but the `dns` feature is disabled — \
                  they will not be evaluated"
@@ -2350,7 +2387,7 @@ impl MonitorBuilder {
         }
 
         #[cfg(feature = "http")]
-        if rules.has_http() {
+        if rules.load().has_http() {
             use crate::protocol::builtin::Http;
             if !self
                 .declared_protocols
@@ -2361,13 +2398,13 @@ impl MonitorBuilder {
             let r = Arc::clone(&rules);
             self = self.on_ctx::<Http>(
                 move |msg: &flowscope::http::HttpMessage, ctx: &mut Ctx<'_>| {
-                    sigma::eval_http(&r, msg, ctx);
+                    sigma::eval_http(&r.load(), msg, ctx);
                     Ok(())
                 },
             );
         }
         #[cfg(not(feature = "http"))]
-        if rules.has_http() {
+        if rules.load().has_http() {
             tracing::warn!(
                 "sigma: HTTP-category rules loaded but the `http` feature is disabled — \
                  they will not be evaluated"
@@ -2375,7 +2412,7 @@ impl MonitorBuilder {
         }
 
         #[cfg(feature = "tls")]
-        if rules.has_tls() {
+        if rules.load().has_tls() {
             use crate::protocol::builtin::TlsHandshake;
             if !self
                 .declared_protocols
@@ -2386,13 +2423,13 @@ impl MonitorBuilder {
             let r = Arc::clone(&rules);
             self = self.on_ctx::<TlsHandshake>(
                 move |hs: &flowscope::tls::TlsHandshake, ctx: &mut Ctx<'_>| {
-                    sigma::eval_tls(&r, hs, ctx);
+                    sigma::eval_tls(&r.load(), hs, ctx);
                     Ok(())
                 },
             );
         }
         #[cfg(not(feature = "tls"))]
-        if rules.has_tls() {
+        if rules.load().has_tls() {
             tracing::warn!(
                 "sigma: TLS-category rules loaded but the `tls` feature is disabled — \
                  they will not be evaluated"
@@ -3080,6 +3117,8 @@ impl MonitorBuilder {
             ml_feature_handlers: self.ml_feature_handlers,
             byte_accumulators,
             ioc_swap: self.ioc_swap,
+            #[cfg(feature = "sigma")]
+            sigma_swap: self.sigma_swap,
             flow_active_timeout: self.flow_active_timeout,
             packet_subs: self.packet_subs,
             kernel_prefilter,

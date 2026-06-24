@@ -124,7 +124,7 @@ jobs:
             --test monitor_replay --test monitor_kernel_prefilter --test monitor_send \
             --test monitor_run_until_idle --test monitor_drain_timeout --test monitor_name_in_ctx \
             --test arp_replay --test ndp_replay --test lldp_replay --test cdp_replay --test asset_inventory --test asset_inventory_udp --test asset_inventory_mdns --test monitor_reassembler_config \
-            --test ad_protocols --test asset_protocols --test ssh_protocol --test quic_protocol --test ioc_match --test ioc_reload --test p0f_replay --test flow_risk --test sigma_match --test ml_features --test nprint_export --test yara_scan --test tier2_infra --test tier2_app
+            --test ad_protocols --test asset_protocols --test ssh_protocol --test quic_protocol --test ioc_match --test ioc_reload --test p0f_replay --test flow_risk --test sigma_match --test sigma_reload --test ml_features --test nprint_export --test yara_scan --test tier2_infra --test tier2_app
 
   # ── Integration tests (need CAP_NET_RAW) ──────────────────────────────────
   test-integration:

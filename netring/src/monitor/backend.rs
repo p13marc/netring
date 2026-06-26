@@ -104,11 +104,14 @@ impl AnyBackend {
                 let mut guard = xdp.readable().await?;
                 while let Some(batch) = guard.next_batch() {
                     for pkt in &batch {
-                        // AF_XDP frames carry a hardware timestamp only when
-                        // the NIC + driver populate it; fall back to now().
+                        // AF_XDP frames carry a hardware timestamp + RX metadata
+                        // only when the NIC + driver populate it (issue #13);
+                        // fall back to now() for the timestamp.
                         let ts = pkt.timestamp().unwrap_or_else(now_ts);
                         last_ts = Some(ts);
-                        on_packet(PacketView::new(pkt.data(), ts));
+                        on_packet(
+                            PacketView::new(pkt.data(), ts).with_rx_metadata(pkt.rx_metadata()),
+                        );
                     }
                 }
             }
@@ -130,7 +133,9 @@ impl AnyBackend {
                         for pkt in &batch {
                             let ts = pkt.timestamp().unwrap_or_else(now_ts);
                             last_ts = Some(ts);
-                            on_packet(PacketView::new(pkt.data(), ts));
+                            on_packet(
+                                PacketView::new(pkt.data(), ts).with_rx_metadata(pkt.rx_metadata()),
+                            );
                         }
                     }
                 }

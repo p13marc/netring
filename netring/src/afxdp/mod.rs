@@ -37,6 +37,8 @@ mod batch;
 mod capture;
 pub(crate) mod ffi;
 #[cfg(feature = "af-xdp")]
+mod metadata;
+#[cfg(feature = "af-xdp")]
 mod ring;
 #[cfg(feature = "af-xdp")]
 pub mod rss;
@@ -73,7 +75,7 @@ use umem::Umem;
 
 use crate::error::Error;
 #[cfg(feature = "af-xdp")]
-use crate::packet::{OwnedPacket, Timestamp};
+use crate::packet::OwnedPacket;
 
 // ── XdpMode ──────────────────────────────────────────────────────────────
 
@@ -160,6 +162,10 @@ pub struct XdpSocketBuilder {
     /// Put the interface into promiscuous mode for the socket's lifetime,
     /// via an auxiliary AF_PACKET `PACKET_MR_PROMISC` guard (issue #4).
     promiscuous: bool,
+    /// Reserve UMEM headroom and read the XDP RX-metadata struct ahead of each
+    /// frame (issue #13). Requires a matching `redirect_meta` program; degrades
+    /// cleanly to no metadata otherwise.
+    rx_metadata: bool,
     #[cfg(feature = "xdp-loader")]
     attach_default: bool,
     #[cfg(feature = "xdp-loader")]
@@ -188,6 +194,7 @@ impl Default for XdpSocketBuilder {
             hugepages: false,
             numa_node: None,
             promiscuous: false,
+            rx_metadata: false,
             #[cfg(feature = "xdp-loader")]
             attach_default: false,
             #[cfg(feature = "xdp-loader")]
@@ -274,6 +281,23 @@ impl XdpSocketBuilder {
     ///   (`ethtool -L <iface> combined 1`) or open one socket per queue.
     pub fn promiscuous(mut self, enable: bool) -> Self {
         self.promiscuous = enable;
+        self
+    }
+
+    /// Read NIC hardware RX metadata — timestamp, RSS hash, VLAN tag — per
+    /// frame (issue #13).
+    ///
+    /// Reserves UMEM headroom for the metadata struct the `redirect_meta` XDP
+    /// program writes ahead of each frame (kernel 6.3+, via the
+    /// `bpf_xdp_metadata_*` kfuncs); the parsed values surface through
+    /// [`XdpPacket::rx_metadata`](crate::XdpPacket::rx_metadata) and as the
+    /// packet [`timestamp`](crate::XdpPacket::timestamp).
+    ///
+    /// Hardware-gated: drivers without the kfuncs (and the loopback / generic
+    /// XDP path) return nothing, and metadata degrades to absent with the
+    /// software timestamp used as before. Off by default.
+    pub fn rx_metadata(mut self, enable: bool) -> Self {
+        self.rx_metadata = enable;
         self
     }
 
@@ -503,6 +527,11 @@ impl XdpSocketBuilder {
             &umem::UmemOptions {
                 hugepages: self.hugepages,
                 numa_node: self.numa_node,
+                headroom: if self.rx_metadata {
+                    metadata::XdpRxMeta::LEN as u32
+                } else {
+                    0
+                },
             },
         )?;
 
@@ -692,6 +721,7 @@ impl XdpSocketBuilder {
             comp,
             need_wakeup_enabled: self.need_wakeup,
             zerocopy,
+            rx_metadata: self.rx_metadata,
             _promisc_guard: promisc_guard,
             #[cfg(feature = "xdp-loader")]
             _xdp_attachment: None,
@@ -790,6 +820,10 @@ pub struct XdpSocket {
     /// [`XdpSocket::is_zerocopy`].
     #[cfg(feature = "af-xdp")]
     zerocopy: bool,
+    /// Issue #13: whether RX-metadata headroom was reserved, so the RX paths
+    /// read the XDP metadata struct ahead of each frame. Off → zero overhead.
+    #[cfg(feature = "af-xdp")]
+    rx_metadata: bool,
     /// RAII guard holding the interface in promiscuous mode (set when built
     /// with [`XdpSocketBuilder::promiscuous`]). On drop, its fd closes and the
     /// kernel decrements `dev->promiscuity`, so the interface leaves
@@ -910,6 +944,29 @@ impl XdpSocket {
         self.zerocopy
     }
 
+    /// Whether this socket reads NIC RX metadata, i.e. was built with
+    /// [`XdpSocketBuilder::rx_metadata`] (issue #13). When `false`, every
+    /// frame's [`rx_metadata`](crate::XdpPacket::rx_metadata) is absent.
+    #[cfg(feature = "af-xdp")]
+    pub fn rx_metadata_enabled(&self) -> bool {
+        self.rx_metadata
+    }
+
+    /// Read + parse the RX-metadata struct from the headroom preceding the
+    /// frame at `addr`. Returns absent metadata when disabled, when no program
+    /// wrote it, or when the magic check fails (the degrade path).
+    #[cfg(feature = "af-xdp")]
+    fn read_rx_metadata(&self, addr: u64) -> flowscope::RxMetadata {
+        if !self.rx_metadata {
+            return flowscope::RxMetadata::default();
+        }
+        self.umem
+            .data_before(addr, metadata::XdpRxMeta::LEN)
+            .and_then(metadata::XdpRxMeta::from_headroom)
+            .map(|m| m.rx_metadata())
+            .unwrap_or_default()
+    }
+
     /// Borrow the socket fd for polling (used by the multi-queue
     /// [`XdpCapture`](crate::xdp::XdpCapture) round-robin).
     #[cfg(all(feature = "af-xdp", feature = "xdp-loader"))]
@@ -950,18 +1007,19 @@ impl XdpSocket {
 
         for i in 0..tok.n {
             let desc: libc::xdp_desc = self.rx.read_at(tok, i);
+            let meta = self.read_rx_metadata(desc.addr);
             match self.umem.data_checked(desc.addr, desc.len as usize) {
                 Some(data) => packets.push(OwnedPacket {
                     data: data.to_vec(),
-                    timestamp: Timestamp::default(),
-                    // AF_XDP RX-metadata HW timestamps are future work (issue #13).
-                    timestamp_clock: crate::packet::TimestampClock::None,
+                    timestamp: meta.hw_timestamp.unwrap_or_default(),
+                    timestamp_clock: match meta.hw_timestamp {
+                        Some(_) => crate::packet::TimestampClock::RawHardware,
+                        None => crate::packet::TimestampClock::None,
+                    },
                     original_len: desc.len as usize,
-                    // AF_XDP doesn't surface AF_PACKET-style metadata; the
-                    // RX metadata BPF extension would, but is not yet wired.
                     status: crate::packet::PacketStatus::default(),
                     direction: crate::packet::PacketDirection::Unknown(0),
-                    rxhash: 0,
+                    rxhash: meta.rx_hash.map_or(0, |h| h.value),
                     vlan_tci: 0,
                     vlan_tpid: 0,
                     ll_protocol: 0,

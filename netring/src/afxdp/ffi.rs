@@ -121,6 +121,66 @@ pub struct ethtool_rxfh {
     // `rss_config[]` flexible array follows in the heap buffer.
 }
 
+// ── RX flow steering (ntuple / RX-NFC, issue #15) ────────────────────────────
+
+/// ethtool sub-command: get the RX classification rule count.
+pub const ETHTOOL_GRXCLSRLCNT: u32 = 0x0000_002e;
+/// ethtool sub-command: get all RX classification rule locations.
+pub const ETHTOOL_GRXCLSRLALL: u32 = 0x0000_0030;
+/// ethtool sub-command: delete an RX classification rule.
+pub const ETHTOOL_SRXCLSRLDEL: u32 = 0x0000_0031;
+/// ethtool sub-command: insert an RX classification rule.
+pub const ETHTOOL_SRXCLSRLINS: u32 = 0x0000_0032;
+
+/// `flow_type` values for [`ethtool_rx_flow_spec`] (from `<linux/ethtool.h>`).
+pub const TCP_V4_FLOW: u32 = 0x01;
+pub const UDP_V4_FLOW: u32 = 0x02;
+pub const SCTP_V4_FLOW: u32 = 0x03;
+pub const TCP_V6_FLOW: u32 = 0x05;
+pub const UDP_V6_FLOW: u32 = 0x06;
+pub const SCTP_V6_FLOW: u32 = 0x07;
+
+/// `location` sentinel: let the driver choose the rule slot on insert.
+pub const RX_CLS_LOC_ANY: u32 = 0xffff_ffff;
+/// `ring_cookie` sentinel: drop matching packets instead of steering them.
+pub const RX_CLS_FLOW_DISC: u64 = 0xffff_ffff_ffff_ffff;
+
+/// `struct ethtool_rx_flow_spec` from `<linux/ethtool.h>`. The `h_u` / `m_u`
+/// unions are a fixed 52-byte area (`hdata[52]` in the kernel); callers treat
+/// them as opaque bytes and write the per-`flow_type` member at its offset (see
+/// `steer::FlowRule`). `m_u` masks bits to be **matched**: a set bit (`1`) is
+/// significant, a clear bit (`0`) is a wildcard, so an all-`0` mask ignores the
+/// whole field. (This is the opposite of the deprecated
+/// `ethtool_rx_ntuple_flow_spec` / `ETHTOOL_SRXNTUPLE`, whose mask documents
+/// bits to be *ignored* — easy to conflate.) Layout pinned by the size/offset
+/// asserts below.
+#[repr(C)]
+#[derive(Debug, Clone, Copy)]
+pub struct ethtool_rx_flow_spec {
+    pub flow_type: u32,
+    pub h_u: [u8; 52],
+    pub h_ext: [u8; 20],
+    pub m_u: [u8; 52],
+    pub m_ext: [u8; 20],
+    pub ring_cookie: u64,
+    pub location: u32,
+}
+
+/// `struct ethtool_rxnfc` from `<linux/ethtool.h>`, as used for the rule
+/// insert / delete / count sub-commands. The trailing `rule_locs[]` flexible
+/// array (for `GRXCLSRLALL`) is appended in a heap buffer when listing.
+#[repr(C)]
+#[derive(Debug, Clone, Copy)]
+pub struct ethtool_rxnfc {
+    pub cmd: u32,
+    pub flow_type: u32,
+    pub data: u64,
+    pub fs: ethtool_rx_flow_spec,
+    /// `rule_cnt` (count / list) aliased with `rss_context` (FLOW_RSS) in the
+    /// kernel union; netring uses only the count meaning.
+    pub rule_cnt: u32,
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -146,6 +206,24 @@ mod tests {
         assert_eq!(size_of::<xdp_desc>(), 16);
         assert_eq!(size_of::<xdp_mmap_offsets>(), 128);
         assert_eq!(size_of::<xdp_ring_offset>(), 32);
+    }
+
+    /// Pins the RX-NFC layout (issue #15) against `<linux/ethtool.h>`: a wrong
+    /// offset would silently mis-pack a steering rule.
+    #[test]
+    fn rxnfc_layout_matches_kernel() {
+        use std::mem::offset_of;
+        assert_eq!(size_of::<ethtool_rx_flow_spec>(), 168);
+        assert_eq!(offset_of!(ethtool_rx_flow_spec, h_u), 4);
+        assert_eq!(offset_of!(ethtool_rx_flow_spec, h_ext), 56);
+        assert_eq!(offset_of!(ethtool_rx_flow_spec, m_u), 76);
+        assert_eq!(offset_of!(ethtool_rx_flow_spec, m_ext), 128);
+        assert_eq!(offset_of!(ethtool_rx_flow_spec, ring_cookie), 152);
+        assert_eq!(offset_of!(ethtool_rx_flow_spec, location), 160);
+
+        assert_eq!(size_of::<ethtool_rxnfc>(), 192);
+        assert_eq!(offset_of!(ethtool_rxnfc, fs), 16);
+        assert_eq!(offset_of!(ethtool_rxnfc, rule_cnt), 184);
     }
 
     #[test]

@@ -46,6 +46,8 @@ pub mod rss;
 mod socket;
 mod stats;
 #[cfg(feature = "af-xdp")]
+pub mod steer;
+#[cfg(feature = "af-xdp")]
 mod umem;
 
 #[cfg(feature = "xdp-loader")]

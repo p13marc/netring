@@ -130,6 +130,12 @@ pub mod xdp {
             RssConfig, RssMode, SYMMETRIC_RSS_KEY, rss_flow_hash, toeplitz,
         };
     }
+
+    /// NIC RX flow steering (issue #15) — pin chosen flows to chosen RX queues
+    /// via ethtool ntuple rules.
+    pub mod steer {
+        pub use crate::afxdp::steer::{FlowRule, RxSteer, SteerGuard};
+    }
 }
 
 // Async / channel adapters

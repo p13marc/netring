@@ -148,8 +148,12 @@ pub const RX_CLS_FLOW_DISC: u64 = 0xffff_ffff_ffff_ffff;
 /// `struct ethtool_rx_flow_spec` from `<linux/ethtool.h>`. The `h_u` / `m_u`
 /// unions are a fixed 52-byte area (`hdata[52]` in the kernel); callers treat
 /// them as opaque bytes and write the per-`flow_type` member at its offset (see
-/// `steer::FlowRule`). `m_u` masks **ignore** bits set to `1`, so an all-`0xff`
-/// mask is a full wildcard. Layout pinned by the size/offset asserts below.
+/// `steer::FlowRule`). `m_u` masks bits to be **matched**: a set bit (`1`) is
+/// significant, a clear bit (`0`) is a wildcard, so an all-`0` mask ignores the
+/// whole field. (This is the opposite of the deprecated
+/// `ethtool_rx_ntuple_flow_spec` / `ETHTOOL_SRXNTUPLE`, whose mask documents
+/// bits to be *ignored* — easy to conflate.) Layout pinned by the size/offset
+/// asserts below.
 #[repr(C)]
 #[derive(Debug, Clone, Copy)]
 pub struct ethtool_rx_flow_spec {

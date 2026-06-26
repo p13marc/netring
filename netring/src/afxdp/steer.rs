@@ -123,7 +123,17 @@ impl FlowRule {
 
     /// Pack into an `ethtool_rx_flow_spec`. Field values land in the `h_u`
     /// union at their per-`flow_type` offset; the matching `m_u` mask bytes are
-    /// cleared (`0` = match), leaving every unset field wildcarded (`0xff`).
+    /// set (`0xff` = match this field), leaving every unset field wildcarded
+    /// (`0` = ignore).
+    ///
+    /// Note: `struct ethtool_rx_flow_spec` (the `ETHTOOL_SRXCLSRL*` ABI used
+    /// here) documents `m_u` as "masks for flow field bits to be **matched**" —
+    /// a set bit is significant, a clear bit is wildcard. This is the *opposite*
+    /// of the older, deprecated `struct ethtool_rx_ntuple_flow_spec`
+    /// (`ETHTOOL_SRXNTUPLE`), whose `m_u` documents "bits to be ignored". The
+    /// two conventions are easy to conflate; the kernel's
+    /// `ethtool_rx_flow_rule_create()` treats a zero mask byte as "skip this
+    /// field", confirming set = match for the struct we use.
     fn pack(&self) -> Result<ffi::ethtool_rx_flow_spec, Error> {
         let v6 = matches!(
             self.flow_type,
@@ -133,10 +143,10 @@ impl FlowRule {
         let (dst_off, sport_off, dport_off) = if v6 { (16, 32, 34) } else { (4, 8, 10) };
 
         let mut h_u = [0u8; 52];
-        let mut m_u = [0xffu8; 52];
+        let mut m_u = [0u8; 52];
         let mut put = |off: usize, bytes: &[u8]| {
             h_u[off..off + bytes.len()].copy_from_slice(bytes);
-            m_u[off..off + bytes.len()].fill(0);
+            m_u[off..off + bytes.len()].fill(0xff);
         };
 
         if let Some(ip) = self.src_ip {
@@ -350,7 +360,7 @@ mod tests {
     }
 
     #[test]
-    fn packs_ipv4_5tuple_with_inverted_mask() {
+    fn packs_ipv4_5tuple_with_match_mask() {
         let spec = FlowRule::tcp()
             .src_ip(Ipv4Addr::new(10, 0, 0, 1))
             .dst_ip(Ipv4Addr::new(192, 168, 1, 2))
@@ -368,9 +378,10 @@ mod tests {
         assert_eq!(spec.ring_cookie, 3);
         assert_eq!(spec.location, ffi::RX_CLS_LOC_ANY);
 
-        // Matched bytes have mask 0 (match); everything else is 0xff (ignore).
-        assert_eq!(&spec.m_u[0..12], &[0u8; 12]);
-        assert!(spec.m_u[12..].iter().all(|&b| b == 0xff));
+        // Matched bytes have mask 0xff (match this field); everything else is
+        // 0 (wildcard / ignore).
+        assert_eq!(&spec.m_u[0..12], &[0xffu8; 12]);
+        assert!(spec.m_u[12..].iter().all(|&b| b == 0));
     }
 
     #[test]
@@ -378,10 +389,10 @@ mod tests {
         let spec = FlowRule::udp().dst_port(53).pack().unwrap();
         assert_eq!(spec.flow_type, ffi::UDP_V4_FLOW);
         assert_eq!(&spec.h_u[10..12], &be16(53));
-        // Only the dst-port bytes are matched.
-        assert_eq!(&spec.m_u[10..12], &[0u8, 0]);
-        assert!(spec.m_u[0..10].iter().all(|&b| b == 0xff));
-        assert!(spec.m_u[12..].iter().all(|&b| b == 0xff));
+        // Only the dst-port bytes are matched (mask 0xff); the rest is wildcard.
+        assert_eq!(&spec.m_u[10..12], &[0xffu8, 0xff]);
+        assert!(spec.m_u[0..10].iter().all(|&b| b == 0));
+        assert!(spec.m_u[12..].iter().all(|&b| b == 0));
     }
 
     #[test]
@@ -394,8 +405,8 @@ mod tests {
         assert_eq!(spec.flow_type, ffi::TCP_V6_FLOW);
         assert_eq!(&spec.h_u[16..32], &Ipv6Addr::LOCALHOST.octets()); // ip6dst
         assert_eq!(&spec.h_u[34..36], &be16(443)); // pdst (tcpip6 offset)
-        assert_eq!(&spec.m_u[16..32], &[0u8; 16]);
-        assert_eq!(&spec.m_u[34..36], &[0u8, 0]);
+        assert_eq!(&spec.m_u[16..32], &[0xffu8; 16]);
+        assert_eq!(&spec.m_u[34..36], &[0xffu8, 0xff]);
     }
 
     #[test]

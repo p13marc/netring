@@ -18,6 +18,7 @@ pub(crate) struct Umem {
     frame_size: usize,
     #[allow(dead_code)]
     frame_count: usize,
+    headroom: u32,
     free_list: VecDeque<u64>,
 }
 
@@ -31,6 +32,11 @@ pub(crate) struct UmemOptions {
     /// Bind the UMEM's pages to this NUMA node (the NIC's node) via `mbind`,
     /// avoiding cross-node DMA + cache traffic. Best-effort.
     pub(crate) numa_node: Option<u32>,
+    /// Per-frame headroom reserved ahead of the packet data, reported to the
+    /// kernel via `xdp_umem_reg.headroom`. RX-metadata capture (issue #13) sets
+    /// this to [`XdpRxMeta::LEN`](super::metadata::XdpRxMeta::LEN) so the XDP
+    /// program's metadata struct fits before each frame; otherwise `0`.
+    pub(crate) headroom: u32,
 }
 
 const HUGEPAGE_2MB: usize = 2 * 1024 * 1024;
@@ -126,6 +132,7 @@ impl Umem {
             size: mapped_len,
             frame_size,
             frame_count,
+            headroom: opts.headroom,
             free_list,
         })
     }
@@ -181,6 +188,28 @@ impl Umem {
         Some(unsafe { std::slice::from_raw_parts(ptr, len) })
     }
 
+    /// Read the `len` headroom bytes immediately preceding the frame at `addr`
+    /// — where an XDP program writes RX metadata via `bpf_xdp_adjust_meta`
+    /// (issue #13). Returns `None` if `addr < len` (no room ahead of the
+    /// frame), which is the case whenever no headroom was reserved, or if
+    /// `addr` lies past the end of the UMEM region (a malformed descriptor).
+    /// The upper-bound check is the same defense-in-depth as
+    /// [`data_checked`](Self::data_checked) — this may run on an unvalidated
+    /// descriptor (before its data range has been bounds-checked), so it must
+    /// not trust `addr` to be in range.
+    #[cfg(feature = "af-xdp")]
+    #[inline]
+    pub(crate) fn data_before(&self, addr: u64, len: usize) -> Option<&[u8]> {
+        if addr as usize > self.size {
+            return None;
+        }
+        let start = (addr as usize).checked_sub(len)?;
+        let ptr = self.base.as_ptr().map_addr(|a| a + start);
+        // SAFETY: `start + len == addr` and `addr <= self.size` (checked above),
+        // so `ptr..ptr+len` lies inside the mmap region.
+        Some(unsafe { std::slice::from_raw_parts(ptr, len) })
+    }
+
     /// Mutable view into UMEM at the given byte offset, with bounds validation.
     ///
     /// Same constraints as [`data_checked`](Self::data_checked).
@@ -204,7 +233,7 @@ impl Umem {
             addr: self.base.as_ptr() as u64,
             len: self.size as u64,
             chunk_size: self.frame_size as u32,
-            headroom: 0,
+            headroom: self.headroom,
             flags: 0,
             tx_metadata_len: 0,
         }
@@ -274,6 +303,7 @@ mod tests {
         let opts = UmemOptions {
             hugepages: true,
             numa_node: None,
+            headroom: 0,
         };
         let umem = Umem::new_with_options(4096, 64, &opts).expect("hugepage UMEM or fallback");
         assert_eq!(umem.available(), 64);
@@ -287,6 +317,7 @@ mod tests {
         let opts = UmemOptions {
             hugepages: false,
             numa_node: Some(0),
+            headroom: 0,
         };
         let umem = Umem::new_with_options(4096, 16, &opts).expect("numa-bound UMEM or warn");
         assert_eq!(umem.available(), 16);
@@ -370,6 +401,23 @@ mod tests {
     fn data_checked_rejects_overflow_addr() {
         let umem = Umem::new(4096, 4).unwrap();
         assert!(umem.data_checked(u64::MAX, 1).is_none());
+    }
+
+    #[cfg(feature = "af-xdp")]
+    #[test]
+    fn data_before_bounds() {
+        let umem = Umem::new(4096, 4).unwrap(); // 16 KiB total
+        // Headroom ahead of a valid in-range frame address — OK.
+        assert!(umem.data_before(4096, 32).is_some());
+        // addr == size is the one-past-the-end frame boundary — still valid
+        // (the headroom lies entirely within the region).
+        assert!(umem.data_before(16384, 32).is_some());
+        // addr < len: no room ahead of the frame — rejected, no underflow.
+        assert!(umem.data_before(16, 32).is_none());
+        // addr past the end of the UMEM (malformed descriptor) — rejected,
+        // no out-of-bounds read.
+        assert!(umem.data_before(16384 + 64, 32).is_none());
+        assert!(umem.data_before(u64::MAX, 32).is_none());
     }
 
     #[test]

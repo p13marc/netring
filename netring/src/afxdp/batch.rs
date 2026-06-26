@@ -25,6 +25,7 @@ pub struct XdpPacket<'a> {
     len: u32,
     options: u32,
     addr: u64,
+    rx_metadata: flowscope::RxMetadata,
 }
 
 impl<'a> XdpPacket<'a> {
@@ -60,33 +61,54 @@ impl<'a> XdpPacket<'a> {
         self.addr
     }
 
-    /// Kernel timestamp, if available.
+    /// NIC hardware receive timestamp, when present (issue #13).
     ///
-    /// Always returns `None` today: AF_XDP RX metadata extensions (timestamps
-    /// via `BPF_PROG_TYPE_XDP` cooperation) are not yet integrated. Reserved
-    /// for future expansion without an API break.
+    /// `Some` only on a socket built with
+    /// [`XdpSocketBuilder::rx_metadata`](crate::XdpSocketBuilder::rx_metadata)
+    /// whose driver populated the XDP `rx_timestamp` kfunc for this frame;
+    /// `None` otherwise (callers fall back to a software timestamp). The clock
+    /// domain is driver-defined — often TAI, not UTC.
     #[inline]
     pub fn timestamp(&self) -> Option<crate::Timestamp> {
-        None
+        self.rx_metadata.hw_timestamp
+    }
+
+    /// NIC hardware RX metadata for this frame — timestamp, RSS hash, VLAN tag
+    /// (issue #13).
+    ///
+    /// All-absent ([`RxMetadata::is_empty`](flowscope::RxMetadata::is_empty))
+    /// unless the socket was built with
+    /// [`XdpSocketBuilder::rx_metadata`](crate::XdpSocketBuilder::rx_metadata)
+    /// and the driver supplied values. Feeds
+    /// [`PacketView::with_rx_metadata`](flowscope::PacketView::with_rx_metadata)
+    /// so the flow tracker can reuse the NIC's hash and timing.
+    #[inline]
+    pub fn rx_metadata(&self) -> flowscope::RxMetadata {
+        self.rx_metadata
     }
 
     /// Copy packet data out for long-lived storage.
     ///
-    /// AF_XDP does not currently surface AF_PACKET-style per-packet
-    /// metadata (status flags, VLAN, direction, flow hash) — those
-    /// `OwnedPacket` fields are zero / `Unknown` for AF_XDP origin. The
-    /// XDP RX metadata BPF extension would populate them; tracked for
-    /// future work.
+    /// When the socket reads RX metadata (issue #13), the hardware timestamp
+    /// and RSS flow hash are carried over; the remaining AF_PACKET-style fields
+    /// (status, direction, VLAN) stay zero / `Unknown` for AF_XDP origin — the
+    /// zero-copy [`rx_metadata`](Self::rx_metadata) view carries the full set.
     pub fn to_owned(&self) -> crate::OwnedPacket {
+        let (timestamp, timestamp_clock) = match self.rx_metadata.hw_timestamp {
+            Some(ts) => (ts, crate::packet::TimestampClock::RawHardware),
+            None => (
+                crate::Timestamp::default(),
+                crate::packet::TimestampClock::None,
+            ),
+        };
         crate::OwnedPacket {
             data: self.data.to_vec(),
-            timestamp: crate::Timestamp::default(),
-            // AF_XDP RX-metadata HW timestamps are future work (issue #13).
-            timestamp_clock: crate::packet::TimestampClock::None,
+            timestamp,
+            timestamp_clock,
             original_len: self.len(),
             status: crate::packet::PacketStatus::default(),
             direction: crate::packet::PacketDirection::Unknown(0),
-            rxhash: 0,
+            rxhash: self.rx_metadata.rx_hash.map_or(0, |h| h.value),
             vlan_tci: 0,
             vlan_tpid: 0,
             ll_protocol: 0,
@@ -209,6 +231,7 @@ impl<'a> Iterator for XdpBatchIter<'a> {
                         len: desc.len,
                         options: desc.options,
                         addr: desc.addr,
+                        rx_metadata: self.batch.socket.read_rx_metadata(desc.addr),
                     });
                 }
                 None => {

@@ -243,6 +243,10 @@ jobs:
       # See docs/PERFORMANCE.md.
       - name: Dispatch-throughput bench (smoke)
         run: cargo bench -p netring --features flow --bench dispatch_throughput -- --warm-up-time 1 --measurement-time 2
+      # Issue #17 M0 spike — keep the specialization measurement bench building
+      # (gated on bench-zero-alloc for the *_for_bench dispatch hooks).
+      - name: Dispatch-specialization spike (compile)
+        run: cargo bench -p netring --features bench-zero-alloc --bench dispatch_specialization --no-run
 
   # ── Zero-alloc regression bench (dhat) ────────────────────────────────────
   # Locks in netring 0.20's Δ 0 bytes / Δ 0 blocks steady-state

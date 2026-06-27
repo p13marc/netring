@@ -232,9 +232,11 @@ nprint = ["flow", "parse", "flowscope/ml-features-nprint"]
 yara = ["flow", "parse", "dep:yara-x"]
 # RFC 5424 syslog anomaly sink (hand-rolled, no deps).
 syslog = []
-# IPFIX / NetFlow v10 flow exporter (RFC 7011, hand-rolled, no deps).
-# Needs the flow-export rails (`flow` + `tokio` gate `crate::export`).
-ipfix = ["flow", "tokio"]
+# IPFIX / NetFlow v10 flow exporter (RFC 7011). The binary wire encoder
+# is delegated to flowscope's `ipfix::wire` (issue #33) so the IANA IE
+# registry + template lifecycle live in one place; netring owns the I/O
+# rails. Needs the flow-export rails (`flow` + `tokio` gate `crate::export`).
+ipfix = ["flow", "tokio", "flowscope/ipfix-export"]
 # (OTLP/Kafka exporters live in the `netring-exporters` companion crate,
 #  not as core features.)
 

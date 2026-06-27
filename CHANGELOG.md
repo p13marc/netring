@@ -1,5 +1,28 @@
 # Changelog
 
+## Unreleased
+
+### Changed
+
+- **IPFIX export now delegates the binary wire encoder to
+  `flowscope::ipfix::wire`** (issue
+  [#33](https://github.com/p13marc/netring/issues/33)) — `IpfixExporter` maps each
+  completed `FlowRecord` onto flowscope's IANA-IE-keyed `FlowRecord` and encodes it
+  with `flowscope::ipfix::wire::MessageBuilder` over the canonical
+  `FLOWSCOPE_TEMPLATE_FLOW_IPV4`/`_IPV6` templates (IDs 256/257). flowscope now owns
+  the IE registry + template lifecycle; netring keeps the I/O / transport rails
+  (`W: Write + Send`, `resend_templates_every`, the async exporter). This deletes
+  ~250 LoC of hand-rolled encoder that had **drifted** from the registry (the old
+  template dropped the `octetTotalCount`/`packetTotalCount` and `tcpControlBits`
+  IEs), and replaces the latent per-*message* `sequenceNumber` increment with the
+  builder's per-Data-Record bookkeeping (RFC 7011 §3.1). The emitted records now
+  carry the **per-direction** delta counts (IE 1/2, initiator) *and* the both-
+  directions totals (IE 85/86); `tcpControlBits` (IE 6) is emitted as `0` until
+  `FlowRecord` carries cumulative TCP flags (tracked in the deferred #33 re-key).
+  The `ipfix` feature now pulls `flowscope/ipfix-export`. **No public-API change**
+  — `export::FlowRecord` and `IpfixExporter`'s surface are unchanged; only the bytes
+  on the wire become the canonical, richer template.
+
 ## 0.27.0 — 2026-06-24 — 1.0 API sweep, threat-intel, ML features & Tier-2 protocols
 
 > Depends on flowscope **0.19**. **Contains breaking changes** (the pre-1.0 API

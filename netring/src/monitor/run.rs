@@ -1888,7 +1888,7 @@ fn dispatch_packet_subs(
         arp_table: None,
     };
     for sub in subs {
-        if sub.predicate.eval(&fields)
+        if sub.predicate.load().eval(&fields)
             && let Err(e) = (sub.handler)(&view, &mut ctx)
         {
             match policy {

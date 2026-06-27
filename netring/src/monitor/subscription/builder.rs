@@ -215,7 +215,7 @@ impl SubscriptionBuilder<PacketTier> {
             + 'static,
     {
         super::packet::PacketSubscription {
-            predicate: self.predicate,
+            predicate: std::sync::Arc::new(arc_swap::ArcSwap::from_pointee(self.predicate)),
             handler: std::sync::Arc::new(handler),
         }
     }

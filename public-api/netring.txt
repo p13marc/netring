@@ -3548,7 +3548,9 @@ pub struct netring::monitor::ReloadHandle
 impl netring::monitor::ReloadHandle
 pub fn netring::monitor::ReloadHandle::has_ioc(&self) -> bool
 pub fn netring::monitor::ReloadHandle::has_sigma(&self) -> bool
+pub fn netring::monitor::ReloadHandle::packet_filter_count(&self) -> usize
 pub fn netring::monitor::ReloadHandle::set_ioc(&self, set: netring::monitor::ioc::IocSet) -> bool
+pub fn netring::monitor::ReloadHandle::set_packet_filter(&self, index: usize, expr: &str) -> core::result::Result<bool, netring::monitor::subscription::expr::ParseError>
 pub fn netring::monitor::ReloadHandle::set_sigma(&self, rules: netring::monitor::sigma::SigmaRuleSet) -> bool
 impl core::clone::Clone for netring::monitor::ReloadHandle
 pub fn netring::monitor::ReloadHandle::clone(&self) -> netring::monitor::ReloadHandle

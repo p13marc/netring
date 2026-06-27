@@ -502,13 +502,23 @@ impl Monitor {
     /// clone; an in-flight event sees the old-or-new set, never a torn one
     /// (lock-free RCU via `arc-swap`).
     ///
-    /// Today it can hot-swap the [`ioc`](MonitorBuilder::ioc) blocklist;
-    /// [`ReloadHandle::set_ioc`] is a no-op if `ioc(..)` wasn't armed.
+    /// It can hot-swap the [`ioc`](MonitorBuilder::ioc) blocklist
+    /// ([`set_ioc`](ReloadHandle::set_ioc)), the [`sigma`](MonitorBuilder::sigma)
+    /// rules ([`set_sigma`](ReloadHandle::set_sigma)), and any packet-tier
+    /// [`.expr()`] filter ([`set_packet_filter`](ReloadHandle::set_packet_filter));
+    /// each setter is a no-op / `false` if that leg wasn't armed.
+    ///
+    /// [`.expr()`]: crate::monitor::subscription::builder::SubscriptionBuilder::expr
     pub fn reload_handle(&self) -> ReloadHandle {
         ReloadHandle {
             ioc: self.ioc_swap.clone(),
             #[cfg(feature = "sigma")]
             sigma: self.sigma_swap.clone(),
+            packet_filters: self
+                .packet_subs
+                .iter()
+                .map(|s| s.predicate.clone())
+                .collect(),
         }
     }
 
@@ -609,6 +619,8 @@ pub struct ReloadHandle {
     ioc: Option<std::sync::Arc<arc_swap::ArcSwap<ioc::IocSet>>>,
     #[cfg(feature = "sigma")]
     sigma: Option<std::sync::Arc<arc_swap::ArcSwap<sigma::SigmaRuleSet>>>,
+    /// The packet-tier filter cells, in registration order (issue #53).
+    packet_filters: Vec<std::sync::Arc<arc_swap::ArcSwap<subscription::Predicate>>>,
 }
 
 impl ReloadHandle {
@@ -655,6 +667,44 @@ impl ReloadHandle {
     #[cfg(feature = "sigma")]
     pub fn has_sigma(&self) -> bool {
         self.sigma.is_some()
+    }
+
+    /// Replace the filter of the packet-tier subscription at `index`
+    /// (registration order) by parsing `expr` with the [`.expr()`] grammar.
+    /// Returns `Ok(true)` on swap, `Ok(false)` if `index` is out of range, and
+    /// `Err` if `expr` doesn't parse — in which case the live filter is left
+    /// untouched (validate-before-swap, like the IOC / Sigma legs).
+    ///
+    /// Lock-free RCU: a frame in flight reads the old-or-new predicate, never a
+    /// torn one, and the swap never blocks the capture loop.
+    ///
+    /// **Caveat (live capture only):** the kernel cBPF/XDP prefilter is the
+    /// build-time union of the *original* packet predicates, so a reloaded
+    /// filter can **narrow** freely but one that **widens** past that union
+    /// will have its newly-wanted frames dropped in-kernel before this tier
+    /// sees them — rebuild the monitor to widen the kernel set. Offline replay
+    /// and any path without a kernel prefilter reload fully.
+    ///
+    /// [`.expr()`]: crate::monitor::subscription::builder::SubscriptionBuilder::expr
+    pub fn set_packet_filter(
+        &self,
+        index: usize,
+        expr: &str,
+    ) -> std::result::Result<bool, subscription::ParseError> {
+        let predicate = subscription::parse_expr(expr)?;
+        match self.packet_filters.get(index) {
+            Some(swap) => {
+                swap.store(std::sync::Arc::new(predicate));
+                Ok(true)
+            }
+            None => Ok(false),
+        }
+    }
+
+    /// Number of packet-tier subscriptions whose filter can be hot-reloaded
+    /// with [`set_packet_filter`](Self::set_packet_filter) (registration order).
+    pub fn packet_filter_count(&self) -> usize {
+        self.packet_filters.len()
     }
 }
 
@@ -2751,7 +2801,11 @@ impl MonitorBuilder {
             .iter()
             .cloned()
             .chain(self.traffic_interests.iter().cloned())
-            .chain(self.packet_subs.iter().map(|s| s.predicate.clone()))
+            .chain(
+                self.packet_subs
+                    .iter()
+                    .map(|s| (**s.predicate.load()).clone()),
+            )
             // Issue #20: ARP rides the kernel filter as a precise EtherType
             // term (0x0806), not the old fail-open capture-all. A pure-ARP
             // monitor now sheds non-ARP at the kernel; an ARP+IP monitor unions

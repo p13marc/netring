@@ -15,6 +15,7 @@
 use std::net::{IpAddr, SocketAddr};
 use std::sync::Arc;
 
+use arc_swap::ArcSwap;
 use flowscope::extract::{FiveTuple, FiveTupleKey};
 use flowscope::{FlowExtractor, L4Proto, PacketView};
 
@@ -31,16 +32,22 @@ pub type PacketHandler =
 /// A built packet subscription: the filter [`Predicate`] paired with its
 /// handler. Produced by `packet()…​.to(handler)` and registered through
 /// [`MonitorBuilder::subscribe`](crate::monitor::MonitorBuilder::subscribe).
+///
+/// The predicate lives behind a lock-free [`ArcSwap`] cell so it can be
+/// hot-reloaded on a running monitor via
+/// [`ReloadHandle::set_packet_filter`](crate::monitor::ReloadHandle::set_packet_filter)
+/// (issue #53) — the per-frame drain reads it with an allocation-free
+/// `load()`, so the zero-copy hot path stays `Δ 0`.
 #[derive(Clone)]
 pub struct PacketSubscription {
-    pub(crate) predicate: Predicate,
+    pub(crate) predicate: Arc<ArcSwap<Predicate>>,
     pub(crate) handler: PacketHandler,
 }
 
 impl std::fmt::Debug for PacketSubscription {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("PacketSubscription")
-            .field("predicate", &self.predicate)
+            .field("predicate", &self.predicate.load())
             .field("handler", &"<fn>")
             .finish()
     }

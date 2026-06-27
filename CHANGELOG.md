@@ -2,6 +2,23 @@
 
 ## Unreleased
 
+### Added
+
+- **Hot-reload of a packet-tier `.expr()` filter** (issue
+  [#53](https://github.com/p13marc/netring/issues/53)) —
+  `ReloadHandle::set_packet_filter(index, expr)` swaps the filter predicate of a
+  running monitor's packet subscription (registration order) without dropping
+  packets, completing the userspace hot-reload legs alongside `set_ioc` /
+  `set_sigma`. The predicate lives behind a lock-free `arc-swap` cell read per
+  frame with an allocation-free `load()` (the zero-copy drain stays `Δ 0`); a
+  frame in flight reads the old-or-new filter, never a torn one. The expr is
+  parsed and validated before the swap, so a bad string returns `Err` and leaves
+  the live filter untouched. `ReloadHandle::packet_filter_count()` reports how
+  many packet subs can be reloaded. **Caveat (live capture only):** the kernel
+  cBPF/XDP prefilter is the build-time union of the original predicates, so a
+  reload can narrow freely but widening past that union drops the newly-wanted
+  frames in-kernel until rebuild (offline replay reloads fully).
+
 ### Changed (breaking — pre-1.0 API sweep, [#37](https://github.com/p13marc/netring/issues/37) §F)
 
 - **Renamed `config::BuildError` → `config::BpfBuildError`** (and the crate-root

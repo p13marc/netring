@@ -794,3 +794,10 @@ required-features = ["bench-zero-alloc"]
 name = "dispatch_throughput"
 harness = false
 required-features = ["flow"]
+
+# Issue #17 M0 spike: measure runtime TypeId dispatch overhead vs a monomorphic
+# direct call (the `subscribe!` macro target), against the track_into baseline.
+[[bench]]
+name = "dispatch_specialization"
+harness = false
+required-features = ["bench-zero-alloc"]

@@ -1,0 +1,29 @@
+pub mod netring_exporters
+pub struct netring_exporters::KafkaSink
+impl netring_exporters::KafkaSink
+pub fn netring_exporters::KafkaSink::new(brokers: &str, topic: impl core::convert::Into<alloc::string::String>) -> core::result::Result<Self, rdkafka::error::KafkaError>
+impl netring::anomaly::sink::AnomalySink for netring_exporters::KafkaSink
+pub fn netring_exporters::KafkaSink::flush(&mut self) -> std::io::error::Result<()>
+pub fn netring_exporters::KafkaSink::write(&mut self, kind: &'static str, severity: netring::anomaly::rule::Severity, ts: flowscope::timestamp::Timestamp, key: core::option::Option<&dyn netring::anomaly::key::Key>, observations: &[(&'static str, alloc::borrow::Cow<'_, str>)], metrics: &[(&'static str, f64)])
+pub struct netring_exporters::OtlpAnomalySink
+impl netring_exporters::OtlpAnomalySink
+pub fn netring_exporters::OtlpAnomalySink::batch_size(self, n: usize) -> Self
+pub fn netring_exporters::OtlpAnomalySink::new(endpoint: impl core::convert::Into<alloc::string::String>, service_name: impl core::convert::Into<alloc::string::String>) -> Self
+impl netring::anomaly::sink::AnomalySink for netring_exporters::OtlpAnomalySink
+pub fn netring_exporters::OtlpAnomalySink::flush(&mut self) -> std::io::error::Result<()>
+pub fn netring_exporters::OtlpAnomalySink::write(&mut self, kind: &'static str, severity: netring::anomaly::rule::Severity, ts: flowscope::timestamp::Timestamp, key: core::option::Option<&dyn netring::anomaly::key::Key>, observations: &[(&'static str, alloc::borrow::Cow<'_, str>)], metrics: &[(&'static str, f64)])
+pub struct netring_exporters::OtlpMetricsExporter
+impl netring_exporters::OtlpMetricsExporter
+pub fn netring_exporters::OtlpMetricsExporter::export(&self, t: &netring::monitor::telemetry::CaptureTelemetry) -> std::io::error::Result<()>
+pub fn netring_exporters::OtlpMetricsExporter::new(endpoint: impl core::convert::Into<alloc::string::String>, service_name: impl core::convert::Into<alloc::string::String>) -> Self
+pub struct netring_exporters::ParquetFlowExporter<W: std::io::Write + core::marker::Send>
+impl netring_exporters::ParquetFlowExporter<std::fs::File>
+pub fn netring_exporters::ParquetFlowExporter<std::fs::File>::create(path: impl core::convert::AsRef<std::path::Path>) -> std::io::error::Result<Self>
+impl<W: std::io::Write + core::marker::Send> netring_exporters::ParquetFlowExporter<W>
+pub fn netring_exporters::ParquetFlowExporter<W>::batch_size(self, n: usize) -> Self
+pub fn netring_exporters::ParquetFlowExporter<W>::new(writer: W) -> core::result::Result<Self, parquet::errors::ParquetError>
+impl<W: std::io::Write + core::marker::Send> core::ops::drop::Drop for netring_exporters::ParquetFlowExporter<W>
+pub fn netring_exporters::ParquetFlowExporter<W>::drop(&mut self)
+impl<W: std::io::Write + core::marker::Send> netring::export::FlowExporter for netring_exporters::ParquetFlowExporter<W>
+pub fn netring_exporters::ParquetFlowExporter<W>::export(&mut self, record: &netring::export::FlowRecord)
+pub fn netring_exporters::ParquetFlowExporter<W>::flush(&mut self) -> std::io::error::Result<()>

@@ -162,7 +162,7 @@ pub trait Protocol: Send + Sync + 'static {
     where
         Self::Message: Send + Sync + Clone + 'static,
     {
-        Err(ProtocolInitError(format!(
+        Err(ProtocolInitError::new(format!(
             "{} does not support broadcast (only session-shaped L7 protocols do today)",
             Self::NAME
         )))
@@ -300,7 +300,21 @@ impl From<flowscope::detect::signatures::SignatureMatch> for SignatureMatch {
 /// flow tracker."
 #[derive(Debug, thiserror::Error)]
 #[error("protocol parser init failed: {0}")]
-pub struct ProtocolInitError(pub String);
+pub struct ProtocolInitError(String);
+
+impl ProtocolInitError {
+    /// Build an init error with a human-readable `message`. Custom
+    /// [`Protocol`] implementations return this from
+    /// [`Protocol::register`] when their parser can't be set up.
+    pub fn new(message: impl Into<String>) -> Self {
+        Self(message.into())
+    }
+
+    /// The error message.
+    pub fn message(&self) -> &str {
+        &self.0
+    }
+}
 
 /// Convenience alias — the flow key produced by
 /// [`flowscope::extract::FiveTuple`]. Most user code names this
@@ -331,7 +345,7 @@ mod plugin_tests {
 
     #[test]
     fn protocol_init_error_displays() {
-        let e = ProtocolInitError("config missing".into());
+        let e = ProtocolInitError::new("config missing");
         assert!(format!("{e}").contains("config missing"));
     }
 }

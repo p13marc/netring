@@ -13,7 +13,7 @@
 
 use std::net::IpAddr;
 
-use super::bpf::{BpfFilter, BpfInsn, BuildError};
+use super::bpf::{BpfBuildError, BpfFilter, BpfInsn};
 use super::bpf_builder::{BpfFilterBuilder, MatchFrag};
 use super::ipnet::IpNet;
 
@@ -115,7 +115,7 @@ struct CompileCtx {
 // ── Public entry point ────────────────────────────────────────
 
 /// Compile a [`BpfFilterBuilder`] into a [`BpfFilter`].
-pub(crate) fn compile(builder: BpfFilterBuilder) -> Result<BpfFilter, BuildError> {
+pub(crate) fn compile(builder: BpfFilterBuilder) -> Result<BpfFilter, BpfBuildError> {
     // Snapshot the symbolic source before consuming the builder,
     // so `BpfFilter::to_human` can render it later.
     let source = builder.clone();
@@ -148,13 +148,13 @@ pub(crate) fn compile(builder: BpfFilterBuilder) -> Result<BpfFilter, BuildError
     blocks.push(compile_block(&fragments)?);
     for branch in &or_branches {
         if branch.fragments.is_empty() {
-            return Err(BuildError::EmptyOr);
+            return Err(BpfBuildError::EmptyOr);
         }
         // Nested OR/NOT inside an OR branch isn't lowerable by the flat-DNF
         // linker. Issue #38: a dedicated, actionable error (was a misleading
         // `ConflictingProtocols` that gave the user no hint to flatten).
         if !branch.or_branches.is_empty() || branch.negated {
-            return Err(BuildError::NestedOr);
+            return Err(BpfBuildError::NestedOr);
         }
         blocks.push(compile_block(&branch.fragments)?);
     }
@@ -227,7 +227,7 @@ pub(crate) fn compile(builder: BpfFilterBuilder) -> Result<BpfFilter, BuildError
 /// Compile a single block (an AND chain of fragments) into a
 /// symbolic instruction stream. Drop labels inside the stream
 /// mean "fail this block"; the linker rewrites them.
-fn compile_block(fragments: &[MatchFrag]) -> Result<Vec<SymInsn>, BuildError> {
+fn compile_block(fragments: &[MatchFrag]) -> Result<Vec<SymInsn>, BpfBuildError> {
     let normalized = normalize(fragments.to_vec())?;
     let mut ctx = infer_ctx(&normalized);
     let mut sym = Vec::with_capacity(normalized.len() * 6);
@@ -242,7 +242,7 @@ fn compile_block(fragments: &[MatchFrag]) -> Result<Vec<SymInsn>, BuildError> {
 /// Sort/dedupe fragments so user chain order doesn't matter for
 /// AND. Detect and reject conflicting protocol selections. Auto-
 /// insert `EthType(0x0800)` for IPv4 fragments that need it.
-fn normalize(fragments: Vec<MatchFrag>) -> Result<Vec<MatchFrag>, BuildError> {
+fn normalize(fragments: Vec<MatchFrag>) -> Result<Vec<MatchFrag>, BpfBuildError> {
     // First pass: collect canonical EthType / IpProto choices and
     // detect conflicts.
     let mut chosen_eth: Option<u16> = None;
@@ -251,7 +251,7 @@ fn normalize(fragments: Vec<MatchFrag>) -> Result<Vec<MatchFrag>, BuildError> {
         match f {
             MatchFrag::EthType(t) => match chosen_eth {
                 Some(prev) if prev != *t => {
-                    return Err(BuildError::ConflictingProtocols {
+                    return Err(BpfBuildError::ConflictingProtocols {
                         a: ethtype_label(prev),
                         b: ethtype_label(*t),
                     });
@@ -260,7 +260,7 @@ fn normalize(fragments: Vec<MatchFrag>) -> Result<Vec<MatchFrag>, BuildError> {
             },
             MatchFrag::IpProto(p) => match chosen_proto {
                 Some(prev) if prev != *p => {
-                    return Err(BuildError::ConflictingProtocols {
+                    return Err(BpfBuildError::ConflictingProtocols {
                         a: ipproto_label(prev),
                         b: ipproto_label(*p),
                     });
@@ -316,7 +316,7 @@ fn normalize(fragments: Vec<MatchFrag>) -> Result<Vec<MatchFrag>, BuildError> {
         .filter(|f| matches!(f, MatchFrag::Vlan))
         .count();
     if has_vlan > 1 {
-        return Err(BuildError::ConflictingProtocols {
+        return Err(BpfBuildError::ConflictingProtocols {
             a: "vlan",
             b: "vlan (Q-in-Q not supported)",
         });
@@ -349,7 +349,7 @@ fn normalize(fragments: Vec<MatchFrag>) -> Result<Vec<MatchFrag>, BuildError> {
         // checks ports against any L4. The kernel still
         // accepts the program, but the user almost certainly
         // wanted .tcp() or .udp() — surface as an error.
-        return Err(BuildError::ConflictingProtocols {
+        return Err(BpfBuildError::ConflictingProtocols {
             a: "port",
             b: "<no IP protocol — call .tcp() or .udp()>",
         });
@@ -428,7 +428,7 @@ fn compile_fragment(
     frag: &MatchFrag,
     ctx: &mut CompileCtx,
     out: &mut Vec<SymInsn>,
-) -> Result<(), BuildError> {
+) -> Result<(), BpfBuildError> {
     match frag {
         MatchFrag::EthType(t) => emit_eth_type(*t, ctx, out),
         MatchFrag::Vlan => {
@@ -438,7 +438,7 @@ fn compile_fragment(
             if ctx.vlan_offset != 0 {
                 // Q-in-Q (.vlan().vlan()) is intentionally out
                 // of scope; surface the conflict early.
-                return Err(BuildError::ConflictingProtocols {
+                return Err(BpfBuildError::ConflictingProtocols {
                     a: "vlan",
                     b: "vlan (Q-in-Q not supported)",
                 });
@@ -479,7 +479,7 @@ fn compile_fragment(
                 // not IPv6 prefix matching (16-byte mask requires
                 // 4 separate u32 ALU ANDs — bigger template).
                 // Surface as a clear error until plan 19 lands it.
-                return Err(BuildError::Ipv6ExtHeader);
+                return Err(BpfBuildError::Ipv6ExtHeader);
             }
             emit_ipv4_net(sd, net, ctx, out)
         }
@@ -489,9 +489,9 @@ fn compile_fragment(
     }
 }
 
-fn emit_vlan_id(id: u16, ctx: &CompileCtx, out: &mut Vec<SymInsn>) -> Result<(), BuildError> {
+fn emit_vlan_id(id: u16, ctx: &CompileCtx, out: &mut Vec<SymInsn>) -> Result<(), BpfBuildError> {
     if ctx.vlan_offset == 0 {
-        return Err(BuildError::ConflictingProtocols {
+        return Err(BpfBuildError::ConflictingProtocols {
             a: "vlan_id",
             b: "<requires .vlan() earlier in the chain>",
         });
@@ -516,7 +516,7 @@ enum SrcDst {
     Any,
 }
 
-fn emit_eth_type(t: u16, ctx: &CompileCtx, out: &mut Vec<SymInsn>) -> Result<(), BuildError> {
+fn emit_eth_type(t: u16, ctx: &CompileCtx, out: &mut Vec<SymInsn>) -> Result<(), BpfBuildError> {
     // Without a preceding `.vlan()`, the ethertype field is at
     // offset 12. With `.vlan()` already in the chain, the inner
     // ethertype (the one we want to match against IPv4/IPv6/etc.)
@@ -532,7 +532,7 @@ fn emit_eth_type(t: u16, ctx: &CompileCtx, out: &mut Vec<SymInsn>) -> Result<(),
     Ok(())
 }
 
-fn emit_ip_proto(p: u8, ctx: &CompileCtx, out: &mut Vec<SymInsn>) -> Result<(), BuildError> {
+fn emit_ip_proto(p: u8, ctx: &CompileCtx, out: &mut Vec<SymInsn>) -> Result<(), BpfBuildError> {
     let off = match ctx.l3 {
         L3Family::Ipv4 => 23u32 + u32::from(ctx.vlan_offset), // Eth(14) + IPv4 proto(9)
         L3Family::Ipv6 => 20u32 + u32::from(ctx.vlan_offset), // Eth(14) + IPv6 next-hdr(6)
@@ -552,7 +552,7 @@ fn emit_ipv4_host(
     addr: u32,
     ctx: &CompileCtx,
     out: &mut Vec<SymInsn>,
-) -> Result<(), BuildError> {
+) -> Result<(), BpfBuildError> {
     let src_off = 26u32 + u32::from(ctx.vlan_offset); // Eth(14) + IPv4 src(12)
     let dst_off = 30u32 + u32::from(ctx.vlan_offset); // Eth(14) + IPv4 dst(16)
     match sd {
@@ -624,12 +624,12 @@ fn emit_ipv4_net(
     net: &IpNet,
     ctx: &CompileCtx,
     out: &mut Vec<SymInsn>,
-) -> Result<(), BuildError> {
+) -> Result<(), BpfBuildError> {
     if !net.is_ipv4() {
-        return Err(BuildError::Ipv6ExtHeader);
+        return Err(BpfBuildError::Ipv6ExtHeader);
     }
     if net.prefix > 32 {
-        return Err(BuildError::InvalidPrefix(net.prefix));
+        return Err(BpfBuildError::InvalidPrefix(net.prefix));
     }
     let mask = net.ipv4_mask().expect("ipv4 net has mask");
     let target = net.as_ipv4_u32().expect("ipv4 net has u32 addr") & mask;
@@ -686,7 +686,7 @@ fn emit_l4_port(
     port: u16,
     ctx: &CompileCtx,
     out: &mut Vec<SymInsn>,
-) -> Result<(), BuildError> {
+) -> Result<(), BpfBuildError> {
     match ctx.l3 {
         L3Family::Ipv4 => emit_ipv4_port(sd, port, ctx, out),
         L3Family::Ipv6 => emit_ipv6_port(sd, port, ctx, out),
@@ -698,7 +698,7 @@ fn emit_ipv4_port(
     port: u16,
     ctx: &CompileCtx,
     out: &mut Vec<SymInsn>,
-) -> Result<(), BuildError> {
+) -> Result<(), BpfBuildError> {
     let frag_off = 20u32 + u32::from(ctx.vlan_offset); // flags+frag at IP+6 = 14+6
     let ihl_off = 14u32 + u32::from(ctx.vlan_offset); // start of IPv4 header
     let l4_base = 14u32 + u32::from(ctx.vlan_offset); // bytes preceding L4 (before adding X = IHL)
@@ -761,7 +761,7 @@ fn emit_ipv6_port(
     port: u16,
     ctx: &CompileCtx,
     out: &mut Vec<SymInsn>,
-) -> Result<(), BuildError> {
+) -> Result<(), BpfBuildError> {
     // IPv6 has a fixed 40-byte header; no IHL trick. Ports are
     // at fixed absolute offsets:
     //   src_port at 14 + 40 + 0 = 54  (+ vlan_offset)
@@ -818,7 +818,7 @@ fn emit_ipv6_host(
     addr_octets: [u8; 16],
     ctx: &CompileCtx,
     out: &mut Vec<SymInsn>,
-) -> Result<(), BuildError> {
+) -> Result<(), BpfBuildError> {
     // IPv6 src at offset 14+8 = 22, dst at 14+24 = 38 (+ vlan_offset).
     let src_off = 22u32 + u32::from(ctx.vlan_offset);
     let dst_off = 38u32 + u32::from(ctx.vlan_offset);
@@ -964,14 +964,16 @@ fn resolve(
     accept_pc: usize,
     drop_pc: usize,
     branch_starts: &[usize],
-) -> Result<Vec<BpfInsn>, BuildError> {
+) -> Result<Vec<BpfInsn>, BpfBuildError> {
     let mut out = Vec::with_capacity(sym.len());
     for (pc, insn) in sym.iter().enumerate() {
         if insn.code == BPF_JMP_JA {
             // Unconditional jump. Target encoded in jt label;
             // emit as k (32-bit relative).
             let target = label_target(insn.jt, pc, accept_pc, drop_pc, branch_starts)?;
-            let rel = target.checked_sub(pc + 1).ok_or(BuildError::JumpTooFar)?;
+            let rel = target
+                .checked_sub(pc + 1)
+                .ok_or(BpfBuildError::JumpTooFar)?;
             out.push(BpfInsn {
                 code: insn.code,
                 jt: 0,
@@ -998,10 +1000,12 @@ fn resolve_label(
     accept_pc: usize,
     drop_pc: usize,
     branch_starts: &[usize],
-) -> Result<u8, BuildError> {
+) -> Result<u8, BpfBuildError> {
     let target = label_target(label, pc, accept_pc, drop_pc, branch_starts)?;
-    let dist = target.checked_sub(pc + 1).ok_or(BuildError::JumpTooFar)?;
-    u8::try_from(dist).map_err(|_| BuildError::JumpTooFar)
+    let dist = target
+        .checked_sub(pc + 1)
+        .ok_or(BpfBuildError::JumpTooFar)?;
+    u8::try_from(dist).map_err(|_| BpfBuildError::JumpTooFar)
 }
 
 fn label_target(
@@ -1010,7 +1014,7 @@ fn label_target(
     accept_pc: usize,
     drop_pc: usize,
     branch_starts: &[usize],
-) -> Result<usize, BuildError> {
+) -> Result<usize, BpfBuildError> {
     match label {
         Label::Fallthrough => Ok(pc + 1),
         Label::Accept => Ok(accept_pc),
@@ -1019,7 +1023,7 @@ fn label_target(
         Label::Branch(id) => branch_starts
             .get(id as usize)
             .copied()
-            .ok_or(BuildError::JumpTooFar),
+            .ok_or(BpfBuildError::JumpTooFar),
     }
 }
 
@@ -1070,7 +1074,7 @@ mod tests {
     fn conflicting_protocols_rejected() {
         let b = BpfFilterBuilder::new().tcp().udp();
         let err = compile(b).unwrap_err();
-        assert!(matches!(err, BuildError::ConflictingProtocols { .. }));
+        assert!(matches!(err, BpfBuildError::ConflictingProtocols { .. }));
     }
 
     #[test]
@@ -1085,7 +1089,7 @@ mod tests {
     fn port_without_proto_errors() {
         let b = BpfFilterBuilder::new().port(80);
         let err = compile(b).unwrap_err();
-        assert!(matches!(err, BuildError::ConflictingProtocols { .. }));
+        assert!(matches!(err, BpfBuildError::ConflictingProtocols { .. }));
     }
 
     #[test]
@@ -1135,7 +1139,7 @@ mod tests {
     fn empty_or_branch_rejected() {
         let b = BpfFilterBuilder::new().tcp().or(|b| b);
         let err = compile(b).unwrap_err();
-        assert!(matches!(err, BuildError::EmptyOr));
+        assert!(matches!(err, BpfBuildError::EmptyOr));
     }
 
     #[test]
@@ -1145,7 +1149,7 @@ mod tests {
             .or(|b| b.udp().or(|b| b.icmp()));
         let err = compile(b).unwrap_err();
         // Issue #38: a dedicated, actionable error (was `ConflictingProtocols`).
-        assert!(matches!(err, BuildError::NestedOr));
+        assert!(matches!(err, BpfBuildError::NestedOr));
         // The message must tell the user to flatten.
         let msg = err.to_string();
         assert!(msg.contains("flatten"), "actionable message: {msg}");

@@ -51,7 +51,7 @@ pub enum Error {
     /// conflicting fragments). Bubbled up from
     /// [`BpfFilter::new`](crate::BpfFilter::new) and the typed builder.
     #[error("BPF filter: {0}")]
-    Bpf(#[from] crate::config::BuildError),
+    Bpf(#[from] crate::config::BpfBuildError),
 
     /// `Monitor` builder rejected the configuration (0.20+).
     #[error("monitor build: {0}")]

@@ -24,10 +24,9 @@ impl Protocol for Tcp {
     fn register(
         _builder: &mut DriverBuilder<FiveTuple>,
     ) -> Result<SlotHandle<Self::Message, FiveTupleKey>, ProtocolInitError> {
-        Err(ProtocolInitError(
+        Err(ProtocolInitError::new(
             "Tcp marker is lifecycle-only — no parser; \
-             handled by the central flow tracker"
-                .into(),
+             handled by the central flow tracker",
         ))
     }
 }

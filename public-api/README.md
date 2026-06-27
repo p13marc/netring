@@ -1,23 +1,28 @@
-# Public-API lock (`netring`)
+# Public-API lock
 
-`netring.txt` is a checked-in snapshot of `netring`'s **entire public API**
-(every feature enabled), produced by
+`netring.txt` and `netring-exporters.txt` are checked-in snapshots of each
+crate's **entire public API** (every feature enabled), produced by
 [`cargo-public-api`](https://github.com/cargo-public-api/cargo-public-api). The
-`public-api lock` CI job regenerates it and fails the build if it differs — so
-**every change to the public surface shows up as a reviewed diff** to this file.
-This is the §F automation of the 1.0 API-stability sweep ([#37]): it catches
-accidental breaks (and documents intentional ones) before they reach a release.
+`public-api lock` CI job regenerates both and fails the build if either differs
+— so **every change to the public surface shows up as a reviewed diff** to these
+files. This is the §F automation of the 1.0 API-stability sweep ([#37]): it
+catches accidental breaks (and documents intentional ones) before they reach a
+release.
 
 ## When CI fails on this
 
 The job prints the diff. If the API change is **intentional**, regenerate the
-lock and commit it alongside your change:
+relevant lock and commit it alongside your change:
 
 ```sh
 rustup toolchain install nightly-2026-04-09        # the pinned toolchain
 cargo install cargo-public-api --version 0.51.0 --locked
-cargo public-api -p netring --all-features -ss > public-api/netring.txt
+cargo public-api -p netring            --all-features -ss > public-api/netring.txt
+cargo public-api -p netring-exporters  --all-features -ss > public-api/netring-exporters.txt
 ```
+
+(`netring-exporters --all-features` builds the `kafka` feature, which needs
+`cmake` + a C toolchain for bundled librdkafka.)
 
 If it's **not** intentional, you introduced an unplanned API change — fix the
 code instead of the snapshot.

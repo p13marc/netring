@@ -408,16 +408,22 @@ jobs:
         with:
           toolchain: nightly-2026-04-09
       - uses: Swatinem/rust-cache@v2
+      # netring-exporters' `kafka` feature builds bundled librdkafka via cmake.
+      - run: sudo apt-get update && sudo apt-get install -y cmake
       - name: install cargo-public-api
         run: cargo install cargo-public-api --version 0.51.0 --locked
       - name: check the public API surface is unchanged
         run: |
-          cargo public-api -p netring --all-features -ss > /tmp/current-api.txt
-          if ! diff -u public-api/netring.txt /tmp/current-api.txt; then
-            echo "::error::netring's public API changed (diff above). If intentional,"
-            echo "::error::regenerate: cargo public-api -p netring --all-features -ss > public-api/netring.txt"
-            exit 1
-          fi
+          fail=0
+          for pkg in netring netring-exporters; do
+            cargo public-api -p "$pkg" --all-features -ss > "/tmp/$pkg-api.txt"
+            if ! diff -u "public-api/$pkg.txt" "/tmp/$pkg-api.txt"; then
+              echo "::error::$pkg's public API changed (diff above). If intentional,"
+              echo "::error::regenerate: cargo public-api -p $pkg --all-features -ss > public-api/$pkg.txt"
+              fail=1
+            fi
+          done
+          exit $fail
 
   # ── netring-exporters companion crate (OTLP + Kafka) ──────────────────────
   exporters:

@@ -2,6 +2,22 @@
 
 ## Unreleased
 
+### Changed (breaking — pre-1.0 API sweep, [#37](https://github.com/p13marc/netring/issues/37) §F)
+
+- **Renamed `config::BuildError` → `config::BpfBuildError`** (and the crate-root
+  re-export `netring::BuildError` → `netring::BpfBuildError`). There were two
+  unrelated public `BuildError` enums — the BPF-filter compiler's and the
+  `Monitor` builder's (`error::BuildError`) — and only the BPF one was re-exported
+  at the crate root, so `netring::BuildError` *silently* meant "BPF compile error"
+  while the Monitor one was reachable only as `netring::error::BuildError`. The
+  rename removes that trap; the Monitor builder error keeps the name `BuildError`
+  (now unambiguous). **Migration:** `netring::BuildError` → `netring::BpfBuildError`
+  (or `netring::config::BpfBuildError`); the `Error::Bpf(_)` variant is unchanged.
+- **`ProtocolInitError`'s public tuple field is now private** — construct it with
+  `ProtocolInitError::new(impl Into<String>)` and read it with `.message()`. This
+  lets the error carry more context later without another break. **Migration:**
+  `ProtocolInitError(s)` → `ProtocolInitError::new(s)`; read `e.0` → `e.message()`.
+
 ### Changed
 
 - **IPFIX export now delegates the binary wire encoder to

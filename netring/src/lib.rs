@@ -91,7 +91,7 @@ pub use bridge::{
     Bridge, BridgeAction, BridgeBuilder, BridgeDirection, BridgeHandles, BridgeStats,
 };
 pub use config::{
-    BpfFilter, BpfFilterBuilder, BpfInsn, BuildError, BusyPollConfig, FanoutFlags, FanoutMode,
+    BpfBuildError, BpfFilter, BpfFilterBuilder, BpfInsn, BusyPollConfig, FanoutFlags, FanoutMode,
     IpNet, ParseIpNetError, RingProfile, TimestampSource,
 };
 pub use dedup::Dedup;

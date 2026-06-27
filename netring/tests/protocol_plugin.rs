@@ -26,7 +26,7 @@ impl Protocol for MyCustomProtocol {
     ) -> Result<SlotHandle<Self::Message, FiveTupleKey>, ProtocolInitError> {
         // Lifecycle-only stand-in for this test; real third-party
         // crates would call `builder.session_on_ports(parser, ports)`.
-        Err(ProtocolInitError("integration-test stub".into()))
+        Err(ProtocolInitError::new("integration-test stub"))
     }
 }
 

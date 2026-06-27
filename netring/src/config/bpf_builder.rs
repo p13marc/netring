@@ -7,7 +7,7 @@
 
 use std::net::IpAddr;
 
-use super::bpf::{BpfFilter, BuildError};
+use super::bpf::{BpfBuildError, BpfFilter};
 use super::ipnet::IpNet;
 
 /// One unit of "what to match" — internal IR.
@@ -256,8 +256,8 @@ impl BpfFilterBuilder {
         self
     }
 
-    /// Compile + validate. Returns the filter or a [`BuildError`].
-    pub fn build(self) -> Result<BpfFilter, BuildError> {
+    /// Compile + validate. Returns the filter or a [`BpfBuildError`].
+    pub fn build(self) -> Result<BpfFilter, BpfBuildError> {
         super::bpf_compile::compile(self)
     }
 }

@@ -86,11 +86,11 @@ impl BpfFilter {
     ///
     /// # Errors
     ///
-    /// Returns [`BuildError::TooManyInstructions`] if the program
+    /// Returns [`BpfBuildError::TooManyInstructions`] if the program
     /// exceeds `MAX_INSNS`.
-    pub fn new(instructions: Vec<BpfInsn>) -> Result<Self, BuildError> {
+    pub fn new(instructions: Vec<BpfInsn>) -> Result<Self, BpfBuildError> {
         if instructions.len() > Self::MAX_INSNS {
-            return Err(BuildError::TooManyInstructions {
+            return Err(BpfBuildError::TooManyInstructions {
                 count: instructions.len(),
             });
         }
@@ -105,9 +105,9 @@ impl BpfFilter {
     pub(crate) fn with_source(
         instructions: Vec<BpfInsn>,
         source: super::bpf_builder::BpfFilterBuilder,
-    ) -> Result<Self, BuildError> {
+    ) -> Result<Self, BpfBuildError> {
         if instructions.len() > Self::MAX_INSNS {
-            return Err(BuildError::TooManyInstructions {
+            return Err(BpfBuildError::TooManyInstructions {
                 count: instructions.len(),
             });
         }
@@ -179,7 +179,7 @@ impl std::fmt::Display for BpfFilter {
 /// Errors produced by [`BpfFilter::new`] and the typed builder.
 #[derive(Debug, thiserror::Error)]
 #[non_exhaustive]
-pub enum BuildError {
+pub enum BpfBuildError {
     /// Two fragments selected mutually-exclusive protocols
     /// (e.g. `tcp().udp()` without OR composition between them).
     #[error("conflicting fragments: {a} and {b} can't both match the same packet")]
@@ -303,7 +303,7 @@ mod tests {
         ];
         let err = BpfFilter::new(oversize).unwrap_err();
         assert!(
-            matches!(err, BuildError::TooManyInstructions { count } if count == BpfFilter::MAX_INSNS + 1)
+            matches!(err, BpfBuildError::TooManyInstructions { count } if count == BpfFilter::MAX_INSNS + 1)
         );
     }
 }

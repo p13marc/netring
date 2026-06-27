@@ -390,6 +390,31 @@ jobs:
           # config/CLI input; asserts no-panic + Display round-trip + total `contains`.
           cargo +nightly fuzz run ipnet_parse -- -runs=200000 -max_total_time=60
 
+  # ── public-API lock: every change to the public surface must be a reviewed ─
+  # diff (1.0 API-stability sweep, #37 §F). Regenerates the cargo-public-api
+  # snapshot and fails if it drifts from the checked-in public-api/netring.txt.
+  # Toolchain + tool pinned so the nightly-rustdoc output is byte-reproducible;
+  # see public-api/README.md to bump them.
+  public-api:
+    name: public-api lock
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: nightly-2026-04-09
+      - uses: Swatinem/rust-cache@v2
+      - name: install cargo-public-api
+        run: cargo install cargo-public-api --version 0.51.0 --locked
+      - name: check the public API surface is unchanged
+        run: |
+          cargo public-api -p netring --all-features -ss > /tmp/current-api.txt
+          if ! diff -u public-api/netring.txt /tmp/current-api.txt; then
+            echo "::error::netring's public API changed (diff above). If intentional,"
+            echo "::error::regenerate: cargo public-api -p netring --all-features -ss > public-api/netring.txt"
+            exit 1
+          fi
+
   # ── netring-exporters companion crate (OTLP + Kafka) ──────────────────────
   exporters:
     name: netring-exporters

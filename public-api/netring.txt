@@ -3051,7 +3051,7 @@ impl<P: netring::protocol::MessageProtocol> core::fmt::Debug for netring::monito
 pub fn netring::monitor::subscription::session::SessionSubscription<P>::fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result
 impl<P> netring::monitor::subscription::Subscribable for netring::monitor::subscription::session::SessionSubscription<P> where P: netring::protocol::MessageProtocol, <P as netring::protocol::Protocol>::Message: netring::monitor::subscription::session::L7Fields
 pub fn netring::monitor::subscription::session::SessionSubscription<P>::install(self, builder: netring::monitor::MonitorBuilder) -> netring::monitor::MonitorBuilder
-pub trait netring::monitor::subscription::session::L7Fields
+pub trait netring::monitor::subscription::session::L7Fields: netring::monitor::subscription::sealed::Sealed
 pub fn netring::monitor::subscription::session::L7Fields::dns_qname(&self) -> core::option::Option<&str>
 pub fn netring::monitor::subscription::session::L7Fields::http_host(&self) -> core::option::Option<&str>
 pub fn netring::monitor::subscription::session::L7Fields::sni(&self) -> core::option::Option<&str>
@@ -3242,7 +3242,7 @@ impl netring::monitor::subscription::builder::HasQname for netring::prelude::Dns
 pub trait netring::monitor::subscription::HasSni: netring::protocol::MessageProtocol + netring::monitor::subscription::builder::sealed::Sealed
 impl netring::monitor::subscription::builder::HasSni for netring::prelude::Tls
 impl netring::monitor::subscription::builder::HasSni for netring::prelude::TlsHandshake
-pub trait netring::monitor::subscription::L7Fields
+pub trait netring::monitor::subscription::L7Fields: netring::monitor::subscription::sealed::Sealed
 pub fn netring::monitor::subscription::L7Fields::dns_qname(&self) -> core::option::Option<&str>
 pub fn netring::monitor::subscription::L7Fields::http_host(&self) -> core::option::Option<&str>
 pub fn netring::monitor::subscription::L7Fields::sni(&self) -> core::option::Option<&str>
@@ -3262,7 +3262,7 @@ impl netring::monitor::subscription::session::L7Fields for flowscope::tls::sessi
 pub fn flowscope::tls::session::TlsMessage::dns_qname(&self) -> core::option::Option<&str>
 pub fn flowscope::tls::session::TlsMessage::http_host(&self) -> core::option::Option<&str>
 pub fn flowscope::tls::session::TlsMessage::sni(&self) -> core::option::Option<&str>
-pub trait netring::monitor::subscription::Subscribable
+pub trait netring::monitor::subscription::Subscribable: netring::monitor::subscription::sealed::Sealed
 pub fn netring::monitor::subscription::Subscribable::install(self, builder: netring::monitor::MonitorBuilder) -> netring::monitor::MonitorBuilder
 impl netring::monitor::subscription::Subscribable for netring::monitor::subscription::packet::PacketSubscription
 pub fn netring::monitor::subscription::packet::PacketSubscription::install(self, builder: netring::monitor::MonitorBuilder) -> netring::monitor::MonitorBuilder

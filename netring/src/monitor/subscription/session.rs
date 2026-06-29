@@ -23,8 +23,11 @@ use crate::protocol::{FlowKey, MessageProtocol, Protocol};
 /// L7 field accessors for a parsed session message. Each protocol's message
 /// type implements the subset it carries (the rest default to `None`), so the
 /// session filter can test `sni` / `http_host` / `dns_qname` uniformly.
+///
+/// Sealed: implemented only by netring for flowscope's L7 message types (issue
+/// #37 §D).
 #[allow(unused_variables)]
-pub trait L7Fields {
+pub trait L7Fields: super::sealed::Sealed {
     /// TLS Server Name Indication.
     fn sni(&self) -> Option<&str> {
         None
@@ -40,6 +43,8 @@ pub trait L7Fields {
 }
 
 #[cfg(feature = "tls")]
+impl super::sealed::Sealed for flowscope::tls::TlsMessage {}
+#[cfg(feature = "tls")]
 impl L7Fields for flowscope::tls::TlsMessage {
     fn sni(&self) -> Option<&str> {
         match self {
@@ -50,12 +55,16 @@ impl L7Fields for flowscope::tls::TlsMessage {
 }
 
 #[cfg(feature = "tls")]
+impl super::sealed::Sealed for flowscope::tls::TlsHandshake {}
+#[cfg(feature = "tls")]
 impl L7Fields for flowscope::tls::TlsHandshake {
     fn sni(&self) -> Option<&str> {
         self.sni.as_deref()
     }
 }
 
+#[cfg(feature = "http")]
+impl super::sealed::Sealed for flowscope::http::HttpMessage {}
 #[cfg(feature = "http")]
 impl L7Fields for flowscope::http::HttpMessage {
     fn http_host(&self) -> Option<&str> {
@@ -68,6 +77,8 @@ impl L7Fields for flowscope::http::HttpMessage {
     }
 }
 
+#[cfg(feature = "dns")]
+impl super::sealed::Sealed for flowscope::dns::DnsMessage {}
 #[cfg(feature = "dns")]
 impl L7Fields for flowscope::dns::DnsMessage {
     fn dns_qname(&self) -> Option<&str> {
@@ -157,6 +168,7 @@ mod tests {
     struct MockMsg {
         sni: Option<String>,
     }
+    impl crate::monitor::subscription::sealed::Sealed for MockMsg {}
     impl L7Fields for MockMsg {
         fn sni(&self) -> Option<&str> {
             self.sni.as_deref()

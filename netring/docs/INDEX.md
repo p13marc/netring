@@ -29,6 +29,7 @@ exporters live in the [`netring-exporters`](../../netring-exporters) crate.
 - [AF_XDP.md](AF_XDP.md) — the AF_XDP backend: modes, rings, the program loader, multi-queue capture, steering.
 
 ## Migration guides
+- [MIGRATING_0.27_TO_0.28.md](MIGRATING_0.27_TO_0.28.md) — flowscope 0.20 adoption (`SessionEvent` is now a netring type, offline pcap L7 drivers removed, typed `ParserKind`, EVE `flow_hash`→`community_id`, `#[non_exhaustive]` wire types) + the pre-1.0 API sweep §D/§F (sealed `Subscribable`/`L7Fields`, `BuildError`→`BpfBuildError`, `ProtocolInitError` field privatized); plus AF_XDP RX metadata + flow steering, load-shedding, and packet-filter hot-reload.
 - [MIGRATING_0.26_TO_0.27.md](MIGRATING_0.26_TO_0.27.md) — the 1.0 API sweep (`#[non_exhaustive]` enums/output structs, sealed L7 markers), the `Capture::packets()` lending iterator, flowscope 0.19; plus the opt-in NSM stack (threat-intel, YARA, Sigma, OCSF, p0f, QUIC, asset inventory, ML export).
 - [MIGRATING_0.24_TO_0.25.md](MIGRATING_0.24_TO_0.25.md) — subscriptions, async effects, TX symmetry, exporters crate; the one break (`FlowRecord.reason` → `Option`) + JA4S `ja4plus` gating.
 - [MIGRATING_0.23_TO_0.24.md](MIGRATING_0.23_TO_0.24.md) — telemetry/health, exporters, JA4/JA4S, AF_XDP-in-Monitor (additive).

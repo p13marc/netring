@@ -6,9 +6,9 @@ primitives). netring takes the break as a coordinated release
 ([#108](https://github.com/p13marc/netring/issues/108)) and uses it to surface
 the new race-stable direction primitives.
 
-> **Version note.** Whether this ships as `0.28.0` or folds into the planned
-> `1.0` API-freeze is a release-management call; the code changes below are the
-> same either way.
+> **Version note.** This ships as **`0.28.0`** — a pre-1.0 minor, so the breaking
+> changes below are expected. The `1.0` API-freeze is deferred and tracked in
+> [#37](https://github.com/p13marc/netring/issues/37).
 
 Most application code is unaffected: if you consume the `Monitor` via typed
 handlers, only the new additive fields show up (your matches keep working

@@ -2274,7 +2274,7 @@ dependencies = [
 
 [[package]]
 name = "netring"
-version = "0.27.0"
+version = "0.28.0"
 dependencies = [
  "ahash",
  "arc-swap",
@@ -2313,7 +2313,7 @@ dependencies = [
 
 [[package]]
 name = "netring-exporters"
-version = "0.3.0"
+version = "0.4.0"
 dependencies = [
  "arrow",
  "bytes",

@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## 0.28.0 — 2026-06-29 — flowscope 0.20, AF_XDP maturity & the pre-1.0 API sweep
 
 ### Added
 
@@ -79,6 +79,34 @@
   directly. (`tcpControlBits` stays `0` — flowscope's `FlowStats` doesn't
   accumulate per-flow TCP flags, so there is no source for it; a flowscope
   dependency, not a netring gap.)
+- **NIC RX flow steering** (issue
+  [#15](https://github.com/p13marc/netring/issues/15)) — `netring::xdp::steer`
+  programs the NIC's ethtool RX-NFC rules so multi-queue / sharded AF_XDP capture
+  can pin chosen flows to chosen RX queues, closing the AF_XDP↔DPDK gap. A typed,
+  validated `FlowRule::tcp().dst_port(443).to_queue(3)` packs into
+  `ethtool_rx_flow_spec` (IPv4/IPv6 family-checked, kernel mask polarity handled);
+  `RxSteer::{open, insert, remove, rule_count}` rides `SIOCETHTOOL` /
+  `ETHTOOL_SRXCLSRL*` (the same plumbing as `queue_count`); `SteerGuard`
+  (`RxSteer::guarded`) removes the rules on drop with all-or-nothing rollback, like
+  `PromiscGuard`. Byte-packing + family validation are unit-tested cap-free and the
+  `lo` insert degrades cleanly (`-EOPNOTSUPP`/`-EPERM`, no panic). **Hardware-gated**
+  (ntuple-capable NIC + `CAP_NET_ADMIN`). Follow-ups left open under #15: `FLOW_RSS`
+  contexts, rule enumeration (`GRXCLSRLALL`), `XdpCaptureBuilder::steer` convenience.
+- **AF_XDP RX hardware metadata** (issue
+  [#13](https://github.com/p13marc/netring/issues/13)) — surface NIC RX timestamp /
+  RSS hash / VLAN tag (kernel 6.3+ XDP-hints kfuncs) through the AF_XDP capture path
+  into `flowscope::RxMetadata`. `afxdp::metadata` defines the fixed 32-byte
+  `XdpRxMeta` BPF↔userspace contract (a magic+version word gates the not-zeroed
+  headroom; per-field validity flags). UMEM headroom is reserved opt-in via
+  `XdpSocketBuilder::rx_metadata(true)` — **off by default, so zero overhead and no
+  behaviour change**. `XdpPacket::{timestamp, rx_metadata}` surface the parsed
+  values and the Monitor's AF_XDP arms feed `PacketView::with_rx_metadata`,
+  preferring the hardware timestamp automatically. The companion `redirect_meta.bpf.c`
+  is committed as **source only** — the `.o` needs the maintainer's BPF toolchain +
+  a real NIC to compile and validate (the `redirect_all.bpf.o` convention), so real
+  timestamps stay hardware-gated (ice/mlx5/gve); loopback / generic XDP exercise the
+  degrade path (no metadata → software timestamp). The userspace contract is fully
+  unit-tested incl. the degrade and out-of-bounds-descriptor cases.
 
 ### Changed (breaking — flowscope 0.20 adoption, [#108](https://github.com/p13marc/netring/issues/108))
 

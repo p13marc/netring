@@ -114,21 +114,28 @@ of `ShardedRunner`. See [scaling.md](scaling.md) and [BACKENDS.md](BACKENDS.md).
 - **Symmetric RSS** (`netring::xdp::rss`) — `RssConfig` / `toeplitz` /
   `SYMMETRIC_RSS_KEY` make both directions of a bidirectional flow hash to the
   same RX queue, so a sharded capture keeps a connection on one worker.
-- **NIC flow steering** (`netring::xdp::steer`) — `FlowRule` / `RxSteer` /
-  `SteerGuard` pin chosen flows to chosen queues via ethtool ntuple rules.
-  Capability is driver-dependent and needs `CAP_NET_ADMIN`; see
-  [issue #15](https://github.com/p13marc/netring/issues/15) for status and the
-  full design.
+- **NIC flow steering** (`netring::xdp::steer`, shipped in 0.28) — `FlowRule` /
+  `RxSteer` / `SteerGuard` pin chosen flows to chosen queues via ethtool ntuple
+  rules (`FlowRule::tcp().dst_port(443).to_queue(3)`; `SteerGuard` removes rules on
+  drop). Capability is driver-dependent and needs `CAP_NET_ADMIN`; loopback
+  degrades cleanly to `-EOPNOTSUPP`. Follow-ups (FLOW_RSS contexts, rule
+  enumeration, `XdpCaptureBuilder::steer`) are tracked in
+  [issue #15](https://github.com/p13marc/netring/issues/15).
 
 ## Hardware metadata
 
-`metadata.rs` decodes per-frame RX metadata into the `PacketView` model. Kernel
-6.3+ can hand AF_XDP consumers a hardware RX timestamp, RX hash, VLAN tag, and
-checksum status via XDP-hints kfuncs — wiring the redirect program to write that
-metadata into the UMEM headroom (so `XdpPacket::timestamp()` returns a real
-value) is tracked in [issue #13](https://github.com/p13marc/netring/issues/13).
-Other deferred upstream items are tracked in
-[issue #117](https://github.com/p13marc/netring/issues/117).
+Kernel 6.3+ can hand AF_XDP consumers a hardware RX timestamp, RX hash, VLAN tag,
+and checksum status via XDP-hints kfuncs. The **userspace contract shipped in
+0.28**: `metadata.rs` defines the fixed 32-byte `XdpRxMeta` BPF↔userspace struct
+(magic+version gate, per-field validity flags) and decodes it into
+`flowscope::RxMetadata`; enable it opt-in with `XdpSocketBuilder::rx_metadata(true)`
+(off by default, zero overhead), and the Monitor's AF_XDP arms prefer the hardware
+timestamp automatically. The companion `redirect_meta.bpf.c` program ships as
+source; compiling its `.o` and validating real timestamps on an ice/mlx5/gve NIC
+is the remaining piece, tracked in
+[issue #13](https://github.com/p13marc/netring/issues/13) (loopback/generic XDP
+exercises only the software-timestamp degrade path). Other deferred upstream items
+are tracked in [issue #117](https://github.com/p13marc/netring/issues/117).
 
 ## Performance
 

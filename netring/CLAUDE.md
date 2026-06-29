@@ -20,6 +20,42 @@ built on AF_PACKET with TPACKET_V3 (block-based mmap ring buffers) and AF_XDP.
 
 ## Implementation Status
 
+**0.28.0 — RELEASE-PREPPED on `master`** (version bumped, CHANGELOG banner
+finalized; pending `just ci` + `cargo publish` + tag — the maintainer's
+hands-on step). "flowscope 0.20, AF_XDP maturity & the pre-1.0 API sweep".
+Depends on **flowscope 0.20**; companion **`netring-exporters` 0.4.0**.
+Migration: `docs/MIGRATING_0.27_TO_0.28.md`. A breaking release (still pre-1.0;
+the 1.0 freeze is deferred under [#37]):
+
+- **Breaking — flowscope 0.20 adoption (#108):** `SessionEvent` is now a netring
+  type (`netring::flow::SessionEvent`; flowscope retired its public one), the
+  offline pcap L7 drivers (`FlowSessionDriver`/`FlowDatagramDriver`) are gone (the
+  pcap streams now drive a `FlowTracker` directly), `ParserKind` is a typed enum
+  (was `&'static str`), EVE emits the standard **Community ID** (`flow_hash` →
+  `community_id`; `export::FlowRecord` gains `community_id`, loses `Copy`),
+  `FlowStream`'s first type param is now the capture source (shared AF_PACKET/
+  AF_XDP tracking loop), and flowscope wire types are `#[non_exhaustive]`.
+- **Breaking — pre-1.0 API sweep §D/§F (#37):** sealed the deep-internal
+  `Subscribable` + `subscription::L7Fields` traits (`FieldSource` left open);
+  `config::BuildError` → `config::BpfBuildError` (the crate-root re-export
+  `netring::BuildError` was silently the BPF one — the Monitor builder keeps
+  `BuildError`); `ProtocolInitError`'s tuple field privatized (`::new`/`.message()`).
+- **AF_XDP maturity (additive):** flow + L7 streams over AF_XDP and multi-NIC
+  fan-in (`AsyncXdpCapture::flow_stream`, `AsyncXdpMultiCapture` →
+  `XdpMulti{Flow,Session,Datagram}Stream`) via the new `AsyncFlowSource` trait;
+  `Backend::Auto` capture facade (`MonitorBuilder::capture` + `resolved_capture_plan`);
+  **RX hardware metadata** (#13 — `afxdp::metadata` `XdpRxMeta` contract, opt-in
+  `XdpSocketBuilder::rx_metadata(true)`, Monitor prefers the HW timestamp; the
+  `redirect_meta.bpf.c` `.o` is maintainer/NIC-gated); **NIC flow steering** (#15 —
+  `netring::xdp::steer` `FlowRule`/`RxSteer`/`SteerGuard` over ethtool ntuple).
+- **Resilience + ops (additive):** load-shedding under overload (#54 —
+  `monitor::overload::LoadShedder` + `ShedPolicy` + honest `SheddingStats`);
+  packet-tier `.expr()` **hot-reload** (#53 — `ReloadHandle::set_packet_filter`,
+  arc-swap, Δ0); canonical race-stable `orientation` + opt-in `infer_tcp_initiator`
+  + per-direction capture-leg binding (`source_idx_{forward,reverse}` +
+  `capture_leg_inconsistent`); IPFIX wire encoding delegated to
+  `flowscope::ipfix::wire` (#33) + `FlowRecord::to_ipfix_record()`.
+
 **0.27.0 — RELEASED 2026-06-24** ("1.0 API sweep, threat-intel, ML features &
 Tier-2 protocols"). Published to crates.io (tag `0.27.0`) alongside
 **`netring-exporters` 0.3.0**; depends on **flowscope 0.19**. Migration:
@@ -1016,21 +1052,21 @@ Cargo features unique to 0.21:
 
 ## Pre-publish checklist
 
-For the `0.25.0` `cargo publish` (release-ready on `0.25-dev`; all CI green).
-flowscope `0.16` is already published, so there's no upstream-first step or
-`[patch.crates-io]` to remove — the registry resolves it.
+For the `0.28.0` `cargo publish` (release-prepped on `master`; run `just ci`
+before publishing). flowscope `0.20` is already published, so there's no
+upstream-first step or `[patch.crates-io]` to remove — the registry resolves it.
 
-1. Confirm `netring/Cargo.toml` is `version = "0.25.0"` (done) and
-   `flowscope = "0.16"` (done); the `## 0.25.0` CHANGELOG banner is finalized
-   (done) — stamp the date header on tag day and flip "Implementation Status"
-   above to "released".
+1. Confirm `netring/Cargo.toml` is `version = "0.28.0"` (done) and depends on
+   `flowscope 0.20` (done); the `## 0.28.0` CHANGELOG banner is finalized (done)
+   — adjust the date header to tag day and flip "Implementation Status" above to
+   "released".
 2. `cargo publish -p netring --dry-run` to verify the package contents.
 3. `cargo publish -p netring`.
 4. **Then** publish the companion crate: `cargo publish -p netring-exporters`
-   (it depends on `netring = "0.25"`, so netring must be on crates.io first).
-   Its `kafka` feature needs `cmake`/librdkafka available at *its* build time,
-   not at publish time.
-5. `git tag 0.25.0` (no `v` prefix, per the user's convention).
+   (`0.4.0`; it depends on `netring = "0.28"`, so netring must be on crates.io
+   first). Its `kafka` feature needs `cmake`/librdkafka available at *its* build
+   time, not at publish time.
+5. `git tag 0.28.0` (no `v` prefix, per the user's convention).
 6. Update the GitHub issue tracker (close shipped issues, file follow-ups).
    Planning lives in issues now — there is no `plans/` directory.
 

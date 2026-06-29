@@ -11,7 +11,7 @@ Flow/session logic lives in the companion crate
 
 ```toml
 [dependencies]
-netring = { version = "0.27", features = ["tokio"] }
+netring = { version = "0.28", features = ["tokio"] }
 ```
 
 ```rust,ignore
@@ -164,7 +164,7 @@ usable directly (flat `packets()` iterator or block-level batches). See
 ## Flow & session tracking
 
 ```toml
-netring = { version = "0.27", features = ["tokio", "flow"] }
+netring = { version = "0.28", features = ["tokio", "flow"] }
 ```
 
 ```rust,ignore
@@ -290,7 +290,8 @@ Organized by topic under [`examples/`](examples/README.md) — `basic/`,
   [Tuning](docs/TUNING_GUIDE.md) · [Troubleshooting](docs/TROUBLESHOOTING.md)
 - [Writing detectors](docs/WRITING_DETECTORS.md) ·
   [Fingerprints](docs/FINGERPRINTS.md) · [Metrics](docs/METRICS.md)
-- **Migrating:** [0.26 → 0.27](docs/MIGRATING_0.26_TO_0.27.md) ·
+- **Migrating:** [0.27 → 0.28](docs/MIGRATING_0.27_TO_0.28.md) ·
+  [0.26 → 0.27](docs/MIGRATING_0.26_TO_0.27.md) ·
   [0.24 → 0.25](docs/MIGRATING_0.24_TO_0.25.md) ·
   [earlier guides](docs/INDEX.md#migration-guides)
 

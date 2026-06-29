@@ -2687,6 +2687,49 @@ impl core::fmt::Debug for netring::monitor::overload::OverloadState
 pub fn netring::monitor::overload::OverloadState::fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result
 impl core::marker::Copy for netring::monitor::overload::OverloadState
 impl core::marker::StructuralPartialEq for netring::monitor::overload::OverloadState
+pub enum netring::monitor::overload::ShedDecision
+pub netring::monitor::overload::ShedDecision::Admit
+pub netring::monitor::overload::ShedDecision::Shed
+impl netring::monitor::overload::ShedDecision
+pub fn netring::monitor::overload::ShedDecision::is_admitted(self) -> bool
+pub fn netring::monitor::overload::ShedDecision::is_shed(self) -> bool
+impl core::clone::Clone for netring::monitor::overload::ShedDecision
+pub fn netring::monitor::overload::ShedDecision::clone(&self) -> netring::monitor::overload::ShedDecision
+impl core::cmp::Eq for netring::monitor::overload::ShedDecision
+impl core::cmp::PartialEq for netring::monitor::overload::ShedDecision
+pub fn netring::monitor::overload::ShedDecision::eq(&self, other: &netring::monitor::overload::ShedDecision) -> bool
+impl core::fmt::Debug for netring::monitor::overload::ShedDecision
+pub fn netring::monitor::overload::ShedDecision::fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::marker::Copy for netring::monitor::overload::ShedDecision
+impl core::marker::StructuralPartialEq for netring::monitor::overload::ShedDecision
+#[non_exhaustive] pub enum netring::monitor::overload::ShedPolicy
+pub netring::monitor::overload::ShedPolicy::Observe
+pub netring::monitor::overload::ShedPolicy::SampleFlows
+pub netring::monitor::overload::ShedPolicy::SampleFlows::keep: f64
+pub netring::monitor::overload::ShedPolicy::ShedNewFlows
+impl core::clone::Clone for netring::monitor::overload::ShedPolicy
+pub fn netring::monitor::overload::ShedPolicy::clone(&self) -> netring::monitor::overload::ShedPolicy
+impl core::cmp::PartialEq for netring::monitor::overload::ShedPolicy
+pub fn netring::monitor::overload::ShedPolicy::eq(&self, other: &netring::monitor::overload::ShedPolicy) -> bool
+impl core::default::Default for netring::monitor::overload::ShedPolicy
+pub fn netring::monitor::overload::ShedPolicy::default() -> netring::monitor::overload::ShedPolicy
+impl core::fmt::Debug for netring::monitor::overload::ShedPolicy
+pub fn netring::monitor::overload::ShedPolicy::fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::marker::Copy for netring::monitor::overload::ShedPolicy
+impl core::marker::StructuralPartialEq for netring::monitor::overload::ShedPolicy
+pub struct netring::monitor::overload::LoadShedder
+impl netring::monitor::overload::LoadShedder
+pub fn netring::monitor::overload::LoadShedder::admit_new_flow(&mut self, flow_hash: u64) -> netring::monitor::overload::ShedDecision
+pub fn netring::monitor::overload::LoadShedder::is_shedding(&self) -> bool
+pub fn netring::monitor::overload::LoadShedder::new(config: netring::monitor::overload::OverloadConfig, policy: netring::monitor::overload::ShedPolicy) -> Self
+pub fn netring::monitor::overload::LoadShedder::observe(&mut self, drop_rate: f64) -> core::option::Option<netring::monitor::overload::OverloadState>
+pub fn netring::monitor::overload::LoadShedder::policy(&self) -> netring::monitor::overload::ShedPolicy
+pub fn netring::monitor::overload::LoadShedder::state(&self) -> netring::monitor::overload::OverloadState
+pub fn netring::monitor::overload::LoadShedder::stats(&self) -> netring::monitor::overload::SheddingStats
+impl core::clone::Clone for netring::monitor::overload::LoadShedder
+pub fn netring::monitor::overload::LoadShedder::clone(&self) -> netring::monitor::overload::LoadShedder
+impl core::fmt::Debug for netring::monitor::overload::LoadShedder
+pub fn netring::monitor::overload::LoadShedder::fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result
 #[non_exhaustive] pub struct netring::monitor::overload::OverloadConfig
 pub netring::monitor::overload::OverloadConfig::enter_drop_rate: f64
 pub netring::monitor::overload::OverloadConfig::recover_drop_rate: f64
@@ -2713,6 +2756,20 @@ impl core::clone::Clone for netring::monitor::overload::OverloadDetector
 pub fn netring::monitor::overload::OverloadDetector::clone(&self) -> netring::monitor::overload::OverloadDetector
 impl core::fmt::Debug for netring::monitor::overload::OverloadDetector
 pub fn netring::monitor::overload::OverloadDetector::fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+#[non_exhaustive] pub struct netring::monitor::overload::SheddingStats
+pub netring::monitor::overload::SheddingStats::admitted: u64
+pub netring::monitor::overload::SheddingStats::shed: u64
+impl core::clone::Clone for netring::monitor::overload::SheddingStats
+pub fn netring::monitor::overload::SheddingStats::clone(&self) -> netring::monitor::overload::SheddingStats
+impl core::cmp::Eq for netring::monitor::overload::SheddingStats
+impl core::cmp::PartialEq for netring::monitor::overload::SheddingStats
+pub fn netring::monitor::overload::SheddingStats::eq(&self, other: &netring::monitor::overload::SheddingStats) -> bool
+impl core::default::Default for netring::monitor::overload::SheddingStats
+pub fn netring::monitor::overload::SheddingStats::default() -> netring::monitor::overload::SheddingStats
+impl core::fmt::Debug for netring::monitor::overload::SheddingStats
+pub fn netring::monitor::overload::SheddingStats::fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::marker::Copy for netring::monitor::overload::SheddingStats
+impl core::marker::StructuralPartialEq for netring::monitor::overload::SheddingStats
 pub mod netring::monitor::p0f
 pub mod netring::monitor::registry
 pub struct netring::monitor::registry::HandlerRegistry

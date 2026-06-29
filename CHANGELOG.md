@@ -18,6 +18,86 @@
   cBPF/XDP prefilter is the build-time union of the original predicates, so a
   reload can narrow freely but widening past that union drops the newly-wanted
   frames in-kernel until rebuild (offline replay reloads fully).
+- **AF_XDP flow + L7 streams and multi-interface fan-in** (issue
+  [#104](https://github.com/p13marc/netring/issues/104), part of the flowscope
+  0.20 adoption [#108](https://github.com/p13marc/netring/issues/108)) —
+  `AsyncXdpCapture::flow_stream(extractor)` is the AF_XDP analogue of
+  `AsyncCapture::flow_stream`, and `AsyncXdpMultiCapture::open([...])` fans N
+  (each internally multi-queue) NICs into one `XdpMultiFlowStream` yielding
+  `TaggedEvent { source_idx, event }` — the motivating shape for a TX/RX-split
+  tap across two NICs. `SessionStream` / `DatagramStream` are now source-agnostic,
+  so `xdp_cap.flow_stream(ext).session_stream(parser)` / `.datagram_stream(parser)`
+  work over AF_XDP too, fanned in as `XdpMultiSessionStream` /
+  `XdpMultiDatagramStream`. The dedup / pcap-tap / monotonic-clamp / track logic
+  is shared verbatim with AF_PACKET via a new `AsyncFlowSource` trait.
+- **Declarative `Backend::Auto` capture facade** (issue
+  [#106](https://github.com/p13marc/netring/issues/106)) —
+  `MonitorBuilder::capture(iface, Backend::Auto)` probes the interface and picks
+  the backend (AF_XDP native → SKB → AF_PACKET), logs the chosen plan, and
+  surfaces it via `Monitor::resolved_capture_plan()`.
+- **Canonical `orientation` + opt-in `infer_tcp_initiator`** on netring flow
+  events (flowscope #118 / #122). `FlowStarted<P>`, `FlowPacket`, and
+  `SessionEvent::{Started,Application}` gained `orientation: flowscope::Orientation`
+  (`Forward` / `Reverse`) — the deterministic, address-sorted direction axis that
+  survives a tap-merge / multi-queue arrival race (the right key for biflow dedup
+  and Community ID ordering). `MonitorBuilder::infer_tcp_initiator(true)` /
+  `MultiStreamConfig::with_infer_tcp_initiator(true)` enable SYN-based initiator
+  inference for split-capture topologies (a no-op for a single tap).
+- **Per-direction capture-leg binding** (issue
+  [#105](https://github.com/p13marc/netring/issues/105), flowscope #120) —
+  `source_idx` now survives the monotonic-timestamp clamp (flowscope #69), so a
+  shared/merged tracker surfaces `FlowStats::source_idx_{forward,reverse}` +
+  `capture_leg_inconsistent` (the tap-miswire / asymmetric-routing IOC) on a
+  flow's stats, exposed through `merged_flow_stream` on AF_PACKET **and** AF_XDP.
+
+### Changed (breaking — flowscope 0.20 adoption, [#108](https://github.com/p13marc/netring/issues/108))
+
+- **`SessionEvent` is now a netring type** (`netring::flow::SessionEvent`, also in
+  the prelude). flowscope 0.20 retired its public `SessionEvent` (it became a
+  crate-private engine carrier); netring now owns its session-stream event type.
+  It is a drop-in with the same variants (`Started` / `Application` / `Closed` /
+  `FlowAnomaly` / `TrackerAnomaly`) and carries the new additive `orientation`
+  field. The `Stream::Item` of `SessionStream` / `DatagramStream` /
+  `PcapSessionStream` / `PcapDatagramStream` (+ the `TaggedEvent`-wrapped multi
+  variants) now carries it. **Migration:** `use flowscope::SessionEvent` →
+  `use netring::flow::SessionEvent`. `flowscope::FlowEvent` is unchanged.
+- **Offline pcap L7 drivers removed.** flowscope 0.20 deleted the per-parser
+  `FlowSessionDriver` / `FlowDatagramDriver` engines; `AsyncPcapSource::{sessions,
+  datagrams}` and `PcapFlowStream::{session_stream,datagram_stream}` are unchanged
+  at the call site but now drive a `FlowTracker` directly (same translation as the
+  live `SessionStream`, so live/offline L7 are equivalent and in-flight flow state
+  is preserved across `session_stream`/`datagram_stream`). `PcapSessionStream::
+  driver()` / `PcapDatagramStream::driver()` are **removed** — use `.tracker()`.
+- **Typed `ParserKind` replaces `&'static str`** (flowscope #109) on
+  `ParserClosed<P>::parser_kind` (field + `::new` arg), `SessionEvent::Application`,
+  and `EventStream::parser_kind()`. `.as_str()` recovers the original slug, so
+  emitted JSON / metric labels are byte-for-byte unchanged. The `Protocol::NAME`
+  and `flowscope::parser_kinds::*` `&str` constants are unchanged.
+- **EVE `flow_hash` → `community_id`** (flowscope #88). The `eve-sink` feature now
+  pulls `flowscope/community-id`, so EVE output carries the standard Corelight
+  Community ID (Zeek/Suricata/Arkime-interoperable) instead of the proprietary
+  FNV-1a `flow_hash`. **Re-key** any dashboard/correlation joined on `flow_hash`;
+  the in-process FNV hash stays available as `KeyFields::stable_hash()`.
+- **`export::FlowRecord` gains `community_id: Option<String>`, loses `Copy`**
+  (issue [#33](https://github.com/p13marc/netring/issues/33)). The same Community
+  ID rides the flow-export record (NDJSON gains a `"community_id"` key; the
+  canonical IE-keyed IPFIX record carries it). Records are handed to exporters by
+  `&`, so the hot path is unaffected; only code that *copied* a record out of a
+  callback needs `.clone()`.
+- **`FlowStream`'s first type parameter is now the capture source** (issue
+  [#104](https://github.com/p13marc/netring/issues/104)) so one tracking loop is
+  shared across AF_PACKET and AF_XDP. Only code that *named* `FlowStream<S, …>` /
+  `SessionStream<S, E, F>` explicitly is affected (`FlowStream<AsyncCapture<S>, E>`
+  / `FlowStream<AsyncXdpCapture, E>`); `cap.flow_stream(…)` call chains are not.
+- **flowscope wire types are `#[non_exhaustive]`** (flowscope #78) — affects only
+  struct-literal construction (`FiveTupleKey { .. }` → `FiveTupleKey::new(..)`,
+  likewise `DnsRecord::new` / `HttpRequest::new` / `Extracted::new` / …) or
+  exhaustive enum matches (add a `_` arm). The free `flowscope::<proto>::parse*()`
+  functions also moved `Option<T>` → `Result<T, ParseError>` (flowscope #85);
+  netring handles its own L2/L3 parse sites internally.
+
+  See [`docs/MIGRATING_0.27_TO_0.28.md`](netring/docs/MIGRATING_0.27_TO_0.28.md)
+  for the full recipe-style migration guide.
 
 ### Changed (breaking — pre-1.0 API sweep, [#37](https://github.com/p13marc/netring/issues/37) §F)
 

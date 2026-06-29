@@ -1105,7 +1105,7 @@ async fn drain_phase(
         // 0.24 Phase D: export the flows finalized by `finish_into` (flows
         // still open at shutdown get a synthesized FlowEnded here).
         if !flow_exporters.is_empty()
-            && let FsEvent::FlowEnded {
+            && let FsEvent::Ended {
                 key, stats, reason, ..
             } = &evt
         {
@@ -1116,7 +1116,7 @@ async fn drain_phase(
         }
         // Issue #32: ML-feature delivery for flows drained at shutdown.
         if !ml_feature_handlers.is_empty()
-            && let FsEvent::FlowEnded {
+            && let FsEvent::Ended {
                 key, stats, reason, ..
             } = &evt
         {
@@ -1125,7 +1125,7 @@ async fn drain_phase(
             }
         }
         // Issue #72: nPrint flush for flows drained at shutdown.
-        if let FsEvent::FlowEnded { key, .. } = &evt {
+        if let FsEvent::Ended { key, .. } = &evt {
             for acc in byte_accumulators.iter_mut() {
                 acc.flush(key);
             }
@@ -1454,7 +1454,7 @@ async fn dispatch_tracked_events(
         // registered. Done before dispatch so exporters see the flow even
         // if a downstream handler errors under `Propagate`.
         if !flow_exporters.is_empty()
-            && let FsEvent::FlowEnded {
+            && let FsEvent::Ended {
                 key, stats, reason, ..
             } = &evt
         {
@@ -1467,7 +1467,7 @@ async fn dispatch_tracked_events(
         // flow, built from the live `stats` (so the IAT / active-idle block
         // survives, unlike the summary record). Empty handler list = no cost.
         if !ml_feature_handlers.is_empty()
-            && let FsEvent::FlowEnded {
+            && let FsEvent::Ended {
                 key, stats, reason, ..
             } = &evt
         {
@@ -1477,7 +1477,7 @@ async fn dispatch_tracked_events(
         }
         // Issue #72: hand the completed flow's nPrint matrix to the on_nprint
         // handlers, then drop it. `None` (no `nprint(..)`) is zero cost.
-        if let FsEvent::FlowEnded { key, .. } = &evt {
+        if let FsEvent::Ended { key, .. } = &evt {
             for acc in byte_accumulators.iter_mut() {
                 acc.flush(key);
             }
@@ -1703,26 +1703,37 @@ async fn dispatch_lifecycle_async(
     evt: FsEvent<FlowKey>,
 ) -> Result<()> {
     match evt {
-        FsEvent::FlowStarted { key, ts, l4 } => match l4 {
+        FsEvent::Started {
+            key,
+            ts,
+            l4,
+            orientation,
+        } => match l4 {
             Some(L4Proto::Tcp) => {
                 dispatcher
-                    .dispatch_async(&FlowStarted::<Tcp>::new(key, l4, ts))
+                    .dispatch_async(
+                        &FlowStarted::<Tcp>::new(key, l4, ts).with_orientation(orientation),
+                    )
                     .await?;
             }
             Some(L4Proto::Udp) => {
                 dispatcher
-                    .dispatch_async(&FlowStarted::<Udp>::new(key, l4, ts))
+                    .dispatch_async(
+                        &FlowStarted::<Udp>::new(key, l4, ts).with_orientation(orientation),
+                    )
                     .await?;
             }
             #[cfg(feature = "icmp")]
             Some(L4Proto::Icmp) | Some(L4Proto::IcmpV6) => {
                 dispatcher
-                    .dispatch_async(&FlowStarted::<Icmp>::new(key, l4, ts))
+                    .dispatch_async(
+                        &FlowStarted::<Icmp>::new(key, l4, ts).with_orientation(orientation),
+                    )
                     .await?;
             }
             _ => {}
         },
-        FsEvent::FlowEnded {
+        FsEvent::Ended {
             key,
             reason,
             stats,
@@ -1755,7 +1766,7 @@ async fn dispatch_lifecycle_async(
             }
             _ => {}
         },
-        FsEvent::FlowEstablished { key, ts, l4 } => {
+        FsEvent::Established { key, ts, l4 } => {
             if matches!(l4, Some(L4Proto::Tcp)) {
                 dispatcher
                     .dispatch_async(&FlowEstablished::<Tcp>::new(key, ts))
@@ -1782,18 +1793,22 @@ async fn dispatch_lifecycle_async(
         }
         // 0.22 R2: one flat FlowPacket carrying `proto`; no per-L4
         // dispatch fan-out.
-        FsEvent::FlowPacket {
+        FsEvent::Packet {
             key,
             side,
             len,
             ts,
             tcp,
+            orientation,
         } => {
             dispatcher
-                .dispatch_async(&FlowPacket::new(key.proto, key, side, len, tcp, ts))
+                .dispatch_async(
+                    &FlowPacket::new(key.proto, key, side, len, tcp, ts)
+                        .with_orientation(orientation),
+                )
                 .await?;
         }
-        FsEvent::FlowTick { key, stats, ts } => match key.proto {
+        FsEvent::Tick { key, stats, ts } => match key.proto {
             L4Proto::Tcp => {
                 dispatcher
                     .dispatch_async(&FlowTick::<Tcp>::new(key, stats, ts))
@@ -1927,7 +1942,7 @@ fn dispatch_arp(
     policy: HandlerErrorPolicy,
     health: &crate::monitor::health::HealthState,
 ) -> Result<()> {
-    let Some(msg) = flowscope::arp::parse_frame(view.frame) else {
+    let Ok(msg) = flowscope::arp::parse_frame(view.frame) else {
         return Ok(());
     };
     // Learn the binding and derive an anomaly against the prior table state.
@@ -2005,7 +2020,7 @@ fn dispatch_ndp(
     let Some(icmp) = layers.icmpv6() else {
         return Ok(());
     };
-    let Some(msg) = flowscope::ndp::parse_icmpv6(icmp.bytes()) else {
+    let Ok(msg) = flowscope::ndp::parse_icmpv6(icmp.bytes()) else {
         return Ok(());
     };
     let anomaly = watch.observe(&msg, view.timestamp);
@@ -2070,7 +2085,7 @@ fn dispatch_lldp(
     policy: HandlerErrorPolicy,
     health: &crate::monitor::health::HealthState,
 ) -> Result<()> {
-    let Some(msg) = flowscope::lldp::parse_frame(view.frame) else {
+    let Ok(msg) = flowscope::lldp::parse_frame(view.frame) else {
         return Ok(());
     };
 
@@ -2127,7 +2142,7 @@ fn dispatch_cdp(
     policy: HandlerErrorPolicy,
     health: &crate::monitor::health::HealthState,
 ) -> Result<()> {
-    let Some(msg) = flowscope::cdp::parse_frame(view.frame) else {
+    let Ok(msg) = flowscope::cdp::parse_frame(view.frame) else {
         return Ok(());
     };
 
@@ -2225,25 +2240,25 @@ fn absorb_frame_assets(
     }
 
     #[cfg(feature = "arp")]
-    if let Some(m) = flowscope::arp::parse_frame(view.frame) {
+    if let Ok(m) = flowscope::arp::parse_frame(view.frame) {
         feed!(flowscope::Asset::from_arp(&m));
     }
     #[cfg(feature = "ndp")]
     if let Ok(layers) = view.layers()
         && let Some(icmp) = layers.icmpv6()
-        && let Some(m) = flowscope::ndp::parse_icmpv6(icmp.bytes())
+        && let Ok(m) = flowscope::ndp::parse_icmpv6(icmp.bytes())
         && let Some(a) = flowscope::Asset::from_ndp(&m)
     {
         feed!(a);
     }
     #[cfg(feature = "lldp")]
-    if let Some(m) = flowscope::lldp::parse_frame(view.frame)
+    if let Ok(m) = flowscope::lldp::parse_frame(view.frame)
         && let Some(a) = flowscope::Asset::from_lldp(&m)
     {
         feed!(a);
     }
     #[cfg(feature = "cdp")]
-    if let Some(m) = flowscope::cdp::parse_frame(view.frame) {
+    if let Ok(m) = flowscope::cdp::parse_frame(view.frame) {
         // `parse_frame` validated frame.len() >= 22, so the src MAC is present.
         let mut mac = [0u8; 6];
         mac.copy_from_slice(&view.frame[6..12]);
@@ -2274,20 +2289,20 @@ fn absorb_frame_assets(
 
         #[cfg(feature = "dhcp")]
         if (sp == 67 || sp == 68 || dp == 67 || dp == 68)
-            && let Some(m) = flowscope::dhcp::parse(payload)
+            && let Ok(m) = flowscope::dhcp::parse(payload)
             && let Some(a) = flowscope::Asset::from_dhcp(&m)
         {
             feed!(a);
         }
         #[cfg(feature = "ssdp")]
         if (sp == 1900 || dp == 1900)
-            && let Some(m) = flowscope::ssdp::parse(payload)
+            && let Ok(m) = flowscope::ssdp::parse(payload)
         {
             feed!(flowscope::Asset::from_ssdp(&m, src_mac));
         }
         #[cfg(feature = "netbios-ns")]
         if (sp == 137 || dp == 137)
-            && let Some(m) = flowscope::netbios_ns::parse(payload)
+            && let Ok(m) = flowscope::netbios_ns::parse(payload)
             && let Some(a) = flowscope::Asset::from_netbios_ns(&m, src_mac)
         {
             feed!(a);
@@ -2403,11 +2418,16 @@ fn dispatch_lifecycle(
     }
 
     match evt {
-        FsEvent::FlowStarted { key, ts, l4 } => match l4 {
+        FsEvent::Started {
+            key,
+            ts,
+            l4,
+            orientation,
+        } => match l4 {
             Some(L4Proto::Tcp) => {
                 dispatch_one!(
                     FlowStarted<Tcp>,
-                    FlowStarted::<Tcp>::new(key, l4, ts),
+                    FlowStarted::<Tcp>::new(key, l4, ts).with_orientation(orientation),
                     Some(key),
                     ts
                 );
@@ -2415,7 +2435,7 @@ fn dispatch_lifecycle(
             Some(L4Proto::Udp) => {
                 dispatch_one!(
                     FlowStarted<Udp>,
-                    FlowStarted::<Udp>::new(key, l4, ts),
+                    FlowStarted::<Udp>::new(key, l4, ts).with_orientation(orientation),
                     Some(key),
                     ts
                 );
@@ -2424,14 +2444,14 @@ fn dispatch_lifecycle(
             Some(L4Proto::Icmp) | Some(L4Proto::IcmpV6) => {
                 dispatch_one!(
                     FlowStarted<Icmp>,
-                    FlowStarted::<Icmp>::new(key, l4, ts),
+                    FlowStarted::<Icmp>::new(key, l4, ts).with_orientation(orientation),
                     Some(key),
                     ts
                 );
             }
             _ => {}
         },
-        FsEvent::FlowEnded {
+        FsEvent::Ended {
             key,
             reason,
             stats,
@@ -2474,7 +2494,7 @@ fn dispatch_lifecycle(
             }
             _ => {}
         },
-        FsEvent::FlowEstablished { key, ts, l4 } => {
+        FsEvent::Established { key, ts, l4 } => {
             if matches!(l4, Some(L4Proto::Tcp)) {
                 dispatch_one!(
                     FlowEstablished<Tcp>,
@@ -2509,21 +2529,22 @@ fn dispatch_lifecycle(
             );
         }
         // 0.22 R2: one flat FlowPacket carrying `proto`.
-        FsEvent::FlowPacket {
+        FsEvent::Packet {
             key,
             side,
             len,
             ts,
             tcp,
+            orientation,
         } => {
             dispatch_one!(
                 FlowPacket,
-                FlowPacket::new(key.proto, key, side, len, tcp, ts),
+                FlowPacket::new(key.proto, key, side, len, tcp, ts).with_orientation(orientation),
                 Some(key),
                 ts
             );
         }
-        FsEvent::FlowTick { key, stats, ts } => match key.proto {
+        FsEvent::Tick { key, stats, ts } => match key.proto {
             L4Proto::Tcp => {
                 dispatch_one!(
                     FlowTick<Tcp>,
@@ -2640,11 +2661,16 @@ async fn dispatch_lifecycle_effects(
     }
 
     match evt {
-        FsEvent::FlowStarted { key, ts, l4 } => match l4 {
+        FsEvent::Started {
+            key,
+            ts,
+            l4,
+            orientation,
+        } => match l4 {
             Some(L4Proto::Tcp) => {
                 dispatch_one!(
                     FlowStarted<Tcp>,
-                    FlowStarted::<Tcp>::new(key, l4, ts),
+                    FlowStarted::<Tcp>::new(key, l4, ts).with_orientation(orientation),
                     Some(key),
                     ts
                 );
@@ -2652,7 +2678,7 @@ async fn dispatch_lifecycle_effects(
             Some(L4Proto::Udp) => {
                 dispatch_one!(
                     FlowStarted<Udp>,
-                    FlowStarted::<Udp>::new(key, l4, ts),
+                    FlowStarted::<Udp>::new(key, l4, ts).with_orientation(orientation),
                     Some(key),
                     ts
                 );
@@ -2661,14 +2687,14 @@ async fn dispatch_lifecycle_effects(
             Some(L4Proto::Icmp) | Some(L4Proto::IcmpV6) => {
                 dispatch_one!(
                     FlowStarted<Icmp>,
-                    FlowStarted::<Icmp>::new(key, l4, ts),
+                    FlowStarted::<Icmp>::new(key, l4, ts).with_orientation(orientation),
                     Some(key),
                     ts
                 );
             }
             _ => {}
         },
-        FsEvent::FlowEnded {
+        FsEvent::Ended {
             key,
             reason,
             stats,
@@ -2707,7 +2733,7 @@ async fn dispatch_lifecycle_effects(
             }
             _ => {}
         },
-        FsEvent::FlowEstablished { key, ts, l4 } => {
+        FsEvent::Established { key, ts, l4 } => {
             if matches!(l4, Some(L4Proto::Tcp)) {
                 dispatch_one!(
                     FlowEstablished<Tcp>,
@@ -2741,21 +2767,22 @@ async fn dispatch_lifecycle_effects(
                 ts
             );
         }
-        FsEvent::FlowPacket {
+        FsEvent::Packet {
             key,
             side,
             len,
             ts,
             tcp,
+            orientation,
         } => {
             dispatch_one!(
                 FlowPacket,
-                FlowPacket::new(key.proto, key, side, len, tcp, ts),
+                FlowPacket::new(key.proto, key, side, len, tcp, ts).with_orientation(orientation),
                 Some(key),
                 ts
             );
         }
-        FsEvent::FlowTick { key, stats, ts } => match key.proto {
+        FsEvent::Tick { key, stats, ts } => match key.proto {
             L4Proto::Tcp => {
                 dispatch_one!(
                     FlowTick<Tcp>,
@@ -2832,11 +2859,11 @@ mod active_export_tests {
     use super::*;
     use crate::export::{FlowExporter, FlowRecord};
 
-    /// Collects every exported record (`FlowRecord` is `Copy`).
+    /// Collects every exported record.
     struct Collect(Arc<Mutex<Vec<FlowRecord>>>);
     impl FlowExporter for Collect {
         fn export(&mut self, r: &FlowRecord) {
-            self.0.lock().unwrap().push(*r);
+            self.0.lock().unwrap().push(r.clone());
         }
     }
 

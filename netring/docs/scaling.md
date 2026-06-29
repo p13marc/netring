@@ -109,8 +109,69 @@ while let Some(tagged) = stream.next().await {
 
 The same TCP flow appearing on both interfaces (e.g. on a routing
 gateway) yields **two distinct flows** with the same `FiveTuple`
-but different `source_idx`. That's intentional — see the "cross-
-interface flow merging" anti-pattern below.
+but different `source_idx`. That's intentional for a gateway — for a
+**tap** (where the two directions are two legs of *one* flow), use
+`merged_flow_stream` instead (next recipe).
+
+## Recipe — tap merge (`merged_flow_stream`)
+
+A network **tap** splits a flow's two directions across two NICs: TX
+on `eth0`, RX on `eth1`. Both legs are **one** bidirectional flow. Feed
+them into a single shared tracker with `merged_flow_stream`:
+
+```rust
+use netring::AsyncMultiCapture;
+use netring::flow::extract::FiveTuple;
+
+let multi = AsyncMultiCapture::open(["eth0", "eth1"])?;        // TX leg, RX leg
+let mut stream = multi.merged_flow_stream(FiveTuple::bidirectional());
+while let Some(evt) = stream.next().await {
+    let evt = evt?;                                            // plain FlowEvent — no source_idx envelope
+    if let FlowEvent::Ended { stats, .. } = &evt {
+        // Which physical leg each canonical direction arrived on
+        // (RFC 5103 biflow); `capture_leg_inconsistent` flags a
+        // tap-miswire / asymmetric route.
+        let _ = (stats.source_idx_forward, stats.source_idx_reverse);
+        assert!(!stats.capture_leg_inconsistent);
+    }
+}
+```
+
+`merged_flow_stream` is **one** `FlowTracker` fed by all sources, keyed
+by the bare bidirectional 5-tuple, so the `a→b` and `b→a` legs coalesce
+by construction. Each source's packets are stamped `source_idx = i + 1`
+so flowscope binds `FlowStats::source_idx_{forward,reverse}` without
+splitting the flow. For race-robust TCP roles across the legs, pair with
+`MultiStreamConfig::with_infer_tcp_initiator(true)` via
+`merged_flow_stream_with`.
+
+### merge vs distinct — pick by topology
+
+| Topology | Method | Result |
+|---|---|---|
+| **Tap** (TX/RX split across NICs) | `merged_flow_stream` | one bidirectional flow, legs bound |
+| **Routing gateway** (flow transits two NICs) | `flow_stream` | two distinct `TaggedEvent` flows |
+
+**Caveat — clock skew across legs.** The two legs arrive on independent
+NIC queues; without hardware RX timestamps, merged ordering can skew and
+a TCP state machine may see SYN/ACK before data (the Suricata
+`copy-iface` failure mode). `infer_tcp_initiator` corrects the *role*
+axis; cross-leg reordering pairs with AF_XDP RX hardware timestamps
+(#13).
+
+**AF_XDP tap merge.** `AsyncXdpMultiCapture` exposes the same
+`merged_flow_stream` / `merged_flow_stream_with` (issue #105 Phase B over
+AF_XDP, built on the `AsyncFlowSource` generalization #104) — kernel-bypass
+tap reconstruction with identical capture-leg semantics:
+
+```rust
+use netring::AsyncXdpMultiCapture;
+use netring::flow::extract::FiveTuple;
+
+let multi = AsyncXdpMultiCapture::open(["eth0", "eth1"])?;     // TX leg, RX leg
+let mut stream = multi.merged_flow_stream(FiveTuple::bidirectional());
+// …identical FlowEvent loop as the AF_PACKET recipe above.
+```
 
 ## Recipe — heterogeneous setups
 
@@ -285,14 +346,17 @@ processes unpredictably.
 your binary name, derive from PID modulo 0x10000, or just pick a
 project-specific magic (e.g. `0xDE57` for DES).
 
-### 6. Cross-interface flow merging
+### 6. Using `flow_stream` for a tap (wrong tool)
 
-Same TCP flow appearing on `eth0` (inbound) and `eth1` (outbound)
-on a routing gateway is **two distinct flows** under
-`AsyncMultiCapture::open` — `(source_idx=0, key)` and
-`(source_idx=1, key)`. If you need a unified view of the routed
-flow, do the merging in your application using both `source_idx`
-fields.
+Same TCP flow appearing on `eth0` (inbound) and `eth1` (outbound) is
+**two distinct flows** under `flow_stream` —  `(source_idx=0, key)` and
+`(source_idx=1, key)`. Correct for a **routing gateway**; wrong for a
+**tap**, where the two directions are one flow. For a tap, use
+[`merged_flow_stream`](#recipe--tap-merge-merged_flow_stream) — one
+shared tracker that coalesces the legs and binds
+`source_idx_{forward,reverse}`. (Don't hand-roll the merge from two
+`source_idx` fields; the bare bidirectional key already canonicalizes
+both legs to the same flow.)
 
 ### 7. PACKET_FANOUT on `lo`
 

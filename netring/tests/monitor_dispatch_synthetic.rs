@@ -19,11 +19,11 @@ use netring::protocol::builtin::Tcp;
 use netring::protocol::event_typed::FlowStarted;
 
 fn dummy_flow_started(port_a: u16, port_b: u16) -> FlowStarted<Tcp> {
-    let key = flowscope::extract::FiveTupleKey {
-        proto: flowscope::L4Proto::Tcp,
-        a: SocketAddr::new(IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1)), port_a),
-        b: SocketAddr::new(IpAddr::V4(Ipv4Addr::new(10, 0, 0, 2)), port_b),
-    };
+    let key = flowscope::extract::FiveTupleKey::new(
+        flowscope::L4Proto::Tcp,
+        SocketAddr::new(IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1)), port_a),
+        SocketAddr::new(IpAddr::V4(Ipv4Addr::new(10, 0, 0, 2)), port_b),
+    );
     FlowStarted::<Tcp>::new(key, Some(flowscope::L4Proto::Tcp), Timestamp::new(0, 0))
 }
 

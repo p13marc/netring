@@ -21,7 +21,7 @@
 use std::net::SocketAddr;
 
 use flowscope::event::{EndReason, FlowStats};
-use flowscope::{L4Proto, Timestamp};
+use flowscope::{KeyFields, L4Proto, Timestamp};
 
 use crate::protocol::FlowKey;
 
@@ -37,7 +37,10 @@ pub use ipfix::IpfixExporter;
 /// "source/destination" lives in the **directional** byte/packet counts
 /// — `*_initiator` is the side that opened the flow, `*_responder` the
 /// other — not in `a`/`b`. In a directional extractor `a` is the source.
-#[derive(Debug, Clone, Copy, PartialEq)]
+// No longer `Copy` (0.20 / issue #33): the `community_id` String owns a heap
+// allocation. Records are passed to exporters by `&` on the hot path, so this
+// costs nothing there — only explicit `.clone()` sites pay.
+#[derive(Debug, Clone, PartialEq)]
 #[cfg_attr(feature = "serde", derive(serde::Serialize))]
 pub struct FlowRecord {
     /// L4 protocol (TCP / UDP / ICMP / …).
@@ -63,6 +66,15 @@ pub struct FlowRecord {
     /// active timeout (0.25 W1c) — the flow is still alive and this is a
     /// periodic interim snapshot, as NetFlow/IPFIX do for long-lived flows.
     pub reason: Option<EndReason>,
+    /// [Corelight Community ID](https://github.com/corelight/community-id-spec)
+    /// v1 (universal seed 0) — the portable cross-tool flow id for pivoting
+    /// netring output against Zeek / Suricata / Security Onion (issue #33,
+    /// flowscope #88). `Some` for full 5-tuple keys (TCP/UDP exact, ICMP
+    /// stable-but-not-spec); `None` if the `flow` feature's
+    /// `flowscope/community-id` is somehow disabled or the key lacks a full
+    /// tuple. Derived deterministically from the canonically-ordered key, so
+    /// both directions of a biflow share one id.
+    pub community_id: Option<String>,
 }
 
 impl FlowRecord {
@@ -79,6 +91,10 @@ impl FlowRecord {
             start: stats.started,
             end: stats.last_seen,
             reason: Some(reason),
+            // Call the `KeyFields` trait method explicitly (the inherent
+            // `FiveTupleKey::community_id` is feature-gated and returns a bare
+            // `String`); the trait method is the always-present `Option`.
+            community_id: KeyFields::community_id(key),
         }
     }
 
@@ -98,6 +114,7 @@ impl FlowRecord {
             start: stats.started,
             end: stats.last_seen,
             reason: None,
+            community_id: KeyFields::community_id(key),
         }
     }
 
@@ -200,11 +217,11 @@ mod tests {
     use std::net::{IpAddr, Ipv4Addr};
 
     fn key() -> FlowKey {
-        FlowKey {
-            proto: L4Proto::Tcp,
-            a: SocketAddr::new(IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1)), 1234),
-            b: SocketAddr::new(IpAddr::V4(Ipv4Addr::new(10, 0, 0, 2)), 80),
-        }
+        FlowKey::new(
+            L4Proto::Tcp,
+            SocketAddr::new(IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1)), 1234),
+            SocketAddr::new(IpAddr::V4(Ipv4Addr::new(10, 0, 0, 2)), 80),
+        )
     }
 
     fn stats() -> FlowStats {
@@ -231,6 +248,16 @@ mod tests {
         assert_eq!(r.total_packets(), 18);
         assert_eq!(r.total_bytes(), 13500);
         assert_eq!(r.duration(), std::time::Duration::from_millis(2500));
+        // Community ID (issue #33): `Some` and direction-invariant — the same
+        // 5-tuple in either order yields one id, matching the golden vector
+        // from flowscope's `KeyFields::community_id`.
+        let expect = KeyFields::community_id(&key());
+        assert!(
+            expect.is_some(),
+            "community-id feature should be on under flow"
+        );
+        assert_eq!(r.community_id, expect);
+        assert!(r.community_id.as_deref().unwrap().starts_with("1:"));
     }
 
     #[test]
@@ -265,5 +292,7 @@ mod tests {
         assert_eq!(out.lines().count(), 1);
         assert!(out.contains("\"packets_initiator\":10"), "out = {out}");
         assert!(out.contains("\"bytes_responder\":12000"), "out = {out}");
+        // Issue #33: the portable Community ID rides the NDJSON line.
+        assert!(out.contains("\"community_id\":\"1:"), "out = {out}");
     }
 }

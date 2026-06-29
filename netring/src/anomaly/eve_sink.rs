@@ -279,11 +279,11 @@ mod tests {
         hs.server_alpn = Some("h2".into());
         hs.ja3 = Some("deadbeef".into());
         hs.ja4 = Some("t13d1516h2_test".into());
-        let key = flowscope::extract::FiveTupleKey {
-            proto: flowscope::L4Proto::Tcp,
-            a: SocketAddr::new(IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1)), 1234),
-            b: SocketAddr::new(IpAddr::V4(Ipv4Addr::new(10, 0, 0, 2)), 443),
-        };
+        let key = flowscope::extract::FiveTupleKey::new(
+            flowscope::L4Proto::Tcp,
+            SocketAddr::new(IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1)), 1234),
+            SocketAddr::new(IpAddr::V4(Ipv4Addr::new(10, 0, 0, 2)), 443),
+        );
         let fp = TlsFingerprint::from_handshake(&hs, Some(key));
 
         let v = eve_tls_record(&fp, Timestamp::from_unix_f64(1000.0), "eth0");
@@ -312,11 +312,11 @@ mod tests {
     fn eve_sink_emits_valid_json_with_5tuple_when_key_is_five_tuple() {
         let mut sink = EveSink::new(Vec::<u8>::new(), eve_options());
 
-        let key = flowscope::extract::FiveTupleKey {
-            proto: flowscope::L4Proto::Tcp,
-            a: SocketAddr::new(IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1)), 12345),
-            b: SocketAddr::new(IpAddr::V4(Ipv4Addr::new(10, 0, 0, 2)), 443),
-        };
+        let key = flowscope::extract::FiveTupleKey::new(
+            flowscope::L4Proto::Tcp,
+            SocketAddr::new(IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1)), 12345),
+            SocketAddr::new(IpAddr::V4(Ipv4Addr::new(10, 0, 0, 2)), 443),
+        );
         sink.begin(
             "PortScan",
             Severity::Warning,

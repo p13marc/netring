@@ -22,6 +22,8 @@ pub mod dedup_stream;
 #[cfg(all(feature = "tokio", feature = "flow"))]
 pub mod flow_broadcast;
 #[cfg(all(feature = "tokio", feature = "flow"))]
+pub(crate) mod flow_source;
+#[cfg(all(feature = "tokio", feature = "flow"))]
 pub mod flow_stream;
 #[cfg(all(feature = "tokio", feature = "flow"))]
 pub mod multi_capture;
@@ -29,6 +31,8 @@ pub mod multi_capture;
 pub mod multi_config;
 #[cfg(all(feature = "tokio", feature = "flow"))]
 pub mod multi_streams;
+#[cfg(all(feature = "tokio", feature = "flow"))]
+pub mod session_event;
 #[cfg(all(feature = "tokio", feature = "flow"))]
 pub mod session_stream;
 

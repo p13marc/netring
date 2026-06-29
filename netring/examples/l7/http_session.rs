@@ -26,9 +26,9 @@
 #[cfg(all(feature = "tokio", feature = "http"))]
 #[tokio::main(flavor = "current_thread")]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
-    use flowscope::SessionEvent;
     use flowscope::http::{HttpMessage, HttpParser};
     use futures::StreamExt;
+    use netring::flow::SessionEvent;
     use netring::flow::extract::FiveTuple;
     use netring::{AsyncCapture, BpfFilter};
     use std::time::{Duration, Instant};
@@ -87,6 +87,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                         len = resp.body.len()
                     );
                 }
+                // flowscope 0.20 #78: HttpMessage is #[non_exhaustive].
+                _ => {}
             },
             SessionEvent::Closed { key, reason, .. } => {
                 println!("- flow {a} <-> {b}  {reason:?}", a = key.a, b = key.b);

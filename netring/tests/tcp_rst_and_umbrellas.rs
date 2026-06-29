@@ -18,11 +18,11 @@ use netring::monitor::{Dispatcher, HandlerRegistry, Monitor};
 use netring::protocol::event_typed::TcpRst;
 
 fn key() -> flowscope::extract::FiveTupleKey {
-    flowscope::extract::FiveTupleKey {
-        proto: L4Proto::Tcp,
-        a: SocketAddr::new(IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1)), 5555),
-        b: SocketAddr::new(IpAddr::V4(Ipv4Addr::new(10, 0, 0, 2)), 80),
-    }
+    flowscope::extract::FiveTupleKey::new(
+        L4Proto::Tcp,
+        SocketAddr::new(IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1)), 5555),
+        SocketAddr::new(IpAddr::V4(Ipv4Addr::new(10, 0, 0, 2)), 80),
+    )
 }
 
 #[test]

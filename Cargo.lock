@@ -1373,9 +1373,9 @@ dependencies = [
 
 [[package]]
 name = "flowscope"
-version = "0.19.0"
+version = "0.20.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "3e195b5530b4dbe7c2e7bf06130f25c83781f4748e5fec3ebdce665ab9e9f574"
+checksum = "f7f23396803cb35a8759a07ad28e3d5ee7119219cc1a0e114e9c63c4a564c568"
 dependencies = [
  "ahash",
  "arrayvec",
@@ -1394,6 +1394,7 @@ dependencies = [
  "radius-parser",
  "serde",
  "serde_json",
+ "sha1",
  "sha2",
  "simple-dns",
  "smallvec",
@@ -3262,6 +3263,17 @@ dependencies = [
  "ryu",
  "serde",
  "unsafe-libyaml-norway",
+]
+
+[[package]]
+name = "sha1"
+version = "0.10.6"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "e3bf829a2d51ab4a5ddf1352d8470c140cadc8301b2ae1789db023f01cedd6ba"
+dependencies = [
+ "cfg-if",
+ "cpufeatures",
+ "digest",
 ]
 
 [[package]]

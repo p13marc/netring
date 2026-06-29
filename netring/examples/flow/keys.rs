@@ -50,12 +50,12 @@ impl FlowExtractor for ServicePort {
         } else {
             Orientation::Reverse
         };
-        Some(Extracted {
-            key: ServiceKey { proto, port },
+        Some(Extracted::new(
+            ServiceKey { proto, port },
             orientation,
-            l4: Some(proto),
-            tcp: None,
-        })
+            Some(proto),
+            None,
+        ))
     }
 }
 

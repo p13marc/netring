@@ -225,6 +225,92 @@ impl AsyncMultiCapture {
     }
 }
 
+// ── AsyncXdpMultiCapture (issue #104) ────────────────────────────────────
+
+/// Fan-in over multiple **AF_XDP** captures — one multi-queue
+/// [`AsyncXdpCapture`](crate::AsyncXdpCapture) per interface (issue #104).
+///
+/// The AF_XDP analogue of [`AsyncMultiCapture`]: `N` NICs × `M` RX queues
+/// compose with no new merge machinery — each interface's queues are already
+/// unified inside its [`AsyncXdpCapture`](crate::AsyncXdpCapture), and the
+/// interfaces are then fanned
+/// through the same `SelectState` round-robin as the AF_PACKET path.
+///
+/// This is the motivating type for **tapped links**, where TX and RX arrive
+/// on two different NICs.
+///
+/// ```no_run
+/// # use futures::StreamExt;
+/// # use netring::AsyncXdpMultiCapture;
+/// # use netring::flow::extract::FiveTuple;
+/// # async fn _ex() -> Result<(), Box<dyn std::error::Error>> {
+/// let multi = AsyncXdpMultiCapture::open(["eth0", "eth1"])?;
+/// let mut stream = multi.flow_stream(FiveTuple::bidirectional());
+/// while let Some(evt) = stream.next().await {
+///     let tagged = evt?;
+///     let _ = tagged.source_idx; // interface index
+///     # break;
+/// }
+/// # Ok(()) }
+/// ```
+#[cfg(all(feature = "af-xdp", feature = "xdp-loader"))]
+pub struct AsyncXdpMultiCapture {
+    captures: Vec<crate::AsyncXdpCapture>,
+    labels: Vec<String>,
+}
+
+#[cfg(all(feature = "af-xdp", feature = "xdp-loader"))]
+impl AsyncXdpMultiCapture {
+    /// Open one multi-queue AF_XDP capture per interface (all RSS queues,
+    /// promiscuous — the [`AsyncXdpCapture::open`](crate::AsyncXdpCapture::open)
+    /// recipe). Labels are the interface names.
+    ///
+    /// # Errors
+    ///
+    /// Returns the first error encountered; earlier captures are dropped.
+    pub fn open<I, S>(interfaces: I) -> Result<Self, Error>
+    where
+        I: IntoIterator<Item = S>,
+        S: AsRef<str>,
+    {
+        let mut captures = Vec::new();
+        let mut labels = Vec::new();
+        for iface in interfaces {
+            let name = iface.as_ref();
+            captures.push(crate::AsyncXdpCapture::open(name)?);
+            labels.push(name.to_string());
+        }
+        AsyncMultiCapture::validate_nonempty(&captures)?;
+        Ok(Self { captures, labels })
+    }
+
+    /// Build from already-opened captures + explicit labels (advanced
+    /// composition; e.g. captures built with custom queue sets).
+    pub fn from_captures(captures: Vec<crate::AsyncXdpCapture>, labels: Vec<String>) -> Self {
+        Self { captures, labels }
+    }
+
+    /// Number of underlying captures (interfaces).
+    pub fn len(&self) -> usize {
+        self.captures.len()
+    }
+
+    /// True if there are no captures.
+    pub fn is_empty(&self) -> bool {
+        self.captures.is_empty()
+    }
+
+    /// Label (interface name) for source `i`.
+    pub fn label(&self, i: usize) -> Option<&str> {
+        self.labels.get(i).map(|s| s.as_str())
+    }
+
+    /// Consume into the underlying captures + labels.
+    pub fn into_captures(self) -> (Vec<crate::AsyncXdpCapture>, Vec<String>) {
+        (self.captures, self.labels)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

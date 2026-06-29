@@ -19,11 +19,11 @@ use netring::anomaly::sink::AnomalySink;
 use netring::layer::{DedupeAnomalies, Layer, MinSeverity, RateLimitAnomalies};
 
 fn key() -> flowscope::extract::FiveTupleKey {
-    flowscope::extract::FiveTupleKey {
-        proto: flowscope::L4Proto::Tcp,
-        a: SocketAddr::new(IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1)), 12345),
-        b: SocketAddr::new(IpAddr::V4(Ipv4Addr::new(10, 0, 0, 2)), 80),
-    }
+    flowscope::extract::FiveTupleKey::new(
+        flowscope::L4Proto::Tcp,
+        SocketAddr::new(IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1)), 12345),
+        SocketAddr::new(IpAddr::V4(Ipv4Addr::new(10, 0, 0, 2)), 80),
+    )
 }
 
 /// Build the chain `outer.wrap(... inner.wrap(base))`. Matches

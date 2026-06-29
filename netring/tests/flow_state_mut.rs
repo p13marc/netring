@@ -23,11 +23,11 @@ struct PerFlowBytes {
 }
 
 fn key() -> flowscope::extract::FiveTupleKey {
-    flowscope::extract::FiveTupleKey {
-        proto: flowscope::L4Proto::Tcp,
-        a: SocketAddr::new(IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1)), 12345),
-        b: SocketAddr::new(IpAddr::V4(Ipv4Addr::new(10, 0, 0, 2)), 80),
-    }
+    flowscope::extract::FiveTupleKey::new(
+        flowscope::L4Proto::Tcp,
+        SocketAddr::new(IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1)), 12345),
+        SocketAddr::new(IpAddr::V4(Ipv4Addr::new(10, 0, 0, 2)), 80),
+    )
 }
 
 #[test]
@@ -151,11 +151,11 @@ fn flow_state_mut_returns_none_for_unregistered_type() {
 
 #[test]
 fn flow_state_separate_per_key() {
-    let key2 = flowscope::extract::FiveTupleKey {
-        proto: flowscope::L4Proto::Tcp,
-        a: SocketAddr::new(IpAddr::V4(Ipv4Addr::new(10, 0, 1, 1)), 12345),
-        b: SocketAddr::new(IpAddr::V4(Ipv4Addr::new(10, 0, 1, 2)), 443),
-    };
+    let key2 = flowscope::extract::FiveTupleKey::new(
+        flowscope::L4Proto::Tcp,
+        SocketAddr::new(IpAddr::V4(Ipv4Addr::new(10, 0, 1, 1)), 12345),
+        SocketAddr::new(IpAddr::V4(Ipv4Addr::new(10, 0, 1, 2)), 443),
+    );
 
     let mut state = StateMap::default();
     let mut sink = NoopSink;

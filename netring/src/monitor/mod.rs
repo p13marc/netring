@@ -57,6 +57,9 @@ pub mod arp;
 pub mod asset;
 // L3 IPv6 Neighbor Discovery — the ARP sibling (feature `ndp`).
 pub mod async_handler;
+/// Declarative backend selection (`Backend::Auto` + the `capture()` facade,
+/// issue #106).
+pub mod auto;
 pub(crate) mod backend;
 #[cfg(feature = "cdp")]
 pub mod cdp;
@@ -99,6 +102,7 @@ pub use crate::stats::DropBreakdown;
 #[cfg(feature = "arp")]
 pub use arp::{ArpAnomaly, ArpAnomalyKind};
 pub use async_handler::{AsyncHandler, BoxFuture};
+pub use auto::{Backend, Fanout};
 pub use dispatcher::{Dispatcher, MAX_EVENT_TYPES};
 pub use effect::{EffectHandler, Effects};
 #[cfg(all(feature = "http", feature = "ja4plus"))]
@@ -715,6 +719,10 @@ pub struct MonitorBuilder {
     /// 0.24 Phase B: AF_XDP capture interfaces. See [`Self::xdp_interface`].
     #[cfg(feature = "af-xdp")]
     xdp_interfaces: Vec<XdpIfaceSpec>,
+    /// Issue #106: `(iface, plan)` for every source added via
+    /// [`Self::capture`] — the resolved backend description, surfaced through
+    /// [`Self::resolved_capture_plan`] so operators can see what `Auto` picked.
+    resolved_backends: Vec<(String, String)>,
     driver_builder: Option<DriverBuilder<FiveTuple>>,
     protocol_slots: Vec<Box<dyn ProtocolSlot>>,
     handlers: HandlerRegistry,
@@ -989,6 +997,21 @@ impl MonitorBuilder {
         self
     }
 
+    /// Enable SYN-based TCP initiator inference (flowscope 0.20 #122).
+    /// When on, a flow whose first observed packet is a `SYN+ACK` —
+    /// the response delivered before the request, the classic
+    /// tap-merge / two-queue race — has its inferred initiator flipped
+    /// so the SYN sender is labelled `Initiator`, and
+    /// `FlowStats::direction_flipped` is set (the analogue of Zeek's
+    /// `conn.log` `^`). Recommended when capturing across multiple
+    /// AF_XDP queues or a TX/RX-split tap; a no-op for a single tap
+    /// (where the SYN is always seen first). Default off — the
+    /// race-immune canonical `orientation` axis is correct regardless.
+    pub fn infer_tcp_initiator(mut self, enable: bool) -> Self {
+        self.tracker_config.infer_tcp_initiator = enable;
+        self
+    }
+
     /// Issue #34: inspect the flow-tracker config this builder will apply
     /// (overlap policy, memcap, active/idle threshold) — for tests / debugging.
     pub fn tracker_config(&self) -> &flowscope::FlowTrackerConfig {
@@ -1017,6 +1040,80 @@ impl MonitorBuilder {
     /// Single-interface convenience.
     pub fn interface(self, iface: impl Into<String>) -> Self {
         self.interfaces([iface])
+    }
+
+    /// Issue #106: the **declarative** capture facade — "just capture this
+    /// interface well" in one line, instead of choosing among `interface` /
+    /// `xdp_interface_loaded` / `xdp_queues` / fanout by hand.
+    ///
+    /// [`Backend::Auto`] probes the host + interface and picks the best
+    /// available backend (AF_XDP-loaded when the `xdp-loader` feature is
+    /// compiled in, else AF_PACKET), **logging the chosen plan** at
+    /// `target: "netring::monitor::auto"` and recording it for
+    /// [`resolved_capture_plan`](Self::resolved_capture_plan). Pass an explicit
+    /// [`Backend`] to pin the choice.
+    ///
+    /// Composes with itself (call once per interface) and with the lower-level
+    /// `interface` / `xdp_interface_loaded` methods. `capture()` is pure sugar:
+    /// it wires the same `interfaces` / `xdp_interfaces` / `xdp_queues` /
+    /// `fanout` fields the explicit methods set.
+    ///
+    /// ```ignore
+    /// use netring::monitor::Backend;
+    /// Monitor::builder()
+    ///     .capture("eth0", Backend::Auto)
+    ///     .protocol::<Tcp>()
+    ///     .build()?;
+    /// ```
+    pub fn capture(mut self, iface: impl Into<String>, backend: Backend) -> Self {
+        let iface = iface.into();
+        let resolved = auto::resolve(&iface, &backend, &auto::SystemProbe);
+        tracing::info!(
+            target: "netring::monitor::auto",
+            iface = %iface,
+            plan = %resolved.description,
+            "capture backend selected",
+        );
+        self.resolved_backends
+            .push((iface.clone(), resolved.description));
+        match resolved.backend {
+            Backend::AfPacket { fanout } => {
+                self.interfaces.push(iface);
+                if let Some(spec) = auto::fanout_to_spec(fanout) {
+                    self.fanout = Some(spec);
+                }
+            }
+            #[cfg(all(feature = "af-xdp", feature = "xdp-loader"))]
+            Backend::AfXdp { queues } => {
+                self.xdp_interfaces.push(XdpIfaceSpec {
+                    iface,
+                    self_load: true,
+                    queues: queues.clone(),
+                });
+                self.xdp_queues = queues;
+            }
+            // Offline replay: wire the existing pcap-source flow. `iface` is
+            // kept only as the plan label (there is no live ring). Drive the
+            // built Monitor with `replay()`, not `run_for`.
+            #[cfg(all(feature = "pcap", feature = "tokio"))]
+            Backend::Pcap { path, speed_factor } => {
+                self.pcap_source_path = Some(path);
+                if let Some(f) = speed_factor {
+                    self.pcap_speed_factor = Some(f);
+                }
+            }
+            // `resolve()` never returns `Auto`.
+            Backend::Auto => unreachable!("auto::resolve resolves Auto to a concrete backend"),
+        }
+        self
+    }
+
+    /// Issue #106: the resolved backend plan for every source added via
+    /// [`capture`](Self::capture), as `(interface, description)` pairs — so an
+    /// operator (or a test) can assert/observe what `Backend::Auto` chose
+    /// without scraping logs. Empty if `capture()` was never called.
+    pub fn resolved_capture_plan(&self) -> &[(String, String)] {
+        &self.resolved_backends
     }
 
     /// 0.24 Phase B: add an **AF_XDP** capture interface (feature
@@ -3253,6 +3350,58 @@ mod tests {
             crate::error::Error::Build(BuildError::NoInterface) => {}
             other => panic!("expected NoInterface, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn capture_auto_records_plan_and_wires_one_source() {
+        // Issue #106: the declarative facade resolves `Auto`, records the plan,
+        // and wires exactly one capture source (cap-free — no bind).
+        let b = Monitor::builder().capture("lo", Backend::Auto);
+        let plan = b.resolved_capture_plan();
+        assert_eq!(plan.len(), 1);
+        assert_eq!(plan[0].0, "lo");
+        assert!(!plan[0].1.is_empty(), "plan description must be non-empty");
+
+        #[cfg(all(feature = "af-xdp", feature = "xdp-loader"))]
+        let wired = b.interfaces.len() + b.xdp_interfaces.len();
+        #[cfg(not(all(feature = "af-xdp", feature = "xdp-loader")))]
+        let wired = b.interfaces.len();
+        assert_eq!(wired, 1, "exactly one source wired");
+    }
+
+    #[test]
+    fn capture_explicit_af_packet_fanout_wires_fanout() {
+        // Issue #106: an explicit backend pins the choice and wires the
+        // matching fields directly.
+        let b = Monitor::builder().capture("lo", Backend::af_packet_fanout(Fanout::Cpu(0x10)));
+        assert_eq!(b.interfaces, vec!["lo".to_string()]);
+        assert_eq!(b.fanout, Some((crate::config::FanoutMode::Cpu, 0x10)));
+        assert_eq!(b.resolved_capture_plan().len(), 1);
+    }
+
+    #[cfg(all(feature = "pcap", feature = "tokio"))]
+    #[test]
+    fn capture_pcap_backend_wires_offline_source_and_records_plan() {
+        // Issue #106 live-Pcap arm: the offline source is reachable through the
+        // same declarative facade + observable in the resolved plan.
+        let b = Monitor::builder().capture("trace-1", Backend::pcap_at_speed("/tmp/x.pcap", 2.0));
+        assert_eq!(
+            b.pcap_source_path.as_deref(),
+            Some(std::path::Path::new("/tmp/x.pcap")),
+        );
+        assert_eq!(b.pcap_speed_factor, Some(2.0));
+        // No live interface is wired (replay drives it, not run_for).
+        assert!(b.interfaces.is_empty());
+        let plan = b.resolved_capture_plan();
+        assert_eq!(plan.len(), 1);
+        assert_eq!(plan[0].0, "trace-1");
+        assert!(
+            plan[0].1.contains("offline pcap replay") && plan[0].1.contains("2x"),
+            "plan = {}",
+            plan[0].1,
+        );
+        // build() relaxes NoInterface when a pcap source is set.
+        assert!(b.build().is_ok());
     }
 
     #[test]

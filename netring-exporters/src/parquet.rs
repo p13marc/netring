@@ -195,7 +195,7 @@ impl<W: Write + Send> ParquetFlowExporter<W> {
 
 impl<W: Write + Send> FlowExporter for ParquetFlowExporter<W> {
     fn export(&mut self, record: &FlowRecord) {
-        self.buffer.push(*record);
+        self.buffer.push(record.clone());
         if self.buffer.len() >= self.batch_size
             && let Err(e) = self.write_buffered()
         {
@@ -244,6 +244,7 @@ mod tests {
             start: Timestamp::new(1_700_000_000, 0),
             end: Timestamp::new(1_700_000_005, 250),
             reason: None,
+            community_id: None,
         }
     }
 

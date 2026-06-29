@@ -131,11 +131,11 @@ mod tests {
     use crate::protocol::event_typed::FlowPacket;
 
     fn key(proto: L4Proto, dport: u16) -> flowscope::extract::FiveTupleKey {
-        flowscope::extract::FiveTupleKey {
+        flowscope::extract::FiveTupleKey::new(
             proto,
-            a: SocketAddr::new(IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1)), 40000),
-            b: SocketAddr::new(IpAddr::V4(Ipv4Addr::new(10, 0, 0, 2)), dport),
-        }
+            SocketAddr::new(IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1)), 40000),
+            SocketAddr::new(IpAddr::V4(Ipv4Addr::new(10, 0, 0, 2)), dport),
+        )
     }
 
     #[test]

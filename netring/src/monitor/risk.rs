@@ -129,15 +129,17 @@ mod tests {
         use bytes::Bytes;
         use flowscope::http::{HttpMessage, HttpRequest, HttpVersion};
 
-        let req = |auth: &'static [u8]| HttpRequest {
-            method: Bytes::from_static(b"GET"),
-            path: Bytes::from_static(b"/"),
-            version: HttpVersion::Http1_1,
-            headers: vec![(
-                Bytes::from_static(b"Authorization"),
-                Bytes::from_static(auth),
-            )],
-            body: Bytes::new(),
+        let req = |auth: &'static [u8]| {
+            HttpRequest::new(
+                Bytes::from_static(b"GET"),
+                Bytes::from_static(b"/"),
+                HttpVersion::Http1_1,
+                vec![(
+                    Bytes::from_static(b"Authorization"),
+                    Bytes::from_static(auth),
+                )],
+                Bytes::new(),
+            )
         };
 
         let basic =

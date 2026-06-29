@@ -38,10 +38,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     use std::net::IpAddr;
     use std::time::{Duration, Instant};
 
-    use flowscope::SessionEvent;
     use flowscope::dns::{DnsMessage, DnsUdpParser};
     use futures::StreamExt;
     use netring::correlate::TimeBucketedCounter;
+    use netring::flow::SessionEvent;
     use netring::flow::extract::FiveTuple;
     use netring::{AsyncCapture, BpfFilter};
 

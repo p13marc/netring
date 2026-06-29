@@ -39,7 +39,7 @@ fn subscribe_with_broadcast_succeeds() {
     // dispatcher's clone (which sits behind protocol_slots).
     assert_eq!(stream.pending(), 0);
     assert!(stream.subscribers() >= 1);
-    assert_eq!(stream.parser_kind(), "http/1");
+    assert_eq!(stream.parser_kind().as_str(), "http/1");
 }
 
 #[test]

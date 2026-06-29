@@ -156,6 +156,53 @@ impl AsyncXdpCapture {
         c
     }
 
+    /// Source-agnostic drain backing the `AsyncFlowSource` impl (issue
+    /// #104): scan from the cursor for the first queue with real ring data,
+    /// drain one batch into `sink` as zero-copy `SourcePacket`s, and advance
+    /// the cursor. Disjoint field access (`sockets` vs `cursor`) keeps the
+    /// borrow checker happy — which a `&mut self` accessor method would not.
+    pub(crate) fn poll_drain_views(
+        &mut self,
+        cx: &mut Context<'_>,
+        sink: &mut dyn FnMut(crate::async_adapters::flow_source::SourcePacket<'_>),
+    ) -> Poll<Result<crate::async_adapters::flow_source::DrainOutcome>> {
+        use crate::async_adapters::flow_source::{DrainOutcome, SourcePacket, view_from_parts};
+        let n = self.sockets.len();
+        for off in 0..n {
+            let i = (self.cursor + off) % n;
+            match self.sockets[i].poll_read_ready_mut(cx) {
+                Poll::Ready(Ok(mut guard)) => {
+                    if guard.get_inner_mut().rx_poll_ready() {
+                        let inner = guard.get_inner_mut();
+                        if let Some(batch) = inner.next_batch() {
+                            for pkt in &batch {
+                                let view =
+                                    view_from_parts(pkt.data(), pkt.timestamp(), pkt.rx_metadata());
+                                sink(SourcePacket {
+                                    view,
+                                    data: pkt.data(),
+                                    // AF_XDP carries no AF_PACKET-style
+                                    // direction; loopback dedup is an
+                                    // AF_PACKET concern.
+                                    direction: crate::packet::PacketDirection::Unknown(0),
+                                    original_len: pkt.len(),
+                                });
+                            }
+                            drop(batch);
+                            self.cursor = (i + 1) % n;
+                            return Poll::Ready(Ok(DrainOutcome::Drained));
+                        }
+                    }
+                    // Empty / spurious wake: clear so the reactor re-arms.
+                    guard.clear_ready();
+                }
+                Poll::Ready(Err(e)) => return Poll::Ready(Err(Error::Io(e))),
+                Poll::Pending => {}
+            }
+        }
+        Poll::Pending
+    }
+
     /// Aggregate per-queue `XDP_STATISTICS` into both the unified
     /// [`CaptureStats`](crate::stats::CaptureStats) **and** the
     /// un-collapsed [`DropBreakdown`](crate::stats::DropBreakdown) in one
@@ -169,5 +216,13 @@ impl AsyncXdpCapture {
             agg = agg.saturating_add(s.statistics()?);
         }
         Ok((agg.to_capture_stats(), agg.into()))
+    }
+
+    /// Unified [`CaptureStats`](crate::stats::CaptureStats) summed across all
+    /// per-queue sockets (issue #104). The AF_XDP analogue of the AF_PACKET
+    /// capture-stats accessors, so the fan-in can report per-source ring
+    /// stats.
+    pub fn capture_stats(&self) -> Result<crate::stats::CaptureStats> {
+        self.detailed_stats().map(|(s, _)| s)
     }
 }

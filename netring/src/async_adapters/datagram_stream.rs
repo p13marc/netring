@@ -10,7 +10,7 @@
 //! # use futures::StreamExt;
 //! # use netring::AsyncCapture;
 //! # use netring::flow::extract::FiveTuple;
-//! # use flowscope::{DatagramParser, FlowSide, SessionEvent, Timestamp};
+//! # use flowscope::{DatagramParser, FlowSide, Timestamp};
 //! # #[derive(Default, Clone)]
 //! # struct MyParser;
 //! # impl DatagramParser for MyParser {
@@ -34,10 +34,12 @@ use std::time::Duration;
 use ahash::RandomState;
 use flowscope::{
     DatagramParser, DatagramParserFactory, FlowEvent, FlowExtractor, FlowTracker,
-    FlowTrackerConfig, L4Proto, Orientation, SessionEvent, Timestamp,
+    FlowTrackerConfig, L4Proto, Orientation, Timestamp,
 };
 use futures_core::Stream;
 
+use crate::async_adapters::flow_source::{AsyncFlowSource, DrainOutcome, SourcePacket};
+use crate::async_adapters::session_event::SessionEvent;
 use crate::async_adapters::tokio_adapter::AsyncCapture;
 use crate::dedup::Dedup;
 use crate::error::Error;
@@ -53,14 +55,16 @@ use crate::traits::PacketSource;
 /// ignored on this stream (they apply to TCP reassembly under
 /// [`SessionStream`](super::session_stream::SessionStream) only). The
 /// per-flow LRU eviction (`max_flows`) and idle timeouts still apply.
-pub struct DatagramStream<S, E, F>
+///
+/// Generic over the packet source `C` (issue #104): an [`AsyncCapture`]
+/// (AF_PACKET) or an [`AsyncXdpCapture`](crate::AsyncXdpCapture) (AF_XDP).
+pub struct DatagramStream<C, E, F>
 where
-    S: PacketSource + std::os::unix::io::AsRawFd,
     E: FlowExtractor,
     E::Key: Eq + std::hash::Hash + Clone + Send + 'static,
     F: DatagramParserFactory<E::Key>,
 {
-    cap: AsyncCapture<S>,
+    cap: C,
     tracker: FlowTracker<E, ()>,
     factory: F,
     parsers: HashMap<E::Key, F::Parser, RandomState>,
@@ -74,9 +78,8 @@ where
     tap: Option<crate::pcap_tap::PcapTap>,
 }
 
-impl<S, E, F> DatagramStream<S, E, F>
+impl<C, E, F> DatagramStream<C, E, F>
 where
-    S: PacketSource + std::os::unix::io::AsRawFd,
     E: FlowExtractor,
     E::Key: Eq + std::hash::Hash + Clone + Send + 'static,
     F: DatagramParserFactory<E::Key>,
@@ -85,7 +88,7 @@ where
     /// without rebuilding it. Preserves `idle_timeout_fn` and any
     /// in-flight flow state from the source `FlowStream`.
     pub(crate) fn from_tracker(
-        cap: AsyncCapture<S>,
+        cap: C,
         tracker: FlowTracker<E, ()>,
         factory: F,
         dedup: Option<Dedup>,
@@ -228,9 +231,28 @@ where
     }
 }
 
-impl<S, E, F> Stream for DatagramStream<S, E, F>
+/// AF_XDP-source accessors (issue #104).
+#[cfg(all(feature = "af-xdp", feature = "xdp-loader"))]
+impl<E, F> DatagramStream<crate::AsyncXdpCapture, E, F>
 where
-    S: PacketSource + std::os::unix::io::AsRawFd + Unpin,
+    E: FlowExtractor,
+    E::Key: Eq + std::hash::Hash + Clone + Send + 'static,
+    F: DatagramParserFactory<E::Key>,
+{
+    /// Borrow the inner multi-queue AF_XDP capture.
+    pub fn xdp_capture(&self) -> &crate::AsyncXdpCapture {
+        &self.cap
+    }
+
+    /// Unified kernel-ring stats summed across the capture's RX queues.
+    pub fn capture_stats(&self) -> Result<crate::stats::CaptureStats, Error> {
+        self.cap.capture_stats()
+    }
+}
+
+impl<C, E, F> Stream for DatagramStream<C, E, F>
+where
+    C: AsyncFlowSource + Unpin,
     E: FlowExtractor + Unpin,
     E::Key: Eq + std::hash::Hash + Clone + Send + 'static + Unpin,
     F: DatagramParserFactory<E::Key> + Unpin,
@@ -262,12 +284,21 @@ where
                 let mut tick_scratch = Vec::new();
                 for (key, parser) in this.parsers.iter_mut() {
                     let parser_kind = parser.parser_kind();
+                    // `on_tick` messages are initiator-attributed; the
+                    // initiator's canonical orientation is the flow's
+                    // `initiator_orientation` (flowscope 0.20 #118).
+                    let orientation = this
+                        .tracker
+                        .get(key)
+                        .map(|e| e.initiator_orientation())
+                        .unwrap_or_default();
                     tick_scratch.clear();
                     parser.on_tick(now, &mut tick_scratch);
                     for m in tick_scratch.drain(..) {
                         this.pending.push_back(SessionEvent::Application {
                             key: key.clone(),
                             side: flowscope::FlowSide::Initiator,
+                            orientation,
                             message: m,
                             ts: now,
                             parser_kind,
@@ -283,97 +314,101 @@ where
                 }
             }
 
-            let mut guard = match this.cap.poll_read_ready_mut(cx) {
-                Poll::Ready(Ok(g)) => g,
-                Poll::Ready(Err(e)) => return Poll::Ready(Some(Err(Error::Io(e)))),
-                Poll::Pending => return Poll::Pending,
-            };
+            // Disjoint field borrows so the sink closure can feed the tracker
+            // + parsers while `cap` is borrowed by `poll_drain`.
+            let cap = &mut this.cap;
+            let tracker = &mut this.tracker;
+            let parsers = &mut this.parsers;
+            let factory = &mut this.factory;
+            let pending = &mut this.pending;
+            let dedup = &mut this.dedup;
+            let monotonic_ts = &mut this.monotonic_ts;
+            #[cfg(feature = "pcap")]
+            let tap = &mut this.tap;
+            #[cfg(feature = "pcap")]
+            let mut tap_error: Option<Error> = None;
 
-            let got_batch = {
-                let inner = guard.get_inner_mut();
-                if let Some(batch) = inner.next_batch() {
-                    #[cfg(feature = "pcap")]
-                    let mut tap_error: Option<Error> = None;
-                    for pkt in &batch {
-                        // Plan 17: optional pre-tracking dedup.
-                        if let Some(d) = this.dedup.as_mut()
-                            && !d.keep(&pkt)
-                        {
-                            continue;
-                        }
+            let outcome = cap.poll_drain(cx, &mut |sp: SourcePacket<'_>| {
+                // Plan 17: optional pre-tracking dedup (on the unclamped ts).
+                if let Some(d) = dedup.as_mut()
+                    && !d.keep_raw(sp.data, sp.direction, sp.view.timestamp)
+                {
+                    return;
+                }
 
-                        // Plan 20: pcap tap.
-                        #[cfg(feature = "pcap")]
-                        if let Some(tap) = this.tap.as_mut()
-                            && let Some(err) = tap.write_or_handle(&pkt)
-                        {
-                            tap_error = Some(err);
-                            break;
-                        }
-
-                        let view = crate::async_adapters::flow_stream::clamp_view(
-                            pkt.view(),
-                            &mut this.monotonic_ts,
-                        );
-                        let view_ts = view.timestamp;
-                        let frame = view.frame;
-                        // Extract before track() so we have orientation
-                        // (FlowExtractor::extract is cheap; double call OK).
-                        let extracted = this.tracker.extractor().extract(view);
-                        let evts = this.tracker.track(view);
-                        for ev in evts {
-                            convert_event(ev, &mut this.parsers, &mut this.pending);
-                        }
-
-                        // For UDP packets, look for an L4 payload and feed the parser.
-                        if let Some(extracted) = extracted
-                            && extracted.l4 == Some(L4Proto::Udp)
-                            && let Some(payload) = peek_udp_payload(frame)
-                        {
-                            let key = &extracted.key;
-                            // Initiator if same orientation as the recorded flow's first
-                            // direction, else Responder. Use the FlowSide derived from the
-                            // tracker's recorded orientation: the tracker just set it.
-                            let side = match extracted.orientation {
-                                Orientation::Forward => flowscope::FlowSide::Initiator,
-                                Orientation::Reverse => flowscope::FlowSide::Responder,
-                            };
-                            let parser = this
-                                .parsers
-                                .entry(key.clone())
-                                .or_insert_with(|| this.factory.new_parser(key));
-                            let parser_kind = parser.parser_kind();
-                            let mut messages = Vec::new();
-                            parser.parse(payload, side, view_ts, &mut messages);
-                            for message in messages {
-                                this.pending.push_back(SessionEvent::Application {
-                                    key: key.clone(),
-                                    side,
-                                    message,
-                                    ts: view_ts,
-                                    parser_kind,
-                                });
-                            }
-                        }
+                // Plan 20: pcap tap.
+                #[cfg(feature = "pcap")]
+                if let Some(t) = tap.as_mut() {
+                    if tap_error.is_some() {
+                        return;
                     }
-                    drop(batch);
+                    if let Some(err) =
+                        t.write_raw_or_handle(sp.data, sp.view.timestamp, sp.original_len)
+                    {
+                        tap_error = Some(err);
+                        return;
+                    }
+                }
+
+                let view = crate::async_adapters::flow_stream::clamp_view(sp.view, monotonic_ts);
+                let view_ts = view.timestamp;
+                let frame = view.frame;
+                // Extract before track() so we have orientation
+                // (FlowExtractor::extract is cheap; `PacketView` is `Copy`).
+                let extracted = tracker.extractor().extract(view);
+                let evts = tracker.track(view);
+                for ev in evts {
+                    convert_event(ev, parsers, pending);
+                }
+
+                // For UDP packets, look for an L4 payload and feed the parser.
+                if let Some(extracted) = extracted
+                    && extracted.l4 == Some(L4Proto::Udp)
+                    && let Some(payload) = peek_udp_payload(frame)
+                {
+                    let key = &extracted.key;
+                    // Initiator if same orientation as the recorded flow's
+                    // first direction, else Responder.
+                    let side = match extracted.orientation {
+                        Orientation::Forward => flowscope::FlowSide::Initiator,
+                        Orientation::Reverse => flowscope::FlowSide::Responder,
+                    };
+                    let parser = parsers
+                        .entry(key.clone())
+                        .or_insert_with(|| factory.new_parser(key));
+                    let parser_kind = parser.parser_kind();
+                    let mut messages = Vec::new();
+                    parser.parse(payload, side, view_ts, &mut messages);
+                    for message in messages {
+                        pending.push_back(SessionEvent::Application {
+                            key: key.clone(),
+                            side,
+                            orientation: extracted.orientation,
+                            message,
+                            ts: view_ts,
+                            parser_kind,
+                        });
+                    }
+                }
+            });
+
+            match outcome {
+                Poll::Pending => return Poll::Pending,
+                Poll::Ready(Err(e)) => return Poll::Ready(Some(Err(Error::Io(e)))),
+                Poll::Ready(Ok(DrainOutcome::Drained)) =>
+                {
                     #[cfg(feature = "pcap")]
                     if let Some(err) = tap_error {
                         return Poll::Ready(Some(Err(err)));
                     }
-                    true
-                } else {
-                    false
                 }
-            };
-            if !got_batch {
-                guard.clear_ready();
+                Poll::Ready(Ok(DrainOutcome::Idle)) => {}
             }
         }
     }
 }
 
-fn convert_event<K, P>(
+pub(crate) fn convert_event<K, P>(
     ev: FlowEvent<K>,
     parsers: &mut HashMap<K, P, RandomState>,
     pending: &mut VecDeque<SessionEvent<K, P::Message>>,
@@ -382,8 +417,19 @@ fn convert_event<K, P>(
     P: DatagramParser,
 {
     match ev {
-        FlowEvent::Started { key, ts, .. } => {
-            pending.push_back(SessionEvent::Started { key, ts });
+        FlowEvent::Started {
+            key,
+            side,
+            orientation,
+            ts,
+            ..
+        } => {
+            pending.push_back(SessionEvent::Started {
+                key,
+                side,
+                orientation,
+                ts,
+            });
         }
         FlowEvent::Ended {
             key,
@@ -422,7 +468,7 @@ fn current_timestamp() -> Timestamp {
 
 /// Walk Eth → optional VLAN×2 → IPv4/IPv6 → UDP and return the UDP
 /// payload. Skips IP fragments and IPv6 extension headers.
-fn peek_udp_payload(frame: &[u8]) -> Option<&[u8]> {
+pub(crate) fn peek_udp_payload(frame: &[u8]) -> Option<&[u8]> {
     let mut offset = 14usize;
     if frame.len() < offset {
         return None;
@@ -483,7 +529,8 @@ fn peek_udp_payload(frame: &[u8]) -> Option<&[u8]> {
 
 use crate::async_adapters::stream_capture::{Sealed, StreamCapture};
 
-impl<S, E, F> Sealed for DatagramStream<S, E, F>
+// `StreamCapture` is AF_PACKET-only; the AF_XDP source has no `AsyncCapture`.
+impl<S, E, F> Sealed for DatagramStream<AsyncCapture<S>, E, F>
 where
     S: PacketSource + std::os::unix::io::AsRawFd,
     E: FlowExtractor,
@@ -492,7 +539,7 @@ where
 {
 }
 
-impl<S, E, F> StreamCapture for DatagramStream<S, E, F>
+impl<S, E, F> StreamCapture for DatagramStream<AsyncCapture<S>, E, F>
 where
     S: PacketSource + std::os::unix::io::AsRawFd,
     E: FlowExtractor,

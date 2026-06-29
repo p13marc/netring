@@ -10,7 +10,7 @@
 //! directly.
 
 // ─── Core builder + run modes ────────────────────────────────────
-pub use crate::monitor::{Handler, Monitor, MonitorBuilder};
+pub use crate::monitor::{Backend, Fanout, Handler, Monitor, MonitorBuilder};
 
 // ─── Async + middleware (Phase D) ────────────────────────────────
 pub use crate::monitor::AsyncHandler;

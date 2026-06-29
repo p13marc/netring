@@ -169,11 +169,11 @@ mod tests {
     use std::net::{IpAddr, Ipv4Addr, SocketAddr};
 
     fn key() -> flowscope::extract::FiveTupleKey {
-        flowscope::extract::FiveTupleKey {
-            proto: flowscope::L4Proto::Tcp,
-            a: SocketAddr::new(IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1)), 44321),
-            b: SocketAddr::new(IpAddr::V4(Ipv4Addr::new(203, 0, 113, 7)), 443),
-        }
+        flowscope::extract::FiveTupleKey::new(
+            flowscope::L4Proto::Tcp,
+            SocketAddr::new(IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1)), 44321),
+            SocketAddr::new(IpAddr::V4(Ipv4Addr::new(203, 0, 113, 7)), 443),
+        )
     }
 
     #[test]

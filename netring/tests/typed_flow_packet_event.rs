@@ -18,11 +18,11 @@ use netring::protocol::builtin::Tcp;
 use netring::protocol::event_typed::{FlowPacket, FlowTick, ParserClosed};
 
 fn key(proto: L4Proto) -> flowscope::extract::FiveTupleKey {
-    flowscope::extract::FiveTupleKey {
+    flowscope::extract::FiveTupleKey::new(
         proto,
-        a: SocketAddr::new(IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1)), 12345),
-        b: SocketAddr::new(IpAddr::V4(Ipv4Addr::new(10, 0, 0, 2)), 80),
-    }
+        SocketAddr::new(IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1)), 12345),
+        SocketAddr::new(IpAddr::V4(Ipv4Addr::new(10, 0, 0, 2)), 80),
+    )
 }
 
 fn fresh_ctx<'a>(
@@ -133,7 +133,7 @@ fn parser_closed_handler_observes_kind_and_reason() {
 
     let mut reg = HandlerRegistry::default();
     reg.register::<ParserClosed<Tcp>, _, _>(move |evt: &ParserClosed<Tcp>| {
-        *o.lock().unwrap() = Some((evt.parser_kind, evt.reason));
+        *o.lock().unwrap() = Some((evt.parser_kind.as_str(), evt.reason));
         Ok(())
     });
     let mut disp: Dispatcher = reg.into_dispatcher().unwrap();
@@ -146,7 +146,7 @@ fn parser_closed_handler_observes_kind_and_reason() {
 
     let evt = ParserClosed::<Tcp>::new(
         key(L4Proto::Tcp),
-        "http",
+        flowscope::ParserKind::Other("http"),
         EndReason::Fin,
         Timestamp::new(0, 0),
     );

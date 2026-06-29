@@ -116,6 +116,12 @@ fn to_ie_record(record: &FlowRecord) -> IeFlowRecord {
     rec.flow_start_milliseconds = ts_millis(record.start);
     rec.flow_end_milliseconds = ts_millis(record.end);
     rec.flow_end_reason = Some(flow_end_reason(record.reason));
+    // Carry the Community ID onto the canonical IE record for faithfulness
+    // (issue #33). It does **not** ride the wire under the default
+    // `FLOWSCOPE_TEMPLATE_FLOW_IPV4`/`_IPV6` templates — Community ID is not an
+    // IANA IE — so this is a no-op for the emitted bytes today; it keeps the
+    // mapping honest for any future template that adds an enterprise IE for it.
+    rec.community_id = record.community_id.clone();
     rec
 }
 
@@ -244,11 +250,11 @@ mod tests {
     use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr};
 
     fn v4_record() -> FlowRecord {
-        let key = FlowKey {
-            proto: L4Proto::Tcp,
-            a: SocketAddr::new(IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1)), 1234),
-            b: SocketAddr::new(IpAddr::V4(Ipv4Addr::new(10, 0, 0, 2)), 80),
-        };
+        let key = FlowKey::new(
+            L4Proto::Tcp,
+            SocketAddr::new(IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1)), 1234),
+            SocketAddr::new(IpAddr::V4(Ipv4Addr::new(10, 0, 0, 2)), 80),
+        );
         let mut s = FlowStats::default();
         s.packets_initiator = 5;
         s.packets_responder = 5;
@@ -300,6 +306,13 @@ mod tests {
         assert_eq!(rec.octet_total_count, 1000);
         assert_eq!(rec.packet_total_count, 10);
         assert_eq!(rec.flow_end_reason, Some(FlowEndReason::EndOfFlowDetected));
+        // Issue #33: the Community ID carries onto the canonical IE record
+        // (faithfulness — even though the default templates don't encode it).
+        assert!(
+            rec.community_id
+                .as_deref()
+                .is_some_and(|c| c.starts_with("1:"))
+        );
     }
 
     #[test]
@@ -359,11 +372,11 @@ mod tests {
 
     #[test]
     fn v6_record_uses_the_v6_template() {
-        let key = FlowKey {
-            proto: L4Proto::Udp,
-            a: SocketAddr::new(IpAddr::V6(Ipv6Addr::LOCALHOST), 5353),
-            b: SocketAddr::new(IpAddr::V6(Ipv6Addr::LOCALHOST), 53),
-        };
+        let key = FlowKey::new(
+            L4Proto::Udp,
+            SocketAddr::new(IpAddr::V6(Ipv6Addr::LOCALHOST), 5353),
+            SocketAddr::new(IpAddr::V6(Ipv6Addr::LOCALHOST), 53),
+        );
         let s = FlowStats::default();
         let rec = FlowRecord::from_ended(&key, &s, EndReason::IdleTimeout);
         assert_eq!(template_id(&rec), TEMPLATE_ID_FLOW_IPV6);

@@ -9,7 +9,10 @@
 
 use std::marker::PhantomData;
 
-use flowscope::{AnomalyKind, EndReason, FlowSide, FlowStats, L4Proto, TcpInfo, Timestamp};
+use flowscope::{
+    AnomalyKind, EndReason, FlowSide, FlowStats, L4Proto, Orientation, ParserKind, TcpInfo,
+    Timestamp,
+};
 
 use crate::protocol::{FlowKey, FlowProtocol, MessageProtocol, Protocol};
 
@@ -107,6 +110,11 @@ pub struct FlowStarted<P: Protocol> {
     pub key: FlowKey,
     /// L4 protocol — `Some(L4Proto::Tcp)` for `P = Tcp`, etc.
     pub l4: Option<L4Proto>,
+    /// Canonical, address-sorted direction of the opening packet
+    /// (flowscope 0.20 #118). Unlike a logical role, this is stable
+    /// across a tap-merge / multi-queue arrival race. Defaults to
+    /// [`Orientation::Forward`] for synthetically-constructed events.
+    pub orientation: Orientation,
     /// Timestamp of the first packet.
     pub ts: Timestamp,
     _marker: PhantomData<fn() -> P>,
@@ -130,9 +138,19 @@ impl<P: Protocol> FlowStarted<P> {
         Self {
             key,
             l4,
+            orientation: Orientation::Forward,
             ts,
             _marker: PhantomData,
         }
+    }
+
+    /// Set the canonical [`Orientation`] of the opening packet. Used
+    /// by the live dispatch path (flowscope 0.20 #118); synthetic
+    /// constructions default to [`Orientation::Forward`].
+    #[must_use]
+    pub fn with_orientation(mut self, orientation: Orientation) -> Self {
+        self.orientation = orientation;
+        self
     }
 }
 
@@ -153,6 +171,7 @@ impl<P: Protocol> std::fmt::Debug for FlowStarted<P> {
             .field("protocol", &P::NAME)
             .field("key", &self.key)
             .field("l4", &self.l4)
+            .field("orientation", &self.orientation)
             .field("ts", &self.ts)
             .finish()
     }
@@ -281,8 +300,14 @@ pub struct FlowPacket {
     pub proto: L4Proto,
     /// Flow key.
     pub key: FlowKey,
-    /// Initiator vs responder for this packet.
+    /// Initiator vs responder for this packet (logical role,
+    /// arrival-order-relative).
     pub side: FlowSide,
+    /// Canonical, address-sorted direction of this packet (flowscope
+    /// 0.20 #118) — stable across a tap-merge / multi-queue arrival
+    /// race, unlike `side`. Defaults to [`Orientation::Forward`] for
+    /// synthetically-constructed events.
+    pub orientation: Orientation,
     /// Packet length on the wire.
     pub len: usize,
     /// TCP-layer details when `emit_packet_details(true)` is set.
@@ -307,10 +332,20 @@ impl FlowPacket {
             proto,
             key,
             side,
+            orientation: Orientation::Forward,
             len,
             tcp,
             ts,
         }
+    }
+
+    /// Set the canonical [`Orientation`] of this packet. Used by the
+    /// live dispatch path (flowscope 0.20 #118); synthetic
+    /// constructions default to [`Orientation::Forward`].
+    #[must_use]
+    pub fn with_orientation(mut self, orientation: Orientation) -> Self {
+        self.orientation = orientation;
+        self
     }
 }
 
@@ -521,8 +556,11 @@ impl<P: Protocol> std::fmt::Debug for FlowTick<P> {
 pub struct ParserClosed<P: Protocol> {
     /// Flow key.
     pub key: FlowKey,
-    /// Parser kind tag (e.g. `"http"`, `"dns"`, `"tls"`).
-    pub parser_kind: &'static str,
+    /// Typed identity of the parser that closed (e.g.
+    /// [`ParserKind::Http1`], [`ParserKind::DnsUdp`]). Lifted from
+    /// `&'static str` to the typed enum in the flowscope 0.20
+    /// adoption (#109); `.as_str()` recovers the original slug.
+    pub parser_kind: ParserKind,
     /// Why the parser closed.
     pub reason: EndReason,
     /// Timestamp of the close.
@@ -534,7 +572,7 @@ impl<P: Protocol> ParserClosed<P> {
     /// Constructor exposed for integration tests / dispatch
     /// translation. Not part of the documented public API.
     #[doc(hidden)]
-    pub fn new(key: FlowKey, parser_kind: &'static str, reason: EndReason, ts: Timestamp) -> Self {
+    pub fn new(key: FlowKey, parser_kind: ParserKind, reason: EndReason, ts: Timestamp) -> Self {
         Self {
             key,
             parser_kind,
@@ -695,11 +733,11 @@ mod tests {
     #[test]
     fn flow_started_debug_includes_protocol_name() {
         use std::net::{IpAddr, Ipv4Addr, SocketAddr};
-        let key = flowscope::extract::FiveTupleKey {
-            proto: flowscope::L4Proto::Tcp,
-            a: SocketAddr::new(IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1)), 12345),
-            b: SocketAddr::new(IpAddr::V4(Ipv4Addr::new(10, 0, 0, 2)), 80),
-        };
+        let key = flowscope::extract::FiveTupleKey::new(
+            flowscope::L4Proto::Tcp,
+            SocketAddr::new(IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1)), 12345),
+            SocketAddr::new(IpAddr::V4(Ipv4Addr::new(10, 0, 0, 2)), 80),
+        );
         let evt = FlowStarted::<Tcp>::new(key, Some(flowscope::L4Proto::Tcp), Timestamp::new(0, 0));
         let s = format!("{evt:?}");
         assert!(s.contains("tcp"));

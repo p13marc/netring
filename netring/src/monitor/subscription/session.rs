@@ -62,6 +62,8 @@ impl L7Fields for flowscope::http::HttpMessage {
         match self {
             flowscope::http::HttpMessage::Request(req) => req.host(),
             flowscope::http::HttpMessage::Response(_) => None,
+            // flowscope 0.20 #78: HttpMessage is now #[non_exhaustive].
+            _ => None,
         }
     }
 }
@@ -162,11 +164,11 @@ mod tests {
     }
 
     fn tls_key() -> FlowKey {
-        flowscope::extract::FiveTupleKey {
-            proto: L4Proto::Tcp,
-            a: "10.0.0.1:54321".parse().unwrap(),
-            b: "10.0.0.2:443".parse().unwrap(),
-        }
+        flowscope::extract::FiveTupleKey::new(
+            L4Proto::Tcp,
+            "10.0.0.1:54321".parse().unwrap(),
+            "10.0.0.2:443".parse().unwrap(),
+        )
     }
 
     #[test]

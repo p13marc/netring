@@ -35,6 +35,7 @@ use flowscope::{
 use futures_core::Stream;
 
 use crate::async_adapters::async_reassembler::{AsyncReassembler, AsyncReassemblerFactory};
+use crate::async_adapters::flow_source::{AsyncFlowSource, DrainOutcome, SourcePacket};
 use crate::async_adapters::tokio_adapter::AsyncCapture;
 use crate::dedup::Dedup;
 use crate::error::Error;
@@ -66,13 +67,17 @@ where
 
 /// Stream of [`FlowEvent`]s produced by feeding captured packets
 /// through a [`FlowTracker`].
-pub struct FlowStream<S, E, U = (), R = NoReassembler>
+///
+/// Generic over the packet source `C` (issue #104): an
+/// [`AsyncCapture`] (AF_PACKET) or an
+/// [`AsyncXdpCapture`](crate::AsyncXdpCapture) (AF_XDP). Both drive the same
+/// tracking loop via the `AsyncFlowSource` trait.
+pub struct FlowStream<C, E, U = (), R = NoReassembler>
 where
-    S: PacketSource + std::os::unix::io::AsRawFd,
     E: FlowExtractor,
     U: Send + 'static,
 {
-    cap: AsyncCapture<S>,
+    cap: C,
     tracker: FlowTracker<E, U>,
     pending: VecDeque<FlowEvent<E::Key>>,
     sweep: tokio::time::Interval,
@@ -90,12 +95,11 @@ where
     tap: Option<crate::pcap_tap::PcapTap>,
 }
 
-impl<S, E> FlowStream<S, E, (), NoReassembler>
+impl<C, E> FlowStream<C, E, (), NoReassembler>
 where
-    S: PacketSource + std::os::unix::io::AsRawFd,
     E: FlowExtractor,
 {
-    pub(crate) fn new(cap: AsyncCapture<S>, extractor: E) -> Self {
+    pub(crate) fn new(cap: C, extractor: E) -> Self {
         let tracker = FlowTracker::new(extractor);
         let sweep_interval = tracker.config().sweep_interval;
         Self {
@@ -112,7 +116,7 @@ where
     }
 
     /// Attach per-flow user state.
-    pub fn with_state<U, F>(self, init: F) -> FlowStream<S, E, U, NoReassembler>
+    pub fn with_state<U, F>(self, init: F) -> FlowStream<C, E, U, NoReassembler>
     where
         U: Send + 'static,
         F: FnMut(&E::Key) -> U + Send + Sync + 'static,
@@ -133,9 +137,8 @@ where
     }
 }
 
-impl<S, E, U> FlowStream<S, E, U, NoReassembler>
+impl<C, E, U> FlowStream<C, E, U, NoReassembler>
 where
-    S: PacketSource + std::os::unix::io::AsRawFd,
     E: FlowExtractor,
     U: Send + 'static,
 {
@@ -147,7 +150,7 @@ where
     pub fn with_async_reassembler<F>(
         self,
         factory: F,
-    ) -> FlowStream<S, E, U, AsyncReassemblerSlot<E::Key, F>>
+    ) -> FlowStream<C, E, U, AsyncReassemblerSlot<E::Key, F>>
     where
         F: AsyncReassemblerFactory<E::Key>,
     {
@@ -170,9 +173,12 @@ where
     }
 }
 
-impl<S, E> FlowStream<S, E, (), NoReassembler>
+// L7 conversions are generic over the source `C` (issue #104): the
+// `SessionStream` / `DatagramStream` they build are now source-agnostic, so
+// AF_XDP (`AsyncXdpCapture`) gets `.session_stream()` / `.datagram_stream()`
+// for free — same as AF_PACKET.
+impl<C, E> FlowStream<C, E, (), NoReassembler>
 where
-    S: PacketSource + std::os::unix::io::AsRawFd,
     E: FlowExtractor,
     E::Key: Eq + std::hash::Hash + Clone + Send + 'static,
 {
@@ -180,7 +186,7 @@ where
     /// flow's TCP segments are dispatched to a per-flow
     /// [`flowscope::SessionParser`] built by `factory`; whatever
     /// messages the parser returns are surfaced as
-    /// [`flowscope::SessionEvent::Application`].
+    /// [`SessionEvent::Application`](crate::flow::SessionEvent::Application).
     ///
     /// The current tracker [`FlowTrackerConfig`] is preserved across
     /// the conversion — `cap.flow_stream(ext).with_config(cfg).session_stream(parser)`
@@ -188,7 +194,7 @@ where
     pub fn session_stream<F>(
         self,
         factory: F,
-    ) -> crate::async_adapters::session_stream::SessionStream<S, E, F>
+    ) -> crate::async_adapters::session_stream::SessionStream<C, E, F>
     where
         F: flowscope::SessionParserFactory<E::Key>,
     {
@@ -216,7 +222,7 @@ where
     pub fn datagram_stream<F>(
         self,
         factory: F,
-    ) -> crate::async_adapters::datagram_stream::DatagramStream<S, E, F>
+    ) -> crate::async_adapters::datagram_stream::DatagramStream<C, E, F>
     where
         F: flowscope::DatagramParserFactory<E::Key>,
     {
@@ -234,9 +240,8 @@ where
     }
 }
 
-impl<S, E, U, R> FlowStream<S, E, U, R>
+impl<C, E, U, R> FlowStream<C, E, U, R>
 where
-    S: PacketSource + std::os::unix::io::AsRawFd,
     E: FlowExtractor,
     U: Send + 'static,
 {
@@ -432,9 +437,9 @@ where
 
 // ── Stream impl: NoReassembler (plan 02 path) ──────────────────────
 
-impl<S, E, U> Stream for FlowStream<S, E, U, NoReassembler>
+impl<C, E, U> Stream for FlowStream<C, E, U, NoReassembler>
 where
-    S: PacketSource + std::os::unix::io::AsRawFd + Unpin,
+    C: AsyncFlowSource + Unpin,
     E: FlowExtractor + Unpin,
     E::Key: Clone + Unpin,
     U: Send + 'static + Unpin,
@@ -459,55 +464,59 @@ where
                 }
             }
 
-            let mut guard = match this.cap.poll_read_ready_mut(cx) {
-                Poll::Ready(Ok(g)) => g,
-                Poll::Ready(Err(e)) => return Poll::Ready(Some(Err(Error::Io(e)))),
-                Poll::Pending => return Poll::Pending,
-            };
+            // Disjoint field borrows so the sink closure can feed the tracker
+            // while `cap` is borrowed by `poll_drain`.
+            let cap = &mut this.cap;
+            let tracker = &mut this.tracker;
+            let pending = &mut this.pending;
+            let dedup = &mut this.dedup;
+            let monotonic_ts = &mut this.monotonic_ts;
+            #[cfg(feature = "pcap")]
+            let tap = &mut this.tap;
+            #[cfg(feature = "pcap")]
+            let mut tap_error: Option<Error> = None;
 
-            let got_batch = {
-                let inner = guard.get_inner_mut();
-                if let Some(batch) = inner.next_batch() {
-                    #[cfg(feature = "pcap")]
-                    let mut tap_error: Option<Error> = None;
-                    for pkt in &batch {
-                        // Plan 17: optional pre-tracking dedup.
-                        if let Some(d) = this.dedup.as_mut()
-                            && !d.keep(&pkt)
-                        {
-                            continue;
-                        }
+            let outcome = cap.poll_drain(cx, &mut |sp: SourcePacket<'_>| {
+                // Plan 17: optional pre-tracking dedup (on the unclamped ts).
+                if let Some(d) = dedup.as_mut()
+                    && !d.keep_raw(sp.data, sp.direction, sp.view.timestamp)
+                {
+                    return;
+                }
 
-                        // Plan 20: pcap tap — record what the tracker
-                        // is about to see. Skip duplicates (above)
-                        // so the recorded file matches the tracked
-                        // event stream.
-                        #[cfg(feature = "pcap")]
-                        if let Some(tap) = this.tap.as_mut()
-                            && let Some(err) = tap.write_or_handle(&pkt)
-                        {
-                            tap_error = Some(err);
-                            break;
-                        }
-
-                        let view = clamp_view(pkt.view(), &mut this.monotonic_ts);
-                        let evts: FlowEvents<E::Key> = this.tracker.track(view);
-                        for ev in evts {
-                            this.pending.push_back(ev);
-                        }
+                // Plan 20: pcap tap — record what the tracker is about to
+                // see, skipping duplicates so the file matches the events.
+                #[cfg(feature = "pcap")]
+                if let Some(t) = tap.as_mut() {
+                    if tap_error.is_some() {
+                        return;
                     }
-                    drop(batch);
+                    if let Some(err) =
+                        t.write_raw_or_handle(sp.data, sp.view.timestamp, sp.original_len)
+                    {
+                        tap_error = Some(err);
+                        return;
+                    }
+                }
+
+                let view = clamp_view(sp.view, monotonic_ts);
+                let evts: FlowEvents<E::Key> = tracker.track(view);
+                for ev in evts {
+                    pending.push_back(ev);
+                }
+            });
+
+            match outcome {
+                Poll::Pending => return Poll::Pending,
+                Poll::Ready(Err(e)) => return Poll::Ready(Some(Err(Error::Io(e)))),
+                Poll::Ready(Ok(DrainOutcome::Drained)) =>
+                {
                     #[cfg(feature = "pcap")]
                     if let Some(err) = tap_error {
                         return Poll::Ready(Some(Err(err)));
                     }
-                    true
-                } else {
-                    false
                 }
-            };
-            if !got_batch {
-                guard.clear_ready();
+                Poll::Ready(Ok(DrainOutcome::Idle)) => {}
             }
         }
     }
@@ -523,7 +532,12 @@ pub(crate) fn clamp_view<'a>(
         return view;
     };
     *last = (*last).max(view.timestamp);
-    PacketView::new(view.frame, *last)
+    // Preserve the per-packet capture leg across the monotonic-clamp
+    // rebuild (flowscope 0.20 #69 builder) so a shared/merged tracker
+    // can bind `FlowStats::source_idx_{forward,reverse}` (#120).
+    // Previously the rebuilt view defaulted `RxMetadata`, zeroing
+    // `source_idx` — the blocker #105 called out.
+    PacketView::new(view.frame, *last).with_source_idx(view.rx_metadata.source_idx)
 }
 
 /// Plan 19: clamp a sweep `now` argument against a running max if
@@ -538,9 +552,9 @@ pub(crate) fn clamp_now(now: Timestamp, state: &mut Option<Timestamp>) -> Timest
 
 // ── Stream impl: AsyncReassemblerSlot path ─────────────────────────
 
-impl<S, E, U, F> Stream for FlowStream<S, E, U, AsyncReassemblerSlot<E::Key, F>>
+impl<C, E, U, F> Stream for FlowStream<C, E, U, AsyncReassemblerSlot<E::Key, F>>
 where
-    S: PacketSource + std::os::unix::io::AsRawFd + Unpin,
+    C: AsyncFlowSource + Unpin,
     E: FlowExtractor + Unpin,
     E::Key: Clone + Unpin,
     U: Send + 'static + Unpin,
@@ -623,70 +637,74 @@ where
                 }
             }
 
-            // 5. Pull a batch.
-            let mut guard = match this.cap.poll_read_ready_mut(cx) {
-                Poll::Ready(Ok(g)) => g,
-                Poll::Ready(Err(e)) => return Poll::Ready(Some(Err(Error::Io(e)))),
-                Poll::Pending => return Poll::Pending,
-            };
+            // 5. Pull a batch through the source-agnostic drain.
+            let cap = &mut this.cap;
+            let tracker = &mut this.tracker;
+            let pending = &mut this.pending;
+            let dedup = &mut this.dedup;
+            let monotonic_ts = &mut this.monotonic_ts;
+            let reassembler = &mut this.reassembler;
+            #[cfg(feature = "pcap")]
+            let tap = &mut this.tap;
+            #[cfg(feature = "pcap")]
+            let mut tap_error: Option<Error> = None;
 
-            let got_batch = {
-                let inner = guard.get_inner_mut();
-                if let Some(batch) = inner.next_batch() {
-                    #[cfg(feature = "pcap")]
-                    let mut tap_error: Option<Error> = None;
-                    for pkt in &batch {
-                        // Plan 17: optional pre-tracking dedup.
-                        if let Some(d) = this.dedup.as_mut()
-                            && !d.keep(&pkt)
-                        {
-                            continue;
-                        }
+            let outcome = cap.poll_drain(cx, &mut |sp: SourcePacket<'_>| {
+                // Plan 17: optional pre-tracking dedup (on the unclamped ts).
+                if let Some(d) = dedup.as_mut()
+                    && !d.keep_raw(sp.data, sp.direction, sp.view.timestamp)
+                {
+                    return;
+                }
 
-                        // Plan 20: pcap tap.
-                        #[cfg(feature = "pcap")]
-                        if let Some(tap) = this.tap.as_mut()
-                            && let Some(err) = tap.write_or_handle(&pkt)
-                        {
-                            tap_error = Some(err);
-                            break;
-                        }
-
-                        let view = clamp_view(pkt.view(), &mut this.monotonic_ts);
-                        let payloads = &mut this.reassembler.pending_payloads;
-                        let evts: FlowEvents<E::Key> =
-                            this.tracker
-                                .track_with_payload(view, |key, side, seq, payload| {
-                                    payloads.push_back((
-                                        key.clone(),
-                                        side,
-                                        seq,
-                                        Bytes::copy_from_slice(payload),
-                                    ));
-                                });
-                        for ev in evts {
-                            this.pending.push_back(ev);
-                        }
+                // Plan 20: pcap tap.
+                #[cfg(feature = "pcap")]
+                if let Some(t) = tap.as_mut() {
+                    if tap_error.is_some() {
+                        return;
                     }
-                    drop(batch);
+                    if let Some(err) =
+                        t.write_raw_or_handle(sp.data, sp.view.timestamp, sp.original_len)
+                    {
+                        tap_error = Some(err);
+                        return;
+                    }
+                }
+
+                let view = clamp_view(sp.view, monotonic_ts);
+                let payloads = &mut reassembler.pending_payloads;
+                let evts: FlowEvents<E::Key> =
+                    tracker.track_with_payload(view, |key, side, seq, payload| {
+                        payloads.push_back((
+                            key.clone(),
+                            side,
+                            seq,
+                            Bytes::copy_from_slice(payload),
+                        ));
+                    });
+                for ev in evts {
+                    pending.push_back(ev);
+                }
+            });
+
+            match outcome {
+                Poll::Pending => return Poll::Pending,
+                Poll::Ready(Err(e)) => return Poll::Ready(Some(Err(Error::Io(e)))),
+                Poll::Ready(Ok(DrainOutcome::Drained)) =>
+                {
                     #[cfg(feature = "pcap")]
                     if let Some(err) = tap_error {
                         return Poll::Ready(Some(Err(err)));
                     }
-                    true
-                } else {
-                    false
                 }
-            };
-            if !got_batch {
-                guard.clear_ready();
+                Poll::Ready(Ok(DrainOutcome::Idle)) => {}
             }
         }
     }
 }
 
 /// Approximate "now" using `SystemTime`.
-fn current_timestamp() -> Timestamp {
+pub(crate) fn current_timestamp() -> Timestamp {
     let now = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .unwrap_or(Duration::ZERO);
@@ -705,7 +723,7 @@ where
     /// default tracker config and `()` for per-flow user state.
     /// Chain `.with_state(...)`, `.with_config(...)`, and
     /// `.with_async_reassembler(...)` to customize.
-    pub fn flow_stream<E>(self, extractor: E) -> FlowStream<S, E, (), NoReassembler>
+    pub fn flow_stream<E>(self, extractor: E) -> FlowStream<AsyncCapture<S>, E, (), NoReassembler>
     where
         E: FlowExtractor,
     {
@@ -713,11 +731,59 @@ where
     }
 }
 
+// ── AsyncXdpCapture::flow_stream entry point (issue #104) ───────────────────
+
+#[cfg(all(feature = "af-xdp", feature = "xdp-loader"))]
+impl crate::AsyncXdpCapture {
+    /// Convert this multi-queue AF_XDP capture into a stream of
+    /// [`FlowEvent`]s — the AF_XDP analogue of
+    /// [`AsyncCapture::flow_stream`]. All RX queues feed one
+    /// [`FlowTracker`]; chain `.with_state(...)` / `.with_config(...)` /
+    /// `.with_async_reassembler(...)` as usual.
+    ///
+    /// The pcap-tap and loopback-dedup legs are AF_PACKET-oriented but work
+    /// here too (dedup is a no-op without a meaningful packet direction).
+    pub fn flow_stream<E>(
+        self,
+        extractor: E,
+    ) -> FlowStream<crate::AsyncXdpCapture, E, (), NoReassembler>
+    where
+        E: FlowExtractor,
+    {
+        FlowStream::new(self, extractor)
+    }
+}
+
+/// Accessors for an AF_XDP-backed flow stream (issue #104). The AF_PACKET
+/// equivalents come from the [`StreamCapture`] trait, which is AF_XDP's
+/// `AsyncXdpCapture` source cannot satisfy (no `AsyncCapture` to lend).
+#[cfg(all(feature = "af-xdp", feature = "xdp-loader"))]
+impl<E, U, R> FlowStream<crate::AsyncXdpCapture, E, U, R>
+where
+    E: FlowExtractor,
+    U: Send + 'static,
+{
+    /// Borrow the inner multi-queue AF_XDP capture (for ring stats /
+    /// zero-copy / queue introspection).
+    pub fn xdp_capture(&self) -> &crate::AsyncXdpCapture {
+        &self.cap
+    }
+
+    /// Unified kernel-ring [`CaptureStats`](crate::stats::CaptureStats) summed
+    /// across the capture's RX queues.
+    pub fn capture_stats(&self) -> Result<crate::stats::CaptureStats, Error> {
+        self.cap.capture_stats()
+    }
+}
+
 // ── StreamCapture trait impl ───────────────────────────────────────
+//
+// Restricted to the AF_PACKET source: `StreamCapture::capture()` returns a
+// concrete `&AsyncCapture<S>`, which the AF_XDP source has no analogue for.
 
 use crate::async_adapters::stream_capture::{Sealed, StreamCapture};
 
-impl<S, E, U, R> Sealed for FlowStream<S, E, U, R>
+impl<S, E, U, R> Sealed for FlowStream<AsyncCapture<S>, E, U, R>
 where
     S: PacketSource + std::os::unix::io::AsRawFd,
     E: FlowExtractor,
@@ -725,7 +791,7 @@ where
 {
 }
 
-impl<S, E, U, R> StreamCapture for FlowStream<S, E, U, R>
+impl<S, E, U, R> StreamCapture for FlowStream<AsyncCapture<S>, E, U, R>
 where
     S: PacketSource + std::os::unix::io::AsRawFd,
     E: FlowExtractor,

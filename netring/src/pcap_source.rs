@@ -31,11 +31,10 @@
 //! [`AsyncPcapSource::flow_events`] returns a stream of
 //! [`flowscope::FlowEvent`]s ready for the same downstream processing
 //! as `AsyncCapture::flow_stream`. Available under the `flow` feature.
-//! For session-level processing on offline pcaps, drive flowscope's
-//! sync [`FlowSessionDriver`] inside a `spawn_blocking` task with
-//! `AsyncPcapSource`'s yielded packets as input.
-//!
-//! [`FlowSessionDriver`]: flowscope::FlowSessionDriver
+//! For session-level processing on offline pcaps, use
+//! [`AsyncPcapSource::sessions`] / [`AsyncPcapSource::datagrams`] (or
+//! [`PcapFlowStream::session_stream`](crate::PcapFlowStream)), which
+//! drive a flowscope [`FlowTracker`](flowscope::FlowTracker) directly.
 
 use std::fs::File;
 use std::io::{BufReader, Read};

@@ -19,11 +19,11 @@ use netring::monitor::HandlerRegistry;
 use netring::prelude::*;
 
 fn dummy_flow_started() -> FlowStarted<Tcp> {
-    let key = flowscope::extract::FiveTupleKey {
-        proto: flowscope::L4Proto::Tcp,
-        a: SocketAddr::new(IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1)), 22),
-        b: SocketAddr::new(IpAddr::V4(Ipv4Addr::new(10, 0, 0, 2)), 53456),
-    };
+    let key = flowscope::extract::FiveTupleKey::new(
+        flowscope::L4Proto::Tcp,
+        SocketAddr::new(IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1)), 22),
+        SocketAddr::new(IpAddr::V4(Ipv4Addr::new(10, 0, 0, 2)), 53456),
+    );
     FlowStarted::<Tcp>::new(key, Some(flowscope::L4Proto::Tcp), Timestamp::new(0, 0))
 }
 
@@ -127,11 +127,11 @@ fn detector_macro_guard_short_circuits_emit() {
     assert_eq!(fired.load(Ordering::Relaxed), 1);
 
     // Same payload but with a non-22 port → guard rejects, no fire.
-    let key = flowscope::extract::FiveTupleKey {
-        proto: flowscope::L4Proto::Tcp,
-        a: SocketAddr::new(IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1)), 12345),
-        b: SocketAddr::new(IpAddr::V4(Ipv4Addr::new(10, 0, 0, 2)), 80),
-    };
+    let key = flowscope::extract::FiveTupleKey::new(
+        flowscope::L4Proto::Tcp,
+        SocketAddr::new(IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1)), 12345),
+        SocketAddr::new(IpAddr::V4(Ipv4Addr::new(10, 0, 0, 2)), 80),
+    );
     let non_ssh = FlowStarted::<Tcp>::new(key, Some(flowscope::L4Proto::Tcp), Timestamp::new(0, 0));
     disp.dispatch::<FlowStarted<Tcp>>(&non_ssh, &mut ctx)
         .unwrap();

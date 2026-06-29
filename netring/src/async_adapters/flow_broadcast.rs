@@ -115,7 +115,7 @@ impl<K: Send + Sync + 'static> Stream for FlowSubscriber<K> {
 
 // ── Conversion entry point on FlowStream<NoReassembler> ──────────────
 
-impl<S, E> FlowStream<S, E, (), NoReassembler>
+impl<S, E> FlowStream<crate::async_adapters::tokio_adapter::AsyncCapture<S>, E, (), NoReassembler>
 where
     S: PacketSource + std::os::unix::io::AsRawFd + Send + Unpin + 'static,
     E: FlowExtractor + Unpin + Send + 'static,
@@ -188,6 +188,7 @@ mod tests {
                 let _ = publisher.send(Arc::new(FlowEvent::Started {
                     key: i,
                     side: FlowSide::Initiator,
+                    orientation: flowscope::Orientation::Forward,
                     ts: Timestamp::default(),
                     l4: None,
                 }));

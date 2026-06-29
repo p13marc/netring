@@ -19,9 +19,10 @@
 
 use std::time::Duration;
 
-use flowscope::{DatagramParser, FlowSide, SessionEvent, Timestamp};
+use flowscope::{DatagramParser, FlowSide, Timestamp};
 use futures::StreamExt;
 use netring::AsyncCapture;
+use netring::flow::SessionEvent;
 use netring::flow::extract::FiveTuple;
 
 const HEARTBEAT_AFTER: Duration = Duration::from_secs(2);

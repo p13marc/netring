@@ -112,7 +112,7 @@ async fn replay_export_flows_emits_a_flow_record() {
         .pcap_source(pcap.path())
         .protocol::<Udp>()
         // A bare FnMut(&FlowRecord) is a FlowExporter (blanket impl).
-        .export_flows(move |rec: &FlowRecord| sink.lock().unwrap().push(*rec))
+        .export_flows(move |rec: &FlowRecord| sink.lock().unwrap().push(rec.clone()))
         .build()
         .expect("build with pcap_source + export_flows");
 

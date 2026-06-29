@@ -16,9 +16,10 @@
 
 use std::env;
 
-use flowscope::{FlowSide, SessionEvent, SessionParser, Timestamp};
+use flowscope::{FlowSide, SessionParser, Timestamp};
 use futures::StreamExt;
 use netring::AsyncPcapSource;
+use netring::flow::SessionEvent;
 use netring::flow::extract::FiveTuple;
 
 /// Minimal `SessionParser` that emits a `(side, byte_count)` tuple

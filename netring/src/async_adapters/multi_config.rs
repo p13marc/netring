@@ -108,6 +108,19 @@ impl<K> MultiStreamConfig<K> {
         self
     }
 
+    /// Enable SYN-based TCP initiator inference on every per-source
+    /// tracker (flowscope 0.20 #122). When on, a flow whose first
+    /// observed packet is a `SYN+ACK` — the response delivered before
+    /// the request, the classic tap-merge / two-queue race — has its
+    /// inferred initiator flipped so the SYN sender is labelled
+    /// `Initiator`, and `FlowStats::direction_flipped` is set.
+    /// Recommended for tap-merge / multi-queue fan-in; a no-op for a
+    /// single tap (where the SYN is always seen first). Default off.
+    pub fn with_infer_tcp_initiator(mut self, enable: bool) -> Self {
+        self.tracker_config.infer_tcp_initiator = enable;
+        self
+    }
+
     /// Provide a [`Dedup`] template to be cloned per source.
     pub fn with_dedup(mut self, d: Dedup) -> Self {
         self.dedup = Some(d);

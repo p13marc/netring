@@ -64,6 +64,19 @@ pub enum TapErrorPolicy {
 pub(crate) trait TapWriter: Send {
     fn write(&mut self, pkt: &Packet<'_>, snaplen: Option<u32>)
     -> Result<(), pcap_file::PcapError>;
+
+    /// `Packet`-free write path used by the generic, source-agnostic
+    /// [`FlowStream`](crate::async_adapters::flow_stream::FlowStream): the
+    /// AF_XDP backend has no [`Packet`] to lend, only raw bytes + a
+    /// timestamp. `original_len` is the full wire length (kept in the pcap
+    /// `orig_len` field even when `snaplen` truncates `caplen`).
+    fn write_raw(
+        &mut self,
+        data: &[u8],
+        ts: crate::packet::Timestamp,
+        original_len: usize,
+        snaplen: Option<u32>,
+    ) -> Result<(), pcap_file::PcapError>;
 }
 
 impl<W: std::io::Write + Send + 'static> TapWriter for CaptureWriter<W> {
@@ -77,6 +90,16 @@ impl<W: std::io::Write + Send + 'static> TapWriter for CaptureWriter<W> {
             None => self.write_packet(pkt),
         }
     }
+
+    fn write_raw(
+        &mut self,
+        data: &[u8],
+        ts: crate::packet::Timestamp,
+        original_len: usize,
+        snaplen: Option<u32>,
+    ) -> Result<(), pcap_file::PcapError> {
+        self.write_raw(data, ts, original_len, snaplen)
+    }
 }
 
 impl<W: std::io::Write + Send + 'static> TapWriter for crate::pcap::CaptureWriterNg<W> {
@@ -89,6 +112,16 @@ impl<W: std::io::Write + Send + 'static> TapWriter for crate::pcap::CaptureWrite
             Some(cap) => self.write_packet_truncated(pkt, cap as usize),
             None => self.write_packet(pkt),
         }
+    }
+
+    fn write_raw(
+        &mut self,
+        data: &[u8],
+        ts: crate::packet::Timestamp,
+        original_len: usize,
+        snaplen: Option<u32>,
+    ) -> Result<(), pcap_file::PcapError> {
+        self.write_raw(data, ts, original_len, snaplen)
     }
 }
 
@@ -143,6 +176,23 @@ impl PcapTap {
             return None;
         }
         let result = self.inner.write(pkt, self.snaplen);
+        self.handle_result(result)
+    }
+
+    /// `Packet`-free variant of [`write_or_handle`](Self::write_or_handle)
+    /// for the source-agnostic
+    /// [`FlowStream`](crate::async_adapters::flow_stream::FlowStream) — the
+    /// AF_XDP backend taps from raw bytes + timestamp.
+    pub(crate) fn write_raw_or_handle(
+        &mut self,
+        data: &[u8],
+        ts: crate::packet::Timestamp,
+        original_len: usize,
+    ) -> Option<Error> {
+        if self.dropped {
+            return None;
+        }
+        let result = self.inner.write_raw(data, ts, original_len, self.snaplen);
         self.handle_result(result)
     }
 
@@ -202,6 +252,16 @@ mod tests {
         fn write(
             &mut self,
             _pkt: &Packet<'_>,
+            _snaplen: Option<u32>,
+        ) -> Result<(), pcap_file::PcapError> {
+            Ok(())
+        }
+
+        fn write_raw(
+            &mut self,
+            _data: &[u8],
+            _ts: crate::packet::Timestamp,
+            _original_len: usize,
             _snaplen: Option<u32>,
         ) -> Result<(), pcap_file::PcapError> {
             Ok(())

@@ -26,9 +26,9 @@
 #[cfg(all(feature = "tokio", feature = "dns"))]
 #[tokio::main(flavor = "current_thread")]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
-    use flowscope::SessionEvent;
     use flowscope::dns::{DnsMessage, DnsUdpParser};
     use futures::StreamExt;
+    use netring::flow::SessionEvent;
     use netring::flow::extract::FiveTuple;
     use netring::{AsyncCapture, BpfFilter};
     use std::time::{Duration, Instant};

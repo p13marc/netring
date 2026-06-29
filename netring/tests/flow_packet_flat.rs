@@ -12,11 +12,11 @@ use flowscope::{FlowSide, L4Proto, Timestamp};
 use netring::protocol::event_typed::{Event, FlowPacket};
 
 fn key(proto: L4Proto) -> flowscope::extract::FiveTupleKey {
-    flowscope::extract::FiveTupleKey {
+    flowscope::extract::FiveTupleKey::new(
         proto,
-        a: SocketAddr::new(IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1)), 1234),
-        b: SocketAddr::new(IpAddr::V4(Ipv4Addr::new(10, 0, 0, 2)), 80),
-    }
+        SocketAddr::new(IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1)), 1234),
+        SocketAddr::new(IpAddr::V4(Ipv4Addr::new(10, 0, 0, 2)), 80),
+    )
 }
 
 #[test]

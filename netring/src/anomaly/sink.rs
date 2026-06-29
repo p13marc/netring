@@ -466,11 +466,11 @@ mod tests {
     #[test]
     fn writer_emit_owned_with_five_tuple_key_populates_structured_fields() {
         use std::net::{IpAddr, Ipv4Addr, SocketAddr};
-        let key = flowscope::extract::FiveTupleKey {
-            proto: flowscope::L4Proto::Tcp,
-            a: SocketAddr::new(IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1)), 12345),
-            b: SocketAddr::new(IpAddr::V4(Ipv4Addr::new(10, 0, 0, 2)), 443),
-        };
+        let key = flowscope::extract::FiveTupleKey::new(
+            flowscope::L4Proto::Tcp,
+            SocketAddr::new(IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1)), 12345),
+            SocketAddr::new(IpAddr::V4(Ipv4Addr::new(10, 0, 0, 2)), 443),
+        );
         let mut sink = NoopSink;
         let owned = sink
             .begin("PortScan", Severity::Error, Timestamp::new(0, 0))

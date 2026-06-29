@@ -88,9 +88,13 @@ where
         self.handle.subscribers()
     }
 
-    /// flowscope's `parser_kind` slug for the broadcast slot
-    /// (matches the corresponding [`crate::protocol::Protocol::NAME`]).
-    pub fn parser_kind(&self) -> &'static str {
+    /// flowscope's typed [`ParserKind`] for the broadcast slot
+    /// (its `.as_str()` slug matches the corresponding
+    /// [`crate::protocol::Protocol::NAME`]). Lifted from `&'static str`
+    /// in the flowscope 0.20 adoption (#109).
+    ///
+    /// [`ParserKind`]: flowscope::ParserKind
+    pub fn parser_kind(&self) -> flowscope::ParserKind {
         self.handle.parser_kind()
     }
 }

@@ -19,7 +19,8 @@
 //! # use futures::StreamExt;
 //! # use netring::AsyncCapture;
 //! # use netring::flow::extract::FiveTuple;
-//! # use flowscope::{FlowSide, SessionEvent, SessionParser, Timestamp};
+//! # use flowscope::{FlowSide, SessionParser, Timestamp};
+//! # use netring::flow::SessionEvent;
 //! # #[derive(Default, Clone)]
 //! # struct MyParser;
 //! # impl SessionParser for MyParser {
@@ -49,11 +50,13 @@ use std::time::Duration;
 use ahash::RandomState;
 use flowscope::{
     BufferedReassembler, BufferedReassemblerFactory, EndReason, FlowEvent, FlowExtractor, FlowSide,
-    FlowTracker, FlowTrackerConfig, Reassembler, ReassemblerFactory, SessionEvent, SessionParser,
+    FlowTracker, FlowTrackerConfig, Reassembler, ReassemblerFactory, SessionParser,
     SessionParserFactory, Timestamp,
 };
 use futures_core::Stream;
 
+use crate::async_adapters::flow_source::{AsyncFlowSource, DrainOutcome, SourcePacket};
+use crate::async_adapters::session_event::SessionEvent;
 use crate::async_adapters::tokio_adapter::AsyncCapture;
 use crate::dedup::Dedup;
 use crate::error::Error;
@@ -62,14 +65,17 @@ use crate::traits::PacketSource;
 /// Async stream of [`SessionEvent`]s produced by reassembling TCP
 /// byte streams and feeding them through a per-flow
 /// [`SessionParser`].
-pub struct SessionStream<S, E, F>
+///
+/// Generic over the packet source `C` (issue #104): an [`AsyncCapture`]
+/// (AF_PACKET) or an [`AsyncXdpCapture`](crate::AsyncXdpCapture) (AF_XDP),
+/// driven through the shared `AsyncFlowSource` drain.
+pub struct SessionStream<C, E, F>
 where
-    S: PacketSource + std::os::unix::io::AsRawFd,
     E: FlowExtractor,
     E::Key: Eq + std::hash::Hash + Clone + Send + 'static,
     F: SessionParserFactory<E::Key>,
 {
-    cap: AsyncCapture<S>,
+    cap: C,
     tracker: FlowTracker<E, ()>,
     parser_factory: F,
     parsers: HashMap<E::Key, F::Parser, RandomState>,
@@ -86,9 +92,8 @@ where
     tap: Option<crate::pcap_tap::PcapTap>,
 }
 
-impl<S, E, F> SessionStream<S, E, F>
+impl<C, E, F> SessionStream<C, E, F>
 where
-    S: PacketSource + std::os::unix::io::AsRawFd,
     E: FlowExtractor,
     E::Key: Eq + std::hash::Hash + Clone + Send + 'static,
     F: SessionParserFactory<E::Key>,
@@ -97,7 +102,7 @@ where
     /// without rebuilding it. Preserves `idle_timeout_fn` and any
     /// in-flight flow state from the source `FlowStream`.
     pub(crate) fn from_tracker(
-        cap: AsyncCapture<S>,
+        cap: C,
         tracker: FlowTracker<E, ()>,
         parser_factory: F,
         dedup: Option<Dedup>,
@@ -248,9 +253,29 @@ where
     }
 }
 
-impl<S, E, F> Stream for SessionStream<S, E, F>
+/// AF_XDP-source accessors (issue #104) — the analogues of the AF_PACKET
+/// `StreamCapture` accessors, which the AF_XDP source can't satisfy.
+#[cfg(all(feature = "af-xdp", feature = "xdp-loader"))]
+impl<E, F> SessionStream<crate::AsyncXdpCapture, E, F>
 where
-    S: PacketSource + std::os::unix::io::AsRawFd + Unpin,
+    E: FlowExtractor,
+    E::Key: Eq + std::hash::Hash + Clone + Send + 'static,
+    F: SessionParserFactory<E::Key>,
+{
+    /// Borrow the inner multi-queue AF_XDP capture.
+    pub fn xdp_capture(&self) -> &crate::AsyncXdpCapture {
+        &self.cap
+    }
+
+    /// Unified kernel-ring stats summed across the capture's RX queues.
+    pub fn capture_stats(&self) -> Result<crate::stats::CaptureStats, Error> {
+        self.cap.capture_stats()
+    }
+}
+
+impl<C, E, F> Stream for SessionStream<C, E, F>
+where
+    C: AsyncFlowSource + Unpin,
     E: FlowExtractor + Unpin,
     E::Key: Eq + std::hash::Hash + Clone + Send + 'static + Unpin,
     F: SessionParserFactory<E::Key> + Unpin,
@@ -290,15 +315,25 @@ where
                 // changed the signature from `Vec<M>`-returning to
                 // scratch-buffer; we reuse the scratch buf across
                 // parsers within a single sweep.
+                // `on_tick` messages are attributed to the initiator
+                // side; the canonical orientation of the initiator is
+                // the flow's `initiator_orientation` (flowscope 0.20
+                // #118), looked up from the live tracker entry.
+                let tracker = &this.tracker;
                 let mut scratch = Vec::new();
                 for (key, parser) in parsers.iter_mut() {
                     let parser_kind = parser.parser_kind();
+                    let orientation = tracker
+                        .get(key)
+                        .map(|e| e.initiator_orientation())
+                        .unwrap_or_default();
                     scratch.clear();
                     parser.on_tick(now, &mut scratch);
                     for m in scratch.drain(..) {
                         pending.push_back(SessionEvent::Application {
                             key: key.clone(),
                             side: FlowSide::Initiator,
+                            orientation,
                             message: m,
                             ts: now,
                             parser_kind,
@@ -320,87 +355,85 @@ where
                 }
             }
 
-            let mut guard = match this.cap.poll_read_ready_mut(cx) {
-                Poll::Ready(Ok(g)) => g,
-                Poll::Ready(Err(e)) => return Poll::Ready(Some(Err(Error::Io(e)))),
-                Poll::Pending => return Poll::Pending,
-            };
+            // Disjoint field borrows so the sink closure can feed the
+            // tracker + reassemblers while `cap` is borrowed by `poll_drain`.
+            let cap = &mut this.cap;
+            let tracker = &mut this.tracker;
+            let parsers = &mut this.parsers;
+            let parser_factory = &mut this.parser_factory;
+            let reassemblers = &mut this.reassemblers;
+            let reassembler_factory = &mut this.reassembler_factory;
+            let pending = &mut this.pending;
+            let dedup = &mut this.dedup;
+            let monotonic_ts = &mut this.monotonic_ts;
+            #[cfg(feature = "pcap")]
+            let tap = &mut this.tap;
+            #[cfg(feature = "pcap")]
+            let mut tap_error: Option<Error> = None;
 
-            let got_batch = {
-                let inner = guard.get_inner_mut();
-                if let Some(batch) = inner.next_batch() {
-                    #[cfg(feature = "pcap")]
-                    let mut tap_error: Option<Error> = None;
-                    for pkt in &batch {
-                        // Plan 17: optional pre-tracking dedup.
-                        if let Some(d) = this.dedup.as_mut()
-                            && !d.keep(&pkt)
-                        {
-                            continue;
-                        }
+            let outcome = cap.poll_drain(cx, &mut |sp: SourcePacket<'_>| {
+                // Plan 17: optional pre-tracking dedup (on the unclamped ts).
+                if let Some(d) = dedup.as_mut()
+                    && !d.keep_raw(sp.data, sp.direction, sp.view.timestamp)
+                {
+                    return;
+                }
 
-                        // Plan 20: pcap tap.
-                        #[cfg(feature = "pcap")]
-                        if let Some(tap) = this.tap.as_mut()
-                            && let Some(err) = tap.write_or_handle(&pkt)
-                        {
-                            tap_error = Some(err);
-                            break;
-                        }
-
-                        let view = crate::async_adapters::flow_stream::clamp_view(
-                            pkt.view(),
-                            &mut this.monotonic_ts,
-                        );
-                        let view_ts = view.timestamp;
-                        let parsers = &mut this.parsers;
-                        let parser_factory = &mut this.parser_factory;
-                        let reassemblers = &mut this.reassemblers;
-                        let reassembler_factory = &mut this.reassembler_factory;
-                        let pending = &mut this.pending;
-
-                        // Per-segment: route into the per-(flow, side) reassembler.
-                        // `segment` takes the carrying packet's timestamp
-                        // (flowscope 0.5+) so the reassembler can classify
-                        // retransmits with timing.
-                        let evts =
-                            this.tracker
-                                .track_with_payload(view, |key, side, seq, payload| {
-                                    if payload.is_empty() {
-                                        return;
-                                    }
-                                    reassemblers
-                                        .entry((key.clone(), side))
-                                        .or_insert_with(|| {
-                                            reassembler_factory.new_reassembler(key, side)
-                                        })
-                                        .segment(seq, payload, view_ts);
-                                });
-
-                        // Per-event: drain reassembler on Packet, drain+fin on Ended,
-                        // pass Started/Anomaly through.
-                        for ev in evts {
-                            process_session_event::<E::Key, F>(
-                                ev,
-                                parsers,
-                                parser_factory,
-                                reassemblers,
-                                pending,
-                            );
-                        }
+                // Plan 20: pcap tap.
+                #[cfg(feature = "pcap")]
+                if let Some(t) = tap.as_mut() {
+                    if tap_error.is_some() {
+                        return;
                     }
-                    drop(batch);
+                    if let Some(err) =
+                        t.write_raw_or_handle(sp.data, sp.view.timestamp, sp.original_len)
+                    {
+                        tap_error = Some(err);
+                        return;
+                    }
+                }
+
+                let view = crate::async_adapters::flow_stream::clamp_view(sp.view, monotonic_ts);
+                let view_ts = view.timestamp;
+
+                // Per-segment: route into the per-(flow, side) reassembler.
+                // `segment` takes the carrying packet's timestamp
+                // (flowscope 0.5+) so the reassembler can classify
+                // retransmits with timing.
+                let evts = tracker.track_with_payload(view, |key, side, seq, payload| {
+                    if payload.is_empty() {
+                        return;
+                    }
+                    reassemblers
+                        .entry((key.clone(), side))
+                        .or_insert_with(|| reassembler_factory.new_reassembler(key, side))
+                        .segment(seq, payload, view_ts);
+                });
+
+                // Per-event: drain reassembler on Packet, drain+fin on Ended,
+                // pass Started/Anomaly through.
+                for ev in evts {
+                    process_session_event::<E::Key, F>(
+                        ev,
+                        parsers,
+                        parser_factory,
+                        reassemblers,
+                        pending,
+                    );
+                }
+            });
+
+            match outcome {
+                Poll::Pending => return Poll::Pending,
+                Poll::Ready(Err(e)) => return Poll::Ready(Some(Err(Error::Io(e)))),
+                Poll::Ready(Ok(DrainOutcome::Drained)) =>
+                {
                     #[cfg(feature = "pcap")]
                     if let Some(err) = tap_error {
                         return Poll::Ready(Some(Err(err)));
                     }
-                    true
-                } else {
-                    false
                 }
-            };
-            if !got_batch {
-                guard.clear_ready();
+                Poll::Ready(Ok(DrainOutcome::Idle)) => {}
             }
         }
     }
@@ -408,7 +441,7 @@ where
 
 /// Build a [`BufferedReassemblerFactory`] honouring the cap + policy
 /// fields on [`FlowTrackerConfig`].
-fn build_reassembler_factory(config: &FlowTrackerConfig) -> BufferedReassemblerFactory {
+pub(crate) fn build_reassembler_factory(config: &FlowTrackerConfig) -> BufferedReassemblerFactory {
     let mut factory = BufferedReassemblerFactory::default();
     if let Some(cap) = config.max_reassembler_buffer {
         factory = factory.with_max_buffer(cap);
@@ -423,7 +456,7 @@ fn build_reassembler_factory(config: &FlowTrackerConfig) -> BufferedReassemblerF
 /// so we can lazily mint a fresh parser when a flow's first byte
 /// arrives — matching the lazy-creation pattern on `parsers` /
 /// `reassemblers` everywhere else.
-fn process_session_event<K, F>(
+pub(crate) fn process_session_event<K, F>(
     ev: FlowEvent<K>,
     parsers: &mut HashMap<K, F::Parser, RandomState>,
     parser_factory: &mut F,
@@ -434,10 +467,27 @@ fn process_session_event<K, F>(
     F: SessionParserFactory<K>,
 {
     match ev {
-        FlowEvent::Started { key, ts, .. } => {
-            pending.push_back(SessionEvent::Started { key, ts });
+        FlowEvent::Started {
+            key,
+            side,
+            orientation,
+            ts,
+            ..
+        } => {
+            pending.push_back(SessionEvent::Started {
+                key,
+                side,
+                orientation,
+                ts,
+            });
         }
-        FlowEvent::Packet { key, side, ts, .. } => {
+        FlowEvent::Packet {
+            key,
+            side,
+            orientation,
+            ts,
+            ..
+        } => {
             // Drain the just-arrived in-order bytes (if any) and feed
             // the parser. Reassembler-poison + cap-enforce already
             // applied inside `BufferedReassembler::segment`.
@@ -461,6 +511,7 @@ fn process_session_event<K, F>(
                 pending.push_back(SessionEvent::Application {
                     key: key.clone(),
                     side,
+                    orientation,
                     message: m,
                     ts,
                     parser_kind,
@@ -504,6 +555,11 @@ fn process_session_event<K, F>(
                             pending.push_back(SessionEvent::Application {
                                 key: key.clone(),
                                 side,
+                                // Close-drain has no per-packet event;
+                                // derive the canonical direction from
+                                // the finished flow's deterministic
+                                // bridge (flowscope 0.20 #118).
+                                orientation: stats.orientation_for(side),
                                 message: m,
                                 ts: stats.last_seen,
                                 parser_kind,
@@ -523,6 +579,7 @@ fn process_session_event<K, F>(
                             pending.push_back(SessionEvent::Application {
                                 key: key.clone(),
                                 side: FlowSide::Initiator,
+                                orientation: stats.orientation_for(FlowSide::Initiator),
                                 message: m,
                                 ts: stats.last_seen,
                                 parser_kind,
@@ -533,6 +590,7 @@ fn process_session_event<K, F>(
                             pending.push_back(SessionEvent::Application {
                                 key: key.clone(),
                                 side: FlowSide::Responder,
+                                orientation: stats.orientation_for(FlowSide::Responder),
                                 message: m,
                                 ts: stats.last_seen,
                                 parser_kind,
@@ -588,7 +646,9 @@ fn current_timestamp() -> Timestamp {
 
 use crate::async_adapters::stream_capture::{Sealed, StreamCapture};
 
-impl<S, E, F> Sealed for SessionStream<S, E, F>
+// `StreamCapture` (and `capture()` → `&AsyncCapture<S>`) is AF_PACKET-only;
+// the AF_XDP source has no `AsyncCapture` to lend.
+impl<S, E, F> Sealed for SessionStream<AsyncCapture<S>, E, F>
 where
     S: PacketSource + std::os::unix::io::AsRawFd,
     E: FlowExtractor,
@@ -597,7 +657,7 @@ where
 {
 }
 
-impl<S, E, F> StreamCapture for SessionStream<S, E, F>
+impl<S, E, F> StreamCapture for SessionStream<AsyncCapture<S>, E, F>
 where
     S: PacketSource + std::os::unix::io::AsRawFd,
     E: FlowExtractor,
@@ -667,6 +727,7 @@ mod tests {
             FlowEvent::Started {
                 key: 7,
                 side: FlowSide::Initiator,
+                orientation: flowscope::Orientation::Forward,
                 ts: ts(),
                 l4: None,
             },
@@ -693,6 +754,7 @@ mod tests {
             FlowEvent::Packet {
                 key: 7,
                 side: FlowSide::Initiator,
+                orientation: flowscope::Orientation::Forward,
                 len: 5,
                 ts: ts(),
             },
@@ -728,6 +790,7 @@ mod tests {
             FlowEvent::Packet {
                 key: 7,
                 side: FlowSide::Initiator,
+                orientation: flowscope::Orientation::Forward,
                 len: 0,
                 ts: ts(),
             },

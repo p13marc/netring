@@ -141,6 +141,28 @@ impl<W: Write> CaptureWriter<W> {
         self.inner.write_packet(&record).map(|_| ())
     }
 
+    /// Write a record from raw parts (no [`Packet`] needed) — the
+    /// source-agnostic tap path. `original_len` is kept in the record's
+    /// `orig_len`; `snaplen`, when `Some`, caps the recorded `caplen`.
+    pub fn write_raw(
+        &mut self,
+        data: &[u8],
+        ts: crate::packet::Timestamp,
+        original_len: usize,
+        snaplen: Option<u32>,
+    ) -> Result<(), pcap_file::PcapError> {
+        let captured = match snaplen {
+            Some(cap) if (cap as usize) < data.len() => &data[..cap as usize],
+            _ => data,
+        };
+        let record = PcapPacket::new(
+            Duration::new(ts.sec as u64, ts.nsec),
+            original_len as u32,
+            captured,
+        );
+        self.inner.write_packet(&record).map(|_| ())
+    }
+
     /// Unwrap into the inner writer.
     pub fn into_inner(self) -> W {
         self.inner.into_writer()
@@ -238,6 +260,22 @@ impl<W: Write> CaptureWriterNg<W> {
         self.write_epb(pkt.timestamp, pkt.original_len, Cow::Borrowed(&pkt.data))
     }
 
+    /// Write a record from raw parts (no [`Packet`] needed) — the
+    /// source-agnostic tap path. See [`CaptureWriter::write_raw`].
+    pub fn write_raw(
+        &mut self,
+        data: &[u8],
+        ts: crate::packet::Timestamp,
+        original_len: usize,
+        snaplen: Option<u32>,
+    ) -> Result<(), pcap_file::PcapError> {
+        let captured = match snaplen {
+            Some(cap) if (cap as usize) < data.len() => &data[..cap as usize],
+            _ => data,
+        };
+        self.write_epb(ts, original_len, Cow::Borrowed(captured))
+    }
+
     fn write_epb(
         &mut self,
         ts: crate::packet::Timestamp,
@@ -312,6 +350,36 @@ mod tests {
         let record = reader.next_packet().expect("first").expect("record");
         assert_eq!(record.data.as_ref(), &[1, 2, 3, 4, 5]);
         assert_eq!(record.orig_len, 100);
+    }
+
+    /// Issue #104: the `Packet`-free `write_raw` path (used by the
+    /// source-agnostic / AF_XDP flow-stream tap) records the same bytes,
+    /// timestamp, and `orig_len`, and honours the snaplen cap.
+    #[test]
+    fn write_raw_round_trips_and_snaplen_truncates() {
+        let mut buf = Vec::new();
+        {
+            let cursor = Cursor::new(&mut buf);
+            let mut w = CaptureWriter::create(cursor).expect("create");
+            // Full record: orig_len kept, all bytes recorded.
+            w.write_raw(&[10, 20, 30, 40], Timestamp::new(7, 8), 64, None)
+                .expect("write full");
+            // Snaplen 2: caplen truncated to 2, orig_len still the full 64.
+            w.write_raw(&[1, 2, 3, 4, 5], Timestamp::new(9, 0), 64, Some(2))
+                .expect("write truncated");
+        }
+        let cursor = Cursor::new(&buf);
+        let mut reader = pcap_file::pcap::PcapReader::new(cursor).expect("reader");
+
+        let r0 = reader.next_packet().expect("rec0").expect("ok");
+        assert_eq!(r0.data.as_ref(), &[10, 20, 30, 40]);
+        assert_eq!(r0.orig_len, 64);
+        assert_eq!(r0.timestamp, std::time::Duration::new(7, 8));
+        drop(r0);
+
+        let r1 = reader.next_packet().expect("rec1").expect("ok");
+        assert_eq!(r1.data.as_ref(), &[1, 2], "snaplen truncates caplen");
+        assert_eq!(r1.orig_len, 64, "orig_len keeps full wire length");
     }
 
     /// Closes feedback item F5 from des-rs: confirm that nanosecond

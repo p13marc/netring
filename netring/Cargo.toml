@@ -23,7 +23,7 @@ exclude = ["CLAUDE.md", "SPEC.md"]
 # pulls only `bitflags` + `thiserror` — both already in netring's tree.
 # The `parse` feature additionally enables `flowscope/extractors`,
 # `flow` enables `tracker`/`reassembler`/`session`.
-flowscope = { version = "0.19", default-features = false }
+flowscope = { version = "0.20", default-features = false }
 
 libc = { workspace = true }
 nix = { workspace = true }
@@ -112,7 +112,11 @@ parse = ["dep:etherparse", "flowscope/extractors"]
 # Flow & session tracking. `flow + tokio` enables `AsyncCapture::flow_stream`
 # + the Monitor. Pulls `bytes` (async reassembler) + `ahash` (flow-key hashing).
 # NOTE: `flow` implies `parse` — the tracker needs etherparse extractors.
-flow = ["parse", "flowscope/tracker", "flowscope/reassembler", "flowscope/session", "dep:bytes", "dep:ahash"]
+# `flowscope/community-id` surfaces the Corelight Community ID v1 on flow
+# records (issue #33 / flowscope #88) — the cross-tool flow id pivoted against
+# Zeek / Suricata. Tiny (sha1 + base64); kept in `flow` so every flow export
+# (JSON / IPFIX / `export::FlowRecord`) carries it.
+flow = ["parse", "flowscope/tracker", "flowscope/reassembler", "flowscope/session", "flowscope/community-id", "dep:bytes", "dep:ahash"]
 # L7 parser pass-through — pull flowscope's HTTP/DNS/TLS/ICMP modules.
 http = ["flow", "flowscope/http"]
 dns = ["flow", "flowscope/dns"]
@@ -210,7 +214,7 @@ metrics = ["dep:metrics"]
 # Pass-through for flowscope's `emit` module (Zeek conn.log, CSV writers).
 emit = ["flow", "flowscope/emit"]
 # Suricata EVE JSON sink over `flowscope::emit::EveJsonWriter`.
-eve-sink = ["emit", "dep:serde_json", "flowscope/emit-eve"]
+eve-sink = ["emit", "dep:serde_json", "flowscope/emit-eve", "flowscope/community-id"]
 # OCSF (Open Cybersecurity Schema Framework) Detection Finding sink (issue #50).
 # Maps each anomaly to an OCSF 2004 NDJSON line; pulls only `serde_json`.
 ocsf-sink = ["dep:serde_json"]
@@ -528,6 +532,11 @@ required-features = ["tokio", "dns"]
 [[example]]
 name = "monitor_basic"
 path = "examples/monitor/basic.rs"
+required-features = ["tokio", "flow"]
+
+[[example]]
+name = "monitor_auto_backend"
+path = "examples/monitor/auto_backend.rs"
 required-features = ["tokio", "flow"]
 
 [[example]]

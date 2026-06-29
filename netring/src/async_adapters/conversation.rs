@@ -242,7 +242,7 @@ impl AsyncReassembler for ConvSideReassembler {
 /// `Conversation` each time the factory observes a new flow.
 /// Underlying FlowStream specialization used by `ConversationStream`.
 type ConvInnerStream<S, E> = FlowStream<
-    S,
+    AsyncCapture<S>,
     E,
     (),
     AsyncReassemblerSlot<<E as FlowExtractor>::Key, ConversationFactory<<E as FlowExtractor>::Key>>,
@@ -296,7 +296,7 @@ where
 
 // ── entry points ────────────────────────────────────────────────────
 
-impl<S, E> FlowStream<S, E, (), NoReassembler>
+impl<S, E> FlowStream<AsyncCapture<S>, E, (), NoReassembler>
 where
     S: PacketSource + std::os::unix::io::AsRawFd,
     E: FlowExtractor,

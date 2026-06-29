@@ -129,11 +129,11 @@ fn apply_owned_anomaly(sink: &mut dyn crate::anomaly::sink::AnomalySink, a: Owne
         a.proto.and_then(l4proto_from_str),
     ) {
         (Some(sip), Some(sp), Some(dip), Some(dp), Some(proto)) => {
-            Some(flowscope::extract::FiveTupleKey {
+            Some(flowscope::extract::FiveTupleKey::new(
                 proto,
-                a: SocketAddr::new(sip, sp),
-                b: SocketAddr::new(dip, dp),
-            })
+                SocketAddr::new(sip, sp),
+                SocketAddr::new(dip, dp),
+            ))
         }
         _ => None,
     };
@@ -209,11 +209,11 @@ mod tests {
 
     fn dummy_evt() -> FlowStarted<Tcp> {
         use std::net::{IpAddr, Ipv4Addr, SocketAddr};
-        let key = flowscope::extract::FiveTupleKey {
-            proto: flowscope::L4Proto::Tcp,
-            a: SocketAddr::new(IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1)), 1),
-            b: SocketAddr::new(IpAddr::V4(Ipv4Addr::new(10, 0, 0, 2)), 80),
-        };
+        let key = flowscope::extract::FiveTupleKey::new(
+            flowscope::L4Proto::Tcp,
+            SocketAddr::new(IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1)), 1),
+            SocketAddr::new(IpAddr::V4(Ipv4Addr::new(10, 0, 0, 2)), 80),
+        );
         FlowStarted::<Tcp>::new(key, Some(flowscope::L4Proto::Tcp), Timestamp::new(0, 0))
     }
 
@@ -224,11 +224,11 @@ mod tests {
         flow_states: &'a mut crate::ctx::FlowStateRegistry,
     ) -> Ctx<'a> {
         Ctx {
-            flow: Some(flowscope::extract::FiveTupleKey {
-                proto: flowscope::L4Proto::Tcp,
-                a: "10.0.0.1:1".parse().unwrap(),
-                b: "10.0.0.2:80".parse().unwrap(),
-            }),
+            flow: Some(flowscope::extract::FiveTupleKey::new(
+                flowscope::L4Proto::Tcp,
+                "10.0.0.1:1".parse().unwrap(),
+                "10.0.0.2:80".parse().unwrap(),
+            )),
             ts: Timestamp::new(0, 0),
             source: SourceIdx(0),
             monitor_name: None,
@@ -301,11 +301,11 @@ mod tests {
             }
         }
 
-        let key = flowscope::extract::FiveTupleKey {
-            proto: flowscope::L4Proto::Tcp,
-            a: "10.0.0.1:1234".parse().unwrap(),
-            b: "10.0.0.2:443".parse().unwrap(),
-        };
+        let key = flowscope::extract::FiveTupleKey::new(
+            flowscope::L4Proto::Tcp,
+            "10.0.0.1:1234".parse().unwrap(),
+            "10.0.0.2:443".parse().unwrap(),
+        );
         let anomaly =
             OwnedAnomaly::new("ioc_match", Severity::Critical.into(), Timestamp::new(0, 0))
                 .with_key(&key)

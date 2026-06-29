@@ -177,11 +177,17 @@ pub mod flow {
     pub use flowscope::tracker::IdleTimeoutFn;
     #[cfg(feature = "flow")]
     pub use flowscope::{
-        AnomalyKind, BufferedReassembler, BufferedReassemblerFactory, EndReason,
-        FlowDatagramDriver, FlowDriver, FlowEntry, FlowEvent, FlowEvents, FlowSessionDriver,
-        FlowSide, FlowState, FlowStats, FlowTracker, FlowTrackerConfig, FlowTrackerStats,
-        HistoryString, OverflowPolicy, Reassembler, ReassemblerFactory, SessionEvent,
+        AnomalyKind, BufferedReassembler, BufferedReassemblerFactory, EndReason, FlowDriver,
+        FlowEntry, FlowEvent, FlowEvents, FlowSide, FlowState, FlowStats, FlowTracker,
+        FlowTrackerConfig, FlowTrackerStats, HistoryString, OverflowPolicy, ParserKind,
+        Reassembler, ReassemblerFactory,
     };
+
+    // netring 0.20-adoption: flowscope retired its public `SessionEvent`
+    // (flowscope #100) and deleted `Flow{Session,Datagram}Driver`
+    // (#99). netring now owns its session-stream event type.
+    #[cfg(all(feature = "tokio", feature = "flow"))]
+    pub use crate::async_adapters::session_event::SessionEvent;
 
     /// Async reassembly types for tokio integration.
     /// Available under `flow + tokio`.
@@ -200,11 +206,27 @@ pub use async_adapters::flow_broadcast::{BroadcastRecvError, FlowBroadcast, Flow
 pub use async_adapters::flow_stream::{AsyncReassemblerSlot, FlowStream, NoReassembler};
 #[cfg(all(feature = "tokio", feature = "flow"))]
 pub use async_adapters::multi_capture::AsyncMultiCapture;
+#[cfg(all(
+    feature = "tokio",
+    feature = "flow",
+    feature = "af-xdp",
+    feature = "xdp-loader"
+))]
+pub use async_adapters::multi_capture::AsyncXdpMultiCapture;
 #[cfg(all(feature = "tokio", feature = "flow"))]
 pub use async_adapters::multi_config::MultiStreamConfig;
 #[cfg(all(feature = "tokio", feature = "flow"))]
 pub use async_adapters::multi_streams::{
-    MultiDatagramStream, MultiFlowStream, MultiSessionStream, TaggedEvent,
+    MergedFlowStream, MultiDatagramStream, MultiFlowStream, MultiSessionStream, TaggedEvent,
+};
+#[cfg(all(
+    feature = "tokio",
+    feature = "flow",
+    feature = "af-xdp",
+    feature = "xdp-loader"
+))]
+pub use async_adapters::multi_streams::{
+    XdpMultiDatagramStream, XdpMultiFlowStream, XdpMultiSessionStream,
 };
 #[cfg(feature = "tokio")]
 pub use async_adapters::stream_capture::{StreamCapture, StreamSetFilter};

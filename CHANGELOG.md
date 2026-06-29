@@ -18,6 +18,22 @@
   cBPF/XDP prefilter is the build-time union of the original predicates, so a
   reload can narrow freely but widening past that union drops the newly-wanted
   frames in-kernel until rebuild (offline replay reloads fully).
+- **Load-shedding policy under overload** (issue
+  [#54](https://github.com/p13marc/netring/issues/54), action half) — a
+  `monitor::overload::LoadShedder` couples the existing hysteresis
+  `OverloadDetector` with a `ShedPolicy { Observe, ShedNewFlows, SampleFlows {
+  keep } }` and **honest** `SheddingStats { admitted, shed }`. Fed the windowed
+  `drop_rate` via `on_capture_stats`, it sheds *new* flows at the dispatch
+  boundary while `Emergency` holds — `admit_new_flow(flow_hash)` returns
+  `ShedDecision::{Admit,Shed}`, deterministic in a **direction-invariant** key
+  hash so both legs of a flow share one verdict, and counts every decision
+  (never a silent drop). Already-admitted flows keep flowing (elephant-friendly).
+  netring owns the *mechanism + policy + counters*; the *heuristic* (keep rate,
+  what's sheddable) is the app's. **Boundary:** userspace dispatch-level shedding
+  only — the kernel-ring (`Block`/`DropOldest`/`DropNewest`) levers and the XDP
+  elephant-shunt (Suricata `bypass`) need the eBPF pre-filter map + a real NIC and
+  stay the hardware-gated follow-up under #44. New example:
+  `monitor_load_shedding`.
 - **AF_XDP flow + L7 streams and multi-interface fan-in** (issue
   [#104](https://github.com/p13marc/netring/issues/104), part of the flowscope
   0.20 adoption [#108](https://github.com/p13marc/netring/issues/108)) —

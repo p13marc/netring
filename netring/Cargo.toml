@@ -763,6 +763,11 @@ path = "examples/monitor/overload_signal.rs"
 required-features = ["tokio", "flow"]
 
 [[example]]
+name = "monitor_load_shedding"
+path = "examples/monitor/load_shedding.rs"
+required-features = ["tokio", "flow"]
+
+[[example]]
 name = "monitor_dga_query"
 path = "examples/monitor/dga_query.rs"
 required-features = ["tokio", "flow", "dns"]

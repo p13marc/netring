@@ -153,14 +153,14 @@ tests: `tests/{monitor_lo_0_22, sharded_lo_merge}.rs`.
 **Dependency.** flowscope `0.14.1` (its ICMP datagram-routing fix is
 required for `on_icmp_error`); netring patches to the local checkout
 (`[patch.crates-io]` in the workspace `Cargo.toml`) until 0.14.1 is
-published. **eBPF bandwidth backend (R6)** is designed only
-(`docs/EBPF_BANDWIDTH.md`) — a hardware-measured spike, not shipped.
+published. **eBPF bandwidth backend (R6)** is designed only — a
+hardware-measured spike, not shipped (tracked in issue #118).
 
 ### Recent additions (netring 0.21 — Send Monitor + sharding + streaming subscribers + pcap replay)
 
 Driven by 9 phase plans (A–I) plus an audit-fix batch (all
 deleted on ship per convention). Full retrospective lives in
-`plans/INDEX.md`. CHANGELOG entry headed
+`CHANGELOG.md`. CHANGELOG entry headed
 `## 0.21.0 — Send Monitor + sharding + streaming subscribers + pcap replay`.
 
 **Phase A — ergonomics polish:** split `.on::<E, _, _>()` into
@@ -1031,7 +1031,8 @@ flowscope `0.16` is already published, so there's no upstream-first step or
    Its `kafka` feature needs `cmake`/librdkafka available at *its* build time,
    not at publish time.
 5. `git tag 0.25.0` (no `v` prefix, per the user's convention).
-6. Delete `plans/netring-0.25-plan.md` (delete-on-ship convention).
+6. Update the GitHub issue tracker (close shipped issues, file follow-ups).
+   Planning lives in issues now — there is no `plans/` directory.
 
 Run `just doc` (`RUSTDOCFLAGS="-D warnings"`) + `just ci` before publish — the
 CI doc job fails on broken intra-doc links. (Earlier-version notes: 0.22 needed

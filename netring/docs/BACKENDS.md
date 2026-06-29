@@ -1,8 +1,8 @@
 # Capture backends (`AnyBackend`)
 
-> Design reference for the 0.24 Phase B I/O-core rewrite. Implements
-> `plans/netring-architecture.md` §3. This documents the *target* shape; the
-> run-loop rewrite (B1/B2) lands it.
+> Design reference for the `AnyBackend` I/O core (shipped in the 0.24 Phase B
+> rewrite). This documents the backend enum shape; see `ARCHITECTURE.md` for the
+> surrounding data-path design.
 
 ## Why an enum, not a `dyn` trait
 

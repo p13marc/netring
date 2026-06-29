@@ -20,9 +20,8 @@ Companion to:
 - The 7 reference detectors under `examples/anomaly/` — working
   examples for every pattern this guide describes.
 - The crate-level API reference (`cargo doc -p netring --open`).
-- The roadmap doc
-  [`plans/netring-0.16-roadmap-2026-05-29.md`](../../plans/netring-0.16-roadmap-2026-05-29.md)
-  for the architecture rationale.
+- The CHANGELOG (`CHANGELOG.md`) for the architecture rationale behind the
+  anomaly / correlation harness.
 
 ## Migration notes (netring 0.18)
 
@@ -615,10 +614,8 @@ to playbooks) much easier than after-the-fact tagging.
 
 - **The 7 reference detectors** under `netring/examples/anomaly/`
   — every pattern in this guide is implemented in working code.
-- **The roadmap** —
-  [`plans/netring-0.16-roadmap-2026-05-29.md`](../../plans/netring-0.16-roadmap-2026-05-29.md)
-  documents the design rationale; the bonus items
-  (`Display`/`to_json_line`/`FlowAnomalyRule`) are documented
+- **The CHANGELOG** (`CHANGELOG.md`) documents the design rationale; the
+  bonus items (`Display`/`to_json_line`/`FlowAnomalyRule`) are documented
   alongside.
 - **flowscope**'s docs — the `SessionEvent` /
   `DatagramParser` types this layer composes over.

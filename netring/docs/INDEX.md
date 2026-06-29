@@ -26,8 +26,7 @@ exporters live in the [`netring-exporters`](../../netring-exporters) crate.
 ## Quality / internals
 - [METRICS.md](METRICS.md) — every `netring_*` metric (capture gauges/counters, anomalies) + cardinality notes.
 - [MIRI.md](MIRI.md) — miri + fuzzing strategy and the Stacked-vs-Tree-Borrows note.
-- [EBPF_BANDWIDTH.md](EBPF_BANDWIDTH.md) — design doc for the eBPF bandwidth backend.
-- [AF_XDP_EVALUATION.md](AF_XDP_EVALUATION.md) — AF_XDP design notes.
+- [AF_XDP.md](AF_XDP.md) — the AF_XDP backend: modes, rings, the program loader, multi-queue capture, steering.
 
 ## Migration guides
 - [MIGRATING_0.26_TO_0.27.md](MIGRATING_0.26_TO_0.27.md) — the 1.0 API sweep (`#[non_exhaustive]` enums/output structs, sealed L7 markers), the `Capture::packets()` lending iterator, flowscope 0.19; plus the opt-in NSM stack (threat-intel, YARA, Sigma, OCSF, p0f, QUIC, asset inventory, ML export).

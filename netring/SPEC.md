@@ -1498,13 +1498,8 @@ by 25% per attempt, down to 25% of original. Log each retry via `log::warn!`.
 Not stabilized as of Rust 1.93. The `nightly` feature flag is reserved for
 future `gen`-block-based iteration when stabilized. No implementation in initial release.
 
-### Detailed plans
+### Implementation history
 
-See `plans/` directory for per-phase file-level implementation plans:
-- `plans/01-ffi-foundations.md` — every struct, constant, and FFI layout test
-- `plans/02-socket-mmap.md` — every setsockopt wrapper, MmapRing, block status helpers
-- `plans/03-rx-path.md` — lifetime model, BatchIter pointer walking, AfPacketRx builder
-- `plans/04-tx-path.md` — V1 frame semantics, TxSlot send/drop, AfPacketTx builder
-- `plans/05-high-level-api.md` — flat iterator design (raw pointer + lifetime erasure)
-- `plans/06-async-channel.md` — AsyncFd loop, channel thread, feature gates
-- `plans/07-tests-docs.md` — every test function, benchmark, example, doc requirement
+The original per-phase implementation plans have all shipped; the durable
+record now lives in `CHANGELOG.md` and `git log`. Forward-looking work is
+tracked in the GitHub issue tracker.

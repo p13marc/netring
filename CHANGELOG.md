@@ -65,6 +65,20 @@
   shared/merged tracker surfaces `FlowStats::source_idx_{forward,reverse}` +
   `capture_leg_inconsistent` (the tap-miswire / asymmetric-routing IOC) on a
   flow's stats, exposed through `merged_flow_stream` on AF_PACKET **and** AF_XDP.
+- **`FlowRecord::to_ipfix_record()`** (feature `ipfix`, issue
+  [#33](https://github.com/p13marc/netring/issues/33)) — view a netring
+  `export::FlowRecord` as flowscope's canonical, IANA-IE-keyed
+  `ipfix::FlowRecord`, the shape every flowscope emitter (IPFIX wire / CSV / Zeek
+  `conn.log` / NDJSON) renders from. netring keeps its own ergonomic `FlowRecord`
+  as the stable public type (the core API stays decoupled from flowscope's IE
+  registry); this is the opt-in bridge for code that wants the canonical record.
+  The mapping now also preserves netring's **full 8-variant `EndReason`** in
+  flowscope's `original_end_reason` shadow field — IE 136 `flowEndReason`
+  collapses it to 5 RFC states, so the un-collapsed reason (Fin vs Rst vs
+  ParseError vs Evicted vs …) survives for consumers reading the IE record
+  directly. (`tcpControlBits` stays `0` — flowscope's `FlowStats` doesn't
+  accumulate per-flow TCP flags, so there is no source for it; a flowscope
+  dependency, not a netring gap.)
 
 ### Changed (breaking — flowscope 0.20 adoption, [#108](https://github.com/p13marc/netring/issues/108))
 

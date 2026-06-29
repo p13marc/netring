@@ -29,10 +29,14 @@
 //!   counts (IE 85/86) carry initiator + responder. A collector that wants
 //!   per-direction (biflow, RFC 5103) responder counts needs a reverse-IE
 //!   template — out of scope for the default templates.
-//! - `tcpControlBits` (IE 6) is emitted as `0`: netring's [`FlowRecord`]
-//!   doesn't carry cumulative TCP flags yet (a future field; tracked under
-//!   the #33 FlowRecord re-key). The IE stays in the template so the wire
-//!   shape is the canonical one.
+//! - `tcpControlBits` (IE 6) is emitted as `0`: flowscope's `FlowStats` does
+//!   not accumulate per-flow TCP control flags, so there is no source to fill
+//!   it (a flowscope dependency, not a netring gap). The IE stays in the
+//!   template so the wire shape is the canonical one.
+//! - The 5-state IE 136 `flowEndReason` collapses netring's 8-variant
+//!   [`EndReason`]; the canonical record also keeps
+//!   the un-collapsed reason in flowscope's `original_end_reason` shadow field
+//!   (issue #33). Reach the canonical record via [`FlowRecord::to_ipfix_record`].
 //! - Source/destination map to the record's `a`/`b` endpoints. With the
 //!   default bidirectional extractor those are canonically ordered, not
 //!   connection direction — use a directional extractor if "source =
@@ -116,6 +120,15 @@ fn to_ie_record(record: &FlowRecord) -> IeFlowRecord {
     rec.flow_start_milliseconds = ts_millis(record.start);
     rec.flow_end_milliseconds = ts_millis(record.end);
     rec.flow_end_reason = Some(flow_end_reason(record.reason));
+    // Preserve netring's full end-reason fidelity (issue #33): IE 136
+    // `flowEndReason` above collapses to 5 RFC states, so the canonical record
+    // also keeps the un-collapsed 8-variant `EndReason` in flowscope's
+    // `original_end_reason` shadow field — flowscope added it precisely so this
+    // distinction (Fin vs Rst vs ParseError vs Evicted vs …) survives for
+    // consumers reading the IE record directly. `None` (an ongoing
+    // active-timeout snapshot) stays `None` here, mirroring `flow_end_reason`'s
+    // `ActiveTimeout`.
+    rec.original_end_reason = record.reason;
     // Carry the Community ID onto the canonical IE record for faithfulness
     // (issue #33). It does **not** ride the wire under the default
     // `FLOWSCOPE_TEMPLATE_FLOW_IPV4`/`_IPV6` templates — Community ID is not an
@@ -123,6 +136,27 @@ fn to_ie_record(record: &FlowRecord) -> IeFlowRecord {
     // mapping honest for any future template that adds an enterprise IE for it.
     rec.community_id = record.community_id.clone();
     rec
+}
+
+impl FlowRecord {
+    /// View this record as flowscope's canonical, **IANA-IE-keyed**
+    /// [`ipfix::FlowRecord`](flowscope::ipfix::FlowRecord) — the single
+    /// flow-record shape every flowscope emitter (IPFIX wire, CSV, Zeek
+    /// `conn.log`, NDJSON) renders from (issue #33).
+    ///
+    /// netring keeps its own ergonomic [`FlowRecord`] as the stable public type
+    /// (so the core API isn't bound to flowscope's IE registry), and this is the
+    /// opt-in bridge for code that wants the canonical record — e.g. to drive a
+    /// flowscope IE-writer other than netring's [`IpfixExporter`]. The mapping is
+    /// the same one `IpfixExporter` uses on the wire: per-direction delta counts
+    /// (IE 1/2) + both-direction totals (IE 85/86), `flowEndReason` (IE 136)
+    /// **plus** the un-collapsed `original_end_reason` shadow, and the Community
+    /// ID. `tcpControlBits` is left unset — flowscope's `FlowStats` does not
+    /// accumulate per-flow TCP flags, so there is no source for it (a flowscope
+    /// dependency, not a netring gap).
+    pub fn to_ipfix_record(&self) -> IeFlowRecord {
+        to_ie_record(self)
+    }
 }
 
 /// The flowscope template ID for a record, chosen by IP family.
@@ -313,6 +347,44 @@ mod tests {
                 .as_deref()
                 .is_some_and(|c| c.starts_with("1:"))
         );
+        // Issue #33: the full 8-variant EndReason survives in the shadow field.
+        assert_eq!(rec.original_end_reason, Some(EndReason::Fin));
+    }
+
+    #[test]
+    fn original_end_reason_preserves_fidelity_ie136_collapses() {
+        // `ParseError` and `Evicted` both collapse to one IE-136 state, but the
+        // canonical record keeps them distinct in `original_end_reason` — the
+        // whole point of the shadow field (issue #33).
+        let key = FlowKey::new(
+            L4Proto::Tcp,
+            SocketAddr::new(IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1)), 1),
+            SocketAddr::new(IpAddr::V4(Ipv4Addr::new(10, 0, 0, 2)), 2),
+        );
+        let stats = FlowStats::default();
+        let parse_err =
+            FlowRecord::from_ended(&key, &stats, EndReason::ParseError).to_ipfix_record();
+        let evicted = FlowRecord::from_ended(&key, &stats, EndReason::Evicted).to_ipfix_record();
+        assert_eq!(parse_err.original_end_reason, Some(EndReason::ParseError));
+        assert_eq!(evicted.original_end_reason, Some(EndReason::Evicted));
+        assert_ne!(
+            parse_err.original_end_reason, evicted.original_end_reason,
+            "the shadow field must keep reasons IE 136 would collapse"
+        );
+        // An ongoing active-timeout snapshot (reason = None) stays None.
+        assert_eq!(
+            FlowRecord::from_active(&key, &stats)
+                .to_ipfix_record()
+                .original_end_reason,
+            None
+        );
+    }
+
+    #[test]
+    fn to_ipfix_record_matches_internal_mapping() {
+        // The public bridge is exactly the on-wire mapping.
+        let r = v4_record();
+        assert_eq!(r.to_ipfix_record(), to_ie_record(&r));
     }
 
     #[test]

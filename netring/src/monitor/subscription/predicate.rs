@@ -296,6 +296,11 @@ fn glob_match(pat: &str, text: &str) -> bool {
 /// - **packet tier** → 5-tuple + vlan from the [`PacketView`](flowscope::PacketView).
 /// - **flow tier** → 5-tuple + byte/packet counts from flow stats.
 /// - **session tier** → 5-tuple + the parsed L7 fields (sni / host / qname).
+///
+/// **Open extension point (intentionally not sealed):** implementing this for
+/// your own type is the supported way to evaluate a parsed [`Predicate`] (from
+/// [`parse_expr`](super::parse_expr)) against your own data — every accessor
+/// defaults to `None`, so you override only the fields you carry.
 #[allow(unused_variables)]
 pub trait FieldSource {
     /// L4 protocol of the current event, if known.

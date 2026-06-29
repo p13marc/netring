@@ -115,8 +115,19 @@
   See [`docs/MIGRATING_0.27_TO_0.28.md`](netring/docs/MIGRATING_0.27_TO_0.28.md)
   for the full recipe-style migration guide.
 
-### Changed (breaking — pre-1.0 API sweep, [#37](https://github.com/p13marc/netring/issues/37) §F)
+### Changed (breaking — pre-1.0 API sweep, [#37](https://github.com/p13marc/netring/issues/37) §D/§F)
 
+- **Sealed the deep-internal subscription-plumbing traits** `Subscribable` and
+  `subscription::L7Fields` (§D) via a private `Sealed` supertrait — they are now
+  implemented only by netring. These are internal seams of the typed
+  subscription engine (the install-onto-builder hook, and the L7-field accessors
+  over flowscope's message types); neither is constructible/usable externally
+  (the subscription tiers and `SessionFields` are `pub(crate)`), so sealing
+  closes nothing a caller could reach and lets them gain methods before 1.0
+  without a major bump. Sealing now is the conservative 1.0 move: removing a
+  seal later is non-breaking, adding one isn't. **`subscription::FieldSource` is
+  intentionally left open** — implementing it is the supported way to evaluate a
+  parsed `.expr()` `Predicate` (`parse_expr`) against your own data.
 - **Renamed `config::BuildError` → `config::BpfBuildError`** (and the crate-root
   re-export `netring::BuildError` → `netring::BpfBuildError`). There were two
   unrelated public `BuildError` enums — the BPF-filter compiler's and the

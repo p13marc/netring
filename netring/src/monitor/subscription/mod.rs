@@ -37,15 +37,34 @@ pub use packet::{PacketHandler, PacketSubscription};
 pub use predicate::{Atom, FieldSource, Glob, Predicate};
 pub use session::{L7Fields, SessionHandler, SessionSubscription};
 
+/// Seals the deep-internal subscription-plumbing traits [`Subscribable`] and
+/// [`L7Fields`](session::L7Fields) so only netring implements them. They carry
+/// no stability guarantee for downstream impls and may grow methods before 1.0;
+/// neither is constructible/usable externally (the tiers + `SessionFields` are
+/// `pub(crate)`), so sealing closes nothing a caller could reach. Sealing now
+/// is the conservative 1.0 move — *removing* a seal later is non-breaking,
+/// *adding* one isn't (issue #37 §D). **`FieldSource` is intentionally left
+/// open** — implementing it is the supported way to `eval` a parsed `.expr()`
+/// [`Predicate`](predicate::Predicate) against your own data.
+mod sealed {
+    pub trait Sealed {}
+}
+
 /// A built subscription that knows how to **install itself** onto a
 /// [`MonitorBuilder`](crate::monitor::MonitorBuilder) (0.25 S3). Lets the one
 /// [`subscribe`](crate::monitor::MonitorBuilder::subscribe) method accept any
 /// tier — packet subs push onto the zero-copy drain; flow/session subs install
 /// a predicate-gated handler on the existing typed dispatch.
-pub trait Subscribable {
+///
+/// Sealed: implemented only by netring's three built-in subscription types.
+pub trait Subscribable: sealed::Sealed {
     /// Install this subscription, returning the updated builder.
     fn install(self, builder: crate::monitor::MonitorBuilder) -> crate::monitor::MonitorBuilder;
 }
+
+impl sealed::Sealed for PacketSubscription {}
+impl<P: crate::protocol::FlowProtocol> sealed::Sealed for FlowSubscription<P> {}
+impl<P: crate::protocol::MessageProtocol> sealed::Sealed for SessionSubscription<P> {}
 
 impl Subscribable for PacketSubscription {
     fn install(self, builder: crate::monitor::MonitorBuilder) -> crate::monitor::MonitorBuilder {

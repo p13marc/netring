@@ -20,10 +20,9 @@ built on AF_PACKET with TPACKET_V3 (block-based mmap ring buffers) and AF_XDP.
 
 ## Implementation Status
 
-**0.28.0 — RELEASE-PREPPED on `master`** (version bumped, CHANGELOG banner
-finalized; pending `just ci` + `cargo publish` + tag — the maintainer's
-hands-on step). "flowscope 0.20, AF_XDP maturity & the pre-1.0 API sweep".
-Depends on **flowscope 0.20**; companion **`netring-exporters` 0.4.0**.
+**0.28.0 — RELEASED 2026-06-29** (published to crates.io, tag `0.28.0`,
+alongside **`netring-exporters` 0.4.0**). "flowscope 0.20, AF_XDP maturity &
+the pre-1.0 API sweep". Depends on **flowscope 0.20**.
 Migration: `docs/MIGRATING_0.27_TO_0.28.md`. A breaking release (still pre-1.0;
 the 1.0 freeze is deferred under [#37]):
 

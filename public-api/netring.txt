@@ -2162,6 +2162,8 @@ pub fn netring::export::FlowRecord::duration(&self) -> core::time::Duration
 pub fn netring::export::FlowRecord::is_ongoing(&self) -> bool
 pub fn netring::export::FlowRecord::total_bytes(&self) -> u64
 pub fn netring::export::FlowRecord::total_packets(&self) -> u64
+impl netring::export::FlowRecord
+pub fn netring::export::FlowRecord::to_ipfix_record(&self) -> flowscope::ipfix::record::FlowRecord
 impl core::clone::Clone for netring::export::FlowRecord
 pub fn netring::export::FlowRecord::clone(&self) -> netring::export::FlowRecord
 impl core::cmp::PartialEq for netring::export::FlowRecord

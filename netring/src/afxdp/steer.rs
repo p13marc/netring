@@ -249,6 +249,38 @@ impl RxSteer {
         Ok(nfc.rule_cnt)
     }
 
+    /// Locations of every installed RX classification rule (`GRXCLSRLALL`).
+    ///
+    /// Useful for clearing stale rules a crashed capture left behind — a
+    /// [`SteerGuard`] only tracks the rules it inserted. Errors on a NIC
+    /// without ntuple support, like the other calls.
+    pub fn list(&self) -> Result<Vec<u32>, Error> {
+        let n = self.rule_count()? as usize;
+        if n == 0 {
+            return Ok(Vec::new());
+        }
+        // `ethtool_rxnfc` header + `rule_cnt` × u32 `rule_locs` tail.
+        // ponytail: TOCTOU with rule_count — a rule added in between is dropped
+        // from the result; re-query if an exact snapshot matters.
+        let mut buf = vec![0u8; RULE_LOCS_OFF + n * 4];
+        // SAFETY: `buf` is larger than `ethtool_rxnfc`; write the header through
+        // an unaligned pointer (a `Vec<u8>` has no struct alignment). The kernel
+        // overwrites the `rule_locs` tail during the ioctl.
+        unsafe {
+            buf.as_mut_ptr()
+                .cast::<ffi::ethtool_rxnfc>()
+                .write_unaligned(ffi::ethtool_rxnfc {
+                    cmd: ffi::ETHTOOL_GRXCLSRLALL,
+                    flow_type: 0,
+                    data: 0,
+                    fs: zeroed_spec(0),
+                    rule_cnt: n as u32,
+                });
+        }
+        ethtool_ioctl(&self.fd, &self.iface, buf.as_mut_ptr().cast())?;
+        Ok(parse_rule_locs(&buf, n))
+    }
+
     /// Insert every rule in `rules` (all-or-nothing) and return a [`SteerGuard`]
     /// that removes them on drop. On any insert failure, already-inserted rules
     /// are rolled back before the error returns.
@@ -305,6 +337,18 @@ impl Drop for SteerGuard {
             }
         }
     }
+}
+
+/// Offset of the flexible `rule_locs[]` tail in `ethtool_rxnfc` (`rule_cnt`
+/// at 184 + 4), matching `<linux/ethtool.h>`.
+const RULE_LOCS_OFF: usize = 188;
+
+/// Decode `n` `GRXCLSRLALL` rule locations from the `ethtool_rxnfc` tail.
+fn parse_rule_locs(buf: &[u8], n: usize) -> Vec<u32> {
+    buf[RULE_LOCS_OFF..RULE_LOCS_OFF + n * 4]
+        .chunks_exact(4)
+        .map(|c| u32::from_ne_bytes(c.try_into().unwrap()))
+        .collect()
 }
 
 /// A zeroed flow spec carrying only `location` — enough for delete / count.
@@ -433,6 +477,22 @@ mod tests {
                     .insert(&FlowRule::tcp().dst_port(443).to_queue(0))
                     .is_err()
             );
+        }
+    }
+
+    #[test]
+    fn list_reads_locations_from_the_tail() {
+        // Synthetic GRXCLSRLALL buffer: header + rule_locs [7, 42].
+        let mut buf = vec![0u8; RULE_LOCS_OFF + 2 * 4];
+        buf[RULE_LOCS_OFF..RULE_LOCS_OFF + 4].copy_from_slice(&7u32.to_ne_bytes());
+        buf[RULE_LOCS_OFF + 4..RULE_LOCS_OFF + 8].copy_from_slice(&42u32.to_ne_bytes());
+        assert_eq!(parse_rule_locs(&buf, 2), vec![7, 42]);
+    }
+
+    #[test]
+    fn lo_list_degrades_cleanly() {
+        if let Ok(steer) = RxSteer::open("lo") {
+            assert!(steer.list().is_err());
         }
     }
 }

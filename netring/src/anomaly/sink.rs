@@ -138,11 +138,16 @@ pub fn publish_owned(sink: &mut dyn AnomalySink, owned: &flowscope::OwnedAnomaly
     // Translate the SmallVec<Cow<'static, str>> observations into the
     // borrowed slice shape AnomalySink::write expects. The internal
     // Cow stays borrowed so no clone happens here.
-    let observations: Vec<(&'static str, std::borrow::Cow<'_, str>)> = owned
+    let mut observations: Vec<(&'static str, std::borrow::Cow<'_, str>)> = owned
         .observations
         .iter()
         .map(|(k, v)| (*k, std::borrow::Cow::Borrowed(v.as_ref())))
         .collect();
+    // Issue #127: surface the MITRE ATT&CK technique for detector-kinded
+    // anomalies as an observation, so it reaches every sink (JSON / EVE / OCSF).
+    if let Some(tid) = owned.kind.attack_technique() {
+        observations.push(("attack_technique", std::borrow::Cow::Borrowed(tid)));
+    }
     let metrics: Vec<(&'static str, f64)> = owned.metrics.iter().copied().collect();
     // flowscope 0.22: `OwnedAnomaly::kind` is a typed `DetectorKind` whose
     // `as_str()` yields a `&'static str` slug for every variant (including
@@ -392,6 +397,64 @@ mod tests {
         let s: &mut dyn AnomalySink = &mut sink;
         // Object-safe: this only compiles if AnomalySink is dyn-safe.
         s.write("k", Severity::Info, Timestamp::new(0, 0), None, &[], &[]);
+    }
+
+    /// Sink that records the observation key/value pairs it receives.
+    #[derive(Default)]
+    struct ObsSink {
+        obs: Vec<(&'static str, String)>,
+    }
+    unsafe impl Send for ObsSink {}
+    impl AnomalySink for ObsSink {
+        fn write(
+            &mut self,
+            _kind: &'static str,
+            _severity: Severity,
+            _ts: Timestamp,
+            _key: Option<&dyn Key>,
+            observations: &[(&'static str, Cow<'_, str>)],
+            _metrics: &[(&'static str, f64)],
+        ) {
+            self.obs
+                .extend(observations.iter().map(|(k, v)| (*k, v.to_string())));
+        }
+    }
+
+    #[test]
+    fn publish_owned_appends_attack_technique_for_kinded_anomaly() {
+        // A beacon-kinded anomaly maps to ATT&CK T1071 — publish_owned must
+        // surface it as an `attack_technique` observation (issue #127).
+        let owned = flowscope::OwnedAnomaly::new(
+            flowscope::DetectorKind::BeaconRita,
+            flowscope::event::Severity::Warning,
+            Timestamp::new(0, 0),
+        );
+        let mut sink = ObsSink::default();
+        publish_owned(&mut sink, &owned);
+        assert!(
+            sink.obs
+                .iter()
+                .any(|(k, v)| *k == "attack_technique" && v == "T1071"),
+            "expected attack_technique=T1071, got {:?}",
+            sink.obs
+        );
+    }
+
+    #[test]
+    fn publish_owned_omits_attack_technique_for_untagged_kind() {
+        // `Other(_)` has no technique — no spurious observation.
+        let owned = flowscope::OwnedAnomaly::new(
+            flowscope::DetectorKind::Other("custom"),
+            flowscope::event::Severity::Info,
+            Timestamp::new(0, 0),
+        );
+        let mut sink = ObsSink::default();
+        publish_owned(&mut sink, &owned);
+        assert!(
+            !sink.obs.iter().any(|(k, _)| *k == "attack_technique"),
+            "unexpected attack_technique for Other kind: {:?}",
+            sink.obs
+        );
     }
 
     #[test]

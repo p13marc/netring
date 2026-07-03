@@ -1449,6 +1449,18 @@ async fn dispatch_tracked_events(
     arp_table: ArpTableRef<'_>,
 ) -> Result<()> {
     for evt in events.drain(..) {
+        // Issue #127: drive the detector registry from the raw tracked event
+        // BEFORE lifecycle dispatch, so detector anomalies and user handlers see
+        // the same flow. Present only when detectors are armed (an unarmed
+        // monitor never allocates the cell → this `get_mut` returns `None`).
+        if let Some(cell) = state_map.get_mut::<crate::monitor::detectors::DetectorCell>() {
+            cell.registry.observe_event(&evt, &mut cell.out);
+            if !cell.out.is_empty() {
+                for owned in cell.out.drain(..) {
+                    crate::anomaly::sink::publish_owned(sink, &owned);
+                }
+            }
+        }
         // 0.24 Phase D: a flow just ended → build a FlowRecord and fan it
         // out to every registered exporter. Cheap no-op when none are
         // registered. Done before dispatch so exporters see the flow even

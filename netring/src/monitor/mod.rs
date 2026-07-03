@@ -64,6 +64,7 @@ pub mod auto;
 pub(crate) mod backend;
 #[cfg(feature = "cdp")]
 pub mod cdp;
+pub mod detectors;
 pub mod dispatcher;
 pub mod effect;
 #[cfg(feature = "tls")]
@@ -808,6 +809,13 @@ pub struct MonitorBuilder {
     /// Issue #124: set once [`Self::flow_analysis`] arms the analyzer, so a
     /// second call is idempotent (feeds/finalize wired only once).
     flow_analysis_armed: bool,
+    /// Issue #127: the detector registry accumulated via [`Self::detector`] /
+    /// [`Self::detectors`], moved into a `detectors::DetectorCell` at `build()`.
+    detector_registry: Option<flowscope::detect::DetectorRegistry<crate::protocol::FlowKey>>,
+    /// Issue #127: set once the DNS query-name feed for detectors is wired, so
+    /// repeated [`Self::detector`] calls don't double-register it.
+    #[cfg(feature = "dns")]
+    detector_dns_wired: bool,
     /// Issue #53: the live, swappable Sigma rule set behind [`Self::sigma`].
     #[cfg(feature = "sigma")]
     sigma_swap: Option<std::sync::Arc<arc_swap::ArcSwap<sigma::SigmaRuleSet>>>,
@@ -2780,6 +2788,103 @@ impl MonitorBuilder {
         self.flow_analysis()
     }
 
+    /// Issue #127: register a flowscope [`Detector`](flowscope::detect::Detector)
+    /// (beacon / port-scan / RITA / connection-flood / data-exfil / DGA / …).
+    /// Chainable — call once per detector. The run loop drives every registered
+    /// detector from the tracked flow-event stream (and DNS query names when the
+    /// `dns` feature is on), publishing each emitted anomaly through the sink
+    /// chain with an `attack_technique` observation when the detector's kind maps
+    /// to a MITRE ATT&CK technique. See [`detectors`].
+    ///
+    /// ```no_run
+    /// # #[cfg(all(feature = "flow", feature = "tokio"))] fn demo() {
+    /// use netring::monitor::Monitor;
+    /// use netring::prelude::StdoutSink;
+    /// use flowscope::detect::patterns::PortScanDetector;
+    /// use flowscope::detect::SrcHost;
+    /// Monitor::builder()
+    ///     .interface("eth0")
+    ///     .detector(PortScanDetector::<SrcHost>::new())
+    ///     .sink(StdoutSink::default());
+    /// # }
+    /// ```
+    pub fn detector(
+        mut self,
+        detector: impl flowscope::detect::Detector<crate::protocol::FlowKey> + 'static,
+    ) -> Self {
+        self.detector_registry
+            .get_or_insert_with(flowscope::detect::DetectorRegistry::new)
+            .register(detector);
+        self.wire_detector_dns_feed()
+    }
+
+    /// Issue #127: register a pre-built
+    /// [`DetectorRegistry`](flowscope::detect::DetectorRegistry). Merges into any
+    /// detectors already added via [`detector`](Self::detector).
+    pub fn detectors(
+        mut self,
+        registry: flowscope::detect::DetectorRegistry<crate::protocol::FlowKey>,
+    ) -> Self {
+        match self.detector_registry.as_mut() {
+            // A registry is opaque (boxed trait objects); if one already exists
+            // we can't cheaply drain the incoming one into it, so require this to
+            // be the first/only bulk registration. Callers mixing both styles
+            // should prefer repeated `.detector(..)`.
+            Some(_) => {
+                tracing::warn!(
+                    "detectors(): a detector registry is already present; the \
+                     supplied registry is ignored — use repeated .detector(..) to mix"
+                );
+            }
+            None => self.detector_registry = Some(registry),
+        }
+        self.wire_detector_dns_feed()
+    }
+
+    /// Wire the DNS query-name feed for detectors exactly once (idempotent
+    /// across repeated `.detector(..)` calls). No-op without the `dns` feature.
+    fn wire_detector_dns_feed(mut self) -> Self {
+        #[cfg(feature = "dns")]
+        {
+            use crate::protocol::builtin::Dns;
+            if !self.detector_dns_wired {
+                self.detector_dns_wired = true;
+                if !self
+                    .declared_protocols
+                    .contains_key(&std::any::TypeId::of::<Dns>())
+                {
+                    self = self.protocol::<Dns>();
+                }
+                self = self.on_ctx::<Dns>(|msg: &flowscope::dns::DnsMessage, ctx: &mut Ctx<'_>| {
+                    let flowscope::dns::DnsMessage::Query(q) = msg else {
+                        return Ok(());
+                    };
+                    let (Some(key), Some(qname)) =
+                        (ctx.flow, q.questions.first().map(|x| x.name.clone()))
+                    else {
+                        return Ok(());
+                    };
+                    let ts = ctx.ts;
+                    // Observe into the cell's buffer, then move the emitted
+                    // anomalies out before re-borrowing ctx for the sink.
+                    let emitted: Vec<flowscope::OwnedAnomaly> = {
+                        let cell = ctx.state_mut::<detectors::DetectorCell>();
+                        cell.registry.observe_dns(&key, &qname, ts, &mut cell.out);
+                        cell.out.drain(..).collect()
+                    };
+                    if !emitted.is_empty() {
+                        let sink = ctx.sink_mut();
+                        for owned in &emitted {
+                            crate::anomaly::sink::publish_owned(sink, owned);
+                        }
+                    }
+                    Ok(())
+                });
+            }
+        }
+        self
+    }
+
     // 0.22: the deprecated three-generic `on_with_marker` is removed —
     // use `.on::<E>(handler)` or `.on_ctx::<E>(handler)`.
 
@@ -3279,7 +3384,13 @@ impl MonitorBuilder {
     }
 
     /// Freeze the builder into a [`Monitor`].
-    pub fn build(self) -> Result<Monitor> {
+    pub fn build(mut self) -> Result<Monitor> {
+        // Issue #127: move the accumulated detector registry into a StateMap
+        // cell. Its presence is the run loop's "detectors armed" signal.
+        if let Some(registry) = self.detector_registry.take() {
+            self.state_map
+                .insert(detectors::DetectorCell::new(registry));
+        }
         // 0.21 E.1: when a pcap source is declared, the
         // `NoInterface` check is relaxed — replay mode never
         // opens AF_PACKET.

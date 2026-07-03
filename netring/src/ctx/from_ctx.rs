@@ -68,6 +68,16 @@ impl StateMap {
         self.by_type.insert(TypeId::of::<T>(), Box::new(value));
     }
 
+    /// 0.29: mutable, **non-creating** read of the `T` slot. `None` if `T`
+    /// was never registered — the mutable sibling of [`Self::get`], used by
+    /// the run loop's detector-registry drive (#127) so an unarmed monitor
+    /// never allocates the cell.
+    pub fn get_mut<T: 'static>(&mut self) -> Option<&mut T> {
+        self.by_type
+            .get_mut(&TypeId::of::<T>())
+            .and_then(|b| b.downcast_mut::<T>())
+    }
+
     /// 0.22: immutable, non-creating read of the `T` slot. Returns
     /// `None` if `T` was never registered/touched. Backs
     /// [`crate::ctx::Ctx::state`] and the bandwidth/report views.

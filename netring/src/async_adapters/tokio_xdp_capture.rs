@@ -73,18 +73,29 @@ impl AsyncXdpCapture {
     /// re-arms instead of spinning. Used by the Monitor's `AnyBackend::XdpMq`.
     pub(crate) fn poll_read_ready(&mut self, cx: &mut Context<'_>) -> Poll<Result<()>> {
         for sock in &mut self.sockets {
-            match sock.poll_read_ready_mut(cx) {
-                Poll::Ready(Ok(mut guard)) => {
-                    if guard.get_inner_mut().rx_poll_ready() {
-                        // Real data — leave readiness set so the drain resolves
-                        // immediately, and stop (round-robin drain handles the rest).
-                        return Poll::Ready(Ok(()));
+            // Issue #131: after clearing a stale readiness we MUST re-poll the
+            // same fd, not fall through to the next socket. `poll_read_ready_mut`
+            // only registers this task's waker when it itself returns `Pending`;
+            // a `Ready` result followed by `clear_ready()` registers nothing, so
+            // dropping through to a final `Poll::Pending` parks the task with no
+            // waker for this socket and it never wakes on the next packet. Loop
+            // until this fd is genuinely `Pending` (waker armed) or has real data.
+            loop {
+                match sock.poll_read_ready_mut(cx) {
+                    Poll::Ready(Ok(mut guard)) => {
+                        if guard.get_inner_mut().rx_poll_ready() {
+                            // Real data — leave readiness set so the drain resolves
+                            // immediately, and stop (round-robin drain handles the rest).
+                            return Poll::Ready(Ok(()));
+                        }
+                        // Spurious/stale wake: clear and re-poll this same fd so
+                        // the reactor re-arms the waker.
+                        guard.clear_ready();
                     }
-                    // Spurious/stale wake: clear so we don't busy-loop.
-                    guard.clear_ready();
+                    Poll::Ready(Err(e)) => return Poll::Ready(Err(Error::Io(e))),
+                    // Waker registered for this socket — move to the next one.
+                    Poll::Pending => break,
                 }
-                Poll::Ready(Err(e)) => return Poll::Ready(Err(Error::Io(e))),
-                Poll::Pending => {}
             }
         }
         Poll::Pending
@@ -170,34 +181,46 @@ impl AsyncXdpCapture {
         let n = self.sockets.len();
         for off in 0..n {
             let i = (self.cursor + off) % n;
-            match self.sockets[i].poll_read_ready_mut(cx) {
-                Poll::Ready(Ok(mut guard)) => {
-                    if guard.get_inner_mut().rx_poll_ready() {
-                        let inner = guard.get_inner_mut();
-                        if let Some(batch) = inner.next_batch() {
-                            for pkt in &batch {
-                                let view =
-                                    view_from_parts(pkt.data(), pkt.timestamp(), pkt.rx_metadata());
-                                sink(SourcePacket {
-                                    view,
-                                    data: pkt.data(),
-                                    // AF_XDP carries no AF_PACKET-style
-                                    // direction; loopback dedup is an
-                                    // AF_PACKET concern.
-                                    direction: crate::packet::PacketDirection::Unknown(0),
-                                    original_len: pkt.len(),
-                                });
+            // Issue #131: re-poll this fd after every `clear_ready()` so the
+            // reactor re-arms the waker. Falling through to the next socket (or
+            // the final `Poll::Pending`) after a `Ready`+`clear_ready` leaves the
+            // task parked with no waker registered for this queue, so it never
+            // wakes on the next packet — the lost-wakeup stall this loop fixes.
+            loop {
+                match self.sockets[i].poll_read_ready_mut(cx) {
+                    Poll::Ready(Ok(mut guard)) => {
+                        if guard.get_inner_mut().rx_poll_ready() {
+                            let inner = guard.get_inner_mut();
+                            if let Some(batch) = inner.next_batch() {
+                                for pkt in &batch {
+                                    let view = view_from_parts(
+                                        pkt.data(),
+                                        pkt.timestamp(),
+                                        pkt.rx_metadata(),
+                                    );
+                                    sink(SourcePacket {
+                                        view,
+                                        data: pkt.data(),
+                                        // AF_XDP carries no AF_PACKET-style
+                                        // direction; loopback dedup is an
+                                        // AF_PACKET concern.
+                                        direction: crate::packet::PacketDirection::Unknown(0),
+                                        original_len: pkt.len(),
+                                    });
+                                }
+                                drop(batch);
+                                self.cursor = (i + 1) % n;
+                                return Poll::Ready(Ok(DrainOutcome::Drained));
                             }
-                            drop(batch);
-                            self.cursor = (i + 1) % n;
-                            return Poll::Ready(Ok(DrainOutcome::Drained));
                         }
+                        // Empty / spurious wake: clear and re-poll this same fd so
+                        // the reactor re-arms.
+                        guard.clear_ready();
                     }
-                    // Empty / spurious wake: clear so the reactor re-arms.
-                    guard.clear_ready();
+                    Poll::Ready(Err(e)) => return Poll::Ready(Err(Error::Io(e))),
+                    // Waker registered for this socket — move to the next one.
+                    Poll::Pending => break,
                 }
-                Poll::Ready(Err(e)) => return Poll::Ready(Err(Error::Io(e))),
-                Poll::Pending => {}
             }
         }
         Poll::Pending

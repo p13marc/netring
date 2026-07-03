@@ -409,6 +409,79 @@ fn xdp_sharded_runner_lo_captures_flows() {
     std::thread::sleep(Duration::from_millis(300));
 }
 
+/// Issue #131: `AsyncXdpCapture` must wake on **every** packet under slow,
+/// spaced-out traffic — not just deliver the first batch and then stall.
+///
+/// The bug: `poll_read_ready` / `poll_drain_views` cleared a stale `AsyncFd`
+/// readiness (fd flagged ready but the RX ring already drained) and then
+/// returned `Poll::Pending` **without re-polling** the fd. Tokio only registers
+/// the task's waker when `poll_read_ready_mut` itself returns `Pending`, so the
+/// task parked with no waker for the socket and never woke on the next packet —
+/// until some unrelated event (the reporter's 10s timer) re-polled the future.
+/// Under saturating traffic the empty-ring branch never runs (fresh data always
+/// beats the poll), which is why line-rate validation missed it; it reproduces
+/// only with idle gaps between packets.
+///
+/// This test sends one packet every ~120ms and asserts that a bounded
+/// `recv().await` resolves **repeatedly** (≥4 separate wake-ups). Pre-fix, the
+/// second `recv()` hangs and its `timeout` fires, failing the test.
+#[cfg(all(feature = "flow", feature = "tokio"))]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn async_xdp_capture_wakes_on_spaced_out_traffic() {
+    use std::sync::Arc;
+    use std::sync::atomic::{AtomicU64, Ordering};
+
+    use netring::AsyncXdpCapture;
+    use netring::xdp::XdpCapture;
+
+    wait_lo_free();
+
+    // Full-NIC async capture on lo (single queue → [0]); attaches the built-in
+    // redirect-all program in SKB mode.
+    let cap = XdpCapture::open("lo")
+        .expect("open XdpCapture on lo (needs root / CAP_BPF+CAP_NET_ADMIN)");
+    let mut cap = AsyncXdpCapture::new(cap).expect("wrap AsyncXdpCapture");
+
+    // Slow, spaced-out loopback UDP: one small burst every ~120ms. The gaps are
+    // what expose the lost-wakeup — between bursts the RX ring drains and the
+    // next poll hits the empty-ring branch.
+    let stop = Arc::new(AtomicU64::new(0));
+    let stop_h = Arc::clone(&stop);
+    let generator = std::thread::spawn(move || {
+        let tx = UdpSocket::bind("127.0.0.1:0").expect("bind udp tx");
+        while stop_h.load(Ordering::Relaxed) == 0 {
+            let _ = tx.send_to(b"netring-131-wakeup", "127.0.0.1:65131");
+            std::thread::sleep(Duration::from_millis(120));
+        }
+    });
+
+    // Each `recv()` must resolve on its own within 2s (well under the 10s the
+    // pre-fix stall relied on). Count independent wake-ups across a ~5s window.
+    let mut wakeups: u64 = 0;
+    let overall = Instant::now() + Duration::from_secs(5);
+    while Instant::now() < overall && wakeups < 4 {
+        match tokio::time::timeout(Duration::from_secs(2), cap.recv()).await {
+            Ok(Ok(batch)) if !batch.is_empty() => wakeups += 1,
+            Ok(Ok(_)) => {}                       // empty drain — keep waiting
+            Ok(Err(e)) => panic!("AsyncXdpCapture::recv error: {e:?}"),
+            Err(_elapsed) => break,               // stall — the regression
+        }
+    }
+
+    stop.store(1, Ordering::Relaxed);
+    let _ = generator.join();
+
+    assert!(
+        wakeups >= 4,
+        "AsyncXdpCapture::recv should wake on every spaced-out packet \
+         (got {wakeups} independent wake-ups in 5s; pre-#131-fix it stalls \
+         after the first batch)",
+    );
+
+    drop(cap);
+    std::thread::sleep(Duration::from_millis(300));
+}
+
 /// 0.25 W1a: the **table-driven** `filter_program` + `XdpProgram::set_filter`
 /// end-to-end. Loads the filter program on `lo`, registers the socket, populates
 /// the `{udp, PORT}` filter, and asserts that matching loopback frames are

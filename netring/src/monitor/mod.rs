@@ -2391,11 +2391,11 @@ impl MonitorBuilder {
     ///
     /// ```no_run
     /// # #[cfg(feature = "tokio")] fn demo() {
-    /// use netring::monitor::{Monitor, ioc::IocSet};
+    /// use netring::monitor::{Monitor, ioc::{IocSet, IocSetExt}};
     /// use netring::prelude::StdoutSink;
     /// Monitor::builder()
     ///     .interface("eth0")
-    ///     .ioc(IocSet::new().domain("evil.example").ja4("t13d…"))
+    ///     .ioc(IocSet::new().domain("evil.example").ja4("t13d1516h2_8daaf6152771_b186095e22b6"))
     ///     .sink(StdoutSink::default());
     /// # }
     /// ```

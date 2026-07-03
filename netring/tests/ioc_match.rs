@@ -18,7 +18,7 @@ use std::time::Duration;
 
 use netring::anomaly::shipped_sinks::ChannelSink;
 use netring::monitor::Monitor;
-use netring::monitor::ioc::IocSet;
+use netring::monitor::ioc::{IocSet, IocSetExt};
 use tempfile::NamedTempFile;
 
 const BAD_IP: Ipv4Addr = Ipv4Addr::new(198, 51, 100, 5);

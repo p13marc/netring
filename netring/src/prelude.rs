@@ -16,7 +16,9 @@ pub use crate::monitor::{Backend, Fanout, Handler, Monitor, MonitorBuilder};
 pub use crate::monitor::AsyncHandler;
 
 // ─── Threat-intel IOC matching (issue #48) ───────────────────────
-pub use crate::monitor::ioc::IocSet;
+// `IocSetExt` carries the ergonomic `.ip()/.domain()/.ja4()/.ja3()` fluent
+// constructors for the (flowscope-sourced) `IocSet` (issue #124).
+pub use crate::monitor::ioc::{IocSet, IocSetExt};
 
 // ─── Sigma rule evaluation (issue #46) ───────────────────────────
 #[cfg(feature = "sigma")]

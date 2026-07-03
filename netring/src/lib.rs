@@ -47,6 +47,7 @@ pub mod layer;
 pub mod metrics;
 #[cfg(all(feature = "flow", feature = "tokio"))]
 pub mod monitor;
+pub mod netns;
 pub mod packet;
 #[cfg(feature = "pcap")]
 pub mod pcap;

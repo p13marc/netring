@@ -792,6 +792,16 @@ impl CaptureBuilder {
             }
         }
     }
+
+    /// Build this `Capture` inside a network namespace (issue #126).
+    ///
+    /// The AF_PACKET socket is created on a scoped thread that has `setns(2)`'d
+    /// into `ns`, so it binds to that namespace's interfaces; the returned
+    /// `Capture` is then usable from the caller's threads (including the tokio
+    /// runtime). Requires `CAP_SYS_ADMIN` at runtime. See [`crate::netns`].
+    pub fn netns(self, ns: &crate::netns::NetNs) -> Result<Capture, Error> {
+        ns.run_in(move || self.build())?
+    }
 }
 
 fn is_enomem(e: &std::io::Error) -> bool {

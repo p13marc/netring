@@ -12,7 +12,7 @@ authors = ["Marc Pardo <p13marc@gmail.com>"]
 # Shared deps. Member crates inherit via `dep.workspace = true`.
 [workspace.dependencies]
 libc = "0.2"
-nix = { version = "0.31", features = ["socket", "mman", "poll", "net", "ioctl"] }
+nix = { version = "0.31", features = ["socket", "mman", "poll", "net", "ioctl", "sched"] }
 thiserror = "2"
 tracing = { version = "0.1", default-features = false, features = ["std"] }
 bitflags = "2"

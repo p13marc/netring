@@ -2540,6 +2540,93 @@ impl MonitorBuilder {
         })
     }
 
+    /// Issue #133: register a handler fired when a TLS (or QUIC, with the `quic`
+    /// feature) session classifies as **encrypted DNS** (DoH / DoT / DoQ),
+    /// handed an [`EncryptedDns`](crate::monitor::fingerprint::EncryptedDns) with
+    /// the protocol, resolver SNI, and a `via_known_resolver` flag. Passive
+    /// visibility into DNS that has moved inside TLS/QUIC — the query names are
+    /// gone, but the fact + the resolver remain policy-relevant.
+    ///
+    /// Auto-registers the TLS handshake (and QUIC) protocol.
+    ///
+    /// ```no_run
+    /// # #[cfg(all(feature = "tls", feature = "tokio"))] fn demo() {
+    /// use netring::monitor::Monitor;
+    /// Monitor::builder()
+    ///     .interface("eth0")
+    ///     .on_encrypted_dns(|e, _ctx| {
+    ///         println!("{} via {:?} (known={})", e.app_protocol.as_str(), e.sni, e.via_known_resolver);
+    ///         Ok(())
+    ///     });
+    /// # }
+    /// ```
+    #[cfg(feature = "tls")]
+    pub fn on_encrypted_dns<F>(mut self, handler: F) -> Self
+    where
+        F: Fn(&crate::monitor::fingerprint::EncryptedDns, &mut Ctx<'_>) -> Result<()>
+            + Send
+            + Sync
+            + 'static,
+    {
+        use crate::monitor::fingerprint::{EncryptedDns, TlsFingerprint, is_known_doh_resolver};
+        use crate::protocol::builtin::TlsHandshake;
+        let handler = std::sync::Arc::new(handler);
+
+        if !self
+            .declared_protocols
+            .contains_key(&std::any::TypeId::of::<TlsHandshake>())
+        {
+            self = self.protocol::<TlsHandshake>();
+        }
+        let h = std::sync::Arc::clone(&handler);
+        self = self.on_ctx::<TlsHandshake>(
+            move |hs: &flowscope::tls::TlsHandshake, ctx: &mut Ctx<'_>| {
+                let fp = TlsFingerprint::from_handshake(hs, ctx.flow);
+                if !fp.app_protocol.is_encrypted_dns() {
+                    return Ok(());
+                }
+                let sni = fp.sni.clone();
+                let e = EncryptedDns {
+                    app_protocol: fp.app_protocol,
+                    via_known_resolver: sni.as_deref().is_some_and(is_known_doh_resolver),
+                    sni,
+                    key: fp.key,
+                    ts: ctx.ts,
+                };
+                h(&e, ctx)
+            },
+        );
+
+        #[cfg(feature = "quic")]
+        {
+            use crate::monitor::fingerprint::QuicFingerprint;
+            use crate::protocol::builtin::Quic;
+            if !self
+                .declared_protocols
+                .contains_key(&std::any::TypeId::of::<Quic>())
+            {
+                self = self.protocol::<Quic>();
+            }
+            let h = std::sync::Arc::clone(&handler);
+            self = self.on_ctx::<Quic>(move |qi: &flowscope::QuicInitial, ctx: &mut Ctx<'_>| {
+                let fp = QuicFingerprint::from_initial(qi, ctx.flow);
+                if !fp.app_protocol.is_encrypted_dns() {
+                    return Ok(());
+                }
+                let sni = fp.sni.clone();
+                let e = EncryptedDns {
+                    app_protocol: fp.app_protocol,
+                    via_known_resolver: sni.as_deref().is_some_and(is_known_doh_resolver),
+                    sni,
+                    key: fp.key,
+                    ts: ctx.ts,
+                };
+                h(&e, ctx)
+            });
+        }
+        self
+    }
+
     /// Issue #48: arm a threat-intel [`IocSet`](ioc::IocSet). The Monitor then
     /// passively matches every flow destination/source IP, DNS query name, TLS
     /// SNI + JA3/JA4, and HTTP `Host` against the set, emitting an `ioc_match`

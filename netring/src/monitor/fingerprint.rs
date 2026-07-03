@@ -44,6 +44,11 @@ pub struct TlsFingerprint {
     /// (e.g. X25519MLKEM768 / X25519Kyber768). A cheap PQ-adoption signal for
     /// inventory + policy, independent of the FoxIO fingerprints.
     pub pq_key_share: bool,
+    /// Issue #133: the application protocol riding this TLS session, classified
+    /// from the negotiated ALPN + SNI + server port (e.g. `Http2`,
+    /// `DnsOverHttps`, `DnsOverTls`). `Unknown` when nothing distinctive was
+    /// offered.
+    pub app_protocol: flowscope::app_proto::AppProtocol,
     /// The flow's 5-tuple key (from the dispatch context), if available.
     #[cfg_attr(feature = "serde", serde(skip_serializing_if = "Option::is_none"))]
     pub key: Option<FlowKey>,
@@ -52,6 +57,9 @@ pub struct TlsFingerprint {
 impl TlsFingerprint {
     /// Build from a flowscope handshake event + the flow key.
     pub(crate) fn from_handshake(hs: &flowscope::tls::TlsHandshake, key: Option<FlowKey>) -> Self {
+        // The server port drives app-proto classification (853 = DoT, etc.);
+        // for TLS the server is the destination side of the key. Default 443.
+        let port = key.map(|k| k.b.port()).unwrap_or(443);
         Self {
             sni: hs.sni.clone(),
             alpn: hs
@@ -65,6 +73,7 @@ impl TlsFingerprint {
             #[cfg(feature = "ja4plus")]
             ja4x: hs.ja4x.clone(),
             pq_key_share: hs.pq_key_share,
+            app_protocol: flowscope::app_proto::AppProtocol::from_tls_handshake(hs, port),
             key,
         }
     }
@@ -125,6 +134,54 @@ impl HttpFingerprint {
     }
 }
 
+/// An encrypted-DNS observation (issue #133) — a TLS or QUIC session that
+/// classified as DoH / DoT / DoQ — handed to an
+/// [`on_encrypted_dns`](crate::monitor::MonitorBuilder::on_encrypted_dns)
+/// handler. The passive DNS-visibility gap: once DNS moves inside TLS/QUIC the
+/// query names are gone, but the *fact* of encrypted DNS (and to which resolver)
+/// is a policy-relevant signal.
+#[derive(Debug, Clone, PartialEq)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize))]
+pub struct EncryptedDns {
+    /// Which encrypted-DNS protocol (`DnsOverHttps` / `DnsOverTls` /
+    /// `DnsOverQuic`).
+    pub app_protocol: flowscope::app_proto::AppProtocol,
+    /// The resolver's SNI, if present (e.g. `cloudflare-dns.com`).
+    #[cfg_attr(feature = "serde", serde(skip_serializing_if = "Option::is_none"))]
+    pub sni: Option<String>,
+    /// `true` when the SNI matches a well-known public DoH/DoT resolver.
+    pub via_known_resolver: bool,
+    /// The flow's 5-tuple key, if available.
+    #[cfg_attr(feature = "serde", serde(skip_serializing_if = "Option::is_none"))]
+    pub key: Option<FlowKey>,
+    /// Observation timestamp.
+    pub ts: flowscope::Timestamp,
+}
+
+/// A curated list of well-known public encrypted-DNS resolver hostnames. Not
+/// exhaustive — a hit is a strong signal, a miss doesn't rule out DoH/DoT.
+const KNOWN_DOH_RESOLVERS: &[&str] = &[
+    "cloudflare-dns.com",
+    "mozilla.cloudflare-dns.com",
+    "one.one.one.one",
+    "dns.google",
+    "dns.google.com",
+    "dns.quad9.net",
+    "doh.opendns.com",
+    "dns.nextdns.io",
+    "doh.cleanbrowsing.org",
+    "dns.adguard.com",
+    "dns.adguard-dns.com",
+    "doh.mullvad.net",
+];
+
+/// Whether `sni` (case-insensitive, trailing-dot-insensitive) names a well-known
+/// public encrypted-DNS resolver.
+pub(crate) fn is_known_doh_resolver(sni: &str) -> bool {
+    let s = sni.trim_end_matches('.').to_ascii_lowercase();
+    KNOWN_DOH_RESOLVERS.contains(&s.as_str())
+}
+
 /// A QUIC client fingerprint bundle (issue #128) — handed to an
 /// [`on_quic_fingerprint`](crate::monitor::MonitorBuilder::on_quic_fingerprint)
 /// handler once per parsed QUIC Initial. The UDP/QUIC analogue of
@@ -150,6 +207,9 @@ pub struct QuicFingerprint {
     /// The Initial's ClientHello offered a post-quantum key-share group. Always
     /// `false` without the `tls` feature (no ClientHello to inspect).
     pub pq_key_share: bool,
+    /// Issue #133: the application protocol riding this QUIC session, classified
+    /// from ALPN + SNI + server port (e.g. `Http3`, `DnsOverQuic`).
+    pub app_protocol: flowscope::app_proto::AppProtocol,
     /// The flow's 5-tuple key, if available.
     #[cfg_attr(feature = "serde", serde(skip_serializing_if = "Option::is_none"))]
     pub key: Option<FlowKey>,
@@ -159,6 +219,7 @@ pub struct QuicFingerprint {
 impl QuicFingerprint {
     /// Build from a parsed QUIC Initial + the flow key.
     pub(crate) fn from_initial(initial: &flowscope::QuicInitial, key: Option<FlowKey>) -> Self {
+        let port = key.map(|k| k.b.port()).unwrap_or(443);
         let version = if initial.version.is_v1() {
             "v1".to_string()
         } else if initial.version.is_v2() {
@@ -183,6 +244,7 @@ impl QuicFingerprint {
             version,
             ja4,
             pq_key_share,
+            app_protocol: flowscope::app_proto::AppProtocol::from_quic_initial(initial, port),
             key,
         }
     }
@@ -296,6 +358,12 @@ mod tests {
         assert_eq!(fp.sni.as_deref(), Some("example.com"));
         assert_eq!(fp.alpn.as_deref(), Some("h2")); // server's pick
         assert!(fp.pq_key_share, "pq_key_share should carry through (#128)");
+        // ALPN h2 on port 443 (default when key absent) → HTTP/2 (#133).
+        assert_eq!(
+            fp.app_protocol,
+            flowscope::app_proto::AppProtocol::Http2,
+            "h2 ALPN should classify as Http2"
+        );
         #[cfg(feature = "ja4plus")]
         {
             assert_eq!(fp.ja4s.as_deref(), Some("t130200_1301_…"));
@@ -316,6 +384,28 @@ mod tests {
         let fp = TlsFingerprint::from_handshake(&hs, None);
         assert_eq!(fp.alpn.as_deref(), Some("h2"));
         assert!(!fp.has_fingerprint());
+    }
+
+    #[test]
+    fn known_doh_resolver_matching_is_case_and_dot_insensitive() {
+        assert!(is_known_doh_resolver("cloudflare-dns.com"));
+        assert!(is_known_doh_resolver("Cloudflare-DNS.com."));
+        assert!(is_known_doh_resolver("dns.google"));
+        assert!(!is_known_doh_resolver("example.com"));
+    }
+
+    #[test]
+    fn doh_sni_classifies_as_dns_over_https() {
+        // h2 ALPN + a known DoH resolver SNI on 443 → DnsOverHttps (#133).
+        let mut hs = TlsHandshake::default();
+        hs.server_alpn = Some("h2".to_string());
+        hs.sni = Some("cloudflare-dns.com".to_string());
+        let fp = TlsFingerprint::from_handshake(&hs, None);
+        assert_eq!(
+            fp.app_protocol,
+            flowscope::app_proto::AppProtocol::DnsOverHttps
+        );
+        assert!(fp.app_protocol.is_encrypted_dns());
     }
 
     // `on_fingerprint` auto-registers the TlsHandshake protocol and wires

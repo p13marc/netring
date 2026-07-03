@@ -169,6 +169,10 @@ pub fn eve_tls_record(
     if let Some(ja4s) = &fp.ja4s {
         tls.insert("ja4s".into(), json!(ja4s));
     }
+    // Issue #133: the classified application protocol (h2 / doh / dot / …).
+    if fp.app_protocol != flowscope::app_proto::AppProtocol::Unknown {
+        tls.insert("app_proto".into(), json!(fp.app_protocol.as_str()));
+    }
 
     let mut obj = serde_json::Map::new();
     obj.insert("timestamp".into(), json!(ts.to_iso8601()));

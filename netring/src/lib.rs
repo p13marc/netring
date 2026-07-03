@@ -173,6 +173,10 @@ pub mod flow {
         Extracted, FlowExtractor, L4Proto, Orientation, PacketView, TcpFlags, TcpInfo,
     };
 
+    // Issue #133: application-protocol classification (ALPN + SNI + port →
+    // Http2 / DnsOverHttps / DnsOverTls / …).
+    pub use flowscope::app_proto::{self, AppProtocol, Transport};
+
     #[cfg(feature = "flow")]
     pub use flowscope::tracker::IdleTimeoutFn;
     #[cfg(feature = "flow")]

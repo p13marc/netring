@@ -34,6 +34,20 @@ async fn on_ssh_fingerprint_builds() {
     assert!(m.is_ok(), "ssh + explicit build failed: {:?}", m.err());
 }
 
+#[cfg(feature = "tls")]
+#[tokio::test(flavor = "current_thread")]
+async fn on_encrypted_dns_builds() {
+    let m = Monitor::builder()
+        .interface("lo")
+        .on_encrypted_dns(|e, _ctx| {
+            let _ = (e.app_protocol.as_str(), &e.sni, e.via_known_resolver);
+            Ok(())
+        })
+        .sink(StdoutSink::default())
+        .build();
+    assert!(m.is_ok(), "on_encrypted_dns build failed: {:?}", m.err());
+}
+
 #[cfg(feature = "quic")]
 #[tokio::test(flavor = "current_thread")]
 async fn on_quic_fingerprint_builds() {

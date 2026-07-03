@@ -79,6 +79,7 @@ pub mod lldp;
 pub mod ml_features;
 pub(crate) mod nprint;
 pub mod overload;
+pub mod owner_bandwidth;
 /// Default cap on concurrently-tracked per-flow-accumulator flows (nPrint #72 /
 /// YARA #45) when the corresponding `max_tracked_*_flows` is not set.
 #[cfg(any(feature = "nprint", feature = "yara"))]
@@ -879,6 +880,15 @@ pub struct MonitorBuilder {
     /// is idempotent.
     #[cfg(feature = "dns")]
     name_map_armed: bool,
+    /// Issue #130: the flow→owner attribution hook set via
+    /// [`Self::with_flow_attribution`].
+    flow_attribution: Option<owner_bandwidth::AttributionHook>,
+    /// Issue #130: `true` once [`Self::owner_bandwidth`] wired the feed
+    /// (idempotent).
+    owner_bandwidth_registered: bool,
+    /// Issue #130: set if `owner_bandwidth()` was armed without an attribution
+    /// hook available at that point — surfaces [`BuildError::AttributionHookRequired`].
+    owner_bandwidth_needs_hook: bool,
     /// Issue #53: the live, swappable Sigma rule set behind [`Self::sigma`].
     #[cfg(feature = "sigma")]
     sigma_swap: Option<std::sync::Arc<arc_swap::ArcSwap<sigma::SigmaRuleSet>>>,
@@ -1918,6 +1928,106 @@ impl MonitorBuilder {
             period,
             move |_tick: &crate::protocol::event_typed::Tick, ctx: &mut Ctx<'_>| {
                 if let Some(report) = ctx.bandwidth() {
+                    f(&report)?;
+                }
+                Ok(())
+            },
+        )
+    }
+
+    /// Issue #130: set the flow→owner attribution hook — maps each flow's
+    /// 5-tuple to an [`Attribution`](flowscope::correlate::Attribution) (an
+    /// opaque owner id: tenant, container, cgroup, subscriber, …), or `None`
+    /// when the flow can't be attributed. Required before
+    /// [`owner_bandwidth`](Self::owner_bandwidth). Call this **first**.
+    pub fn with_flow_attribution<F>(mut self, hook: F) -> Self
+    where
+        F: Fn(&crate::protocol::FlowKey) -> Option<flowscope::correlate::Attribution>
+            + Send
+            + Sync
+            + 'static,
+    {
+        self.flow_attribution = Some(std::sync::Arc::new(hook));
+        self
+    }
+
+    /// Issue #130: track per-owner bandwidth with the default 10 s / 1 s window.
+    /// Requires [`with_flow_attribution`](Self::with_flow_attribution) to have
+    /// been called first (else [`build`](Self::build) returns
+    /// [`BuildError::AttributionHookRequired`]).
+    pub fn owner_bandwidth(self) -> Self {
+        self.owner_bandwidth_windowed(
+            owner_bandwidth::OWNER_BW_WINDOW,
+            owner_bandwidth::OWNER_BW_BUCKET,
+        )
+    }
+
+    /// Issue #130: track per-owner bandwidth over an explicit rolling
+    /// `window` / `bucket`. See [`owner_bandwidth`](Self::owner_bandwidth).
+    pub fn owner_bandwidth_windowed(mut self, window: Duration, bucket: Duration) -> Self {
+        use crate::protocol::builtin::{Tcp, Udp};
+        use crate::protocol::event_typed::{FlowEnded, FlowPacket};
+
+        if self.owner_bandwidth_registered {
+            return self;
+        }
+        let Some(hook) = self.flow_attribution.clone() else {
+            // No hook yet — flag it; build() turns this into a clear error.
+            self.owner_bandwidth_needs_hook = true;
+            return self;
+        };
+        self.owner_bandwidth_registered = true;
+
+        self = self
+            .protocol::<Tcp>()
+            .protocol::<Udp>()
+            .state_init::<owner_bandwidth::OwnerBandwidthState, _>(move || {
+                owner_bandwidth::OwnerBandwidthState::new(hook.clone(), window, bucket)
+            });
+        self = self.on_ctx::<FlowPacket>(
+            |evt: &crate::protocol::event_typed::FlowPacket, ctx: &mut Ctx<'_>| {
+                let key = evt.key;
+                let len = evt.len as u64;
+                let ts = ctx.ts;
+                ctx.state_mut::<owner_bandwidth::OwnerBandwidthState>()
+                    .record(&key, len, ts);
+                Ok(())
+            },
+        );
+        // Evict a flow's cached owner when it ends (Tcp + Udp).
+        self = self.on_ctx::<FlowEnded<Tcp>>(|evt: &FlowEnded<Tcp>, ctx: &mut Ctx<'_>| {
+            ctx.state_mut::<owner_bandwidth::OwnerBandwidthState>()
+                .forget(&evt.key);
+            Ok(())
+        });
+        self.on_ctx::<FlowEnded<Udp>>(|evt: &FlowEnded<Udp>, ctx: &mut Ctx<'_>| {
+            ctx.state_mut::<owner_bandwidth::OwnerBandwidthState>()
+                .forget(&evt.key);
+            Ok(())
+        })
+    }
+
+    /// Issue #130: arm [`owner_bandwidth`](Self::owner_bandwidth) and a periodic
+    /// report — `f` receives an
+    /// [`OwnerBandwidthReport`](crate::monitor::owner_bandwidth::OwnerBandwidthReport)
+    /// every `period`.
+    pub fn on_owner_bandwidth<F>(self, period: Duration, f: F) -> Self
+    where
+        F: Fn(&crate::monitor::owner_bandwidth::OwnerBandwidthReport<'_>) -> Result<()>
+            + Send
+            + Sync
+            + 'static,
+    {
+        self.owner_bandwidth().tick(
+            period,
+            move |tick: &crate::protocol::event_typed::Tick, ctx: &mut Ctx<'_>| {
+                if let Some(state) =
+                    ctx.state::<crate::monitor::owner_bandwidth::OwnerBandwidthState>()
+                {
+                    let report = crate::monitor::owner_bandwidth::OwnerBandwidthReport {
+                        state,
+                        now: tick.now,
+                    };
                     f(&report)?;
                 }
                 Ok(())
@@ -3761,6 +3871,10 @@ impl MonitorBuilder {
         if let Some(registry) = self.detector_registry.take() {
             self.state_map
                 .insert(detectors::DetectorCell::new(registry));
+        }
+        // Issue #130: owner_bandwidth() was armed before with_flow_attribution().
+        if self.owner_bandwidth_needs_hook {
+            return Err(BuildError::AttributionHookRequired.into());
         }
         // 0.21 E.1: when a pcap source is declared, the
         // `NoInterface` check is relaxed — replay mode never

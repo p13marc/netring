@@ -97,6 +97,13 @@ pub enum BuildError {
     #[error("dispatch shape mismatch in Protocol impl: {0}")]
     ProtocolDispatchMismatch(String),
 
+    /// Issue #130: `.owner_bandwidth()` was armed without a
+    /// `.with_flow_attribution(..)` hook to map flows to owners.
+    #[error(
+        "owner_bandwidth() requires a .with_flow_attribution(|key| ..) hook to attribute flows to owners"
+    )]
+    AttributionHookRequired,
+
     /// 0.21 A.6: A detector declared (via `detector! { counters: [K] }`)
     /// that it needs a counter for key type `type_name`, but no
     /// `.counter::<K>(window, bucket)` call registered it on the

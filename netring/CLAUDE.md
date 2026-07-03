@@ -20,6 +20,38 @@ built on AF_PACKET with TPACKET_V3 (block-based mmap ring buffers) and AF_XDP.
 
 ## Implementation Status
 
+**0.29.0 — RELEASE-PREPPED on `master` (NOT yet published)** 2026-07-03.
+"flowscope 0.22, threat/detection redesign & the observability surface". Depends
+on **flowscope 0.22**. Migration: `docs/MIGRATING_0.28_TO_0.29.md`. A breaking
+release (still pre-1.0; the 1.0 freeze is deferred under [#37]). Version bumped,
+CHANGELOG + migration doc written, `just ci` green — the `cargo publish` +
+`git tag 0.29.0` remain a maintainer action. 15 feature commits closing issues
+#131, #132, #124, #127, #128, #53, #123, #133, #120, #130, #121, #122, #125,
+#126:
+
+- **Breaking — IOC/flow-risk retype (#124):** `monitor::ioc::IocSet` is now
+  flowscope's `detect::ioc::IocSet` (typed `IocKind`/`IocMatch`); the local
+  `monitor::risk` scaffolding is gone. Flow-risk scoring moved onto flowscope's
+  `FlowAnalyzer` — `flow_analysis()` / `flow_analysis_with` / `on_analyzed_flow`;
+  `flow_risk()` is deprecated sugar.
+- **flowscope 0.20 → 0.22 (#132):** typed `DetectorKind` (+ ATT&CK),
+  `Detector`/`DetectorRegistry`, `app_proto`, `NameMap`, `BandwidthByKey`,
+  `WindowedQuantiles`, `IpFragmentReassembler`; `flow` pulls `flowscope/analysis`.
+- **Detection (additive):** detector registry + MITRE ATT&CK observation label
+  (#127); SSH/QUIC fingerprints + TLS PQ key-share (#128); YARA hot-reload +
+  reload-handle non-reloadable doc (#53).
+- **Observability surface (additive):** Community ID accessors (#123); app-proto
+  classification + encrypted-DNS hook (#133); structured DNS handler + passive
+  IP→name map (#120); owner-attributed bandwidth (#130); traffic aggregation —
+  talkers/matrix/domains/SNI (#121); RED metrics per protocol (#122).
+- **Capture tooling (additive):** rotating + triggered pcap writers (#125);
+  network-namespace capture via `NetNs` + `CaptureBuilder::netns` (#126).
+- **AF_XDP fix:** `AsyncXdpCapture` lost-wakeup under spaced-out traffic (#131).
+- **Deferred:** IP-fragment reassembly (#134) — flowscope 0.22's
+  `IpFragmentReassembler` is the building block, but the run-loop `track_into`
+  re-injection + frame synthesis + kernel-prefilter fragment-allow atom touch the
+  hot path and need live/pcap validation; left open as a follow-up.
+
 **0.28.0 — RELEASED 2026-06-29** (published to crates.io, tag `0.28.0`,
 alongside **`netring-exporters` 0.4.0**). "flowscope 0.20, AF_XDP maturity &
 the pre-1.0 API sweep". Depends on **flowscope 0.20**.

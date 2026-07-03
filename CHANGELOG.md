@@ -1,5 +1,100 @@
 # Changelog
 
+## 0.29.0 — 2026-07-03 — flowscope 0.22, threat/detection redesign & the observability surface
+
+Depends on **flowscope 0.22**. A breaking release (still pre-1.0). Migration:
+`docs/MIGRATING_0.28_TO_0.29.md`.
+
+### Fixed
+
+- **`AsyncXdpCapture` lost wakeup under spaced-out traffic** (issue
+  [#131](https://github.com/p13marc/netring/issues/131)) — the AF_XDP async
+  poller cleared `AsyncFd` readiness and returned `Pending` without re-arming the
+  waker, so a packet arriving during an idle gap could hang until the next
+  unrelated wakeup. `poll_read_ready` / `poll_drain_views` now re-poll after
+  `clear_ready()` until either the ring has data or `Pending` registers a fresh
+  waker. Affected the AF_XDP flow/L7 streams and `XdpMq` since 0.26.
+
+### Changed
+
+- **flowscope 0.20 → 0.22** (issue
+  [#132](https://github.com/p13marc/netring/issues/132)) — adopts the typed
+  `DetectorKind` (with `attack_technique()` → MITRE ATT&CK IDs), the
+  `Detector`/`DetectorRegistry` trait surface, `app_proto` classification,
+  `NameMap`, `BandwidthByKey`/`Attribution`, `WindowedQuantiles`, and the
+  `IpFragmentReassembler`. The `flow` feature now pulls `flowscope/analysis`.
+- **Breaking — IOC surface retyped onto flowscope's threat backbone** (issue
+  [#124](https://github.com/p13marc/netring/issues/124)) — `monitor::ioc::IocSet`
+  is now flowscope's `detect::ioc::IocSet` (with `IocKind`/`IocMatch`); the
+  netring-local risk types were removed. New `FlowAnalyzer`-based flow-risk
+  scoring: `flow_analysis()` / `flow_analysis_with(cfg)` / `on_analyzed_flow(..)`
+  emit one `flow_risk` anomaly per flow at its max severity. `flow_risk()` is now
+  deprecated sugar for `flow_analysis()`.
+
+### Added
+
+- **Detector registry + MITRE ATT&CK tagging** (issue
+  [#127](https://github.com/p13marc/netring/issues/127)) — `.detector(impl
+  Detector)` / `.detectors(registry)` run flowscope NDR detectors in-Monitor;
+  ATT&CK technique IDs ride as an `attack_technique` observation label
+  (auto-appended from `kind.attack_technique()`), lifted into native fields by
+  the OCSF and EVE sinks. No `AnomalySink::write` break.
+- **SSH (HASSH) + QUIC fingerprints, TLS PQ key-share** (issue
+  [#128](https://github.com/p13marc/netring/issues/128)) — `SshFingerprint` +
+  `on_ssh_fingerprint` (ssh), `QuicFingerprint` + `on_quic_fingerprint`
+  (quic+tls), and `TlsFingerprint.pq_key_share`.
+- **YARA hot-reload** (issue
+  [#53](https://github.com/p13marc/netring/issues/53)) — `ReloadHandle::set_yara`
+  / `has_yara` swap a running monitor's YARA-X rules via `arc-swap` (`load_full`
+  inside the flush, zero hot-path cost). `ReloadHandle`'s rustdoc gains the
+  non-reloadable-surface table, closing the hot-reload epic.
+- **Community ID accessors** (issue
+  [#123](https://github.com/p13marc/netring/issues/123)) — `community_id()` on
+  the flow events and `Ctx::community_id()`; EVE tls + anomaly records carry it.
+- **Application-protocol classification + encrypted-DNS hook** (issue
+  [#133](https://github.com/p13marc/netring/issues/133)) —
+  `TlsFingerprint.app_protocol`, `on_encrypted_dns(..)` over DoT/DoH/DoQ,
+  known-resolver detection, EVE tls `app_proto`.
+- **Structured DNS handler + passive IP→name map** (issue
+  [#120](https://github.com/p13marc/netring/issues/120)) — `on_dns(..)` over a
+  `DnsView`, `name_map()` / `on_name(..)` fed by DNS responses (+ TLS SNI
+  claims), and `Ctx::names(ip)`.
+- **Owner-attributed bandwidth** (issue
+  [#130](https://github.com/p13marc/netring/issues/130)) —
+  `with_flow_attribution(..)` + `owner_bandwidth()` / `on_owner_bandwidth(..)`
+  track throughput by a caller-defined owner (tenant / container / subscriber)
+  with an unattributed bucket; `owner_bandwidth()` without an attribution hook is
+  a build error.
+- **Traffic aggregation** (issue
+  [#121](https://github.com/p13marc/netring/issues/121)) — `aggregate()` /
+  `on_aggregate(..)` compute top talkers, a host-pair traffic matrix, and top DNS
+  names / TLS SNI over rolling windows, each dimension individually toggleable.
+- **RED metrics** (issue
+  [#122](https://github.com/p13marc/netring/issues/122)) — `red()` /
+  `on_red(..)` compute request Rate, Error rate and Duration quantiles per
+  protocol (DNS by rcode + timeouts with query→response latency; flows by end
+  reason with connection lifetime).
+- **Rotating + triggered pcap writers** (issue
+  [#125](https://github.com/p13marc/netring/issues/125)) — `RotatingPcapWriter`
+  (size / duration rotation + file-count / total-bytes retention) and a
+  `TriggeredPcapWriter` + `PreTriggerRing` + `TriggerHandle` pre-trigger ring
+  buffer for capturing the lead-up to an event.
+- **Network-namespace capture** (issue
+  [#126](https://github.com/p13marc/netring/issues/126)) — a `NetNs` handle
+  (`from_name` / `from_pid` / `from_path` / `current`) with a scoped-thread
+  `run_in(..)`, and `CaptureBuilder::netns(&NetNs)` to build an AF_PACKET capture
+  inside a namespace. Requires `CAP_SYS_ADMIN`.
+
+### Deferred
+
+- **IP-fragment reassembly** (issue
+  [#134](https://github.com/p13marc/netring/issues/134)) — flowscope 0.22's
+  `IpFragmentReassembler` is now the building block, but the remaining work
+  (re-injecting reassembled datagrams into the flow tracker at the run-loop
+  `track_into` sites, frame synthesis, and a kernel-prefilter fragment-allow
+  atom) touches the packet hot path and needs live/pcap validation, so it stays
+  open for a follow-up rather than landing unvalidated.
+
 ## 0.28.0 — 2026-06-29 — flowscope 0.20, AF_XDP maturity & the pre-1.0 API sweep
 
 ### Added

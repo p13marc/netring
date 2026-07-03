@@ -51,6 +51,7 @@ use crate::protocol::Protocol;
 use crate::protocol::event_typed::{Event, Tick};
 
 // L2 ARP visibility + spoof/binding-change detection (feature `arp`).
+pub mod aggregate;
 pub mod analysis;
 #[cfg(feature = "arp")]
 pub mod arp;
@@ -886,6 +887,8 @@ pub struct MonitorBuilder {
     /// Issue #130: `true` once [`Self::owner_bandwidth`] wired the feed
     /// (idempotent).
     owner_bandwidth_registered: bool,
+    /// Issue #121: `true` once [`Self::aggregate`] wired its feeds (idempotent).
+    aggregate_armed: bool,
     /// Issue #130: set if `owner_bandwidth()` was armed without an attribution
     /// hook available at that point — surfaces [`BuildError::AttributionHookRequired`].
     owner_bandwidth_needs_hook: bool,
@@ -2025,6 +2028,129 @@ impl MonitorBuilder {
                     ctx.state::<crate::monitor::owner_bandwidth::OwnerBandwidthState>()
                 {
                     let report = crate::monitor::owner_bandwidth::OwnerBandwidthReport {
+                        state,
+                        now: tick.now,
+                    };
+                    f(&report)?;
+                }
+                Ok(())
+            },
+        )
+    }
+
+    /// Issue #121: arm traffic aggregation (top talkers, host-pair matrix, top
+    /// DNS names / TLS SNI) with default tuning. Sugar for
+    /// [`aggregate_with`](Self::aggregate_with)`(Default)`.
+    pub fn aggregate(self) -> Self {
+        self.aggregate_with(aggregate::AggregateConfig::default())
+    }
+
+    /// Issue #121: arm traffic aggregation with an explicit
+    /// [`AggregateConfig`](aggregate::AggregateConfig) (window / bucket + which
+    /// dimensions). Each dimension only wires its feed when enabled (and its
+    /// parser feature is present). Idempotent.
+    pub fn aggregate_with(mut self, cfg: aggregate::AggregateConfig) -> Self {
+        use crate::protocol::builtin::{Tcp, Udp};
+        use crate::protocol::event_typed::FlowPacket;
+
+        if self.aggregate_armed {
+            return self;
+        }
+        self.aggregate_armed = true;
+
+        let want_flow = cfg.top_talkers || cfg.traffic_matrix;
+        let seed = cfg.clone();
+        self = self.state_init(move || aggregate::AggregateState::new(&seed));
+
+        if want_flow {
+            self = self
+                .protocol::<Tcp>()
+                .protocol::<Udp>()
+                .on_ctx::<FlowPacket>(|evt: &FlowPacket, ctx: &mut Ctx<'_>| {
+                    use crate::flow::FlowSide;
+                    let key = evt.key;
+                    let len = evt.len as u64;
+                    let ts = ctx.ts;
+                    let st = ctx.state_mut::<aggregate::AggregateState>();
+                    if let Some(t) = st.talkers.as_mut() {
+                        // The sender is the initiator (`a`) or responder (`b`).
+                        let src = if evt.side == FlowSide::Initiator {
+                            key.a.ip()
+                        } else {
+                            key.b.ip()
+                        };
+                        t.record_tx(src, len, ts);
+                    }
+                    if let Some(m) = st.matrix.as_mut() {
+                        // `key` is address-canonical, so the pair is stable.
+                        m.record_tx((key.a.ip(), key.b.ip()), len, ts);
+                    }
+                    Ok(())
+                });
+        }
+
+        #[cfg(feature = "dns")]
+        if cfg.top_domains {
+            use crate::protocol::builtin::Dns;
+            if !self
+                .declared_protocols
+                .contains_key(&std::any::TypeId::of::<Dns>())
+            {
+                self = self.protocol::<Dns>();
+            }
+            self = self.on_ctx::<Dns>(|msg: &flowscope::dns::DnsMessage, ctx: &mut Ctx<'_>| {
+                if let flowscope::dns::DnsMessage::Query(q) = msg
+                    && let Some(name) = q.questions.first().map(|x| x.name.clone())
+                {
+                    let ts = ctx.ts;
+                    if let Some(d) = ctx
+                        .state_mut::<aggregate::AggregateState>()
+                        .domains
+                        .as_mut()
+                    {
+                        d.record(name, 1, ts);
+                    }
+                }
+                Ok(())
+            });
+        }
+
+        #[cfg(feature = "tls")]
+        if cfg.top_sni {
+            use crate::protocol::builtin::TlsHandshake;
+            if !self
+                .declared_protocols
+                .contains_key(&std::any::TypeId::of::<TlsHandshake>())
+            {
+                self = self.protocol::<TlsHandshake>();
+            }
+            self = self.on_ctx::<TlsHandshake>(
+                |hs: &flowscope::tls::TlsHandshake, ctx: &mut Ctx<'_>| {
+                    if let Some(sni) = hs.sni.clone() {
+                        let ts = ctx.ts;
+                        if let Some(s) = ctx.state_mut::<aggregate::AggregateState>().sni.as_mut() {
+                            s.record(sni, 1, ts);
+                        }
+                    }
+                    Ok(())
+                },
+            );
+        }
+        self
+    }
+
+    /// Issue #121: arm [`aggregate`](Self::aggregate) and a periodic report —
+    /// `f` receives an [`AggregateReport`](aggregate::AggregateReport) every
+    /// `period`.
+    pub fn on_aggregate<F>(self, period: Duration, f: F) -> Self
+    where
+        F: Fn(&aggregate::AggregateReport<'_>) -> Result<()> + Send + Sync + 'static,
+    {
+        self.aggregate().tick(
+            period,
+            move |tick: &crate::protocol::event_typed::Tick, ctx: &mut Ctx<'_>| {
+                if let Some(state) = ctx.state::<aggregate::AggregateState>() {
+                    let report = aggregate::AggregateReport {
                         state,
                         now: tick.now,
                     };

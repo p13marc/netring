@@ -27,7 +27,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     Monitor::builder()
         .interface(&iface)
         .name("flow-risk")
-        .flow_risk()
+        .flow_analysis()
         .sink(StdoutSink::default())
         .build()?
         .run_for(Duration::from_secs(300))

@@ -51,6 +51,7 @@ use crate::protocol::Protocol;
 use crate::protocol::event_typed::{Event, Tick};
 
 // L2 ARP visibility + spoof/binding-change detection (feature `arp`).
+pub mod analysis;
 #[cfg(feature = "arp")]
 pub mod arp;
 #[cfg(feature = "asset")]
@@ -91,7 +92,6 @@ pub mod ndp;
 #[cfg(feature = "p0f")]
 pub mod p0f;
 pub mod registry;
-pub mod risk;
 pub mod run;
 #[cfg(feature = "sigma")]
 pub mod sigma;
@@ -801,6 +801,13 @@ pub struct MonitorBuilder {
     /// `ioc(..)` is armed; a clone reaches [`Monitor::reload_handle`] so an
     /// operator can hot-swap the blocklist without dropping packets.
     ioc_swap: Option<std::sync::Arc<arc_swap::ArcSwap<ioc::IocSet>>>,
+    /// Issue #124: handlers registered via [`Self::on_analyzed_flow`], shared
+    /// with the per-protocol `FlowEnded` finalize closures so registration order
+    /// relative to [`Self::flow_analysis`] is irrelevant.
+    analyzed_flow_handlers: analysis::AnalyzedFlowHandlers,
+    /// Issue #124: set once [`Self::flow_analysis`] arms the analyzer, so a
+    /// second call is idempotent (feeds/finalize wired only once).
+    flow_analysis_armed: bool,
     /// Issue #53: the live, swappable Sigma rule set behind [`Self::sigma`].
     #[cfg(feature = "sigma")]
     sigma_swap: Option<std::sync::Arc<arc_swap::ArcSwap<sigma::SigmaRuleSet>>>,
@@ -2587,23 +2594,49 @@ impl MonitorBuilder {
         self
     }
 
-    /// Issue #49: arm the built-in nDPI-style **flow-risk** checks. The Monitor
-    /// passively flags deterministic security risks and emits a `flow_risk`
-    /// anomaly per hit (observation `risk` = the flag). v1: `obsolete_tls`
-    /// (negotiated SSLv3 / TLS 1.0 / 1.1) and `cleartext_http_credentials`
-    /// (`Authorization: Basic` over plaintext HTTP). The TLS / HTTP arms are
-    /// active only with the corresponding feature (and auto-register the
-    /// protocol). See [`risk`].
+    /// Issue #124: arm nDPI-style **flow-risk** analysis with default tuning.
+    /// Sugar for [`flow_analysis_with`](Self::flow_analysis_with)`(Default)`.
+    ///
+    /// The Monitor folds each flow's TLS handshake / HTTP request / DNS exchange
+    /// into a per-flow L7 summary and, at flow end, computes flowscope's 14-flag
+    /// [`FlowRisk`](flowscope::detect::FlowRisk) — obsolete TLS, weak cipher,
+    /// cleartext credentials, DGA domains, port/proto mismatch, suspicious JA4,
+    /// and more — emitting **one** `flow_risk` anomaly per risky flow (`risk` =
+    /// the comma-joined flag slugs, `risk_score` metric) at the flow's max risk
+    /// severity. Threat-intel matching stays in the live
+    /// [`ioc()`](Self::ioc) path, so the two compose without duplication.
     ///
     /// ```no_run
-    /// # #[cfg(all(feature = "tls", feature = "tokio"))] fn demo() {
+    /// # #[cfg(all(feature = "flow", feature = "tokio"))] fn demo() {
     /// use netring::monitor::Monitor;
     /// use netring::prelude::StdoutSink;
-    /// Monitor::builder().interface("eth0").flow_risk().sink(StdoutSink::default());
+    /// Monitor::builder().interface("eth0").flow_analysis().sink(StdoutSink::default());
     /// # }
     /// ```
-    #[cfg(any(feature = "tls", feature = "http"))]
-    pub fn flow_risk(mut self) -> Self {
+    pub fn flow_analysis(self) -> Self {
+        self.flow_analysis_with(analysis::FlowAnalysisConfig::default())
+    }
+
+    /// Issue #124: arm flow-risk analysis with explicit
+    /// [`FlowAnalysisConfig`](analysis::FlowAnalysisConfig) (TTL, flow cap,
+    /// anomaly toggle, minimum severity). See [`flow_analysis`](Self::flow_analysis).
+    pub fn flow_analysis_with(mut self, cfg: analysis::FlowAnalysisConfig) -> Self {
+        use crate::protocol::builtin::{Tcp, Udp};
+        use crate::protocol::event_typed::FlowEnded;
+
+        if self.flow_analysis_armed {
+            // Idempotent — arming twice must not double-wire the feeds/finalize.
+            return self;
+        }
+        self.flow_analysis_armed = true;
+
+        // Seed the analyzer cell with the configured TTL + capacity (the
+        // `state_mut` lazy-create fallback would otherwise use defaults).
+        let seed_cfg = cfg.clone();
+        self = self.state_init(move || analysis::AnalyzerCell::new(&seed_cfg));
+
+        // L7 feeds — each auto-registers its protocol. `ctx.flow` carries the
+        // flow key for L7 message handlers; `ctx.ts` the current timestamp.
         #[cfg(feature = "tls")]
         {
             use crate::protocol::builtin::TlsHandshake;
@@ -2615,7 +2648,12 @@ impl MonitorBuilder {
             }
             self = self.on_ctx::<TlsHandshake>(
                 |hs: &flowscope::tls::TlsHandshake, ctx: &mut Ctx<'_>| {
-                    risk::check_tls_risk(hs, ctx);
+                    if let Some(key) = ctx.flow {
+                        let ts = ctx.ts;
+                        ctx.state_mut::<analysis::AnalyzerCell>()
+                            .analyzer
+                            .observe_tls(&key, hs, ts);
+                    }
                     Ok(())
                 },
             );
@@ -2630,11 +2668,116 @@ impl MonitorBuilder {
                 self = self.protocol::<Http>();
             }
             self = self.on_ctx::<Http>(|msg: &flowscope::http::HttpMessage, ctx: &mut Ctx<'_>| {
-                risk::check_http_risk(msg, ctx);
+                if let Some(key) = ctx.flow {
+                    let ts = ctx.ts;
+                    ctx.state_mut::<analysis::AnalyzerCell>()
+                        .analyzer
+                        .observe_http(&key, msg, ts);
+                }
                 Ok(())
             });
         }
+        #[cfg(feature = "dns")]
+        {
+            use crate::protocol::builtin::Dns;
+            if !self
+                .declared_protocols
+                .contains_key(&std::any::TypeId::of::<Dns>())
+            {
+                self = self.protocol::<Dns>();
+            }
+            self = self.on_ctx::<Dns>(|msg: &flowscope::dns::DnsMessage, ctx: &mut Ctx<'_>| {
+                if let Some(key) = ctx.flow {
+                    let ts = ctx.ts;
+                    let cell = ctx.state_mut::<analysis::AnalyzerCell>();
+                    match msg {
+                        flowscope::dns::DnsMessage::Query(q) => {
+                            cell.analyzer.observe_dns_query(&key, q, ts)
+                        }
+                        flowscope::dns::DnsMessage::Response(r) => {
+                            cell.analyzer.observe_dns_response(&key, r, ts)
+                        }
+                        _ => {}
+                    }
+                }
+                Ok(())
+            });
+        }
+
+        // Finalize at flow end (TCP + UDP), emit `flow_risk`, run handlers. Both
+        // Tcp and Udp flows are already registered above (analyzer feeds), or
+        // here for the pure-lifecycle case with no L7 features enabled.
+        if !self
+            .declared_protocols
+            .contains_key(&std::any::TypeId::of::<Tcp>())
+        {
+            self = self.protocol::<Tcp>();
+        }
+        if !self
+            .declared_protocols
+            .contains_key(&std::any::TypeId::of::<Udp>())
+        {
+            self = self.protocol::<Udp>();
+        }
+
+        let emit_risk = cfg.emit_risk_anomalies;
+        let min = cfg.min_risk_severity;
+
+        let handlers_tcp = std::sync::Arc::clone(&self.analyzed_flow_handlers);
+        self = self.on_ctx::<FlowEnded<Tcp>>(move |evt: &FlowEnded<Tcp>, ctx: &mut Ctx<'_>| {
+            let af = ctx
+                .state_mut::<analysis::AnalyzerCell>()
+                .analyzer
+                .finalize(&evt.key, evt.stats.clone());
+            let hs = handlers_tcp
+                .lock()
+                .expect("analyzed-flow handler list poisoned");
+            analysis::emit_analyzed_flow(af, emit_risk, min, ctx, &hs);
+            Ok(())
+        });
+
+        let handlers_udp = std::sync::Arc::clone(&self.analyzed_flow_handlers);
+        self = self.on_ctx::<FlowEnded<Udp>>(move |evt: &FlowEnded<Udp>, ctx: &mut Ctx<'_>| {
+            let af = ctx
+                .state_mut::<analysis::AnalyzerCell>()
+                .analyzer
+                .finalize(&evt.key, evt.stats.clone());
+            let hs = handlers_udp
+                .lock()
+                .expect("analyzed-flow handler list poisoned");
+            analysis::emit_analyzed_flow(af, emit_risk, min, ctx, &hs);
+            Ok(())
+        });
+
         self
+    }
+
+    /// Issue #124: register a handler invoked with each finalized
+    /// [`AnalyzedFlow`](flowscope::analysis::AnalyzedFlow) — the SIEM-ready flow
+    /// record (5-tuple + stats + L7 summary + computed risk). Requires
+    /// [`flow_analysis`](Self::flow_analysis) to be armed (call order between
+    /// the two is irrelevant); a no-op otherwise.
+    pub fn on_analyzed_flow(
+        self,
+        handler: impl Fn(&flowscope::analysis::AnalyzedFlow<crate::protocol::FlowKey>, &mut Ctx<'_>)
+        + Send
+        + Sync
+        + 'static,
+    ) -> Self {
+        self.analyzed_flow_handlers
+            .lock()
+            .expect("analyzed-flow handler list poisoned")
+            .push(std::sync::Arc::new(handler));
+        self
+    }
+
+    /// Issue #49 → #124: **deprecated** alias for [`flow_analysis`](Self::flow_analysis).
+    /// The old two-flag checks are subsumed by flowscope's full 14-flag
+    /// [`FlowRisk`](flowscope::detect::FlowRisk); one `flow_risk` anomaly per
+    /// flow now carries all tripped flags.
+    #[deprecated(since = "0.29.0", note = "renamed and upgraded; use `flow_analysis()`")]
+    pub fn flow_risk(self) -> Self {
+        self.flow_analysis()
     }
 
     // 0.22: the deprecated three-generic `on_with_marker` is removed —

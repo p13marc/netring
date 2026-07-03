@@ -21,7 +21,7 @@ pub struct Dns;
 
 impl Protocol for Dns {
     type Message = flowscope::dns::DnsMessage;
-    const NAME: &'static str = flowscope::parser_kinds::DNS_UDP;
+    const NAME: &'static str = flowscope::dns::PARSER_KIND_UDP;
 
     fn dispatch() -> Dispatch {
         Dispatch::Udp(vec![53])
@@ -52,7 +52,7 @@ mod tests {
 
     #[test]
     fn name_matches_flowscope_parser_kind() {
-        assert_eq!(<Dns as Protocol>::NAME, flowscope::parser_kinds::DNS_UDP);
+        assert_eq!(<Dns as Protocol>::NAME, flowscope::dns::PARSER_KIND_UDP);
     }
 
     #[test]

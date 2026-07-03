@@ -125,13 +125,9 @@ impl<T: AnomalySink + Sized> AnomalySinkExt for T {}
 /// outputs into the sink chain.
 ///
 /// Constraints:
-/// - `OwnedAnomaly::kind` must be `Cow::Borrowed(_)` because
-///   `AnomalySink::write` takes `&'static str`. Per the
-///   `flowscope::DetectorScore::name() -> &'static str` contract,
-///   detector-originated anomalies always satisfy this. Anomalies
-///   constructed with a runtime-built `String` slug will leak the
-///   string via `Box::leak` — once per unique slug, then memoized
-///   by the leak itself.
+/// - `OwnedAnomaly::kind` is a typed `flowscope::DetectorKind` (flowscope
+///   0.22); `as_str()` yields the `&'static str` slug `AnomalySink::write`
+///   wants for every variant, so no `Box::leak` is ever needed.
 /// - Observations and metrics are forwarded as borrowed slices —
 ///   no copy beyond the `Cow::Borrowed` re-wrap.
 /// - The `key` parameter is `None`: OwnedAnomaly's 5-tuple fields
@@ -148,15 +144,10 @@ pub fn publish_owned(sink: &mut dyn AnomalySink, owned: &flowscope::OwnedAnomaly
         .map(|(k, v)| (*k, std::borrow::Cow::Borrowed(v.as_ref())))
         .collect();
     let metrics: Vec<(&'static str, f64)> = owned.metrics.iter().copied().collect();
-    let kind: &'static str = match &owned.kind {
-        std::borrow::Cow::Borrowed(s) => s,
-        // Per the doc, detector-originated anomalies always carry a
-        // Cow::Borrowed slug. The Owned case here is defensive — leak
-        // once so the resulting &'static str outlives the sink.write
-        // call. A hot loop hitting this path repeatedly would leak
-        // memory; document the gotcha rather than panic.
-        std::borrow::Cow::Owned(s) => Box::leak(s.clone().into_boxed_str()),
-    };
+    // flowscope 0.22: `OwnedAnomaly::kind` is a typed `DetectorKind` whose
+    // `as_str()` yields a `&'static str` slug for every variant (including
+    // `Other`) — no more `Cow`/`Box::leak` dance.
+    let kind: &'static str = owned.kind.as_str();
     sink.write(
         kind,
         owned.severity.into(),
@@ -165,6 +156,23 @@ pub fn publish_owned(sink: &mut dyn AnomalySink, owned: &flowscope::OwnedAnomaly
         &observations,
         &metrics,
     );
+}
+
+/// Map a netring anomaly `kind` slug back to a flowscope [`DetectorKind`]
+/// (issue #132 / #127). Used when building a `flowscope::OwnedAnomaly` from
+/// netring-side writer state (EVE / channel / owned sinks).
+///
+/// Round-trips through [`DetectorKind::from_slug`]: if the slug is a known
+/// built-in it recovers the typed variant (so `attack_technique()` works), and
+/// if not it becomes `Other(slug)` — never `Unknown`, which would silently
+/// rewrite the emitted slug to `"unknown"`.
+pub(crate) fn detector_kind_for(kind: &'static str) -> flowscope::DetectorKind {
+    let parsed = flowscope::DetectorKind::from_slug(kind);
+    if parsed.as_str() == kind {
+        parsed
+    } else {
+        flowscope::DetectorKind::Other(kind)
+    }
 }
 
 /// Erased key borrow — lets [`AnomalyWriter`] stay non-generic in
@@ -278,7 +286,11 @@ impl<'sink> AnomalyWriter<'sink> {
     /// involving an intermediate [`AnomalySink`]. The caller owns
     /// what happens next; no sink callback is invoked.
     pub fn emit_owned(self) -> flowscope::OwnedAnomaly {
-        let mut owned = flowscope::OwnedAnomaly::new(self.kind, self.severity.into(), self.ts);
+        let mut owned = flowscope::OwnedAnomaly::new(
+            detector_kind_for(self.kind),
+            self.severity.into(),
+            self.ts,
+        );
         if let Some(repr) = self.key_repr
             && let Some(fkey) = repr
                 .key
@@ -451,7 +463,7 @@ mod tests {
             .with_metric("rate", 4.5)
             .emit_owned();
         // Same `kind`, severity-mapped to flowscope's enum, ts intact.
-        assert_eq!(owned.kind, "Materialize");
+        assert_eq!(owned.kind.as_str(), "Materialize");
         assert_eq!(owned.severity, flowscope::event::Severity::Warning);
         assert_eq!(owned.ts, Timestamp::new(7, 0));
         // Observation + metric round-tripped.

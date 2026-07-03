@@ -323,7 +323,11 @@ fn build_owned(
     observations: &[(&'static str, Cow<'_, str>)],
     metrics: &[(&'static str, f64)],
 ) -> flowscope::OwnedAnomaly {
-    let mut owned = flowscope::OwnedAnomaly::new(kind, severity.into(), ts);
+    let mut owned = flowscope::OwnedAnomaly::new(
+        crate::anomaly::sink::detector_kind_for(kind),
+        severity.into(),
+        ts,
+    );
     if let Some(k) = key {
         // Structured 5-tuple flatten via KeyFields downcast.
         if let Some(fkey) = k
@@ -459,9 +463,10 @@ mod tests {
             .with_metric("b", 3.0)
             .emit();
         let received = rx.recv().await.expect("channel did not deliver");
-        // 0.21 A.10: OwnedAnomaly now sourced from flowscope. `kind`
-        // is `Cow<'static, str>`; `severity` is flowscope's enum.
-        assert_eq!(received.kind, "Forwarded");
+        // 0.21 A.10: OwnedAnomaly now sourced from flowscope. flowscope 0.22:
+        // `kind` is a typed `DetectorKind` (`as_str()` → the slug); `severity`
+        // is flowscope's enum.
+        assert_eq!(received.kind.as_str(), "Forwarded");
         assert_eq!(received.severity, flowscope::event::Severity::Critical);
         assert_eq!(received.observations[0].0, "a");
         assert_eq!(received.observations[0].1.as_ref(), "x");

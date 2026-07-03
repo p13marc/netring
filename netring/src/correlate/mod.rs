@@ -36,3 +36,12 @@ pub use flowscope::correlate::{
     BurstDetector, BurstHit, Ewma, FlowStateMap, KeylessSequencePattern, RateValue, RollingRate,
     SequencePattern, TimeBucketedCounter, TimeBucketedSet, TopK,
 };
+
+// 0.29 (flowscope 0.22): the detector-grade streaming + owner-aggregation
+// primitives added in flowscope 0.21/0.22. Surfaced at the netring path so the
+// aggregation (#121), RED (#122), and owner-bandwidth (#130) surfaces — and
+// downstream detectors — can reuse them without a direct flowscope import.
+#[cfg(feature = "flow")]
+pub use flowscope::correlate::{
+    Attribution, BandwidthByKey, ByteSemantics, DdSketch, EwmaVar, FirstSeen, WindowedQuantiles,
+};

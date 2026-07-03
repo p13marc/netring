@@ -309,7 +309,11 @@ async fn replay_on_effect_emits_anomaly_through_the_sink() {
             let ts = ctx.ts;
             async move {
                 tokio::task::yield_now().await; // simulate async I/O
-                let mut a = OwnedAnomaly::new("effect_fired", Severity::Warning.into(), ts);
+                let mut a = OwnedAnomaly::new(
+                    flowscope::DetectorKind::Other("effect_fired"),
+                    Severity::Warning.into(),
+                    ts,
+                );
                 if let Some(k) = key {
                     a = a.with_key(&k);
                 }

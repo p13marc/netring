@@ -117,7 +117,7 @@ async fn replay_count(reload: bool) -> usize {
 
     let mut n = 0;
     while let Ok(a) = rx.try_recv() {
-        if a.kind == "sigma_match" {
+        if a.kind.as_str() == "sigma_match" {
             n += 1;
         }
     }

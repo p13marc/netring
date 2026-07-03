@@ -89,7 +89,7 @@ async fn replay_count_matches(set_up: impl FnOnce(&netring::monitor::ReloadHandl
 
     let mut n = 0;
     while let Ok(a) = rx.try_recv() {
-        if a.kind == "ioc_match" {
+        if a.kind.as_str() == "ioc_match" {
             n += 1;
         }
     }

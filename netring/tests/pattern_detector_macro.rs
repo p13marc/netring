@@ -34,12 +34,16 @@ struct ToyScore {
 }
 
 impl DetectorScore for ToyScore {
-    fn name(&self) -> &'static str {
-        "ToyScan"
+    fn kind(&self) -> flowscope::DetectorKind {
+        flowscope::DetectorKind::Other("ToyScan")
     }
     fn into_anomaly(self, ts: Timestamp) -> flowscope::OwnedAnomaly {
-        flowscope::OwnedAnomaly::new("ToyScan", FsSeverity::Warning, ts)
-            .with_metric("count", self.count as f64)
+        flowscope::OwnedAnomaly::new(
+            flowscope::DetectorKind::Other("ToyScan"),
+            FsSeverity::Warning,
+            ts,
+        )
+        .with_metric("count", self.count as f64)
     }
 }
 

@@ -18,7 +18,7 @@ pub struct Icmp;
 #[cfg(feature = "icmp")]
 impl Protocol for Icmp {
     type Message = flowscope::icmp::IcmpMessage;
-    const NAME: &'static str = flowscope::parser_kinds::ICMP;
+    const NAME: &'static str = flowscope::icmp::PARSER_KIND;
 
     fn dispatch() -> Dispatch {
         Dispatch::Icmp
@@ -59,7 +59,7 @@ mod tests {
 
     #[test]
     fn name_matches_flowscope_parser_kind() {
-        assert_eq!(<Icmp as Protocol>::NAME, flowscope::parser_kinds::ICMP);
+        assert_eq!(<Icmp as Protocol>::NAME, flowscope::icmp::PARSER_KIND);
     }
 
     #[test]

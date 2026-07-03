@@ -20,7 +20,7 @@ pub struct Http;
 
 impl Protocol for Http {
     type Message = flowscope::http::HttpMessage;
-    const NAME: &'static str = flowscope::parser_kinds::HTTP;
+    const NAME: &'static str = flowscope::http::PARSER_KIND;
 
     fn dispatch() -> Dispatch {
         Dispatch::Tcp(vec![80, 8080])
@@ -61,7 +61,7 @@ mod tests {
 
     #[test]
     fn name_matches_flowscope_parser_kind() {
-        assert_eq!(<Http as Protocol>::NAME, flowscope::parser_kinds::HTTP);
+        assert_eq!(<Http as Protocol>::NAME, flowscope::http::PARSER_KIND);
     }
 
     #[test]

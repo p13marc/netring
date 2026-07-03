@@ -438,8 +438,8 @@ async fn async_xdp_capture_wakes_on_spaced_out_traffic() {
 
     // Full-NIC async capture on lo (single queue → [0]); attaches the built-in
     // redirect-all program in SKB mode.
-    let cap = XdpCapture::open("lo")
-        .expect("open XdpCapture on lo (needs root / CAP_BPF+CAP_NET_ADMIN)");
+    let cap =
+        XdpCapture::open("lo").expect("open XdpCapture on lo (needs root / CAP_BPF+CAP_NET_ADMIN)");
     let mut cap = AsyncXdpCapture::new(cap).expect("wrap AsyncXdpCapture");
 
     // Slow, spaced-out loopback UDP: one small burst every ~120ms. The gaps are
@@ -462,9 +462,9 @@ async fn async_xdp_capture_wakes_on_spaced_out_traffic() {
     while Instant::now() < overall && wakeups < 4 {
         match tokio::time::timeout(Duration::from_secs(2), cap.recv()).await {
             Ok(Ok(batch)) if !batch.is_empty() => wakeups += 1,
-            Ok(Ok(_)) => {}                       // empty drain — keep waiting
+            Ok(Ok(_)) => {} // empty drain — keep waiting
             Ok(Err(e)) => panic!("AsyncXdpCapture::recv error: {e:?}"),
-            Err(_elapsed) => break,               // stall — the regression
+            Err(_elapsed) => break, // stall — the regression
         }
     }
 

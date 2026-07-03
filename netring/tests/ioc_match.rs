@@ -110,7 +110,7 @@ async fn replay_emits_ioc_matches_for_ip_and_domain() {
 
     let mut kinds = Vec::new();
     while let Ok(a) = rx.try_recv() {
-        if a.kind == "ioc_match" {
+        if a.kind.as_str() == "ioc_match" {
             kinds.push(a);
         }
     }

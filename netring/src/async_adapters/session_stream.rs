@@ -751,13 +751,7 @@ mod tests {
         reassemblers.insert((7u32, FlowSide::Initiator), r);
 
         process_session_event::<u32, EchoParser>(
-            FlowEvent::Packet {
-                key: 7,
-                side: FlowSide::Initiator,
-                orientation: flowscope::Orientation::Forward,
-                len: 5,
-                ts: ts(),
-            },
+            flowscope::test_helpers::events::packet_side(7, FlowSide::Initiator, 5, ts()),
             &mut parsers,
             &mut factory,
             &mut reassemblers,
@@ -787,13 +781,7 @@ mod tests {
     fn packet_event_with_no_reassembler_is_silent() {
         let (mut parsers, mut factory, mut reassemblers, mut pending) = empty_state();
         process_session_event::<u32, EchoParser>(
-            FlowEvent::Packet {
-                key: 7,
-                side: FlowSide::Initiator,
-                orientation: flowscope::Orientation::Forward,
-                len: 0,
-                ts: ts(),
-            },
+            flowscope::test_helpers::events::packet_side(7, FlowSide::Initiator, 0, ts()),
             &mut parsers,
             &mut factory,
             &mut reassemblers,

@@ -1800,6 +1800,10 @@ async fn dispatch_lifecycle_async(
             ts,
             tcp,
             orientation,
+            // flowscope 0.22: `Packet` gained `source_idx` (the capture leg) and
+            // is now variant-level `#[non_exhaustive]`. netring stamps its own
+            // `SourceIdx` from the backend, so the flowscope leg is ignored here.
+            ..
         } => {
             dispatcher
                 .dispatch_async(
@@ -2536,6 +2540,10 @@ fn dispatch_lifecycle(
             ts,
             tcp,
             orientation,
+            // flowscope 0.22: `Packet` gained `source_idx` (the capture leg) and
+            // is now variant-level `#[non_exhaustive]`. netring stamps its own
+            // `SourceIdx` from the backend, so the flowscope leg is ignored here.
+            ..
         } => {
             dispatch_one!(
                 FlowPacket,
@@ -2774,6 +2782,10 @@ async fn dispatch_lifecycle_effects(
             ts,
             tcp,
             orientation,
+            // flowscope 0.22: `Packet` gained `source_idx` (the capture leg) and
+            // is now variant-level `#[non_exhaustive]`. netring stamps its own
+            // `SourceIdx` from the backend, so the flowscope leg is ignored here.
+            ..
         } => {
             dispatch_one!(
                 FlowPacket,

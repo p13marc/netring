@@ -1,6 +1,6 @@
 [package]
 name = "netring"
-version = "0.28.0"
+version = "0.29.0"
 edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
@@ -23,7 +23,7 @@ exclude = ["CLAUDE.md", "SPEC.md"]
 # pulls only `bitflags` + `thiserror` — both already in netring's tree.
 # The `parse` feature additionally enables `flowscope/extractors`,
 # `flow` enables `tracker`/`reassembler`/`session`.
-flowscope = { version = "0.20", default-features = false }
+flowscope = { version = "0.22", default-features = false }
 
 libc = { workspace = true }
 nix = { workspace = true }
@@ -71,6 +71,10 @@ yara-x = { version = "1.18", default-features = false, optional = true }
 arc-swap = "1"
 
 [dev-dependencies]
+# flowscope 0.22: `FlowEvent::Packet` / `driver::Event::Packet` are variant-level
+# `#[non_exhaustive]`, so tests synthesize them via `flowscope::test_helpers`
+# (behind flowscope's `test-helpers` feature) rather than struct literals.
+flowscope = { version = "0.22", default-features = false, features = ["test-helpers"] }
 env_logger = "0.11"
 tempfile = "3"
 divan = "0.1"
@@ -116,7 +120,7 @@ parse = ["dep:etherparse", "flowscope/extractors"]
 # records (issue #33 / flowscope #88) — the cross-tool flow id pivoted against
 # Zeek / Suricata. Tiny (sha1 + base64); kept in `flow` so every flow export
 # (JSON / IPFIX / `export::FlowRecord`) carries it.
-flow = ["parse", "flowscope/tracker", "flowscope/reassembler", "flowscope/session", "flowscope/community-id", "dep:bytes", "dep:ahash"]
+flow = ["parse", "flowscope/tracker", "flowscope/reassembler", "flowscope/session", "flowscope/community-id", "flowscope/analysis", "dep:bytes", "dep:ahash"]
 # L7 parser pass-through — pull flowscope's HTTP/DNS/TLS/ICMP modules.
 http = ["flow", "flowscope/http"]
 dns = ["flow", "flowscope/dns"]

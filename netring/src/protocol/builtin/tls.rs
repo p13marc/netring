@@ -21,7 +21,7 @@ pub struct Tls;
 
 impl Protocol for Tls {
     type Message = flowscope::tls::TlsMessage;
-    const NAME: &'static str = flowscope::parser_kinds::TLS;
+    const NAME: &'static str = flowscope::tls::PARSER_KIND;
 
     fn dispatch() -> Dispatch {
         Dispatch::Tcp(vec![443, 8443])
@@ -52,7 +52,7 @@ mod tests {
 
     #[test]
     fn name_matches_flowscope_parser_kind() {
-        assert_eq!(<Tls as Protocol>::NAME, flowscope::parser_kinds::TLS);
+        assert_eq!(<Tls as Protocol>::NAME, flowscope::tls::PARSER_KIND);
     }
 
     #[test]

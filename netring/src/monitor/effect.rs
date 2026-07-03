@@ -110,14 +110,10 @@ fn apply_owned_anomaly(sink: &mut dyn crate::anomaly::sink::AnomalySink, a: Owne
     use std::borrow::Cow;
     use std::net::SocketAddr;
 
-    // `write` wants a `&'static str` kind. Anomalies almost always use a
-    // `&'static str` literal (`Cow::Borrowed`); a runtime-built kind
-    // (`Cow::Owned`, rare) is leaked — same documented cost as
-    // `AnomalyWriter::with_dynamic`.
-    let kind: &'static str = match a.kind {
-        Cow::Borrowed(s) => s,
-        Cow::Owned(s) => Box::leak(s.into_boxed_str()),
-    };
+    // `write` wants a `&'static str` kind. flowscope 0.22: `OwnedAnomaly::kind`
+    // is a typed `DetectorKind` whose `as_str()` is `&'static str` for every
+    // variant.
+    let kind: &'static str = a.kind.as_str();
 
     // Reconstruct a FiveTupleKey when the anomaly carries a full 5-tuple
     // (the common case for flow/session anomalies). Incomplete → no key.
@@ -255,7 +251,11 @@ mod tests {
             async move {
                 tokio::task::yield_now().await; // simulate I/O
                 // `key`/`ts` are owned here; no borrow of Ctx survived.
-                let mut a = OwnedAnomaly::new("probe", Severity::Info.into(), ts);
+                let mut a = OwnedAnomaly::new(
+                    flowscope::DetectorKind::Other("probe"),
+                    Severity::Info.into(),
+                    ts,
+                );
                 if let Some(k) = key {
                     a = a.with_key(&k);
                 }
@@ -306,10 +306,13 @@ mod tests {
             "10.0.0.1:1234".parse().unwrap(),
             "10.0.0.2:443".parse().unwrap(),
         );
-        let anomaly =
-            OwnedAnomaly::new("ioc_match", Severity::Critical.into(), Timestamp::new(0, 0))
-                .with_key(&key)
-                .with_observation("ja4", "t13d1516h2");
+        let anomaly = OwnedAnomaly::new(
+            flowscope::DetectorKind::Other("ioc_match"),
+            Severity::Critical.into(),
+            Timestamp::new(0, 0),
+        )
+        .with_key(&key)
+        .with_observation("ja4", "t13d1516h2");
 
         let mut sink = Capturing::default();
         Effects::emit(anomaly).apply(&mut sink);
@@ -328,11 +331,19 @@ mod tests {
     fn effects_builder_merges_and_reports_empty() {
         assert!(Effects::none().is_empty());
         let ts = Timestamp::new(0, 0);
-        let mut e = Effects::emit(OwnedAnomaly::new("a", Severity::Info.into(), ts))
-            .and_emit(OwnedAnomaly::new("b", Severity::Warning.into(), ts));
+        let mut e = Effects::emit(OwnedAnomaly::new(
+            flowscope::DetectorKind::Other("a"),
+            Severity::Info.into(),
+            ts,
+        ))
+        .and_emit(OwnedAnomaly::new(
+            flowscope::DetectorKind::Other("b"),
+            Severity::Warning.into(),
+            ts,
+        ));
         assert_eq!(e.anomalies.len(), 2);
         e.extend(Effects::emit(OwnedAnomaly::new(
-            "c",
+            flowscope::DetectorKind::Other("c"),
             Severity::Error.into(),
             ts,
         )));

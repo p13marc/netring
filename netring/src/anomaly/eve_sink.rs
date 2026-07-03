@@ -100,7 +100,11 @@ impl<W: Write + Send> AnomalySink for EveSink<W> {
         // flatten). Keys that don't downcast keep `src_ip` etc.
         // `None` — EveJsonWriter omits those fields rather than
         // emitting `null` per its schema convention.
-        let mut owned = flowscope::OwnedAnomaly::new(kind, severity.into(), ts);
+        let mut owned = flowscope::OwnedAnomaly::new(
+            crate::anomaly::sink::detector_kind_for(kind),
+            severity.into(),
+            ts,
+        );
         if let Some(k) = key
             && let Some(fkey) = k
                 .as_any()

@@ -120,7 +120,7 @@ async fn replay_emits_sigma_match_for_flagged_dns_query_only() {
     monitor.replay().await.expect("replay completes");
 
     let matches: Vec<_> = std::iter::from_fn(|| rx.try_recv().ok())
-        .filter(|a| a.kind == "sigma_match")
+        .filter(|a| a.kind.as_str() == "sigma_match")
         .collect();
     assert_eq!(
         matches.len(),

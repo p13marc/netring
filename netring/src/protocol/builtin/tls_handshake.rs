@@ -24,7 +24,7 @@ pub struct TlsHandshake;
 
 impl Protocol for TlsHandshake {
     type Message = flowscope::tls::TlsHandshake;
-    const NAME: &'static str = flowscope::parser_kinds::TLS_HANDSHAKE;
+    const NAME: &'static str = flowscope::tls::handshake::PARSER_KIND;
 
     fn dispatch() -> Dispatch {
         Dispatch::Tcp(vec![443, 8443])
@@ -49,7 +49,7 @@ mod tests {
     fn name_matches_flowscope_parser_kind() {
         assert_eq!(
             <TlsHandshake as Protocol>::NAME,
-            flowscope::parser_kinds::TLS_HANDSHAKE
+            flowscope::tls::handshake::PARSER_KIND
         );
     }
 

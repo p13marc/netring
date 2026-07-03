@@ -182,6 +182,11 @@ pub fn eve_tls_record(
         obj.insert("dest_ip".into(), json!(key.b.ip().to_string()));
         obj.insert("dest_port".into(), json!(key.b.port()));
         obj.insert("proto".into(), json!(l4_proto_str(key.proto)));
+        // Issue #123: the standard Community ID, so this record correlates with
+        // Zeek / Suricata / netring flow records for the same flow.
+        if let Some(cid) = flowscope::KeyFields::community_id(key) {
+            obj.insert("community_id".into(), json!(cid));
+        }
     }
     obj.insert("tls".into(), serde_json::Value::Object(tls));
     serde_json::Value::Object(obj)

@@ -121,6 +121,14 @@ pub struct FlowStarted<P: Protocol> {
 }
 
 impl<P: Protocol> FlowStarted<P> {
+    /// The [Community ID](https://github.com/corelight/community-id-spec) v1
+    /// flow hash for this flow (`"1:<base64>"`), matching
+    /// [`export::FlowRecord::community_id`](crate::export::FlowRecord::community_id).
+    /// `None` for non-IP flows. Issue #123.
+    pub fn community_id(&self) -> Option<String> {
+        flowscope::KeyFields::community_id(&self.key)
+    }
+
     /// Constructor — `pub(crate)` because user code obtains these
     /// via the dispatcher, not by direct construction. Exposed
     /// publicly only under the `bench-zero-alloc` feature so
@@ -194,6 +202,14 @@ pub struct FlowEnded<P: Protocol> {
 }
 
 impl<P: Protocol> FlowEnded<P> {
+    /// The [Community ID](https://github.com/corelight/community-id-spec) v1
+    /// flow hash for this flow (`"1:<base64>"`), matching
+    /// [`export::FlowRecord::community_id`](crate::export::FlowRecord::community_id).
+    /// `None` for non-IP flows. Issue #123.
+    pub fn community_id(&self) -> Option<String> {
+        flowscope::KeyFields::community_id(&self.key)
+    }
+
     /// Constructor exposed for integration tests / dispatch
     /// translation. Not part of the documented public API.
     #[doc(hidden)]
@@ -247,6 +263,14 @@ pub struct FlowEstablished<P: Protocol> {
 }
 
 impl<P: Protocol> FlowEstablished<P> {
+    /// The [Community ID](https://github.com/corelight/community-id-spec) v1
+    /// flow hash for this flow (`"1:<base64>"`), matching
+    /// [`export::FlowRecord::community_id`](crate::export::FlowRecord::community_id).
+    /// `None` for non-IP flows. Issue #123.
+    pub fn community_id(&self) -> Option<String> {
+        flowscope::KeyFields::community_id(&self.key)
+    }
+
     /// Constructor exposed for integration tests / dispatch
     /// translation. Not part of the documented public API.
     #[doc(hidden)]
@@ -317,6 +341,14 @@ pub struct FlowPacket {
 }
 
 impl FlowPacket {
+    /// The [Community ID](https://github.com/corelight/community-id-spec) v1
+    /// flow hash for this flow (`"1:<base64>"`), matching
+    /// [`export::FlowRecord::community_id`](crate::export::FlowRecord::community_id).
+    /// `None` for non-IP flows. Issue #123.
+    pub fn community_id(&self) -> Option<String> {
+        flowscope::KeyFields::community_id(&self.key)
+    }
+
     /// Constructor exposed for integration tests / dispatch
     /// translation. Not part of the documented public API.
     #[doc(hidden)]
@@ -376,6 +408,14 @@ pub struct TcpRst {
 }
 
 impl TcpRst {
+    /// The [Community ID](https://github.com/corelight/community-id-spec) v1
+    /// flow hash for this flow (`"1:<base64>"`), matching
+    /// [`export::FlowRecord::community_id`](crate::export::FlowRecord::community_id).
+    /// `None` for non-IP flows. Issue #123.
+    pub fn community_id(&self) -> Option<String> {
+        flowscope::KeyFields::community_id(&self.key)
+    }
+
     /// Constructor exposed for integration tests / dispatch
     /// translation. Not part of the documented public API.
     #[doc(hidden)]
@@ -511,6 +551,14 @@ pub struct FlowTick<P: Protocol> {
 }
 
 impl<P: Protocol> FlowTick<P> {
+    /// The [Community ID](https://github.com/corelight/community-id-spec) v1
+    /// flow hash for this flow (`"1:<base64>"`), matching
+    /// [`export::FlowRecord::community_id`](crate::export::FlowRecord::community_id).
+    /// `None` for non-IP flows. Issue #123.
+    pub fn community_id(&self) -> Option<String> {
+        flowscope::KeyFields::community_id(&self.key)
+    }
+
     /// Constructor exposed for integration tests / dispatch
     /// translation. Not part of the documented public API.
     #[doc(hidden)]
@@ -569,6 +617,14 @@ pub struct ParserClosed<P: Protocol> {
 }
 
 impl<P: Protocol> ParserClosed<P> {
+    /// The [Community ID](https://github.com/corelight/community-id-spec) v1
+    /// flow hash for this flow (`"1:<base64>"`), matching
+    /// [`export::FlowRecord::community_id`](crate::export::FlowRecord::community_id).
+    /// `None` for non-IP flows. Issue #123.
+    pub fn community_id(&self) -> Option<String> {
+        flowscope::KeyFields::community_id(&self.key)
+    }
+
     /// Constructor exposed for integration tests / dispatch
     /// translation. Not part of the documented public API.
     #[doc(hidden)]
@@ -741,5 +797,31 @@ mod tests {
         let evt = FlowStarted::<Tcp>::new(key, Some(flowscope::L4Proto::Tcp), Timestamp::new(0, 0));
         let s = format!("{evt:?}");
         assert!(s.contains("tcp"));
+    }
+
+    #[test]
+    fn community_id_accessor_matches_key_fields() {
+        use std::net::{IpAddr, Ipv4Addr, SocketAddr};
+        let key = flowscope::extract::FiveTupleKey::new(
+            flowscope::L4Proto::Tcp,
+            SocketAddr::new(IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1)), 12345),
+            SocketAddr::new(IpAddr::V4(Ipv4Addr::new(10, 0, 0, 2)), 80),
+        );
+        let expect = flowscope::KeyFields::community_id(&key);
+        // The accessor must equal the canonical source used by
+        // export::FlowRecord.community_id, and be well-formed (`1:` prefix).
+        let evt = FlowStarted::<Tcp>::new(key, Some(flowscope::L4Proto::Tcp), Timestamp::new(0, 0));
+        assert_eq!(evt.community_id(), expect);
+        assert!(evt.community_id().unwrap().starts_with("1:"));
+
+        // FlowEnded / FlowPacket agree with FlowStarted on the same key.
+        let ended = FlowEnded::<Tcp>::new(
+            key,
+            EndReason::Fin,
+            flowscope::FlowStats::default(),
+            Some(flowscope::L4Proto::Tcp),
+            Timestamp::new(1, 0),
+        );
+        assert_eq!(ended.community_id(), evt.community_id());
     }
 }

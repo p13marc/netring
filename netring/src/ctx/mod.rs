@@ -207,6 +207,18 @@ impl<'a> Ctx<'a> {
         }
     }
 
+    /// The [Community ID](https://github.com/corelight/community-id-spec) v1
+    /// flow hash (`"1:<base64>"`) of the current event's flow, matching
+    /// [`export::FlowRecord::community_id`](crate::export::FlowRecord::community_id)
+    /// and the flow events' `community_id()` accessors. `None` when the event
+    /// carries no flow key (e.g. a tick) or the flow isn't IP. Issue #123.
+    #[inline]
+    pub fn community_id(&self) -> Option<String> {
+        self.flow
+            .as_ref()
+            .and_then(flowscope::KeyFields::community_id)
+    }
+
     /// Borrow per-monitor state `T` mutably.
     ///
     /// `T: Default` so the slot is lazy-created on first access.

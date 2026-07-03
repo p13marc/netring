@@ -2394,6 +2394,99 @@ impl MonitorBuilder {
         )
     }
 
+    /// Issue #128: register a handler fired once per QUIC Initial with a
+    /// [`QuicFingerprint`](crate::monitor::fingerprint::QuicFingerprint) — SNI,
+    /// ALPN, version, the `q`-prefixed QUIC JA4 (with the `tls` feature), and
+    /// the post-quantum key-share signal.
+    ///
+    /// Auto-registers the [`Quic`](crate::protocol::builtin::Quic) protocol.
+    ///
+    /// ```no_run
+    /// # #[cfg(all(feature = "quic", feature = "tokio"))] fn demo() {
+    /// use netring::monitor::Monitor;
+    /// Monitor::builder()
+    ///     .interface("eth0")
+    ///     .on_quic_fingerprint(|fp, _ctx| {
+    ///         println!("quic {} sni={:?} ja4={:?}", fp.version, fp.sni, fp.ja4);
+    ///         Ok(())
+    ///     });
+    /// # }
+    /// ```
+    #[cfg(feature = "quic")]
+    pub fn on_quic_fingerprint<F>(mut self, handler: F) -> Self
+    where
+        F: Fn(&crate::monitor::fingerprint::QuicFingerprint, &mut Ctx<'_>) -> Result<()>
+            + Send
+            + Sync
+            + 'static,
+    {
+        use crate::monitor::fingerprint::QuicFingerprint;
+        use crate::protocol::builtin::Quic;
+        if !self
+            .declared_protocols
+            .contains_key(&std::any::TypeId::of::<Quic>())
+        {
+            self = self.protocol::<Quic>();
+        }
+        self.on_ctx::<Quic>(move |initial: &flowscope::QuicInitial, ctx: &mut Ctx<'_>| {
+            let fp = QuicFingerprint::from_initial(initial, ctx.flow);
+            handler(&fp, ctx)
+        })
+    }
+
+    /// Issue #128: register a handler fired once per SSH flow — when **both**
+    /// peers' KEXINIT have been seen — with an
+    /// [`SshFingerprint`](crate::monitor::fingerprint::SshFingerprint) carrying
+    /// the HASSH client + server fingerprints, the version banner(s), and the
+    /// offered KEX algorithms.
+    ///
+    /// Auto-registers the [`Ssh`](crate::protocol::builtin::Ssh) protocol and a
+    /// per-flow accumulator slot (evicted on flow end). HASSH is BSD-licensed —
+    /// no `ja4plus` opt-in required.
+    ///
+    /// ```no_run
+    /// # #[cfg(all(feature = "ssh", feature = "tokio"))] fn demo() {
+    /// use netring::monitor::Monitor;
+    /// Monitor::builder()
+    ///     .interface("eth0")
+    ///     .on_ssh_fingerprint(|fp, _ctx| {
+    ///         println!("ssh hassh={:?} server={:?}", fp.hassh, fp.hassh_server);
+    ///         Ok(())
+    ///     });
+    /// # }
+    /// ```
+    #[cfg(feature = "ssh")]
+    pub fn on_ssh_fingerprint<F>(mut self, handler: F) -> Self
+    where
+        F: Fn(&crate::monitor::fingerprint::SshFingerprint, &mut Ctx<'_>) -> Result<()>
+            + Send
+            + Sync
+            + 'static,
+    {
+        use crate::monitor::fingerprint::SshFpState;
+        use crate::protocol::builtin::Ssh;
+        if !self
+            .declared_protocols
+            .contains_key(&std::any::TypeId::of::<Ssh>())
+        {
+            self = self.protocol::<Ssh>();
+        }
+        // Per-flow accumulator — auto-evicted on FlowEnded.
+        self = self.flow_state::<SshFpState>(Duration::from_secs(300));
+        self.on_ctx::<Ssh>(move |msg: &flowscope::ssh::SshMessage, ctx: &mut Ctx<'_>| {
+            let key = ctx.flow;
+            // Fold into the per-flow state; extract the fingerprint (owned)
+            // before re-borrowing ctx for the handler.
+            let fired = ctx
+                .flow_state_mut::<SshFpState>()
+                .and_then(|st| st.observe(msg, key));
+            match fired {
+                Some(fp) => handler(&fp, ctx),
+                None => Ok(()),
+            }
+        })
+    }
+
     /// Issue #48: arm a threat-intel [`IocSet`](ioc::IocSet). The Monitor then
     /// passively matches every flow destination/source IP, DNS query name, TLS
     /// SNI + JA3/JA4, and HTTP `Host` against the set, emitting an `ioc_match`
@@ -2843,6 +2936,7 @@ impl MonitorBuilder {
 
     /// Wire the DNS query-name feed for detectors exactly once (idempotent
     /// across repeated `.detector(..)` calls). No-op without the `dns` feature.
+    #[cfg_attr(not(feature = "dns"), allow(unused_mut))]
     fn wire_detector_dns_feed(mut self) -> Self {
         #[cfg(feature = "dns")]
         {

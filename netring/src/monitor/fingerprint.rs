@@ -40,6 +40,10 @@ pub struct TlsFingerprint {
     /// server didn't present a certificate in the handshake.
     #[cfg(feature = "ja4plus")]
     pub ja4x: Option<String>,
+    /// Issue #128: the ClientHello offered a **post-quantum** key-share group
+    /// (e.g. X25519MLKEM768 / X25519Kyber768). A cheap PQ-adoption signal for
+    /// inventory + policy, independent of the FoxIO fingerprints.
+    pub pq_key_share: bool,
     /// The flow's 5-tuple key (from the dispatch context), if available.
     #[cfg_attr(feature = "serde", serde(skip_serializing_if = "Option::is_none"))]
     pub key: Option<FlowKey>,
@@ -60,6 +64,7 @@ impl TlsFingerprint {
             ja4s: hs.ja4s.clone(),
             #[cfg(feature = "ja4plus")]
             ja4x: hs.ja4x.clone(),
+            pq_key_share: hs.pq_key_share,
             key,
         }
     }
@@ -120,6 +125,152 @@ impl HttpFingerprint {
     }
 }
 
+/// A QUIC client fingerprint bundle (issue #128) — handed to an
+/// [`on_quic_fingerprint`](crate::monitor::MonitorBuilder::on_quic_fingerprint)
+/// handler once per parsed QUIC Initial. The UDP/QUIC analogue of
+/// [`TlsFingerprint`]: SNI + ALPN + version, plus the QUIC-flavoured JA4
+/// (`q`-prefixed) and the post-quantum key-share signal when the `tls` feature
+/// recovers the embedded ClientHello.
+#[cfg(feature = "quic")]
+#[derive(Debug, Clone, Default, PartialEq)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize))]
+pub struct QuicFingerprint {
+    /// Server Name Indication from the Initial's ClientHello, if present.
+    #[cfg_attr(feature = "serde", serde(skip_serializing_if = "Option::is_none"))]
+    pub sni: Option<String>,
+    /// First offered ALPN protocol (e.g. `h3`), if any.
+    #[cfg_attr(feature = "serde", serde(skip_serializing_if = "Option::is_none"))]
+    pub alpn: Option<String>,
+    /// QUIC version label (`v1` / `v2` / a raw `0x…` for others).
+    pub version: String,
+    /// QUIC JA4 (`q`-prefixed FoxIO format). `None` without the `tls` feature
+    /// (the embedded ClientHello is needed) or when it wasn't recoverable.
+    #[cfg_attr(feature = "serde", serde(skip_serializing_if = "Option::is_none"))]
+    pub ja4: Option<String>,
+    /// The Initial's ClientHello offered a post-quantum key-share group. Always
+    /// `false` without the `tls` feature (no ClientHello to inspect).
+    pub pq_key_share: bool,
+    /// The flow's 5-tuple key, if available.
+    #[cfg_attr(feature = "serde", serde(skip_serializing_if = "Option::is_none"))]
+    pub key: Option<FlowKey>,
+}
+
+#[cfg(feature = "quic")]
+impl QuicFingerprint {
+    /// Build from a parsed QUIC Initial + the flow key.
+    pub(crate) fn from_initial(initial: &flowscope::QuicInitial, key: Option<FlowKey>) -> Self {
+        let version = if initial.version.is_v1() {
+            "v1".to_string()
+        } else if initial.version.is_v2() {
+            "v2".to_string()
+        } else {
+            format!("0x{:08x}", initial.version.as_u32())
+        };
+        #[cfg(feature = "tls")]
+        let ja4 = flowscope::quic::ja4(initial);
+        #[cfg(not(feature = "tls"))]
+        let ja4 = None;
+        #[cfg(feature = "tls")]
+        let pq_key_share = initial
+            .client_hello
+            .as_ref()
+            .is_some_and(|ch| ch.pq_key_share);
+        #[cfg(not(feature = "tls"))]
+        let pq_key_share = false;
+        Self {
+            sni: initial.sni.clone(),
+            alpn: initial.alpn.first().cloned(),
+            version,
+            ja4,
+            pq_key_share,
+            key,
+        }
+    }
+}
+
+/// An SSH fingerprint bundle (issue #128) — the HASSH client + server
+/// fingerprints, the version banner(s), and the offered KEX algorithms —
+/// handed to an
+/// [`on_ssh_fingerprint`](crate::monitor::MonitorBuilder::on_ssh_fingerprint)
+/// handler once **both** peers' KEXINIT messages have been observed on a flow.
+///
+/// HASSH is MD5-based and openly specified (Salesforce, BSD-licensed), so unlike
+/// the JA4+ fingerprints it needs no `ja4plus` opt-in.
+#[cfg(feature = "ssh")]
+#[derive(Debug, Clone, Default, PartialEq)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize))]
+pub struct SshFingerprint {
+    /// Version banner line(s) seen on the flow (`SSH-2.0-...`). SSH banners
+    /// carry no direction upstream, so both peers' banners land here in
+    /// arrival order.
+    pub banners: Vec<String>,
+    /// HASSH (client KEXINIT fingerprint), if the client KEXINIT was seen.
+    #[cfg_attr(feature = "serde", serde(skip_serializing_if = "Option::is_none"))]
+    pub hassh: Option<String>,
+    /// HASSHServer (server KEXINIT fingerprint), if the server KEXINIT was seen.
+    #[cfg_attr(feature = "serde", serde(skip_serializing_if = "Option::is_none"))]
+    pub hassh_server: Option<String>,
+    /// Client `kex_algorithms` name-list (from the client KEXINIT).
+    pub kex_algorithms: Vec<String>,
+    /// The flow's 5-tuple key, if available.
+    #[cfg_attr(feature = "serde", serde(skip_serializing_if = "Option::is_none"))]
+    pub key: Option<FlowKey>,
+}
+
+/// Per-flow SSH accumulator (issue #128). Lives in the Monitor's flow-state
+/// map (auto-evicted on `FlowEnded`); folds banner + KEXINIT messages until
+/// both HASSH fingerprints are known, then fires exactly once.
+#[cfg(feature = "ssh")]
+#[derive(Debug, Default)]
+pub(crate) struct SshFpState {
+    pub(crate) banners: Vec<String>,
+    pub(crate) hassh: Option<String>,
+    pub(crate) hassh_server: Option<String>,
+    pub(crate) kex_algorithms: Vec<String>,
+    /// Set once the handler has fired, so a duplicate KEXINIT can't re-fire.
+    pub(crate) fired: bool,
+}
+
+#[cfg(feature = "ssh")]
+impl SshFpState {
+    /// Fold one SSH message. Returns `Some(fingerprint)` exactly once — when
+    /// both peers' KEXINIT have been observed and the handler hasn't fired yet.
+    pub(crate) fn observe(
+        &mut self,
+        msg: &flowscope::ssh::SshMessage,
+        key: Option<FlowKey>,
+    ) -> Option<SshFingerprint> {
+        match msg {
+            flowscope::ssh::SshMessage::Banner { banner } => {
+                self.banners.push(banner.clone());
+            }
+            flowscope::ssh::SshMessage::KexInit(k) => {
+                if k.from_client {
+                    self.hassh.get_or_insert_with(|| k.hassh.clone());
+                    if self.kex_algorithms.is_empty() {
+                        self.kex_algorithms = k.kex_algorithms.clone();
+                    }
+                } else {
+                    self.hassh_server.get_or_insert_with(|| k.hassh.clone());
+                }
+            }
+            _ => {}
+        }
+        if !self.fired && self.hassh.is_some() && self.hassh_server.is_some() {
+            self.fired = true;
+            Some(SshFingerprint {
+                banners: self.banners.clone(),
+                hassh: self.hassh.clone(),
+                hassh_server: self.hassh_server.clone(),
+                kex_algorithms: self.kex_algorithms.clone(),
+                key,
+            })
+        } else {
+            None
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -134,6 +285,7 @@ mod tests {
         hs.server_alpn = Some("h2".to_string());
         hs.ja3 = Some("abc".to_string());
         hs.ja4 = Some("t13d…".to_string());
+        hs.pq_key_share = true;
         #[cfg(feature = "ja4plus")]
         {
             hs.ja4s = Some("t130200_1301_…".to_string());
@@ -143,6 +295,7 @@ mod tests {
         let fp = TlsFingerprint::from_handshake(&hs, None);
         assert_eq!(fp.sni.as_deref(), Some("example.com"));
         assert_eq!(fp.alpn.as_deref(), Some("h2")); // server's pick
+        assert!(fp.pq_key_share, "pq_key_share should carry through (#128)");
         #[cfg(feature = "ja4plus")]
         {
             assert_eq!(fp.ja4s.as_deref(), Some("t130200_1301_…"));

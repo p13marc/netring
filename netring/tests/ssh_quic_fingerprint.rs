@@ -1,0 +1,49 @@
+//! SSH + QUIC fingerprint wiring (issue #128).
+//!
+//! Cap-free: `.on_ssh_fingerprint(..)` / `.on_quic_fingerprint(..)` auto-register
+//! their protocol (and, for SSH, a per-flow accumulator slot) and the Monitor
+//! builds without a capture. The fingerprint composition is unit-tested in
+//! `netring::monitor::fingerprint`; the SSH state machine needs real (non
+//! synthesizable — flowscope's SshMessage is #[non_exhaustive]) wire data, so it
+//! is exercised by the live/replay suites rather than here.
+
+#![cfg(all(feature = "tokio", feature = "flow"))]
+
+use netring::monitor::Monitor;
+use netring::prelude::StdoutSink;
+
+#[cfg(feature = "ssh")]
+#[tokio::test(flavor = "current_thread")]
+async fn on_ssh_fingerprint_builds() {
+    let m = Monitor::builder()
+        .interface("lo")
+        .on_ssh_fingerprint(|fp, _ctx| {
+            let _ = (&fp.hassh, &fp.hassh_server, &fp.banners);
+            Ok(())
+        })
+        .sink(StdoutSink::default())
+        .build();
+    assert!(m.is_ok(), "on_ssh_fingerprint build failed: {:?}", m.err());
+
+    // Explicit `.protocol::<Ssh>()` first → hook must not double-register.
+    let m = Monitor::builder()
+        .interface("lo")
+        .protocol::<netring::protocol::builtin::Ssh>()
+        .on_ssh_fingerprint(|_fp, _ctx| Ok(()))
+        .build();
+    assert!(m.is_ok(), "ssh + explicit build failed: {:?}", m.err());
+}
+
+#[cfg(feature = "quic")]
+#[tokio::test(flavor = "current_thread")]
+async fn on_quic_fingerprint_builds() {
+    let m = Monitor::builder()
+        .interface("lo")
+        .on_quic_fingerprint(|fp, _ctx| {
+            let _ = (&fp.sni, &fp.alpn, &fp.version, fp.pq_key_share);
+            Ok(())
+        })
+        .sink(StdoutSink::default())
+        .build();
+    assert!(m.is_ok(), "on_quic_fingerprint build failed: {:?}", m.err());
+}

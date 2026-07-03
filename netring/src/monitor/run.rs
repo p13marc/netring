@@ -207,6 +207,8 @@ pub(crate) async fn run_loop(monitor: Monitor, stop: StopCondition) -> Result<()
         ioc_swap: _,
         #[cfg(feature = "sigma")]
             sigma_swap: _,
+        #[cfg(feature = "yara")]
+            yara_swap: _,
         flow_active_timeout,
         packet_subs,
         kernel_prefilter,
@@ -806,6 +808,8 @@ pub(crate) async fn replay_loop(
         ioc_swap: _,
         #[cfg(feature = "sigma")]
             sigma_swap: _,
+        #[cfg(feature = "yara")]
+            yara_swap: _,
         flow_active_timeout: _, // active-timeout export is a live-loop concern
         packet_subs,
         // pcap replay has no kernel filter to set (the source isn't a socket).

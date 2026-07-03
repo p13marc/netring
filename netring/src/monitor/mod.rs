@@ -282,6 +282,9 @@ pub struct Monitor {
     /// Issue #53: the live Sigma rule set, for [`Self::reload_handle`].
     #[cfg(feature = "sigma")]
     pub(crate) sigma_swap: Option<std::sync::Arc<arc_swap::ArcSwap<sigma::SigmaRuleSet>>>,
+    /// Issue #53: the live YARA rule set, for [`Self::reload_handle`].
+    #[cfg(feature = "yara")]
+    pub(crate) yara_swap: Option<std::sync::Arc<arc_swap::ArcSwap<yara_x::Rules>>>,
     /// 0.25 W1c: active-timeout period for interim flow-record export. When
     /// `Some` (and exporters exist), the run loop emits ongoing `FlowRecord`s
     /// for long-lived flows every period. See [`MonitorBuilder::export_active_timeout`].
@@ -519,6 +522,8 @@ impl Monitor {
             ioc: self.ioc_swap.clone(),
             #[cfg(feature = "sigma")]
             sigma: self.sigma_swap.clone(),
+            #[cfg(feature = "yara")]
+            yara: self.yara_swap.clone(),
             packet_filters: self
                 .packet_subs
                 .iter()
@@ -619,11 +624,32 @@ impl std::fmt::Debug for Monitor {
 /// the setters from any task while the monitor runs. Backed by lock-free RCU
 /// (`arc-swap`): an in-flight event reads the old-or-new set, never a torn one,
 /// and converges within one event.
+///
+/// ## What reloads, and what doesn't
+///
+/// Hot-reloadable (this handle): the [`ioc`](MonitorBuilder::ioc) blocklist,
+/// the [`sigma`](MonitorBuilder::sigma) rules, the [`yara`](MonitorBuilder::yara)
+/// rule set, and each packet-tier [`.expr()`] filter.
+///
+/// **Not** reloadable — these are frozen at [`build()`](MonitorBuilder::build)
+/// and require a rebuild to change:
+///
+/// | Fixed at build | Why |
+/// |---|---|
+/// | The kernel cBPF / XDP prefilter | Its port/proto set is the build-time union of the declared packet predicates; a reloaded filter can narrow but not widen past it (newly-wanted frames are dropped in-kernel). |
+/// | The set of Sigma L7 categories wired | DNS/HTTP/TLS handler installation is decided from the original rule set; rules in a new category won't be evaluated until rebuild. |
+/// | Detector membership | Detectors registered via [`detector`](MonitorBuilder::detector) are baked into the `DetectorCell`. |
+/// | Flow / session / protocol predicates | The registered protocol slots and subscription tiers. |
+///
+/// [`.expr()`]: crate::monitor::subscription::builder::SubscriptionBuilder::expr
 #[derive(Clone)]
 pub struct ReloadHandle {
     ioc: Option<std::sync::Arc<arc_swap::ArcSwap<ioc::IocSet>>>,
     #[cfg(feature = "sigma")]
     sigma: Option<std::sync::Arc<arc_swap::ArcSwap<sigma::SigmaRuleSet>>>,
+    /// Issue #53: the live YARA rule set, for [`ReloadHandle::set_yara`].
+    #[cfg(feature = "yara")]
+    yara: Option<std::sync::Arc<arc_swap::ArcSwap<yara_x::Rules>>>,
     /// The packet-tier filter cells, in registration order (issue #53).
     packet_filters: Vec<std::sync::Arc<arc_swap::ArcSwap<subscription::Predicate>>>,
 }
@@ -672,6 +698,28 @@ impl ReloadHandle {
     #[cfg(feature = "sigma")]
     pub fn has_sigma(&self) -> bool {
         self.sigma.is_some()
+    }
+
+    /// Replace the live YARA rule set (issue #53). Returns `false` (a no-op) if
+    /// the monitor wasn't armed with [`MonitorBuilder::yara`]. Compile the new
+    /// [`YaraRules`](yara::YaraRules) on the caller side (a compile error there
+    /// leaves the live set untouched); the swap is infallible and never blocks
+    /// the capture loop. Takes effect on the next flow that finishes scanning.
+    #[cfg(feature = "yara")]
+    pub fn set_yara(&self, rules: yara::YaraRules) -> bool {
+        match &self.yara {
+            Some(swap) => {
+                swap.store(rules.into_inner());
+                true
+            }
+            None => false,
+        }
+    }
+
+    /// Whether this handle can reload a YARA rule set (i.e. `yara(..)` was armed).
+    #[cfg(feature = "yara")]
+    pub fn has_yara(&self) -> bool {
+        self.yara.is_some()
     }
 
     /// Replace the filter of the packet-tier subscription at `index`
@@ -787,6 +835,11 @@ pub struct MonitorBuilder {
     /// per-flow payload scanner at build).
     #[cfg(feature = "yara")]
     yara_rules: Option<yara::YaraRules>,
+    /// Issue #53: the live, swappable YARA rule cell (a clone reaches
+    /// [`Monitor::reload_handle`]). `Some` once `yara(..)` is armed, seeded at
+    /// build.
+    #[cfg(feature = "yara")]
+    yara_swap: Option<std::sync::Arc<arc_swap::ArcSwap<yara_x::Rules>>>,
     /// Issue #45: YARA match handlers registered via [`Self::on_yara_match`].
     #[cfg(feature = "yara")]
     yara_handlers: Vec<yara::YaraHandler>,
@@ -3567,9 +3620,13 @@ impl MonitorBuilder {
             )));
         }
         #[cfg(feature = "yara")]
-        if let Some(rules) = self.yara_rules {
+        if let Some(rules) = self.yara_rules.take() {
+            // Issue #53: seed the swappable rule cell and keep a clone reachable
+            // through reload_handle() for hot-reload.
+            let swap = std::sync::Arc::new(arc_swap::ArcSwap::new(rules.into_inner()));
+            self.yara_swap = Some(std::sync::Arc::clone(&swap));
             byte_accumulators.push(Box::new(yara::YaraAccumulator::new(
-                rules,
+                swap,
                 self.yara_handlers,
                 self.yara_max_flows.unwrap_or(DEFAULT_NPRINT_MAX_FLOWS),
                 self.yara_max_bytes.unwrap_or(DEFAULT_YARA_SCAN_BYTES),
@@ -3619,6 +3676,8 @@ impl MonitorBuilder {
             ioc_swap: self.ioc_swap,
             #[cfg(feature = "sigma")]
             sigma_swap: self.sigma_swap,
+            #[cfg(feature = "yara")]
+            yara_swap: self.yara_swap,
             flow_active_timeout: self.flow_active_timeout,
             packet_subs: self.packet_subs,
             kernel_prefilter,

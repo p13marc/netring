@@ -130,3 +130,56 @@ async fn replay_clean_traffic_does_not_match() {
     monitor.replay().await.expect("replay completes");
     assert_eq!(*hits.lock().unwrap(), 0, "clean traffic must not match");
 }
+
+#[tokio::test(flavor = "current_thread")]
+async fn set_yara_hot_swaps_the_live_rule_set() {
+    // Issue #53: arm with a rule that DOESN'T match, hot-swap in one that does
+    // BEFORE replay, and assert the swapped rule fires. Proves the scanner reads
+    // the live (reloaded) cell rather than the build-time snapshot.
+    let (a, b) = EICAR.as_bytes().split_at(20);
+    let pcap = write_pcap(&[a, b]);
+
+    let inert =
+        YaraRules::compile(r#"rule never { strings: $a = "ZZZ-NO-SUCH-BYTES" condition: $a }"#)
+            .expect("compile inert");
+
+    let hits: Arc<Mutex<Vec<String>>> = Arc::new(Mutex::new(Vec::new()));
+    let sink = Arc::clone(&hits);
+    let monitor = Monitor::builder()
+        .pcap_source(pcap.path())
+        .protocol::<Tcp>()
+        .yara(inert)
+        .on_yara_match(move |_k, m| sink.lock().unwrap().push(m.rule.clone()))
+        .build()
+        .expect("build with yara");
+
+    let handle = monitor.reload_handle();
+    assert!(handle.has_yara(), "handle should report yara armed");
+
+    // Swap in the matching rule before replay drives the scan.
+    let live = YaraRules::compile(
+        r#"rule eicar { strings: $a = "EICAR-STANDARD-ANTIVIRUS-TEST-FILE" condition: $a }"#,
+    )
+    .expect("compile live");
+    assert!(handle.set_yara(live), "set_yara should swap the live set");
+
+    monitor.replay().await.expect("replay completes");
+
+    let hits = hits.lock().unwrap();
+    assert_eq!(hits.len(), 1, "swapped-in rule should fire, got {hits:?}");
+    assert_eq!(hits[0], "eicar");
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn set_yara_is_a_noop_without_yara_armed() {
+    let pcap = write_pcap(&[b"hello"]);
+    let monitor = Monitor::builder()
+        .pcap_source(pcap.path())
+        .protocol::<Tcp>()
+        .build()
+        .expect("build");
+    let handle = monitor.reload_handle();
+    assert!(!handle.has_yara());
+    let rules = YaraRules::compile(r#"rule r { strings: $a = "x" condition: $a }"#).expect("c");
+    assert!(!handle.set_yara(rules), "unarmed set_yara must be a no-op");
+}

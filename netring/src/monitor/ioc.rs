@@ -101,6 +101,7 @@ impl IocSetExt for IocSet {
 /// matched indicator, and (when the feed provided them) `source` +
 /// `reputation`. `observed` is the concrete value that hit (the queried FQDN,
 /// the SNI, …) when it differs from the stored indicator.
+#[cfg(any(feature = "dns", feature = "tls", feature = "http"))]
 fn emit_match(ctx: &mut Ctx<'_>, key: Option<&FlowKey>, m: &IocMatch, observed: Option<&str>) {
     let mut w = ctx.emit("ioc_match", Severity::Critical);
     if let Some(k) = key {

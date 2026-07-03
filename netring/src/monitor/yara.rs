@@ -38,6 +38,12 @@ impl YaraRules {
             yara_x::compile(source).map_err(|e| Error::Config(format!("YARA compile: {e}")))?;
         Ok(Self(Arc::new(rules)))
     }
+
+    /// The shared inner `Arc<yara_x::Rules>` — used to seed / hot-swap the
+    /// scanner's live rule cell (issue #53).
+    pub(crate) fn into_inner(self) -> Arc<yara_x::Rules> {
+        self.0
+    }
 }
 
 /// One YARA rule hit on a flow's payload.
@@ -73,8 +79,12 @@ struct FlowBufs {
 }
 
 /// Buffers each flow's L4 payload and scans it with YARA at flow end.
+///
+/// The rule set is held behind an [`ArcSwap`](arc_swap::ArcSwap) so it can be
+/// hot-reloaded (issue #53) via [`ReloadHandle::set_yara`](crate::monitor::ReloadHandle::set_yara):
+/// `flush` loads the current rules once per flow end (no per-packet cost).
 pub(crate) struct YaraAccumulator {
-    rules: Arc<yara_x::Rules>,
+    rules: Arc<arc_swap::ArcSwap<yara_x::Rules>>,
     extractor: flowscope::extract::FiveTuple,
     flows: rustc_hash::FxHashMap<FlowKey, FlowBufs>,
     handlers: Vec<YaraHandler>,
@@ -84,13 +94,13 @@ pub(crate) struct YaraAccumulator {
 
 impl YaraAccumulator {
     pub(crate) fn new(
-        rules: YaraRules,
+        rules: Arc<arc_swap::ArcSwap<yara_x::Rules>>,
         handlers: Vec<YaraHandler>,
         max_flows: usize,
         max_bytes: usize,
     ) -> Self {
         Self {
-            rules: rules.0,
+            rules,
             // Bidirectional: key flows the same way the tracker keys FlowEnded.
             extractor: flowscope::extract::FiveTuple::bidirectional(),
             flows: rustc_hash::FxHashMap::default(),
@@ -174,15 +184,18 @@ impl crate::monitor::nprint::FlowByteAccumulator for YaraAccumulator {
 
     fn flush(&mut self, key: &FlowKey) {
         if let Some(bufs) = self.flows.remove(key) {
+            // Load the live rule set once per flow end (issue #53 hot-reload):
+            // an in-flight reload takes effect on the next flushed flow.
+            let rules = self.rules.load_full();
             Self::scan_dir(
-                &self.rules,
+                &rules,
                 &mut self.handlers,
                 key,
                 &bufs.init,
                 ScanDirection::Initiator,
             );
             Self::scan_dir(
-                &self.rules,
+                &rules,
                 &mut self.handlers,
                 key,
                 &bufs.resp,

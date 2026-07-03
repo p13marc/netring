@@ -219,6 +219,23 @@ impl<'a> Ctx<'a> {
             .and_then(flowscope::KeyFields::community_id)
     }
 
+    /// Issue #120: names observed for `ip` via the passive DNS reverse map
+    /// (armed with [`MonitorBuilder::name_map`](crate::monitor::MonitorBuilder::name_map)).
+    /// Returns the currently-live canonical names (most-recent first is not
+    /// guaranteed). Empty when the name map isn't armed or `ip` is unknown.
+    #[cfg(feature = "dns")]
+    pub fn names(&self, ip: std::net::IpAddr) -> Vec<String> {
+        match self.state::<crate::monitor::dns::NameMapState>() {
+            Some(st) => st
+                .map
+                .peek_names(ip, self.ts)
+                .into_iter()
+                .map(|c| c.name.clone())
+                .collect(),
+            None => Vec::new(),
+        }
+    }
+
     /// Borrow per-monitor state `T` mutably.
     ///
     /// `T: Default` so the slot is lazy-created on first access.

@@ -66,6 +66,8 @@ pub(crate) mod backend;
 pub mod cdp;
 pub mod detectors;
 pub mod dispatcher;
+#[cfg(feature = "dns")]
+pub mod dns;
 pub mod effect;
 #[cfg(feature = "tls")]
 pub mod fingerprint;
@@ -869,6 +871,14 @@ pub struct MonitorBuilder {
     /// repeated [`Self::detector`] calls don't double-register it.
     #[cfg(feature = "dns")]
     detector_dns_wired: bool,
+    /// Issue #120: handlers registered via [`Self::on_name`], shared with the
+    /// internal DNS feed closure (call order vs [`Self::name_map`] is irrelevant).
+    #[cfg(feature = "dns")]
+    name_handlers: dns::NameHandlers,
+    /// Issue #120: set once [`Self::name_map`] wires the feed, so a second call
+    /// is idempotent.
+    #[cfg(feature = "dns")]
+    name_map_armed: bool,
     /// Issue #53: the live, swappable Sigma rule set behind [`Self::sigma`].
     #[cfg(feature = "sigma")]
     sigma_swap: Option<std::sync::Arc<arc_swap::ArcSwap<sigma::SigmaRuleSet>>>,
@@ -2624,6 +2634,133 @@ impl MonitorBuilder {
                 h(&e, ctx)
             });
         }
+        self
+    }
+
+    /// Issue #120: register a handler fired per parsed DNS message with a
+    /// [`DnsView`](crate::monitor::dns::DnsView) — the message plus the resolved
+    /// client/server sides and helpers (`qname`, `rcode`, `is_answerless`,
+    /// `community_id`). Auto-registers the [`Dns`](crate::protocol::builtin::Dns)
+    /// protocol.
+    ///
+    /// ```no_run
+    /// # #[cfg(all(feature = "dns", feature = "tokio"))] fn demo() {
+    /// use netring::monitor::Monitor;
+    /// Monitor::builder()
+    ///     .interface("eth0")
+    ///     .on_dns(|v, _ctx| {
+    ///         if let Some(q) = v.qname() { println!("{} -> {}", v.client, q); }
+    ///         Ok(())
+    ///     });
+    /// # }
+    /// ```
+    #[cfg(feature = "dns")]
+    pub fn on_dns<F>(mut self, handler: F) -> Self
+    where
+        F: Fn(&crate::monitor::dns::DnsView<'_>, &mut Ctx<'_>) -> Result<()>
+            + Send
+            + Sync
+            + 'static,
+    {
+        use crate::monitor::dns::{DnsView, client_server};
+        use crate::protocol::builtin::Dns;
+        if !self
+            .declared_protocols
+            .contains_key(&std::any::TypeId::of::<Dns>())
+        {
+            self = self.protocol::<Dns>();
+        }
+        self.on_ctx::<Dns>(move |msg: &flowscope::dns::DnsMessage, ctx: &mut Ctx<'_>| {
+            let Some(key) = ctx.flow else {
+                return Ok(());
+            };
+            let (client, server) = client_server(&key);
+            let view = DnsView {
+                message: msg,
+                client,
+                server,
+                key,
+                ts: ctx.ts,
+            };
+            handler(&view, ctx)
+        })
+    }
+
+    /// Issue #120: arm the passive IP→name reverse map with default tuning.
+    /// Sugar for [`name_map_with`](Self::name_map_with)`(Default)`.
+    #[cfg(feature = "dns")]
+    pub fn name_map(self) -> Self {
+        self.name_map_with(flowscope::dns::NameMapConfig::default())
+    }
+
+    /// Issue #120: arm the IP→name reverse map with explicit
+    /// [`NameMapConfig`](flowscope::dns::NameMapConfig). DNS responses populate
+    /// the map (`answer IP → queried name`); query later flows via
+    /// [`Ctx::names`](crate::ctx::Ctx::names), and newly-learned bindings fire
+    /// the [`on_name`](Self::on_name) handlers. Idempotent.
+    #[cfg(feature = "dns")]
+    pub fn name_map_with(mut self, config: flowscope::dns::NameMapConfig) -> Self {
+        use crate::monitor::dns::{NameMapState, client_server};
+        use crate::protocol::builtin::Dns;
+        if self.name_map_armed {
+            return self;
+        }
+        self.name_map_armed = true;
+
+        let cfg = config.clone();
+        self = self.state_init(move || NameMapState::new(cfg.clone()));
+
+        if !self
+            .declared_protocols
+            .contains_key(&std::any::TypeId::of::<Dns>())
+        {
+            self = self.protocol::<Dns>();
+        }
+        let handlers = std::sync::Arc::clone(&self.name_handlers);
+        self.on_ctx::<Dns>(move |msg: &flowscope::dns::DnsMessage, ctx: &mut Ctx<'_>| {
+            let flowscope::dns::DnsMessage::Response(resp) = msg else {
+                return Ok(());
+            };
+            let Some(key) = ctx.flow else {
+                return Ok(());
+            };
+            let (client, _server) = client_server(&key);
+            let ts = ctx.ts;
+            // Observe + drain new claims into the cell's scratch, then move them
+            // out before re-borrowing ctx for the handlers.
+            let learned: Vec<(std::net::IpAddr, flowscope::dns::NameClaim)> = {
+                let st = ctx.state_mut::<NameMapState>();
+                st.map.observe_response(client, resp, ts);
+                st.scratch.clear();
+                st.map.drain_new_into(&mut st.scratch);
+                std::mem::take(&mut st.scratch)
+            };
+            if !learned.is_empty() {
+                let hs = handlers.lock().expect("name handler list poisoned");
+                if !hs.is_empty() {
+                    for (ip, claim) in &learned {
+                        for h in hs.iter() {
+                            h(*ip, claim, ctx);
+                        }
+                    }
+                }
+            }
+            Ok(())
+        })
+    }
+
+    /// Issue #120: register a handler fired with each newly-learned `(IP, name)`
+    /// binding from the [`name_map`](Self::name_map). Requires the name map to be
+    /// armed (call order is irrelevant); a no-op otherwise.
+    #[cfg(feature = "dns")]
+    pub fn on_name<F>(self, handler: F) -> Self
+    where
+        F: Fn(std::net::IpAddr, &flowscope::dns::NameClaim, &mut Ctx<'_>) + Send + Sync + 'static,
+    {
+        self.name_handlers
+            .lock()
+            .expect("name handler list poisoned")
+            .push(std::sync::Arc::new(handler));
         self
     }
 

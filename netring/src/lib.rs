@@ -52,6 +52,8 @@ pub mod packet;
 pub mod pcap;
 #[cfg(all(feature = "pcap", feature = "tokio", feature = "flow"))]
 pub mod pcap_flow;
+#[cfg(feature = "pcap")]
+pub mod pcap_rotate;
 #[cfg(all(feature = "pcap", feature = "tokio"))]
 pub mod pcap_source;
 #[cfg(all(feature = "pcap", feature = "tokio"))]

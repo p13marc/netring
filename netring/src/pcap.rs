@@ -42,7 +42,7 @@ use pcap_file::pcapng::blocks::interface_description::{
 use crate::packet::{OwnedPacket, Packet};
 
 /// Linktype for raw Ethernet frames (DLT_EN10MB / 1).
-const LINKTYPE_ETHERNET: u32 = 1;
+pub(crate) const LINKTYPE_ETHERNET: u32 = 1;
 
 /// `if_tsresol` value selecting **nanosecond** timestamp resolution
 /// (10⁻⁹ s): a single byte whose low 7 bits are the negative power of ten

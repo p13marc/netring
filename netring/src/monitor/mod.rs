@@ -57,6 +57,7 @@ pub mod analysis;
 pub mod arp;
 #[cfg(feature = "asset")]
 pub mod asset;
+pub mod red;
 // L3 IPv6 Neighbor Discovery — the ARP sibling (feature `ndp`).
 pub mod async_handler;
 /// Declarative backend selection (`Backend::Auto` + the `capture()` facade,
@@ -889,6 +890,8 @@ pub struct MonitorBuilder {
     owner_bandwidth_registered: bool,
     /// Issue #121: `true` once [`Self::aggregate`] wired its feeds (idempotent).
     aggregate_armed: bool,
+    /// Issue #122: `true` once [`Self::red`] wired its feeds (idempotent).
+    red_armed: bool,
     /// Issue #130: set if `owner_bandwidth()` was armed without an attribution
     /// hook available at that point — surfaces [`BuildError::AttributionHookRequired`].
     owner_bandwidth_needs_hook: bool,
@@ -2151,6 +2154,96 @@ impl MonitorBuilder {
             move |tick: &crate::protocol::event_typed::Tick, ctx: &mut Ctx<'_>| {
                 if let Some(state) = ctx.state::<aggregate::AggregateState>() {
                     let report = aggregate::AggregateReport {
+                        state,
+                        now: tick.now,
+                    };
+                    f(&report)?;
+                }
+                Ok(())
+            },
+        )
+    }
+
+    /// Issue #122: arm RED metrics (request Rate, Error rate, Duration
+    /// quantiles) per protocol with default tuning. Sugar for
+    /// [`red_with`](Self::red_with)`(Default)`.
+    pub fn red(self) -> Self {
+        self.red_with(red::RedConfig::default())
+    }
+
+    /// Issue #122: arm RED metrics with an explicit
+    /// [`RedConfig`](red::RedConfig). Wires the DNS feed (per-response, keyed on
+    /// rcode + timeouts) and the flow feed (per-connection, keyed on the end
+    /// reason) as enabled. Idempotent.
+    pub fn red_with(mut self, cfg: red::RedConfig) -> Self {
+        use crate::protocol::builtin::{Tcp, Udp};
+        use crate::protocol::event_typed::FlowEnded;
+
+        if self.red_armed {
+            return self;
+        }
+        self.red_armed = true;
+
+        let seed = cfg.clone();
+        self = self.state_init(move || red::RedState::new(&seed));
+
+        #[cfg(feature = "dns")]
+        if cfg.dns {
+            use crate::protocol::builtin::Dns;
+            if !self
+                .declared_protocols
+                .contains_key(&std::any::TypeId::of::<Dns>())
+            {
+                self = self.protocol::<Dns>();
+            }
+            self = self.on_ctx::<Dns>(|msg: &flowscope::dns::DnsMessage, ctx: &mut Ctx<'_>| {
+                let ts = ctx.ts;
+                red::observe_dns(ctx.state_mut::<red::RedState>(), msg, ts);
+                Ok(())
+            });
+        }
+
+        if cfg.flow {
+            self = self
+                .protocol::<Tcp>()
+                .protocol::<Udp>()
+                .on_ctx::<FlowEnded<Tcp>>(|evt: &FlowEnded<Tcp>, ctx: &mut Ctx<'_>| {
+                    let (class, dur, ts) = (
+                        red::flow_error_class(evt.reason),
+                        evt.stats.duration().as_secs_f64() * 1000.0,
+                        ctx.ts,
+                    );
+                    if let Some(t) = ctx.state_mut::<red::RedState>().flow.as_mut() {
+                        t.observe(class, Some(dur), ts);
+                    }
+                    Ok(())
+                })
+                .on_ctx::<FlowEnded<Udp>>(|evt: &FlowEnded<Udp>, ctx: &mut Ctx<'_>| {
+                    let (class, dur, ts) = (
+                        red::flow_error_class(evt.reason),
+                        evt.stats.duration().as_secs_f64() * 1000.0,
+                        ctx.ts,
+                    );
+                    if let Some(t) = ctx.state_mut::<red::RedState>().flow.as_mut() {
+                        t.observe(class, Some(dur), ts);
+                    }
+                    Ok(())
+                });
+        }
+        self
+    }
+
+    /// Issue #122: arm [`red`](Self::red) and a periodic report — `f` receives a
+    /// [`RedReport`](red::RedReport) every `period`.
+    pub fn on_red<F>(self, period: Duration, f: F) -> Self
+    where
+        F: Fn(&red::RedReport<'_>) -> Result<()> + Send + Sync + 'static,
+    {
+        self.red().tick(
+            period,
+            move |tick: &crate::protocol::event_typed::Tick, ctx: &mut Ctx<'_>| {
+                if let Some(state) = ctx.state::<red::RedState>() {
+                    let report = red::RedReport {
                         state,
                         now: tick.now,
                     };

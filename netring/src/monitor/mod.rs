@@ -71,7 +71,7 @@ pub mod dispatcher;
 #[cfg(feature = "dns")]
 pub mod dns;
 pub mod effect;
-#[cfg(feature = "tls")]
+#[cfg(any(feature = "tls", feature = "ssh", feature = "quic"))]
 pub mod fingerprint;
 pub mod handler;
 pub mod health;

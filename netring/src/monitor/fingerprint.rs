@@ -18,6 +18,7 @@ use crate::protocol::FlowKey;
 /// [`ja4plus`](index.html#features) feature — commercial use requires a FoxIO
 /// OEM license (see `docs/FINGERPRINTS.md`). All are `None` if fingerprinting
 /// wasn't enabled/configured.
+#[cfg(feature = "tls")]
 #[derive(Debug, Clone, Default, PartialEq)]
 #[cfg_attr(feature = "serde", derive(serde::Serialize))]
 pub struct TlsFingerprint {
@@ -54,6 +55,7 @@ pub struct TlsFingerprint {
     pub key: Option<FlowKey>,
 }
 
+#[cfg(feature = "tls")]
 impl TlsFingerprint {
     /// Build from a flowscope handshake event + the flow key.
     pub(crate) fn from_handshake(hs: &flowscope::tls::TlsHandshake, key: Option<FlowKey>) -> Self {
@@ -140,6 +142,7 @@ impl HttpFingerprint {
 /// handler. The passive DNS-visibility gap: once DNS moves inside TLS/QUIC the
 /// query names are gone, but the *fact* of encrypted DNS (and to which resolver)
 /// is a policy-relevant signal.
+#[cfg(feature = "tls")]
 #[derive(Debug, Clone, PartialEq)]
 #[cfg_attr(feature = "serde", derive(serde::Serialize))]
 pub struct EncryptedDns {
@@ -160,6 +163,7 @@ pub struct EncryptedDns {
 
 /// A curated list of well-known public encrypted-DNS resolver hostnames. Not
 /// exhaustive — a hit is a strong signal, a miss doesn't rule out DoH/DoT.
+#[cfg(feature = "tls")]
 const KNOWN_DOH_RESOLVERS: &[&str] = &[
     "cloudflare-dns.com",
     "mozilla.cloudflare-dns.com",
@@ -177,6 +181,7 @@ const KNOWN_DOH_RESOLVERS: &[&str] = &[
 
 /// Whether `sni` (case-insensitive, trailing-dot-insensitive) names a well-known
 /// public encrypted-DNS resolver.
+#[cfg(feature = "tls")]
 pub(crate) fn is_known_doh_resolver(sni: &str) -> bool {
     let s = sni.trim_end_matches('.').to_ascii_lowercase();
     KNOWN_DOH_RESOLVERS.contains(&s.as_str())
@@ -333,7 +338,7 @@ impl SshFpState {
     }
 }
 
-#[cfg(test)]
+#[cfg(all(test, feature = "tls"))]
 mod tests {
     use super::*;
     use flowscope::tls::TlsHandshake;

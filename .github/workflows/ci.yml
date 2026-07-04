@@ -451,6 +451,25 @@ jobs:
           done
           exit $fail
 
+  # ── semver hygiene: classify the public-API delta against the last published ─
+  # release and fail if the version bump is inadequate for it (1.0 API-stability
+  # sweep, #37). Complements the public-api lock (which reviews the surface diff)
+  # by grading each change's semver severity. cargo-semver-checks runs on stable.
+  semver:
+    name: semver-checks
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - name: install cargo-semver-checks
+        run: cargo install cargo-semver-checks --version 0.48.0 --locked
+      # Baseline defaults to the latest netring on crates.io. A pre-1.0 minor
+      # bump (0.x → 0.(x+1)) is treated as breaking-allowed; a same-version push
+      # with breaking changes fails, so an accidental break can't land unbumped.
+      - name: cargo semver-checks
+        run: cargo semver-checks check-release -p netring
+
   # ── netring-exporters companion crate (OTLP + Kafka) ──────────────────────
   exporters:
     name: netring-exporters

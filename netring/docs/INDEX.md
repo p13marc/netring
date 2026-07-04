@@ -12,7 +12,7 @@ All netring documentation lives in this one tree (`netring/docs/`). The repo roo
 - [API_OVERVIEW.md](API_OVERVIEW.md) — types, methods, configuration.
 - [ASYNC_GUIDE.md](ASYNC_GUIDE.md) — tokio patterns, Send rules, Monitor on multi-thread.
 - [WRITING_DETECTORS.md](WRITING_DETECTORS.md) — `detector!` / `pattern_detector!` tutorial.
-- [FINGERPRINTS.md](FINGERPRINTS.md) — TLS fingerprinting (JA3 / JA4 / JA4S), `on_fingerprint`, licensing.
+- [FINGERPRINTS.md](FINGERPRINTS.md) — TLS (JA3 / JA4 / JA4S, PQ key-share, app-proto), SSH (HASSH) and QUIC fingerprinting; `on_fingerprint` / `on_ssh_fingerprint` / `on_quic_fingerprint` / `on_encrypted_dns`; licensing.
 - [discoverability.md](discoverability.md) — the Monitor toolkit by use case.
 - [scaling.md](scaling.md) — fan-out capture, `FanoutMode` matrix, anti-patterns.
 - [TUNING_GUIDE.md](TUNING_GUIDE.md) — performance profiles, system tuning.
@@ -29,6 +29,7 @@ exporters live in the [`netring-exporters`](../../netring-exporters) crate.
 - [AF_XDP.md](AF_XDP.md) — the AF_XDP backend: modes, rings, the program loader, multi-queue capture, steering.
 
 ## Migration guides
+- [MIGRATING_0.28_TO_0.29.md](MIGRATING_0.28_TO_0.29.md) — flowscope 0.22 adoption + the threat/detection redesign (breaking: `monitor::ioc::IocSet` is now flowscope's threat-intel type, `flow_risk()`→`flow_analysis()`) + the additive observability surface (traffic aggregation, RED metrics, owner bandwidth, DNS handler + name map, SSH/QUIC fingerprints, encrypted-DNS, IP-fragment reassembly, netns capture, rotating/triggered pcap).
 - [MIGRATING_0.27_TO_0.28.md](MIGRATING_0.27_TO_0.28.md) — flowscope 0.20 adoption (`SessionEvent` is now a netring type, offline pcap L7 drivers removed, typed `ParserKind`, EVE `flow_hash`→`community_id`, `#[non_exhaustive]` wire types) + the pre-1.0 API sweep §D/§F (sealed `Subscribable`/`L7Fields`, `BuildError`→`BpfBuildError`, `ProtocolInitError` field privatized); plus AF_XDP RX metadata + flow steering, load-shedding, and packet-filter hot-reload.
 - [MIGRATING_0.26_TO_0.27.md](MIGRATING_0.26_TO_0.27.md) — the 1.0 API sweep (`#[non_exhaustive]` enums/output structs, sealed L7 markers), the `Capture::packets()` lending iterator, flowscope 0.19; plus the opt-in NSM stack (threat-intel, YARA, Sigma, OCSF, p0f, QUIC, asset inventory, ML export).
 - [MIGRATING_0.24_TO_0.25.md](MIGRATING_0.24_TO_0.25.md) — subscriptions, async effects, TX symmetry, exporters crate; the one break (`FlowRecord.reason` → `Option`) + JA4S `ja4plus` gating.

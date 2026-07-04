@@ -170,6 +170,14 @@ headline API with kernel filter pushdown.
 | `monitor_ocsf` | **OCSF Detection Findings** (feature `ocsf-sink`): `.sink(OcsfSink::stdout())` writing each anomaly as an OCSF 2004 NDJSON finding (AWS Security Lake / Splunk OCSF), paired here with IOC matching |
 | `monitor_l2_discovery` | **L2 neighbor discovery** (features `lldp,cdp`): `.on_lldp()` + `.on_cdp()` surfacing LLDP (IEEE 802.1AB) and CDP (Cisco) device announcements — chassis/device id, port, system name, platform — the infrastructure half of an asset inventory |
 | `monitor_asset_inventory` | **Passive asset inventory** (features `asset,arp,ndp,lldp,cdp`): `.asset_inventory(cap)` + `.on_asset()` building a MAC-keyed device record fed by ARP/NDP/LLDP/CDP; fires on new-or-changed assets |
+| `monitor_traffic_aggregation` | **Traffic aggregation** (#121, features `flow,dns,tls`): `.on_aggregate(period, …)` — rolling top talkers, host-pair traffic matrix, top DNS names / TLS SNI |
+| `monitor_red_metrics` | **RED metrics** (#122, features `flow,dns`): `.on_red(period, …)` — request Rate / Error rate / Duration quantiles per protocol (DNS by rcode+timeouts, flows by end reason) |
+| `monitor_owner_bandwidth` | **Owner-attributed bandwidth** (#130, feature `flow`): `.with_flow_attribution(hook)` + `.on_owner_bandwidth(period, …)` — throughput by tenant/container/subscriber with an unattributed bucket |
+| `monitor_dns_monitor` | **DNS monitoring** (#120, features `flow,dns`): `.on_dns(…)` structured exchanges + `.name_map()`/`.on_name(…)` passive IP→name learning |
+| `monitor_encrypted_dns` | **Encrypted-DNS visibility** (#133, features `tls,quic`): `.on_encrypted_dns(…)` flagging DoH/DoT/DoQ sessions and their resolver |
+| `monitor_ip_defrag` | **IP-fragment reassembly** (#134, features `flow,dns`): `.reassemble_ip_fragments()` reassembles IPv4 fragments before parsing — defeats fragmentation-based evasion |
+| `monitor_netns_capture` | **Network-namespace capture** (#126): `NetNs::from_name(..)` + `CaptureBuilder::netns(&ns)` to capture on a container's interface (needs `CAP_SYS_ADMIN`) |
+| `monitor_triggered_pcap` | **Rotating + triggered pcap** (#125, feature `pcap`): `RotatingPcapWriter` + `TriggeredPcapWriter` pre-trigger ring — capture the lead-up to an event |
 
 All take an `<iface>` argument (default `lo`) and an optional
 `<seconds>` deadline. Pair with `synthetic_traffic` for

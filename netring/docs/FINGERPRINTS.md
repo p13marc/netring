@@ -80,6 +80,27 @@ ECH state). `TlsFingerprint` is the identity-focused subset.
 See [`examples/monitor/ja4_fingerprint.rs`](../examples/monitor/ja4_fingerprint.rs)
 for a JA4 / JA4S / JA4X / JA4H blocklist IOC matcher.
 
+### SSH, QUIC, post-quantum, and application protocol (0.29)
+
+Beyond TLS/HTTP, the Monitor surfaces three more fingerprint families:
+
+- **SSH (HASSH)** — `on_ssh_fingerprint` (feature `ssh`) hands you an
+  `SshFingerprint` (client/server banners, HASSH + HASSH-server, KEX algorithms,
+  host key) once a session's key exchange is seen.
+- **QUIC** — `on_quic_fingerprint` (features `quic` + `tls`) hands you a
+  `QuicFingerprint` (SNI, ALPN, version, the `q`-prefixed JA4, and the PQ
+  key-share signal) per parsed QUIC Initial.
+- **TLS post-quantum** — `TlsFingerprint.pq_key_share` is `true` when the
+  ClientHello offered a post-quantum key-share group (e.g. X25519MLKEM768) — a
+  cheap PQ-adoption signal independent of the FoxIO fingerprints.
+
+`TlsFingerprint.app_protocol` (and `QuicFingerprint`) also carry the
+`flowscope::app_proto::AppProtocol` classified from ALPN + SNI + port (e.g.
+`Http2`, `DnsOverHttps`, `DnsOverTls`). For the DNS-privacy angle,
+**`on_encrypted_dns`** (features `tls`/`quic`) fires an `EncryptedDns` for each
+DoH/DoT/DoQ session with the resolver SNI and a known-public-resolver flag — see
+[`examples/monitor/encrypted_dns.rs`](../examples/monitor/encrypted_dns.rs).
+
 ## ⚠️ Licensing — JA4S is **not** BSD; read before using commercially
 
 The licenses **differ by fingerprint**, and this matters:

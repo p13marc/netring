@@ -11,7 +11,7 @@ Flow/session logic lives in the companion crate
 
 ```toml
 [dependencies]
-netring = { version = "0.28", features = ["tokio"] }
+netring = { version = "0.29", features = ["tokio"] }
 ```
 
 ```rust,ignore
@@ -41,11 +41,19 @@ loop {
   STUN, WireGuard, SMB/Kerberos/LDAP/RDP), fingerprinting (JA3/JA4/JA4H/JA4X,
   HASSH, p0f), and a fluent Monitor with detectors, middleware, sinks, and
   exporters.
-- **Network security monitoring.** Threat-intel IOC matching, YARA-X payload
-  scanning, Sigma rule evaluation (with live hot-reload of IOC/Sigma sets),
-  nDPI-style flow-risk scoring, RITA beacon detection, passive asset inventory
-  (MAC-keyed from ARP/NDP/LLDP/CDP/DHCP/SSDP/mDNS), nPrint + CICFlowMeter ML
-  feature export, and an OCSF Detection-Finding sink for Security Lake / Splunk.
+- **Network security monitoring.** Threat-intel IOC matching (flowscope's
+  threat backbone), `FlowAnalyzer` flow-risk scoring, pluggable NDR detectors
+  with MITRE ATT&CK tagging, YARA-X payload scanning, Sigma rule evaluation
+  (with live hot-reload of IOC / Sigma / YARA sets), RITA beacon detection,
+  SSH (HASSH) / QUIC / TLS (JA3/JA4, PQ key-share) fingerprinting, encrypted-DNS
+  (DoH/DoT/DoQ) visibility, IP-fragment reassembly (anti-evasion), passive asset
+  inventory, nPrint + CICFlowMeter ML export, and an OCSF Detection-Finding sink.
+- **Observability out of the box.** Rolling traffic aggregation (top talkers,
+  host-pair matrix, top domains/SNI), RED metrics (rate/errors/duration) per
+  protocol, owner-attributed bandwidth (by tenant/container/subscriber),
+  Community ID on flow records, and rotating + pre-trigger pcap capture.
+- **Runs where the traffic is.** Capture inside a container's network namespace
+  (`NetNs` + `CaptureBuilder::netns`), per-CPU sharding, and multi-NIC fan-in.
 
 ## The Monitor: subscriptions
 
@@ -164,7 +172,7 @@ usable directly (flat `packets()` iterator or block-level batches). See
 ## Flow & session tracking
 
 ```toml
-netring = { version = "0.28", features = ["tokio", "flow"] }
+netring = { version = "0.29", features = ["tokio", "flow"] }
 ```
 
 ```rust,ignore

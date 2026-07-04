@@ -344,6 +344,15 @@ jobs:
       - run: cargo build -p netring --example monitor_l2_discovery --features tokio,lldp,cdp,emit
       # Issue #28: the asset-inventory example needs asset + the discovery sources.
       - run: cargo build -p netring --example monitor_asset_inventory --features tokio,asset,arp,ndp,lldp,cdp,dhcp,ssdp,netbios-ns,mdns
+      # 0.29.0 observability + capture examples.
+      - run: cargo build -p netring --example monitor_traffic_aggregation --features tokio,flow,dns,tls
+      - run: cargo build -p netring --example monitor_red_metrics --features tokio,flow,dns
+      - run: cargo build -p netring --example monitor_owner_bandwidth --features tokio,flow
+      - run: cargo build -p netring --example monitor_dns_monitor --features tokio,flow,dns
+      - run: cargo build -p netring --example monitor_encrypted_dns --features tokio,tls,quic
+      - run: cargo build -p netring --example monitor_ip_defrag --features tokio,flow,dns
+      - run: cargo build -p netring --example monitor_netns_capture --features tokio
+      - run: cargo build -p netring --example monitor_triggered_pcap --features pcap
 
   # ── License + advisory checks (cargo-deny) ───────────────────────────────
   deny:

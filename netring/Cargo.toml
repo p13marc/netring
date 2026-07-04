@@ -613,6 +613,47 @@ name = "monitor_ssh_hassh"
 path = "examples/monitor/ssh_hassh.rs"
 required-features = ["tokio", "ssh", "emit"]
 
+# 0.29.0 observability + capture surface
+[[example]]
+name = "monitor_traffic_aggregation"
+path = "examples/monitor/traffic_aggregation.rs"
+required-features = ["tokio", "flow", "dns", "tls"]
+
+[[example]]
+name = "monitor_red_metrics"
+path = "examples/monitor/red_metrics.rs"
+required-features = ["tokio", "flow", "dns"]
+
+[[example]]
+name = "monitor_owner_bandwidth"
+path = "examples/monitor/owner_bandwidth.rs"
+required-features = ["tokio", "flow"]
+
+[[example]]
+name = "monitor_dns_monitor"
+path = "examples/monitor/dns_monitor.rs"
+required-features = ["tokio", "flow", "dns"]
+
+[[example]]
+name = "monitor_encrypted_dns"
+path = "examples/monitor/encrypted_dns.rs"
+required-features = ["tokio", "tls", "quic"]
+
+[[example]]
+name = "monitor_ip_defrag"
+path = "examples/monitor/ip_defrag.rs"
+required-features = ["tokio", "flow", "dns"]
+
+[[example]]
+name = "monitor_netns_capture"
+path = "examples/monitor/netns_capture.rs"
+required-features = ["tokio"]
+
+[[example]]
+name = "monitor_triggered_pcap"
+path = "examples/monitor/triggered_pcap.rs"
+required-features = ["pcap"]
+
 [[example]]
 name = "monitor_quic_sni"
 path = "examples/monitor/quic_sni.rs"

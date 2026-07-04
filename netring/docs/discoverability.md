@@ -122,6 +122,39 @@ Zeek `conn.log` shape).
   (`bw.to_snapshot(n)`).
 - Example: `examples/monitor/report_stream.rs`.
 
+## Observability surface (0.29)
+
+Purpose-built periodic reports, each armed with one builder call plus an
+`on_*(period, |report| …)` callback (and a serializable snapshot):
+
+| Tool | Arm + report | Report | Example |
+|---|---|---|---|
+| Traffic aggregation (#121) | `.on_aggregate(p, …)` | top talkers / host-pair matrix / top domains / top SNI | `traffic_aggregation` |
+| RED metrics (#122) | `.on_red(p, …)` | rate / error rate / duration quantiles per `RedProto` | `red_metrics` |
+| Owner bandwidth (#130) | `.with_flow_attribution(hook)` + `.on_owner_bandwidth(p, …)` | throughput by tenant/container + unattributed bucket | `owner_bandwidth` |
+
+## DNS visibility & names (0.29)
+
+- `.on_dns(|view, ctx| …)` — structured DNS exchanges (client/server split,
+  qname, rcode, community id). `.name_map()` + `.on_name(…)` learn a passive
+  IP→name map; `ctx.names(ip)` resolves inside any handler.
+- `.on_encrypted_dns(…)` — flag DoH/DoT/DoQ sessions + resolver.
+- Examples: `dns_monitor`, `encrypted_dns`.
+
+## Fingerprints & anti-evasion (0.29)
+
+- `.on_ssh_fingerprint(…)` (HASSH), `.on_quic_fingerprint(…)`,
+  `TlsFingerprint.{app_protocol, pq_key_share}` — see FINGERPRINTS.md.
+- `.reassemble_ip_fragments()` — reassemble IPv4 fragments before parsing
+  (defeats fragmentation evasion; example `ip_defrag`).
+
+## Capture placement & recording (0.29)
+
+- `NetNs::from_name(..)` + `CaptureBuilder::netns(&ns)` — capture inside a
+  container's network namespace (example `netns_capture`).
+- `RotatingPcapWriter` + `TriggeredPcapWriter` (feature `pcap`) — rotating
+  capture with a pre-trigger ring (example `triggered_pcap`).
+
 ## Stream consumers
 
 - `.with_broadcast::<P>()` + `monitor.subscribe::<P>()` →

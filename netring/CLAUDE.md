@@ -25,9 +25,9 @@ built on AF_PACKET with TPACKET_V3 (block-based mmap ring buffers) and AF_XDP.
 on **flowscope 0.22**. Migration: `docs/MIGRATING_0.28_TO_0.29.md`. A breaking
 release (still pre-1.0; the 1.0 freeze is deferred under [#37]). Version bumped,
 CHANGELOG + migration doc written, `just ci` green — the `cargo publish` +
-`git tag 0.29.0` remain a maintainer action. 15 feature commits closing issues
+`git tag 0.29.0` remain a maintainer action. 16 feature commits closing issues
 #131, #132, #124, #127, #128, #53, #123, #133, #120, #130, #121, #122, #125,
-#126:
+#126, #134 (+ a feature-matrix CI hardening under #37):
 
 - **Breaking — IOC/flow-risk retype (#124):** `monitor::ioc::IocSet` is now
   flowscope's `detect::ioc::IocSet` (typed `IocKind`/`IocMatch`); the local
@@ -45,12 +45,12 @@ CHANGELOG + migration doc written, `just ci` green — the `cargo publish` +
   IP→name map (#120); owner-attributed bandwidth (#130); traffic aggregation —
   talkers/matrix/domains/SNI (#121); RED metrics per protocol (#122).
 - **Capture tooling (additive):** rotating + triggered pcap writers (#125);
-  network-namespace capture via `NetNs` + `CaptureBuilder::netns` (#126).
+  network-namespace capture via `NetNs` + `CaptureBuilder::netns` (#126);
+  IP-fragment reassembly via `reassemble_ip_fragments[_with]` (#134 — flowscope
+  `IpFragmentReassembler` fed before `track_into` at both run-loop sites, frame
+  synthesis with re-checksummed IPv4 header; replay-validated that a fragmented
+  DNS response parses only when armed).
 - **AF_XDP fix:** `AsyncXdpCapture` lost-wakeup under spaced-out traffic (#131).
-- **Deferred:** IP-fragment reassembly (#134) — flowscope 0.22's
-  `IpFragmentReassembler` is the building block, but the run-loop `track_into`
-  re-injection + frame synthesis + kernel-prefilter fragment-allow atom touch the
-  hot path and need live/pcap validation; left open as a follow-up.
 
 **0.28.0 — RELEASED 2026-06-29** (published to crates.io, tag `0.28.0`,
 alongside **`netring-exporters` 0.4.0**). "flowscope 0.20, AF_XDP maturity &

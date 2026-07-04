@@ -84,6 +84,7 @@ All opt-in; nothing to change unless you want them:
 | RED metrics | `red`, `on_red` | [#122](https://github.com/p13marc/netring/issues/122) |
 | Rotating/triggered pcap | `RotatingPcapWriter`, `TriggeredPcapWriter` | [#125](https://github.com/p13marc/netring/issues/125) |
 | Netns capture | `NetNs`, `CaptureBuilder::netns` | [#126](https://github.com/p13marc/netring/issues/126) |
+| IP-fragment reassembly | `reassemble_ip_fragments`, `reassemble_ip_fragments_with` | [#134](https://github.com/p13marc/netring/issues/134) |
 
 ## 5. Note: `owner_bandwidth()` requires an attribution hook
 

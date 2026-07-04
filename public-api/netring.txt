@@ -2772,6 +2772,18 @@ pub fn flowscope::detect::ioc::IocSet::ip(self, ip: core::net::ip_addr::IpAddr) 
 pub fn flowscope::detect::ioc::IocSet::ips(self, it: impl core::iter::traits::collect::IntoIterator<Item = core::net::ip_addr::IpAddr>) -> Self
 pub fn flowscope::detect::ioc::IocSet::ja3(self, fp: impl core::convert::AsRef<str>) -> Self
 pub fn flowscope::detect::ioc::IocSet::ja4(self, fp: impl core::convert::AsRef<str>) -> Self
+pub mod netring::monitor::ip_frag
+#[non_exhaustive] pub struct netring::monitor::ip_frag::IpFragConfig
+pub netring::monitor::ip_frag::IpFragConfig::max_datagram_bytes: usize
+pub netring::monitor::ip_frag::IpFragConfig::max_datagrams: usize
+pub netring::monitor::ip_frag::IpFragConfig::timeout: core::time::Duration
+pub netring::monitor::ip_frag::IpFragConfig::warn_on_overlap: bool
+impl core::clone::Clone for netring::monitor::ip_frag::IpFragConfig
+pub fn netring::monitor::ip_frag::IpFragConfig::clone(&self) -> netring::monitor::ip_frag::IpFragConfig
+impl core::default::Default for netring::monitor::ip_frag::IpFragConfig
+pub fn netring::monitor::ip_frag::IpFragConfig::default() -> Self
+impl core::fmt::Debug for netring::monitor::ip_frag::IpFragConfig
+pub fn netring::monitor::ip_frag::IpFragConfig::fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result
 pub mod netring::monitor::lldp
 pub mod netring::monitor::ml_features
 pub mod netring::monitor::ndp
@@ -3951,6 +3963,8 @@ pub fn netring::monitor::MonitorBuilder::pcap_source(self, path: impl core::conv
 pub fn netring::monitor::MonitorBuilder::pcap_speed_factor(self, factor: f32) -> Self
 pub fn netring::monitor::MonitorBuilder::promiscuous(self, enable: bool) -> Self
 pub fn netring::monitor::MonitorBuilder::protocol<P: netring::protocol::Protocol>(self) -> Self
+pub fn netring::monitor::MonitorBuilder::reassemble_ip_fragments(self) -> Self
+pub fn netring::monitor::MonitorBuilder::reassemble_ip_fragments_with(self, config: netring::monitor::ip_frag::IpFragConfig) -> Self
 pub fn netring::monitor::MonitorBuilder::reassembly_memcap(self, bytes: u64, policy: flowscope::event::MemcapPolicy) -> Self
 pub fn netring::monitor::MonitorBuilder::red(self) -> Self
 pub fn netring::monitor::MonitorBuilder::red_with(self, cfg: netring::monitor::red::RedConfig) -> Self
@@ -5133,6 +5147,8 @@ pub fn netring::monitor::MonitorBuilder::pcap_source(self, path: impl core::conv
 pub fn netring::monitor::MonitorBuilder::pcap_speed_factor(self, factor: f32) -> Self
 pub fn netring::monitor::MonitorBuilder::promiscuous(self, enable: bool) -> Self
 pub fn netring::monitor::MonitorBuilder::protocol<P: netring::protocol::Protocol>(self) -> Self
+pub fn netring::monitor::MonitorBuilder::reassemble_ip_fragments(self) -> Self
+pub fn netring::monitor::MonitorBuilder::reassemble_ip_fragments_with(self, config: netring::monitor::ip_frag::IpFragConfig) -> Self
 pub fn netring::monitor::MonitorBuilder::reassembly_memcap(self, bytes: u64, policy: flowscope::event::MemcapPolicy) -> Self
 pub fn netring::monitor::MonitorBuilder::red(self) -> Self
 pub fn netring::monitor::MonitorBuilder::red_with(self, cfg: netring::monitor::red::RedConfig) -> Self

@@ -84,16 +84,17 @@ Depends on **flowscope 0.22**. A breaking release (still pre-1.0). Migration:
   (`from_name` / `from_pid` / `from_path` / `current`) with a scoped-thread
   `run_in(..)`, and `CaptureBuilder::netns(&NetNs)` to build an AF_PACKET capture
   inside a namespace. Requires `CAP_SYS_ADMIN`.
-
-### Deferred
-
 - **IP-fragment reassembly** (issue
-  [#134](https://github.com/p13marc/netring/issues/134)) — flowscope 0.22's
-  `IpFragmentReassembler` is now the building block, but the remaining work
-  (re-injecting reassembled datagrams into the flow tracker at the run-loop
-  `track_into` sites, frame synthesis, and a kernel-prefilter fragment-allow
-  atom) touches the packet hot path and needs live/pcap validation, so it stays
-  open for a follow-up rather than landing unvalidated.
+  [#134](https://github.com/p13marc/netring/issues/134)) —
+  `reassemble_ip_fragments()` / `reassemble_ip_fragments_with(IpFragConfig)`
+  (off by default) feed each IPv4 fragment to flowscope's
+  `IpFragmentReassembler` before the flow tracker parses it, synthesizing a
+  reassembled frame (L2/VLAN prefix preserved, IPv4 header re-checksummed) once a
+  datagram completes — so a payload split across fragments reaches the L7 parsers
+  whole. Only the tracker input is reassembled; taps / packet subs / p0f keep the
+  raw wire fragments. Overlapping fragments (teardrop / RFC 5722) are dropped
+  (evasion signal). Validated by a replay test: a fragmented DNS response parses
+  only when reassembly is armed.
 
 ## 0.28.0 — 2026-06-29 — flowscope 0.20, AF_XDP maturity & the pre-1.0 API sweep
 

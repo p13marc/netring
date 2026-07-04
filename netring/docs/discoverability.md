@@ -133,6 +133,13 @@ Purpose-built periodic reports, each armed with one builder call plus an
 | RED metrics (#122) | `.on_red(p, …)` | rate / error rate / duration quantiles per `RedProto` | `red_metrics` |
 | Owner bandwidth (#130) | `.with_flow_attribution(hook)` + `.on_owner_bandwidth(p, …)` | throughput by tenant/container + unattributed bucket | `owner_bandwidth` |
 
+**Bandwidth, by grouping** — pick the key that matches the question:
+
+- **by app protocol** (`http`/`https`/`dns`…): `bandwidth_by_app()` / `on_bandwidth` — port-derived label.
+- **by session (5-tuple)**: no dedicated builder — `FlowEnded.stats` gives cumulative bytes + duration per connection for free; for a rolling top-N of *active* sessions feed a `BandwidthByKey<FlowKey>` on `FlowPacket`. Example: `session_bandwidth`.
+- **by owner / tenant / container**: `owner_bandwidth` above.
+- **by OS process (pid)**: not a core API — passive capture sees no process identity. The `process_bandwidth` example resolves it host-side from `/proc/net` + `/proc/<pid>/fd` and feeds `with_flow_attribution` (local-host, best-effort — see the example's caveats).
+
 ## DNS visibility & names (0.29)
 
 - `.on_dns(|view, ctx| …)` — structured DNS exchanges (client/server split,

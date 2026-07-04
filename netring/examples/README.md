@@ -178,6 +178,8 @@ headline API with kernel filter pushdown.
 | `monitor_ip_defrag` | **IP-fragment reassembly** (#134, features `flow,dns`): `.reassemble_ip_fragments()` reassembles IPv4 fragments before parsing — defeats fragmentation-based evasion |
 | `monitor_netns_capture` | **Network-namespace capture** (#126): `NetNs::from_name(..)` + `CaptureBuilder::netns(&ns)` to capture on a container's interface (needs `CAP_SYS_ADMIN`) |
 | `monitor_triggered_pcap` | **Rotating + triggered pcap** (#125, feature `pcap`): `RotatingPcapWriter` + `TriggeredPcapWriter` pre-trigger ring — capture the lead-up to an event |
+| `monitor_session_bandwidth` | **Per-session bandwidth** (features `tokio,flow`): rolling top-N active 5-tuples via `BandwidthByKey<FlowKey>` + cumulative bytes/avg-throughput from `FlowEnded.stats` |
+| `monitor_process_bandwidth` | **Per-process bandwidth** (features `tokio,flow`): a `/proc/net` socket→pid resolver feeding `.with_flow_attribution(hook)` + `.on_owner_bandwidth(…)` — local-host, best-effort (nethogs-style) |
 
 All take an `<iface>` argument (default `lo`) and an optional
 `<seconds>` deadline. Pair with `synthetic_traffic` for

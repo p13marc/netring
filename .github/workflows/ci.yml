@@ -353,6 +353,8 @@ jobs:
       - run: cargo build -p netring --example monitor_ip_defrag --features tokio,flow,dns
       - run: cargo build -p netring --example monitor_netns_capture --features tokio
       - run: cargo build -p netring --example monitor_triggered_pcap --features pcap
+      - run: cargo build -p netring --example monitor_session_bandwidth --features tokio,flow
+      - run: cargo build -p netring --example monitor_process_bandwidth --features tokio,flow
 
   # ── License + advisory checks (cargo-deny) ───────────────────────────────
   deny:

@@ -655,6 +655,16 @@ path = "examples/monitor/triggered_pcap.rs"
 required-features = ["pcap"]
 
 [[example]]
+name = "monitor_session_bandwidth"
+path = "examples/monitor/session_bandwidth.rs"
+required-features = ["tokio", "flow"]
+
+[[example]]
+name = "monitor_process_bandwidth"
+path = "examples/monitor/process_bandwidth.rs"
+required-features = ["tokio", "flow"]
+
+[[example]]
 name = "monitor_quic_sni"
 path = "examples/monitor/quic_sni.rs"
 required-features = ["tokio", "quic", "emit"]

@@ -58,6 +58,32 @@ jobs:
             cargo clippy -p netring $f -- -D warnings
             echo "::endgroup::"
           done
+      # Issue #37: the combos above omit `tokio`, so the Monitor layer
+      # (`#[cfg(all(feature = "flow", feature = "tokio"))]`) and its
+      # feature-gated submodules (`monitor::fingerprint`, `red`, `aggregate`, …)
+      # never compile — a monitor-only gating bug (e.g. an `ssh`-gated method
+      # referencing a `tls`-gated module) slips through. This second pass turns
+      # the Monitor on for each narrow surface. It caught the 0.29.0
+      # `on_ssh_fingerprint`-vs-`fingerprint`-module break.
+      - name: clippy (monitor feature combos, tokio on)
+        run: |
+          for f in \
+            "--features tokio,flow" \
+            "--features tokio,dns,emit" \
+            "--features tokio,tls,http,emit" \
+            "--features tokio,ssh,emit" \
+            "--features tokio,quic,emit" \
+            "--features tokio,sigma,dns,http,tls" \
+            "--features tokio,yara" \
+            "--features tokio,ocsf-sink,dns,tls" \
+            "--features tokio,p0f" \
+            "--features tokio,asset,arp,ndp" \
+            "--features tokio,eve-sink,dns,tls" \
+            "--features tokio,metrics,flow"; do
+            echo "::group::clippy -p netring $f"
+            cargo clippy -p netring $f -- -D warnings
+            echo "::endgroup::"
+          done
 
   fmt:
     name: Format

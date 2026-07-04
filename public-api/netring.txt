@@ -50,6 +50,7 @@ pub fn netring::afpacket::rx::CaptureBuilder::fill_rxhash(self, enable: bool) ->
 pub fn netring::afpacket::rx::CaptureBuilder::frame_size(self, bytes: usize) -> Self
 pub fn netring::afpacket::rx::CaptureBuilder::ignore_outgoing(self, enable: bool) -> Self
 pub fn netring::afpacket::rx::CaptureBuilder::interface(self, name: &str) -> Self
+pub fn netring::afpacket::rx::CaptureBuilder::netns(self, ns: &netring::netns::NetNs) -> core::result::Result<netring::afpacket::rx::Capture, netring::error::Error>
 pub fn netring::afpacket::rx::CaptureBuilder::poll_timeout(self, timeout: core::time::Duration) -> Self
 pub fn netring::afpacket::rx::CaptureBuilder::prefer_busy_poll(self, enable: bool) -> Self
 pub fn netring::afpacket::rx::CaptureBuilder::profile(self, profile: netring::config::RingProfile) -> Self
@@ -1967,9 +1968,15 @@ impl core::str::traits::FromStr for netring::config::ipnet::IpNet
 pub type netring::config::ipnet::IpNet::Err = netring::config::ipnet::ParseIpNetError
 pub fn netring::config::ipnet::IpNet::from_str(s: &str) -> core::result::Result<Self, Self::Err>
 pub mod netring::correlate
+pub use netring::correlate::Attribution
+pub use netring::correlate::BandwidthByKey
 pub use netring::correlate::BurstDetector
 pub use netring::correlate::BurstHit
+pub use netring::correlate::ByteSemantics
+pub use netring::correlate::DdSketch
 pub use netring::correlate::Ewma
+pub use netring::correlate::EwmaVar
+pub use netring::correlate::FirstSeen
 pub use netring::correlate::FlowStateMap
 pub use netring::correlate::KeylessSequencePattern
 pub use netring::correlate::RateValue
@@ -1978,6 +1985,7 @@ pub use netring::correlate::SequencePattern
 pub use netring::correlate::TimeBucketedCounter
 pub use netring::correlate::TimeBucketedSet
 pub use netring::correlate::TopK
+pub use netring::correlate::WindowedQuantiles
 pub struct netring::correlate::KeyIndexed<K, V>
 impl<K: core::hash::Hash + core::cmp::Eq, V> netring::correlate::KeyIndexed<K, V>
 pub fn netring::correlate::KeyIndexed<K, V>::contains_fresh(&self, k: &K, now: flowscope::timestamp::Timestamp) -> bool
@@ -2018,12 +2026,14 @@ pub fn netring::ctx::Ctx<'_>::split_state_sink_counter<T, K>(&mut self) -> (&mut
 impl<'a> netring::ctx::Ctx<'a>
 pub fn netring::ctx::Ctx<'a>::arp_table(&self) -> core::option::Option<&flowscope::correlate::neighbor_table::ArpTable>
 pub fn netring::ctx::Ctx<'a>::bandwidth(&self) -> core::option::Option<netring::monitor::bandwidth::BandwidthReport<'_>>
+pub fn netring::ctx::Ctx<'a>::community_id(&self) -> core::option::Option<alloc::string::String>
 pub fn netring::ctx::Ctx<'a>::counter<K>(&self) -> core::option::Option<&flowscope::correlate::bucketed::TimeBucketedCounter<K>> where K: core::hash::Hash + core::cmp::Eq + core::clone::Clone + core::marker::Send + 'static
 pub fn netring::ctx::Ctx<'a>::counter_mut<K>(&mut self) -> &mut flowscope::correlate::bucketed::TimeBucketedCounter<K> where K: core::hash::Hash + core::cmp::Eq + core::clone::Clone + core::marker::Send + 'static
 pub fn netring::ctx::Ctx<'a>::emit(&mut self, kind: &'static str, severity: netring::Severity) -> netring::anomaly::sink::AnomalyWriter<'_>
 pub fn netring::ctx::Ctx<'a>::flow_state_mut<T>(&mut self) -> core::option::Option<&mut T> where T: core::default::Default + core::marker::Send + 'static
 pub fn netring::ctx::Ctx<'a>::label_table(&self) -> &flowscope::well_known::LabelTable
 pub fn netring::ctx::Ctx<'a>::lookup_icmp_flow(&self, inner: &flowscope::icmp::types::IcmpInner) -> core::option::Option<(netring::protocol::FlowKey, flowscope::event::FlowStats)>
+pub fn netring::ctx::Ctx<'a>::names(&self, ip: core::net::ip_addr::IpAddr) -> alloc::vec::Vec<alloc::string::String>
 pub fn netring::ctx::Ctx<'a>::new_for_bench(ts: flowscope::timestamp::Timestamp, state_map: &'a mut netring::ctx::StateMap, sink: &'a mut dyn netring::anomaly::sink::AnomalySink, counters: &'a mut netring::ctx::CounterRegistry, flow_states: &'a mut netring::ctx::FlowStateRegistry) -> Self
 pub fn netring::ctx::Ctx<'a>::sink_mut(&mut self) -> &mut dyn netring::anomaly::sink::AnomalySink
 pub fn netring::ctx::Ctx<'a>::state<T: 'static>(&self) -> core::option::Option<&T>
@@ -2050,6 +2060,7 @@ impl core::marker::StructuralPartialEq for netring::ctx::SourceIdx
 pub struct netring::ctx::StateMap
 impl netring::ctx::StateMap
 pub fn netring::ctx::StateMap::get<T: 'static>(&self) -> core::option::Option<&T>
+pub fn netring::ctx::StateMap::get_mut<T: 'static>(&mut self) -> core::option::Option<&mut T>
 pub fn netring::ctx::StateMap::get_or_init_mut<T: core::default::Default + core::marker::Send + 'static>(&mut self) -> &mut T
 pub fn netring::ctx::StateMap::get_or_init_with<T, F>(&mut self, factory: F) -> &mut T where T: core::marker::Send + 'static, F: core::ops::function::FnOnce() -> T
 pub fn netring::ctx::StateMap::insert<T: core::marker::Send + 'static>(&mut self, value: T)
@@ -2085,6 +2096,7 @@ impl<E, F> netring::monitor::handler::Handler<E, netring::monitor::handler::Payl
 pub fn netring::detector_macro::Detector<E, F>::call(&self, payload: &<E as netring::protocol::event_typed::Event>::Payload, ctx: &mut netring::ctx::Ctx<'_>) -> netring::error::Result<()>
 pub mod netring::error
 #[non_exhaustive] pub enum netring::error::BuildError
+pub netring::error::BuildError::AttributionHookRequired
 pub netring::error::BuildError::CounterNotRegistered
 pub netring::error::BuildError::CounterNotRegistered::detector: &'static str
 pub netring::error::BuildError::CounterNotRegistered::type_name: &'static str
@@ -2204,6 +2216,7 @@ pub fn netring::export::ipfix::IpfixExporter<W>::export(&mut self, record: &netr
 pub fn netring::export::ipfix::IpfixExporter<W>::flush(&mut self) -> std::io::error::Result<()>
 pub mod netring::flow
 pub use netring::flow::AnomalyKind
+pub use netring::flow::AppProtocol
 pub use netring::flow::BufferedReassembler
 pub use netring::flow::BufferedReassemblerFactory
 pub use netring::flow::EndReason
@@ -2230,6 +2243,8 @@ pub use netring::flow::Reassembler
 pub use netring::flow::ReassemblerFactory
 pub use netring::flow::TcpFlags
 pub use netring::flow::TcpInfo
+pub use netring::flow::Transport
+pub use netring::flow::app_proto
 pub use netring::flow::extract
 #[non_exhaustive] pub enum netring::flow::SessionEvent<K, M>
 pub netring::flow::SessionEvent::Application
@@ -2389,6 +2404,58 @@ pub const netring::metrics::GAUGE_HANDLER_ERRORS: &str
 pub const netring::metrics::GAUGE_PACKETS: &str
 pub fn netring::metrics::record_capture_delta(iface: &str, delta: &netring::stats::CaptureStats)
 pub mod netring::monitor
+pub mod netring::monitor::aggregate
+#[non_exhaustive] pub struct netring::monitor::aggregate::AggregateConfig
+pub netring::monitor::aggregate::AggregateConfig::bucket: core::time::Duration
+pub netring::monitor::aggregate::AggregateConfig::top_domains: bool
+pub netring::monitor::aggregate::AggregateConfig::top_sni: bool
+pub netring::monitor::aggregate::AggregateConfig::top_talkers: bool
+pub netring::monitor::aggregate::AggregateConfig::traffic_matrix: bool
+pub netring::monitor::aggregate::AggregateConfig::window: core::time::Duration
+impl core::clone::Clone for netring::monitor::aggregate::AggregateConfig
+pub fn netring::monitor::aggregate::AggregateConfig::clone(&self) -> netring::monitor::aggregate::AggregateConfig
+impl core::default::Default for netring::monitor::aggregate::AggregateConfig
+pub fn netring::monitor::aggregate::AggregateConfig::default() -> Self
+impl core::fmt::Debug for netring::monitor::aggregate::AggregateConfig
+pub fn netring::monitor::aggregate::AggregateConfig::fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+pub struct netring::monitor::aggregate::AggregateReport<'a>
+impl netring::monitor::aggregate::AggregateReport<'_>
+pub fn netring::monitor::aggregate::AggregateReport<'_>::to_snapshot(&self, n: usize) -> netring::monitor::aggregate::AggregateSnapshot
+pub fn netring::monitor::aggregate::AggregateReport<'_>::top_domains(&self, n: usize) -> alloc::vec::Vec<(alloc::string::String, f64)>
+pub fn netring::monitor::aggregate::AggregateReport<'_>::top_pairs(&self, n: usize) -> alloc::vec::Vec<((core::net::ip_addr::IpAddr, core::net::ip_addr::IpAddr), f64)>
+pub fn netring::monitor::aggregate::AggregateReport<'_>::top_sni(&self, n: usize) -> alloc::vec::Vec<(alloc::string::String, f64)>
+pub fn netring::monitor::aggregate::AggregateReport<'_>::top_talkers(&self, n: usize) -> alloc::vec::Vec<(core::net::ip_addr::IpAddr, f64)>
+pub struct netring::monitor::aggregate::AggregateSnapshot
+pub netring::monitor::aggregate::AggregateSnapshot::domains: alloc::vec::Vec<(alloc::string::String, f64)>
+pub netring::monitor::aggregate::AggregateSnapshot::pairs: alloc::vec::Vec<(alloc::string::String, alloc::string::String, f64)>
+pub netring::monitor::aggregate::AggregateSnapshot::sni: alloc::vec::Vec<(alloc::string::String, f64)>
+pub netring::monitor::aggregate::AggregateSnapshot::talkers: alloc::vec::Vec<(alloc::string::String, f64)>
+impl core::clone::Clone for netring::monitor::aggregate::AggregateSnapshot
+pub fn netring::monitor::aggregate::AggregateSnapshot::clone(&self) -> netring::monitor::aggregate::AggregateSnapshot
+impl core::cmp::PartialEq for netring::monitor::aggregate::AggregateSnapshot
+pub fn netring::monitor::aggregate::AggregateSnapshot::eq(&self, other: &netring::monitor::aggregate::AggregateSnapshot) -> bool
+impl core::default::Default for netring::monitor::aggregate::AggregateSnapshot
+pub fn netring::monitor::aggregate::AggregateSnapshot::default() -> netring::monitor::aggregate::AggregateSnapshot
+impl core::fmt::Debug for netring::monitor::aggregate::AggregateSnapshot
+pub fn netring::monitor::aggregate::AggregateSnapshot::fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::marker::StructuralPartialEq for netring::monitor::aggregate::AggregateSnapshot
+impl serde_core::ser::Serialize for netring::monitor::aggregate::AggregateSnapshot
+pub fn netring::monitor::aggregate::AggregateSnapshot::serialize<__S>(&self, __serializer: __S) -> core::result::Result<<__S as serde_core::ser::Serializer>::Ok, <__S as serde_core::ser::Serializer>::Error> where __S: serde_core::ser::Serializer
+pub mod netring::monitor::analysis
+#[non_exhaustive] pub struct netring::monitor::analysis::FlowAnalysisConfig
+pub netring::monitor::analysis::FlowAnalysisConfig::emit_risk_anomalies: bool
+pub netring::monitor::analysis::FlowAnalysisConfig::max_flows: usize
+pub netring::monitor::analysis::FlowAnalysisConfig::min_risk_severity: flowscope::detect::risk::RiskSeverity
+pub netring::monitor::analysis::FlowAnalysisConfig::ttl: core::time::Duration
+impl core::clone::Clone for netring::monitor::analysis::FlowAnalysisConfig
+pub fn netring::monitor::analysis::FlowAnalysisConfig::clone(&self) -> netring::monitor::analysis::FlowAnalysisConfig
+impl core::default::Default for netring::monitor::analysis::FlowAnalysisConfig
+pub fn netring::monitor::analysis::FlowAnalysisConfig::default() -> Self
+impl core::fmt::Debug for netring::monitor::analysis::FlowAnalysisConfig
+pub fn netring::monitor::analysis::FlowAnalysisConfig::fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+pub const netring::monitor::analysis::DEFAULT_FLOW_ANALYSIS_MAX_FLOWS: usize
+pub const netring::monitor::analysis::DEFAULT_FLOW_ANALYSIS_TTL: core::time::Duration
+pub type netring::monitor::analysis::AnalyzedFlowHandler = alloc::sync::Arc<(dyn core::ops::function::Fn(&flowscope::analysis::analyzed_flow::AnalyzedFlow<netring::protocol::FlowKey>, &mut netring::ctx::Ctx<'_>) + core::marker::Send + core::marker::Sync + 'static)>
 pub mod netring::monitor::arp
 #[non_exhaustive] pub enum netring::monitor::arp::ArpAnomalyKind
 pub netring::monitor::arp::ArpAnomalyKind::BindingChanged
@@ -2492,6 +2559,7 @@ pub const netring::monitor::bandwidth::BandwidthSnapshot::NAME: &'static str
 impl serde_core::ser::Serialize for netring::monitor::bandwidth::BandwidthSnapshot
 pub fn netring::monitor::bandwidth::BandwidthSnapshot::serialize<__S>(&self, __serializer: __S) -> core::result::Result<<__S as serde_core::ser::Serializer>::Ok, <__S as serde_core::ser::Serializer>::Error> where __S: serde_core::ser::Serializer
 pub mod netring::monitor::cdp
+pub mod netring::monitor::detectors
 pub mod netring::monitor::dispatcher
 pub struct netring::monitor::dispatcher::Dispatcher
 impl netring::monitor::dispatcher::Dispatcher
@@ -2505,6 +2573,20 @@ pub fn netring::monitor::dispatcher::Dispatcher::type_count(&self) -> usize
 impl core::fmt::Debug for netring::monitor::dispatcher::Dispatcher
 pub fn netring::monitor::dispatcher::Dispatcher::fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result
 pub const netring::monitor::dispatcher::MAX_EVENT_TYPES: usize
+pub mod netring::monitor::dns
+pub struct netring::monitor::dns::DnsView<'a>
+pub netring::monitor::dns::DnsView::client: core::net::ip_addr::IpAddr
+pub netring::monitor::dns::DnsView::key: netring::protocol::FlowKey
+pub netring::monitor::dns::DnsView::message: &'a flowscope::dns::datagram::DnsMessage
+pub netring::monitor::dns::DnsView::server: core::net::ip_addr::IpAddr
+pub netring::monitor::dns::DnsView::ts: flowscope::timestamp::Timestamp
+impl netring::monitor::dns::DnsView<'_>
+pub fn netring::monitor::dns::DnsView<'_>::community_id(&self) -> core::option::Option<alloc::string::String>
+pub fn netring::monitor::dns::DnsView<'_>::is_answerless(&self) -> bool
+pub fn netring::monitor::dns::DnsView<'_>::is_query(&self) -> bool
+pub fn netring::monitor::dns::DnsView<'_>::qname(&self) -> core::option::Option<&str>
+pub fn netring::monitor::dns::DnsView<'_>::rcode(&self) -> core::option::Option<flowscope::dns::types::DnsRcode>
+pub type netring::monitor::dns::NameHandler = alloc::sync::Arc<(dyn core::ops::function::Fn(core::net::ip_addr::IpAddr, &flowscope::dns::name_map::NameClaim, &mut netring::ctx::Ctx<'_>) + core::marker::Send + core::marker::Sync)>
 pub mod netring::monitor::effect
 pub struct netring::monitor::effect::Effects
 impl netring::monitor::effect::Effects
@@ -2522,6 +2604,21 @@ pub fn netring::monitor::effect::EffectHandler::call(&self, payload: &<E as netr
 impl<E, F, Fut> netring::monitor::effect::EffectHandler<E> for F where E: netring::protocol::event_typed::Event, F: core::ops::function::Fn(&<E as netring::protocol::event_typed::Event>::Payload, &netring::ctx::Ctx<'_>) -> Fut + core::marker::Send + core::marker::Sync + 'static, Fut: core::future::future::Future<Output = netring::error::Result<netring::monitor::effect::Effects>> + core::marker::Send + 'static
 pub fn F::call(&self, payload: &<E as netring::protocol::event_typed::Event>::Payload, ctx: &netring::ctx::Ctx<'_>) -> netring::monitor::async_handler::BoxFuture<netring::error::Result<netring::monitor::effect::Effects>>
 pub mod netring::monitor::fingerprint
+pub struct netring::monitor::fingerprint::EncryptedDns
+pub netring::monitor::fingerprint::EncryptedDns::app_protocol: flowscope::app_proto::AppProtocol
+pub netring::monitor::fingerprint::EncryptedDns::key: core::option::Option<netring::protocol::FlowKey>
+pub netring::monitor::fingerprint::EncryptedDns::sni: core::option::Option<alloc::string::String>
+pub netring::monitor::fingerprint::EncryptedDns::ts: flowscope::timestamp::Timestamp
+pub netring::monitor::fingerprint::EncryptedDns::via_known_resolver: bool
+impl core::clone::Clone for netring::monitor::fingerprint::EncryptedDns
+pub fn netring::monitor::fingerprint::EncryptedDns::clone(&self) -> netring::monitor::fingerprint::EncryptedDns
+impl core::cmp::PartialEq for netring::monitor::fingerprint::EncryptedDns
+pub fn netring::monitor::fingerprint::EncryptedDns::eq(&self, other: &netring::monitor::fingerprint::EncryptedDns) -> bool
+impl core::fmt::Debug for netring::monitor::fingerprint::EncryptedDns
+pub fn netring::monitor::fingerprint::EncryptedDns::fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::marker::StructuralPartialEq for netring::monitor::fingerprint::EncryptedDns
+impl serde_core::ser::Serialize for netring::monitor::fingerprint::EncryptedDns
+pub fn netring::monitor::fingerprint::EncryptedDns::serialize<__S>(&self, __serializer: __S) -> core::result::Result<<__S as serde_core::ser::Serializer>::Ok, <__S as serde_core::ser::Serializer>::Error> where __S: serde_core::ser::Serializer
 pub struct netring::monitor::fingerprint::HttpFingerprint
 pub netring::monitor::fingerprint::HttpFingerprint::host: core::option::Option<alloc::string::String>
 pub netring::monitor::fingerprint::HttpFingerprint::ja4h: alloc::string::String
@@ -2539,13 +2636,51 @@ pub fn netring::monitor::fingerprint::HttpFingerprint::fmt(&self, f: &mut core::
 impl core::marker::StructuralPartialEq for netring::monitor::fingerprint::HttpFingerprint
 impl serde_core::ser::Serialize for netring::monitor::fingerprint::HttpFingerprint
 pub fn netring::monitor::fingerprint::HttpFingerprint::serialize<__S>(&self, __serializer: __S) -> core::result::Result<<__S as serde_core::ser::Serializer>::Ok, <__S as serde_core::ser::Serializer>::Error> where __S: serde_core::ser::Serializer
+pub struct netring::monitor::fingerprint::QuicFingerprint
+pub netring::monitor::fingerprint::QuicFingerprint::alpn: core::option::Option<alloc::string::String>
+pub netring::monitor::fingerprint::QuicFingerprint::app_protocol: flowscope::app_proto::AppProtocol
+pub netring::monitor::fingerprint::QuicFingerprint::ja4: core::option::Option<alloc::string::String>
+pub netring::monitor::fingerprint::QuicFingerprint::key: core::option::Option<netring::protocol::FlowKey>
+pub netring::monitor::fingerprint::QuicFingerprint::pq_key_share: bool
+pub netring::monitor::fingerprint::QuicFingerprint::sni: core::option::Option<alloc::string::String>
+pub netring::monitor::fingerprint::QuicFingerprint::version: alloc::string::String
+impl core::clone::Clone for netring::monitor::fingerprint::QuicFingerprint
+pub fn netring::monitor::fingerprint::QuicFingerprint::clone(&self) -> netring::monitor::fingerprint::QuicFingerprint
+impl core::cmp::PartialEq for netring::monitor::fingerprint::QuicFingerprint
+pub fn netring::monitor::fingerprint::QuicFingerprint::eq(&self, other: &netring::monitor::fingerprint::QuicFingerprint) -> bool
+impl core::default::Default for netring::monitor::fingerprint::QuicFingerprint
+pub fn netring::monitor::fingerprint::QuicFingerprint::default() -> netring::monitor::fingerprint::QuicFingerprint
+impl core::fmt::Debug for netring::monitor::fingerprint::QuicFingerprint
+pub fn netring::monitor::fingerprint::QuicFingerprint::fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::marker::StructuralPartialEq for netring::monitor::fingerprint::QuicFingerprint
+impl serde_core::ser::Serialize for netring::monitor::fingerprint::QuicFingerprint
+pub fn netring::monitor::fingerprint::QuicFingerprint::serialize<__S>(&self, __serializer: __S) -> core::result::Result<<__S as serde_core::ser::Serializer>::Ok, <__S as serde_core::ser::Serializer>::Error> where __S: serde_core::ser::Serializer
+pub struct netring::monitor::fingerprint::SshFingerprint
+pub netring::monitor::fingerprint::SshFingerprint::banners: alloc::vec::Vec<alloc::string::String>
+pub netring::monitor::fingerprint::SshFingerprint::hassh: core::option::Option<alloc::string::String>
+pub netring::monitor::fingerprint::SshFingerprint::hassh_server: core::option::Option<alloc::string::String>
+pub netring::monitor::fingerprint::SshFingerprint::kex_algorithms: alloc::vec::Vec<alloc::string::String>
+pub netring::monitor::fingerprint::SshFingerprint::key: core::option::Option<netring::protocol::FlowKey>
+impl core::clone::Clone for netring::monitor::fingerprint::SshFingerprint
+pub fn netring::monitor::fingerprint::SshFingerprint::clone(&self) -> netring::monitor::fingerprint::SshFingerprint
+impl core::cmp::PartialEq for netring::monitor::fingerprint::SshFingerprint
+pub fn netring::monitor::fingerprint::SshFingerprint::eq(&self, other: &netring::monitor::fingerprint::SshFingerprint) -> bool
+impl core::default::Default for netring::monitor::fingerprint::SshFingerprint
+pub fn netring::monitor::fingerprint::SshFingerprint::default() -> netring::monitor::fingerprint::SshFingerprint
+impl core::fmt::Debug for netring::monitor::fingerprint::SshFingerprint
+pub fn netring::monitor::fingerprint::SshFingerprint::fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::marker::StructuralPartialEq for netring::monitor::fingerprint::SshFingerprint
+impl serde_core::ser::Serialize for netring::monitor::fingerprint::SshFingerprint
+pub fn netring::monitor::fingerprint::SshFingerprint::serialize<__S>(&self, __serializer: __S) -> core::result::Result<<__S as serde_core::ser::Serializer>::Ok, <__S as serde_core::ser::Serializer>::Error> where __S: serde_core::ser::Serializer
 pub struct netring::monitor::fingerprint::TlsFingerprint
 pub netring::monitor::fingerprint::TlsFingerprint::alpn: core::option::Option<alloc::string::String>
+pub netring::monitor::fingerprint::TlsFingerprint::app_protocol: flowscope::app_proto::AppProtocol
 pub netring::monitor::fingerprint::TlsFingerprint::ja3: core::option::Option<alloc::string::String>
 pub netring::monitor::fingerprint::TlsFingerprint::ja4: core::option::Option<alloc::string::String>
 pub netring::monitor::fingerprint::TlsFingerprint::ja4s: core::option::Option<alloc::string::String>
 pub netring::monitor::fingerprint::TlsFingerprint::ja4x: core::option::Option<alloc::string::String>
 pub netring::monitor::fingerprint::TlsFingerprint::key: core::option::Option<netring::protocol::FlowKey>
+pub netring::monitor::fingerprint::TlsFingerprint::pq_key_share: bool
 pub netring::monitor::fingerprint::TlsFingerprint::sni: core::option::Option<alloc::string::String>
 impl netring::monitor::fingerprint::TlsFingerprint
 pub fn netring::monitor::fingerprint::TlsFingerprint::has_fingerprint(&self) -> bool
@@ -2620,26 +2755,23 @@ pub fn netring::monitor::health::MonitorHealthSnapshot::fmt(&self, f: &mut core:
 impl core::marker::Copy for netring::monitor::health::MonitorHealthSnapshot
 impl core::marker::StructuralPartialEq for netring::monitor::health::MonitorHealthSnapshot
 pub mod netring::monitor::ioc
-pub struct netring::monitor::ioc::IocSet
-impl netring::monitor::ioc::IocSet
-pub fn netring::monitor::ioc::IocSet::domain(self, d: impl core::convert::AsRef<str>) -> Self
-pub fn netring::monitor::ioc::IocSet::domains<S: core::convert::AsRef<str>>(self, it: impl core::iter::traits::collect::IntoIterator<Item = S>) -> Self
-pub fn netring::monitor::ioc::IocSet::ip(self, ip: core::net::ip_addr::IpAddr) -> Self
-pub fn netring::monitor::ioc::IocSet::ips(self, it: impl core::iter::traits::collect::IntoIterator<Item = core::net::ip_addr::IpAddr>) -> Self
-pub fn netring::monitor::ioc::IocSet::is_empty(&self) -> bool
-pub fn netring::monitor::ioc::IocSet::ja3(self, fp: impl core::convert::Into<alloc::string::String>) -> Self
-pub fn netring::monitor::ioc::IocSet::ja4(self, fp: impl core::convert::Into<alloc::string::String>) -> Self
-pub fn netring::monitor::ioc::IocSet::matches_domain(&self, name: &str) -> core::option::Option<&str>
-pub fn netring::monitor::ioc::IocSet::matches_ip(&self, ip: &core::net::ip_addr::IpAddr) -> bool
-pub fn netring::monitor::ioc::IocSet::matches_ja3(&self, fp: &str) -> bool
-pub fn netring::monitor::ioc::IocSet::matches_ja4(&self, fp: &str) -> bool
-pub fn netring::monitor::ioc::IocSet::new() -> Self
-impl core::clone::Clone for netring::monitor::ioc::IocSet
-pub fn netring::monitor::ioc::IocSet::clone(&self) -> netring::monitor::ioc::IocSet
-impl core::default::Default for netring::monitor::ioc::IocSet
-pub fn netring::monitor::ioc::IocSet::default() -> netring::monitor::ioc::IocSet
-impl core::fmt::Debug for netring::monitor::ioc::IocSet
-pub fn netring::monitor::ioc::IocSet::fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+pub use netring::monitor::ioc::IocKind
+pub use netring::monitor::ioc::IocMatch
+pub use netring::monitor::ioc::IocSet
+pub trait netring::monitor::ioc::IocSetExt: core::marker::Sized
+pub fn netring::monitor::ioc::IocSetExt::domain(self, d: impl core::convert::AsRef<str>) -> Self
+pub fn netring::monitor::ioc::IocSetExt::domains<S: core::convert::AsRef<str>>(self, it: impl core::iter::traits::collect::IntoIterator<Item = S>) -> Self
+pub fn netring::monitor::ioc::IocSetExt::ip(self, ip: core::net::ip_addr::IpAddr) -> Self
+pub fn netring::monitor::ioc::IocSetExt::ips(self, it: impl core::iter::traits::collect::IntoIterator<Item = core::net::ip_addr::IpAddr>) -> Self
+pub fn netring::monitor::ioc::IocSetExt::ja3(self, fp: impl core::convert::AsRef<str>) -> Self
+pub fn netring::monitor::ioc::IocSetExt::ja4(self, fp: impl core::convert::AsRef<str>) -> Self
+impl netring::monitor::ioc::IocSetExt for flowscope::detect::ioc::IocSet
+pub fn flowscope::detect::ioc::IocSet::domain(self, d: impl core::convert::AsRef<str>) -> Self
+pub fn flowscope::detect::ioc::IocSet::domains<S: core::convert::AsRef<str>>(self, it: impl core::iter::traits::collect::IntoIterator<Item = S>) -> Self
+pub fn flowscope::detect::ioc::IocSet::ip(self, ip: core::net::ip_addr::IpAddr) -> Self
+pub fn flowscope::detect::ioc::IocSet::ips(self, it: impl core::iter::traits::collect::IntoIterator<Item = core::net::ip_addr::IpAddr>) -> Self
+pub fn flowscope::detect::ioc::IocSet::ja3(self, fp: impl core::convert::AsRef<str>) -> Self
+pub fn flowscope::detect::ioc::IocSet::ja4(self, fp: impl core::convert::AsRef<str>) -> Self
 pub mod netring::monitor::lldp
 pub mod netring::monitor::ml_features
 pub mod netring::monitor::ndp
@@ -2772,7 +2904,80 @@ impl core::fmt::Debug for netring::monitor::overload::SheddingStats
 pub fn netring::monitor::overload::SheddingStats::fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result
 impl core::marker::Copy for netring::monitor::overload::SheddingStats
 impl core::marker::StructuralPartialEq for netring::monitor::overload::SheddingStats
+pub mod netring::monitor::owner_bandwidth
+pub struct netring::monitor::owner_bandwidth::OwnerBandwidthReport<'a>
+impl netring::monitor::owner_bandwidth::OwnerBandwidthReport<'_>
+pub fn netring::monitor::owner_bandwidth::OwnerBandwidthReport<'_>::rate(&self, owner: flowscope::correlate::bandwidth::Attribution) -> f64
+pub fn netring::monitor::owner_bandwidth::OwnerBandwidthReport<'_>::semantics(&self) -> flowscope::correlate::bandwidth::ByteSemantics
+pub fn netring::monitor::owner_bandwidth::OwnerBandwidthReport<'_>::to_snapshot(&self, n: usize) -> netring::monitor::owner_bandwidth::OwnerBandwidthSnapshot
+pub fn netring::monitor::owner_bandwidth::OwnerBandwidthReport<'_>::top(&self, n: usize) -> alloc::vec::Vec<(flowscope::correlate::bandwidth::Attribution, f64)>
+pub fn netring::monitor::owner_bandwidth::OwnerBandwidthReport<'_>::unknown_rate(&self) -> f64
+pub fn netring::monitor::owner_bandwidth::OwnerBandwidthReport<'_>::unknown_share(&self) -> f64
+pub struct netring::monitor::owner_bandwidth::OwnerBandwidthSnapshot
+pub netring::monitor::owner_bandwidth::OwnerBandwidthSnapshot::owners: alloc::vec::Vec<(u64, f64)>
+pub netring::monitor::owner_bandwidth::OwnerBandwidthSnapshot::semantics: &'static str
+pub netring::monitor::owner_bandwidth::OwnerBandwidthSnapshot::unknown_bps: f64
+pub netring::monitor::owner_bandwidth::OwnerBandwidthSnapshot::unknown_share: f64
+impl core::clone::Clone for netring::monitor::owner_bandwidth::OwnerBandwidthSnapshot
+pub fn netring::monitor::owner_bandwidth::OwnerBandwidthSnapshot::clone(&self) -> netring::monitor::owner_bandwidth::OwnerBandwidthSnapshot
+impl core::cmp::PartialEq for netring::monitor::owner_bandwidth::OwnerBandwidthSnapshot
+pub fn netring::monitor::owner_bandwidth::OwnerBandwidthSnapshot::eq(&self, other: &netring::monitor::owner_bandwidth::OwnerBandwidthSnapshot) -> bool
+impl core::fmt::Debug for netring::monitor::owner_bandwidth::OwnerBandwidthSnapshot
+pub fn netring::monitor::owner_bandwidth::OwnerBandwidthSnapshot::fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::marker::StructuralPartialEq for netring::monitor::owner_bandwidth::OwnerBandwidthSnapshot
+impl serde_core::ser::Serialize for netring::monitor::owner_bandwidth::OwnerBandwidthSnapshot
+pub fn netring::monitor::owner_bandwidth::OwnerBandwidthSnapshot::serialize<__S>(&self, __serializer: __S) -> core::result::Result<<__S as serde_core::ser::Serializer>::Ok, <__S as serde_core::ser::Serializer>::Error> where __S: serde_core::ser::Serializer
+pub type netring::monitor::owner_bandwidth::AttributionHook = alloc::sync::Arc<(dyn core::ops::function::Fn(&netring::protocol::FlowKey) -> core::option::Option<flowscope::correlate::bandwidth::Attribution> + core::marker::Send + core::marker::Sync + 'static)>
 pub mod netring::monitor::p0f
+pub mod netring::monitor::red
+pub enum netring::monitor::red::RedProto
+pub netring::monitor::red::RedProto::Dns
+pub netring::monitor::red::RedProto::Flow
+impl core::clone::Clone for netring::monitor::red::RedProto
+pub fn netring::monitor::red::RedProto::clone(&self) -> netring::monitor::red::RedProto
+impl core::cmp::Eq for netring::monitor::red::RedProto
+impl core::cmp::PartialEq for netring::monitor::red::RedProto
+pub fn netring::monitor::red::RedProto::eq(&self, other: &netring::monitor::red::RedProto) -> bool
+impl core::fmt::Debug for netring::monitor::red::RedProto
+pub fn netring::monitor::red::RedProto::fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::marker::Copy for netring::monitor::red::RedProto
+impl core::marker::StructuralPartialEq for netring::monitor::red::RedProto
+#[non_exhaustive] pub struct netring::monitor::red::RedConfig
+pub netring::monitor::red::RedConfig::alpha: f64
+pub netring::monitor::red::RedConfig::bucket: core::time::Duration
+pub netring::monitor::red::RedConfig::dns: bool
+pub netring::monitor::red::RedConfig::flow: bool
+pub netring::monitor::red::RedConfig::max_bins: usize
+pub netring::monitor::red::RedConfig::window: core::time::Duration
+impl core::clone::Clone for netring::monitor::red::RedConfig
+pub fn netring::monitor::red::RedConfig::clone(&self) -> netring::monitor::red::RedConfig
+impl core::default::Default for netring::monitor::red::RedConfig
+pub fn netring::monitor::red::RedConfig::default() -> Self
+impl core::fmt::Debug for netring::monitor::red::RedConfig
+pub fn netring::monitor::red::RedConfig::fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+pub struct netring::monitor::red::RedReport<'a>
+impl netring::monitor::red::RedReport<'_>
+pub fn netring::monitor::red::RedReport<'_>::duration_ms(&self, proto: netring::monitor::red::RedProto, q: f64) -> core::option::Option<f64>
+pub fn netring::monitor::red::RedReport<'_>::error_rate(&self, proto: netring::monitor::red::RedProto) -> f64
+pub fn netring::monitor::red::RedReport<'_>::error_ratio(&self, proto: netring::monitor::red::RedProto) -> f64
+pub fn netring::monitor::red::RedReport<'_>::rate(&self, proto: netring::monitor::red::RedProto) -> f64
+pub fn netring::monitor::red::RedReport<'_>::to_snapshot(&self, proto: netring::monitor::red::RedProto) -> netring::monitor::red::RedSnapshot
+pub struct netring::monitor::red::RedSnapshot
+pub netring::monitor::red::RedSnapshot::error_rate: f64
+pub netring::monitor::red::RedSnapshot::error_ratio: f64
+pub netring::monitor::red::RedSnapshot::p50_ms: core::option::Option<f64>
+pub netring::monitor::red::RedSnapshot::p95_ms: core::option::Option<f64>
+pub netring::monitor::red::RedSnapshot::p99_ms: core::option::Option<f64>
+pub netring::monitor::red::RedSnapshot::rate: f64
+impl core::clone::Clone for netring::monitor::red::RedSnapshot
+pub fn netring::monitor::red::RedSnapshot::clone(&self) -> netring::monitor::red::RedSnapshot
+impl core::cmp::PartialEq for netring::monitor::red::RedSnapshot
+pub fn netring::monitor::red::RedSnapshot::eq(&self, other: &netring::monitor::red::RedSnapshot) -> bool
+impl core::fmt::Debug for netring::monitor::red::RedSnapshot
+pub fn netring::monitor::red::RedSnapshot::fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::marker::StructuralPartialEq for netring::monitor::red::RedSnapshot
+impl serde_core::ser::Serialize for netring::monitor::red::RedSnapshot
+pub fn netring::monitor::red::RedSnapshot::serialize<__S>(&self, __serializer: __S) -> core::result::Result<<__S as serde_core::ser::Serializer>::Ok, <__S as serde_core::ser::Serializer>::Error> where __S: serde_core::ser::Serializer
 pub mod netring::monitor::registry
 pub struct netring::monitor::registry::HandlerRegistry
 impl netring::monitor::registry::HandlerRegistry
@@ -2810,7 +3015,6 @@ impl<P: netring::protocol::Protocol> netring::monitor::registry::ProtocolSlot fo
 pub fn netring::monitor::registry::TypedBroadcastProtocolSlot<P>::drain_and_dispatch(&mut self, dispatcher: &mut netring::monitor::dispatcher::Dispatcher, ctx: &mut netring::ctx::Ctx<'_>) -> netring::error::Result<()>
 impl<P: netring::protocol::Protocol> netring::monitor::registry::ProtocolSlot for netring::monitor::registry::TypedProtocolSlot<P>
 pub fn netring::monitor::registry::TypedProtocolSlot<P>::drain_and_dispatch(&mut self, dispatcher: &mut netring::monitor::dispatcher::Dispatcher, ctx: &mut netring::ctx::Ctx<'_>) -> netring::error::Result<()>
-pub mod netring::monitor::risk
 pub mod netring::monitor::run
 pub mod netring::monitor::shard
 pub struct netring::monitor::shard::ShardedRunner
@@ -3661,6 +3865,8 @@ pub fn netring::monitor::Monitor::fmt(&self, f: &mut core::fmt::Formatter<'_>) -
 pub struct netring::monitor::MonitorBuilder
 impl netring::monitor::MonitorBuilder
 pub fn netring::monitor::MonitorBuilder::active_idle_threshold(self, threshold: core::option::Option<core::time::Duration>) -> Self
+pub fn netring::monitor::MonitorBuilder::aggregate(self) -> Self
+pub fn netring::monitor::MonitorBuilder::aggregate_with(self, cfg: netring::monitor::aggregate::AggregateConfig) -> Self
 pub fn netring::monitor::MonitorBuilder::all_l4(self) -> Self
 pub fn netring::monitor::MonitorBuilder::all_l7(self) -> Self
 pub fn netring::monitor::MonitorBuilder::arp_allow(self, ip: core::net::ip_addr::Ipv4Addr, mac: flowscope::mac_addr::MacAddr) -> Self
@@ -3679,17 +3885,21 @@ pub fn netring::monitor::MonitorBuilder::capture_metrics(self, period: core::tim
 pub fn netring::monitor::MonitorBuilder::catch_handler_panics(self, on: bool) -> Self
 pub fn netring::monitor::MonitorBuilder::counter<K>(self, window: core::time::Duration, bucket: core::time::Duration) -> Self where K: core::hash::Hash + core::cmp::Eq + core::clone::Clone + core::marker::Send + 'static
 pub fn netring::monitor::MonitorBuilder::detect<E, F>(self, detector: netring::detector_macro::Detector<E, F>) -> Self where E: netring::protocol::event_typed::Event, F: netring::monitor::handler::Handler<E, netring::monitor::handler::PayloadCtx>
+pub fn netring::monitor::MonitorBuilder::detector(self, detector: impl flowscope::detect::registry::Detector<netring::protocol::FlowKey> + 'static) -> Self
+pub fn netring::monitor::MonitorBuilder::detectors(self, registry: flowscope::detect::registry::DetectorRegistry<netring::protocol::FlowKey>) -> Self
 pub fn netring::monitor::MonitorBuilder::drain_timeout(self, t: core::time::Duration) -> Self
 pub fn netring::monitor::MonitorBuilder::export_active_timeout(self, period: core::time::Duration) -> Self
 pub fn netring::monitor::MonitorBuilder::export_flows<E>(self, exporter: E) -> Self where E: netring::export::FlowExporter + 'static
 pub fn netring::monitor::MonitorBuilder::fanout(self, mode: netring::config::FanoutMode, group_id: u16) -> Self
+pub fn netring::monitor::MonitorBuilder::flow_analysis(self) -> Self
+pub fn netring::monitor::MonitorBuilder::flow_analysis_with(self, cfg: netring::monitor::analysis::FlowAnalysisConfig) -> Self
 pub fn netring::monitor::MonitorBuilder::flow_risk(self) -> Self
 pub fn netring::monitor::MonitorBuilder::flow_state<T>(self, idle_timeout: core::time::Duration) -> Self where T: core::default::Default + core::marker::Send + 'static
 pub fn netring::monitor::MonitorBuilder::handler_error_policy(self, policy: netring::monitor::HandlerErrorPolicy) -> Self
 pub fn netring::monitor::MonitorBuilder::infer_tcp_initiator(self, enable: bool) -> Self
 pub fn netring::monitor::MonitorBuilder::interface(self, iface: impl core::convert::Into<alloc::string::String>) -> Self
 pub fn netring::monitor::MonitorBuilder::interfaces<I, S>(self, ifaces: I) -> Self where I: core::iter::traits::collect::IntoIterator<Item = S>, S: core::convert::Into<alloc::string::String>
-pub fn netring::monitor::MonitorBuilder::ioc(self, set: netring::monitor::ioc::IocSet) -> Self
+pub fn netring::monitor::MonitorBuilder::ioc(self, set: flowscope::detect::ioc::IocSet) -> Self
 pub fn netring::monitor::MonitorBuilder::kernel_prefilter(&self) -> core::option::Option<netring::config::bpf::BpfFilter>
 pub fn netring::monitor::MonitorBuilder::label_table(self, table: flowscope::well_known::LabelTable) -> Self
 pub fn netring::monitor::MonitorBuilder::layer<L: netring::layer::Layer + 'static>(self, layer: L) -> Self
@@ -3697,12 +3907,16 @@ pub fn netring::monitor::MonitorBuilder::max_scan_bytes(self, max: usize) -> Sel
 pub fn netring::monitor::MonitorBuilder::max_tracked_nprint_flows(self, max: usize) -> Self
 pub fn netring::monitor::MonitorBuilder::max_tracked_yara_flows(self, max: usize) -> Self
 pub fn netring::monitor::MonitorBuilder::name(self, name: impl core::convert::Into<alloc::boxed::Box<str>>) -> Self
+pub fn netring::monitor::MonitorBuilder::name_map(self) -> Self
+pub fn netring::monitor::MonitorBuilder::name_map_with(self, config: flowscope::dns::name_map::NameMapConfig) -> Self
 pub fn netring::monitor::MonitorBuilder::ndp_allow(self, ip: core::net::ip_addr::Ipv6Addr, mac: flowscope::mac_addr::MacAddr) -> Self
 pub fn netring::monitor::MonitorBuilder::ndp_report_new_binding(self, enabled: bool) -> Self
 pub fn netring::monitor::MonitorBuilder::ndp_report_unsolicited(self, enabled: bool) -> Self
 pub fn netring::monitor::MonitorBuilder::ndp_warmup(self, window: core::time::Duration) -> Self
 pub fn netring::monitor::MonitorBuilder::nprint(self, config: flowscope::nprint::matrix::NPrintConfig) -> Self
 pub fn netring::monitor::MonitorBuilder::on<E: netring::protocol::event_typed::Event>(self, handler: impl netring::monitor::handler::Handler<E, netring::monitor::handler::PayloadOnly>) -> Self
+pub fn netring::monitor::MonitorBuilder::on_aggregate<F>(self, period: core::time::Duration, f: F) -> Self where F: core::ops::function::Fn(&netring::monitor::aggregate::AggregateReport<'_>) -> netring::error::Result<()> + core::marker::Send + core::marker::Sync + 'static
+pub fn netring::monitor::MonitorBuilder::on_analyzed_flow(self, handler: impl core::ops::function::Fn(&flowscope::analysis::analyzed_flow::AnalyzedFlow<netring::protocol::FlowKey>, &mut netring::ctx::Ctx<'_>) + core::marker::Send + core::marker::Sync + 'static) -> Self
 pub fn netring::monitor::MonitorBuilder::on_arp<F>(self, handler: F) -> Self where F: core::ops::function::Fn(&flowscope::arp::types::ArpMessage, &mut netring::ctx::Ctx<'_>) -> netring::error::Result<()> + core::marker::Send + 'static
 pub fn netring::monitor::MonitorBuilder::on_arp_anomaly<F>(self, handler: F) -> Self where F: core::ops::function::Fn(&netring::monitor::arp::ArpAnomaly, &mut netring::ctx::Ctx<'_>) -> netring::error::Result<()> + core::marker::Send + 'static
 pub fn netring::monitor::MonitorBuilder::on_asset<F>(self, handler: F) -> Self where F: core::ops::function::Fn(&flowscope::asset::core::Asset, &mut netring::ctx::Ctx<'_>) -> netring::error::Result<()> + core::marker::Send + 'static
@@ -3711,24 +3925,35 @@ pub fn netring::monitor::MonitorBuilder::on_bandwidth<F>(self, period: core::tim
 pub fn netring::monitor::MonitorBuilder::on_capture_stats<F>(self, period: core::time::Duration, handler: F) -> Self where F: core::ops::function::FnMut(&netring::monitor::telemetry::CaptureTelemetry, &mut netring::ctx::Ctx<'_>) -> netring::error::Result<()> + core::marker::Send + 'static
 pub fn netring::monitor::MonitorBuilder::on_cdp<F>(self, handler: F) -> Self where F: core::ops::function::Fn(&flowscope::cdp::types::CdpMessage, &mut netring::ctx::Ctx<'_>) -> netring::error::Result<()> + core::marker::Send + 'static
 pub fn netring::monitor::MonitorBuilder::on_ctx<E: netring::protocol::event_typed::Event>(self, handler: impl netring::monitor::handler::Handler<E, netring::monitor::handler::PayloadCtx>) -> Self
+pub fn netring::monitor::MonitorBuilder::on_dns<F>(self, handler: F) -> Self where F: core::ops::function::Fn(&netring::monitor::dns::DnsView<'_>, &mut netring::ctx::Ctx<'_>) -> netring::error::Result<()> + core::marker::Send + core::marker::Sync + 'static
 pub fn netring::monitor::MonitorBuilder::on_effect<E: netring::protocol::event_typed::Event>(self, handler: impl netring::monitor::effect::EffectHandler<E>) -> Self
+pub fn netring::monitor::MonitorBuilder::on_encrypted_dns<F>(self, handler: F) -> Self where F: core::ops::function::Fn(&netring::monitor::fingerprint::EncryptedDns, &mut netring::ctx::Ctx<'_>) -> netring::error::Result<()> + core::marker::Send + core::marker::Sync + 'static
 pub fn netring::monitor::MonitorBuilder::on_fingerprint<F>(self, handler: F) -> Self where F: core::ops::function::Fn(&netring::monitor::fingerprint::TlsFingerprint, &mut netring::ctx::Ctx<'_>) -> netring::error::Result<()> + core::marker::Send + core::marker::Sync + 'static
 pub fn netring::monitor::MonitorBuilder::on_http_fingerprint<F>(self, handler: F) -> Self where F: core::ops::function::Fn(&netring::monitor::fingerprint::HttpFingerprint, &mut netring::ctx::Ctx<'_>) -> netring::error::Result<()> + core::marker::Send + core::marker::Sync + 'static
 pub fn netring::monitor::MonitorBuilder::on_icmp_error(self, handler: impl netring::monitor::handler::Handler<netring::protocol::event_typed::IcmpError, netring::monitor::handler::PayloadCtx>) -> Self
 pub fn netring::monitor::MonitorBuilder::on_lldp<F>(self, handler: F) -> Self where F: core::ops::function::Fn(&flowscope::lldp::types::LldpMessage, &mut netring::ctx::Ctx<'_>) -> netring::error::Result<()> + core::marker::Send + 'static
 pub fn netring::monitor::MonitorBuilder::on_ml_features<F>(self, handler: F) -> Self where F: core::ops::function::FnMut(&flowscope::ml_features::features::CicFlowFeatures) + core::marker::Send + 'static
+pub fn netring::monitor::MonitorBuilder::on_name<F>(self, handler: F) -> Self where F: core::ops::function::Fn(core::net::ip_addr::IpAddr, &flowscope::dns::name_map::NameClaim, &mut netring::ctx::Ctx<'_>) + core::marker::Send + core::marker::Sync + 'static
 pub fn netring::monitor::MonitorBuilder::on_named<E: netring::protocol::event_typed::Event>(self, name: &'static str, handler: impl netring::monitor::handler::Handler<E, netring::monitor::handler::PayloadCtx>) -> Self
 pub fn netring::monitor::MonitorBuilder::on_ndp<F>(self, handler: F) -> Self where F: core::ops::function::Fn(&flowscope::ndp::types::NdpMessage, &mut netring::ctx::Ctx<'_>) -> netring::error::Result<()> + core::marker::Send + 'static
 pub fn netring::monitor::MonitorBuilder::on_ndp_anomaly<F>(self, handler: F) -> Self where F: core::ops::function::Fn(&netring::monitor::ndp::NdpAnomaly, &mut netring::ctx::Ctx<'_>) -> netring::error::Result<()> + core::marker::Send + 'static
 pub fn netring::monitor::MonitorBuilder::on_nprint<F>(self, handler: F) -> Self where F: core::ops::function::FnMut(&netring::protocol::FlowKey, &flowscope::nprint::matrix::NPrintMatrix) + core::marker::Send + 'static
+pub fn netring::monitor::MonitorBuilder::on_owner_bandwidth<F>(self, period: core::time::Duration, f: F) -> Self where F: core::ops::function::Fn(&netring::monitor::owner_bandwidth::OwnerBandwidthReport<'_>) -> netring::error::Result<()> + core::marker::Send + core::marker::Sync + 'static
 pub fn netring::monitor::MonitorBuilder::on_p0f<F>(self, handler: F) -> Self where F: core::ops::function::Fn(&flowscope::tcp_fingerprint::fingerprint::TcpFingerprint, &mut netring::ctx::Ctx<'_>) -> netring::error::Result<()> + core::marker::Send + 'static
+pub fn netring::monitor::MonitorBuilder::on_quic_fingerprint<F>(self, handler: F) -> Self where F: core::ops::function::Fn(&netring::monitor::fingerprint::QuicFingerprint, &mut netring::ctx::Ctx<'_>) -> netring::error::Result<()> + core::marker::Send + core::marker::Sync + 'static
+pub fn netring::monitor::MonitorBuilder::on_red<F>(self, period: core::time::Duration, f: F) -> Self where F: core::ops::function::Fn(&netring::monitor::red::RedReport<'_>) -> netring::error::Result<()> + core::marker::Send + core::marker::Sync + 'static
+pub fn netring::monitor::MonitorBuilder::on_ssh_fingerprint<F>(self, handler: F) -> Self where F: core::ops::function::Fn(&netring::monitor::fingerprint::SshFingerprint, &mut netring::ctx::Ctx<'_>) -> netring::error::Result<()> + core::marker::Send + core::marker::Sync + 'static
 pub fn netring::monitor::MonitorBuilder::on_tcp_reset(self, handler: impl netring::monitor::handler::Handler<netring::protocol::event_typed::TcpRst, netring::monitor::handler::PayloadCtx>) -> Self
 pub fn netring::monitor::MonitorBuilder::on_yara_match<F>(self, handler: F) -> Self where F: core::ops::function::FnMut(&netring::protocol::FlowKey, &netring::monitor::yara::YaraMatch) + core::marker::Send + 'static
+pub fn netring::monitor::MonitorBuilder::owner_bandwidth(self) -> Self
+pub fn netring::monitor::MonitorBuilder::owner_bandwidth_windowed(self, window: core::time::Duration, bucket: core::time::Duration) -> Self
 pub fn netring::monitor::MonitorBuilder::pcap_source(self, path: impl core::convert::Into<std::path::PathBuf>) -> Self
 pub fn netring::monitor::MonitorBuilder::pcap_speed_factor(self, factor: f32) -> Self
 pub fn netring::monitor::MonitorBuilder::promiscuous(self, enable: bool) -> Self
 pub fn netring::monitor::MonitorBuilder::protocol<P: netring::protocol::Protocol>(self) -> Self
 pub fn netring::monitor::MonitorBuilder::reassembly_memcap(self, bytes: u64, policy: flowscope::event::MemcapPolicy) -> Self
+pub fn netring::monitor::MonitorBuilder::red(self) -> Self
+pub fn netring::monitor::MonitorBuilder::red_with(self, cfg: netring::monitor::red::RedConfig) -> Self
 pub fn netring::monitor::MonitorBuilder::report<F>(self, period: core::time::Duration, f: F) -> Self where F: core::ops::function::Fn(netring::report::ReportSnapshot<'_, '_>) -> netring::error::Result<()> + core::marker::Send + core::marker::Sync + 'static
 pub fn netring::monitor::MonitorBuilder::report_to<R, B, S>(self, period: core::time::Duration, build: B, sink: S) -> Self where R: netring::report::Report, B: core::ops::function::Fn(netring::report::ReportSnapshot<'_, '_>) -> R + core::marker::Send + core::marker::Sync + 'static, S: netring::report::ReportSink<R> + 'static
 pub fn netring::monitor::MonitorBuilder::resolved_capture_plan(&self) -> &[(alloc::string::String, alloc::string::String)]
@@ -3743,6 +3968,7 @@ pub fn netring::monitor::MonitorBuilder::tick<H, M>(self, period: core::time::Du
 pub fn netring::monitor::MonitorBuilder::tick_ctx(self, period: core::time::Duration, handler: impl netring::monitor::handler::Handler<netring::protocol::event_typed::Tick, netring::monitor::handler::CtxOnly>) -> Self
 pub fn netring::monitor::MonitorBuilder::tracker_config(&self) -> &flowscope::tracker::FlowTrackerConfig
 pub fn netring::monitor::MonitorBuilder::with_broadcast<P: netring::protocol::MessageProtocol>(self) -> Self where <P as netring::protocol::Protocol>::Message: core::marker::Send + core::marker::Sync + core::clone::Clone + 'static
+pub fn netring::monitor::MonitorBuilder::with_flow_attribution<F>(self, hook: F) -> Self where F: core::ops::function::Fn(&netring::protocol::FlowKey) -> core::option::Option<flowscope::correlate::bandwidth::Attribution> + core::marker::Send + core::marker::Sync + 'static
 pub fn netring::monitor::MonitorBuilder::xdp_interface(self, iface: impl core::convert::Into<alloc::string::String>) -> Self
 pub fn netring::monitor::MonitorBuilder::xdp_interface_loaded(self, iface: impl core::convert::Into<alloc::string::String>) -> Self
 pub fn netring::monitor::MonitorBuilder::xdp_queues(self, queues: netring::afxdp::Queues) -> Self
@@ -3812,10 +4038,12 @@ pub struct netring::monitor::ReloadHandle
 impl netring::monitor::ReloadHandle
 pub fn netring::monitor::ReloadHandle::has_ioc(&self) -> bool
 pub fn netring::monitor::ReloadHandle::has_sigma(&self) -> bool
+pub fn netring::monitor::ReloadHandle::has_yara(&self) -> bool
 pub fn netring::monitor::ReloadHandle::packet_filter_count(&self) -> usize
-pub fn netring::monitor::ReloadHandle::set_ioc(&self, set: netring::monitor::ioc::IocSet) -> bool
+pub fn netring::monitor::ReloadHandle::set_ioc(&self, set: flowscope::detect::ioc::IocSet) -> bool
 pub fn netring::monitor::ReloadHandle::set_packet_filter(&self, index: usize, expr: &str) -> core::result::Result<bool, netring::monitor::subscription::expr::ParseError>
 pub fn netring::monitor::ReloadHandle::set_sigma(&self, rules: netring::monitor::sigma::SigmaRuleSet) -> bool
+pub fn netring::monitor::ReloadHandle::set_yara(&self, rules: netring::monitor::yara::YaraRules) -> bool
 impl core::clone::Clone for netring::monitor::ReloadHandle
 pub fn netring::monitor::ReloadHandle::clone(&self) -> netring::monitor::ReloadHandle
 pub struct netring::monitor::ShardedRunner
@@ -3842,11 +4070,13 @@ impl core::fmt::Debug for netring::monitor::tick::TickRegistration
 pub fn netring::monitor::tick::TickRegistration::fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result
 pub struct netring::monitor::TlsFingerprint
 pub netring::monitor::TlsFingerprint::alpn: core::option::Option<alloc::string::String>
+pub netring::monitor::TlsFingerprint::app_protocol: flowscope::app_proto::AppProtocol
 pub netring::monitor::TlsFingerprint::ja3: core::option::Option<alloc::string::String>
 pub netring::monitor::TlsFingerprint::ja4: core::option::Option<alloc::string::String>
 pub netring::monitor::TlsFingerprint::ja4s: core::option::Option<alloc::string::String>
 pub netring::monitor::TlsFingerprint::ja4x: core::option::Option<alloc::string::String>
 pub netring::monitor::TlsFingerprint::key: core::option::Option<netring::protocol::FlowKey>
+pub netring::monitor::TlsFingerprint::pq_key_share: bool
 pub netring::monitor::TlsFingerprint::sni: core::option::Option<alloc::string::String>
 impl netring::monitor::fingerprint::TlsFingerprint
 pub fn netring::monitor::fingerprint::TlsFingerprint::has_fingerprint(&self) -> bool
@@ -3915,6 +4145,20 @@ pub fn netring::monitor::registry::TypedBroadcastProtocolSlot<P>::drain_and_disp
 impl<P: netring::protocol::Protocol> netring::monitor::registry::ProtocolSlot for netring::monitor::registry::TypedProtocolSlot<P>
 pub fn netring::monitor::registry::TypedProtocolSlot<P>::drain_and_dispatch(&mut self, dispatcher: &mut netring::monitor::dispatcher::Dispatcher, ctx: &mut netring::ctx::Ctx<'_>) -> netring::error::Result<()>
 pub type netring::monitor::BoxFuture<T> = core::pin::Pin<alloc::boxed::Box<(dyn core::future::future::Future<Output = T> + core::marker::Send)>>
+pub mod netring::netns
+pub struct netring::netns::NetNs
+impl netring::netns::NetNs
+pub fn netring::netns::NetNs::as_fd(&self) -> std::os::fd::owned::BorrowedFd<'_>
+pub fn netring::netns::NetNs::current() -> std::io::error::Result<Self>
+pub fn netring::netns::NetNs::from_name(name: &str) -> std::io::error::Result<Self>
+pub fn netring::netns::NetNs::from_path(path: impl core::convert::AsRef<std::path::Path>, label: impl core::convert::Into<alloc::string::String>) -> std::io::error::Result<Self>
+pub fn netring::netns::NetNs::from_pid(pid: u32) -> std::io::error::Result<Self>
+pub fn netring::netns::NetNs::inode(&self) -> std::io::error::Result<u64>
+pub fn netring::netns::NetNs::label(&self) -> &str
+pub fn netring::netns::NetNs::run_in<T, F>(&self, f: F) -> std::io::error::Result<T> where F: core::ops::function::FnOnce() -> T + core::marker::Send, T: core::marker::Send
+pub fn netring::netns::NetNs::try_clone(&self) -> std::io::error::Result<Self>
+impl core::fmt::Debug for netring::netns::NetNs
+pub fn netring::netns::NetNs::fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result
 pub mod netring::packet
 pub use netring::packet::Timestamp
 pub enum netring::packet::PacketDirection
@@ -4090,6 +4334,65 @@ pub fn netring::pcap_flow::PcapSessionStream<E, P>::tracker_stats(&self) -> &flo
 impl<E, P> futures_core::stream::Stream for netring::pcap_flow::PcapSessionStream<E, P> where E: flowscope::extractor::FlowExtractor + core::marker::Unpin, <E as flowscope::extractor::FlowExtractor>::Key: core::hash::Hash + core::cmp::Eq + core::clone::Clone + core::marker::Send + core::marker::Unpin + 'static, P: flowscope::session::SessionParser + core::clone::Clone + core::marker::Send + core::marker::Sync + core::marker::Unpin, <P as flowscope::session::SessionParser>::Message: core::marker::Unpin
 pub type netring::pcap_flow::PcapSessionStream<E, P>::Item = core::result::Result<netring::async_adapters::session_event::SessionEvent<<E as flowscope::extractor::FlowExtractor>::Key, <P as flowscope::session::SessionParser>::Message>, netring::error::Error>
 pub fn netring::pcap_flow::PcapSessionStream<E, P>::poll_next(self: core::pin::Pin<&mut Self>, cx: &mut core::task::wake::Context<'_>) -> core::task::poll::Poll<core::option::Option<Self::Item>>
+pub mod netring::pcap_rotate
+pub enum netring::pcap_rotate::FileNaming
+pub netring::pcap_rotate::FileNaming::EpochSeconds
+pub netring::pcap_rotate::FileNaming::Sequence
+impl core::clone::Clone for netring::pcap_rotate::FileNaming
+pub fn netring::pcap_rotate::FileNaming::clone(&self) -> netring::pcap_rotate::FileNaming
+impl core::cmp::Eq for netring::pcap_rotate::FileNaming
+impl core::cmp::PartialEq for netring::pcap_rotate::FileNaming
+pub fn netring::pcap_rotate::FileNaming::eq(&self, other: &netring::pcap_rotate::FileNaming) -> bool
+impl core::fmt::Debug for netring::pcap_rotate::FileNaming
+pub fn netring::pcap_rotate::FileNaming::fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::marker::Copy for netring::pcap_rotate::FileNaming
+impl core::marker::StructuralPartialEq for netring::pcap_rotate::FileNaming
+pub struct netring::pcap_rotate::PreTriggerRing
+impl netring::pcap_rotate::PreTriggerRing
+pub fn netring::pcap_rotate::PreTriggerRing::drain_into(&mut self, w: &mut netring::pcap_rotate::RotatingPcapWriter) -> std::io::error::Result<()>
+pub fn netring::pcap_rotate::PreTriggerRing::is_empty(&self) -> bool
+pub fn netring::pcap_rotate::PreTriggerRing::len(&self) -> usize
+pub fn netring::pcap_rotate::PreTriggerRing::new(max_bytes: usize) -> Self
+pub fn netring::pcap_rotate::PreTriggerRing::push(&mut self, data: &[u8], ts: flowscope::timestamp::Timestamp, original_len: usize)
+#[non_exhaustive] pub struct netring::pcap_rotate::RotatingConfig
+pub netring::pcap_rotate::RotatingConfig::linktype: u32
+pub netring::pcap_rotate::RotatingConfig::max_bytes: core::option::Option<u64>
+pub netring::pcap_rotate::RotatingConfig::max_duration: core::option::Option<core::time::Duration>
+pub netring::pcap_rotate::RotatingConfig::max_files: core::option::Option<usize>
+pub netring::pcap_rotate::RotatingConfig::max_total_bytes: core::option::Option<u64>
+pub netring::pcap_rotate::RotatingConfig::naming: netring::pcap_rotate::FileNaming
+impl core::clone::Clone for netring::pcap_rotate::RotatingConfig
+pub fn netring::pcap_rotate::RotatingConfig::clone(&self) -> netring::pcap_rotate::RotatingConfig
+impl core::default::Default for netring::pcap_rotate::RotatingConfig
+pub fn netring::pcap_rotate::RotatingConfig::default() -> Self
+impl core::fmt::Debug for netring::pcap_rotate::RotatingConfig
+pub fn netring::pcap_rotate::RotatingConfig::fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+pub struct netring::pcap_rotate::RotatingPcapWriter
+impl netring::pcap_rotate::RotatingPcapWriter
+pub fn netring::pcap_rotate::RotatingPcapWriter::create(dir: impl core::convert::AsRef<std::path::Path>, base: impl core::convert::Into<alloc::string::String>, config: netring::pcap_rotate::RotatingConfig) -> std::io::error::Result<Self>
+pub fn netring::pcap_rotate::RotatingPcapWriter::current_path(&self) -> core::option::Option<&std::path::Path>
+pub fn netring::pcap_rotate::RotatingPcapWriter::file_paths(&self) -> alloc::vec::Vec<std::path::PathBuf>
+pub fn netring::pcap_rotate::RotatingPcapWriter::rotate_now(&mut self) -> std::io::error::Result<()>
+pub fn netring::pcap_rotate::RotatingPcapWriter::sync_and_close(&mut self) -> std::io::error::Result<()>
+pub fn netring::pcap_rotate::RotatingPcapWriter::write(&mut self, pkt: &netring::packet::Packet<'_>, snaplen: core::option::Option<u32>) -> std::io::error::Result<()>
+pub fn netring::pcap_rotate::RotatingPcapWriter::write_raw(&mut self, data: &[u8], ts: flowscope::timestamp::Timestamp, original_len: usize, snaplen: core::option::Option<u32>) -> std::io::error::Result<()>
+pub struct netring::pcap_rotate::TriggerHandle(_)
+impl netring::pcap_rotate::TriggerHandle
+pub fn netring::pcap_rotate::TriggerHandle::fire(&self)
+pub fn netring::pcap_rotate::TriggerHandle::is_fired(&self) -> bool
+pub fn netring::pcap_rotate::TriggerHandle::new() -> Self
+impl core::clone::Clone for netring::pcap_rotate::TriggerHandle
+pub fn netring::pcap_rotate::TriggerHandle::clone(&self) -> netring::pcap_rotate::TriggerHandle
+impl core::default::Default for netring::pcap_rotate::TriggerHandle
+pub fn netring::pcap_rotate::TriggerHandle::default() -> netring::pcap_rotate::TriggerHandle
+impl core::fmt::Debug for netring::pcap_rotate::TriggerHandle
+pub fn netring::pcap_rotate::TriggerHandle::fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+pub struct netring::pcap_rotate::TriggeredPcapWriter
+impl netring::pcap_rotate::TriggeredPcapWriter
+pub fn netring::pcap_rotate::TriggeredPcapWriter::is_recording(&self) -> bool
+pub fn netring::pcap_rotate::TriggeredPcapWriter::new(ring_bytes: usize, writer: netring::pcap_rotate::RotatingPcapWriter) -> (Self, netring::pcap_rotate::TriggerHandle)
+pub fn netring::pcap_rotate::TriggeredPcapWriter::sync_and_close(&mut self) -> std::io::error::Result<()>
+pub fn netring::pcap_rotate::TriggeredPcapWriter::write_raw(&mut self, data: &[u8], ts: flowscope::timestamp::Timestamp, original_len: usize) -> std::io::error::Result<()>
 pub mod netring::pcap_source
 #[non_exhaustive] pub enum netring::pcap_source::PcapFormat
 pub netring::pcap_source::PcapFormat::LegacyPcap
@@ -4167,6 +4470,7 @@ pub use netring::prelude::Ewma
 pub use netring::prelude::FlowSide
 pub use netring::prelude::IcmpFamily
 pub use netring::prelude::Inventory
+pub use netring::prelude::IocSet
 pub use netring::prelude::KeyFields
 pub use netring::prelude::L4Proto
 pub use netring::prelude::LabelTable
@@ -4397,12 +4701,14 @@ pub fn netring::ctx::Ctx<'_>::split_state_sink_counter<T, K>(&mut self) -> (&mut
 impl<'a> netring::ctx::Ctx<'a>
 pub fn netring::ctx::Ctx<'a>::arp_table(&self) -> core::option::Option<&flowscope::correlate::neighbor_table::ArpTable>
 pub fn netring::ctx::Ctx<'a>::bandwidth(&self) -> core::option::Option<netring::monitor::bandwidth::BandwidthReport<'_>>
+pub fn netring::ctx::Ctx<'a>::community_id(&self) -> core::option::Option<alloc::string::String>
 pub fn netring::ctx::Ctx<'a>::counter<K>(&self) -> core::option::Option<&flowscope::correlate::bucketed::TimeBucketedCounter<K>> where K: core::hash::Hash + core::cmp::Eq + core::clone::Clone + core::marker::Send + 'static
 pub fn netring::ctx::Ctx<'a>::counter_mut<K>(&mut self) -> &mut flowscope::correlate::bucketed::TimeBucketedCounter<K> where K: core::hash::Hash + core::cmp::Eq + core::clone::Clone + core::marker::Send + 'static
 pub fn netring::ctx::Ctx<'a>::emit(&mut self, kind: &'static str, severity: netring::Severity) -> netring::anomaly::sink::AnomalyWriter<'_>
 pub fn netring::ctx::Ctx<'a>::flow_state_mut<T>(&mut self) -> core::option::Option<&mut T> where T: core::default::Default + core::marker::Send + 'static
 pub fn netring::ctx::Ctx<'a>::label_table(&self) -> &flowscope::well_known::LabelTable
 pub fn netring::ctx::Ctx<'a>::lookup_icmp_flow(&self, inner: &flowscope::icmp::types::IcmpInner) -> core::option::Option<(netring::protocol::FlowKey, flowscope::event::FlowStats)>
+pub fn netring::ctx::Ctx<'a>::names(&self, ip: core::net::ip_addr::IpAddr) -> alloc::vec::Vec<alloc::string::String>
 pub fn netring::ctx::Ctx<'a>::new_for_bench(ts: flowscope::timestamp::Timestamp, state_map: &'a mut netring::ctx::StateMap, sink: &'a mut dyn netring::anomaly::sink::AnomalySink, counters: &'a mut netring::ctx::CounterRegistry, flow_states: &'a mut netring::ctx::FlowStateRegistry) -> Self
 pub fn netring::ctx::Ctx<'a>::sink_mut(&mut self) -> &mut dyn netring::anomaly::sink::AnomalySink
 pub fn netring::ctx::Ctx<'a>::state<T: 'static>(&self) -> core::option::Option<&T>
@@ -4475,6 +4781,8 @@ pub netring::prelude::FlowEnded::l4: core::option::Option<flowscope::extractor::
 pub netring::prelude::FlowEnded::reason: flowscope::event::EndReason
 pub netring::prelude::FlowEnded::stats: flowscope::event::FlowStats
 pub netring::prelude::FlowEnded::ts: flowscope::timestamp::Timestamp
+impl<P: netring::protocol::Protocol> netring::protocol::event_typed::FlowEnded<P>
+pub fn netring::protocol::event_typed::FlowEnded<P>::community_id(&self) -> core::option::Option<alloc::string::String>
 impl<P: netring::protocol::FlowProtocol> netring::protocol::event_typed::Event for netring::protocol::event_typed::FlowEnded<P>
 pub type netring::protocol::event_typed::FlowEnded<P>::Payload = netring::protocol::event_typed::FlowEnded<P>
 pub fn netring::protocol::event_typed::FlowEnded<P>::protocol_marker() -> core::option::Option<core::any::TypeId>
@@ -4485,6 +4793,8 @@ pub fn netring::protocol::event_typed::FlowEnded<P>::fmt(&self, f: &mut core::fm
 #[non_exhaustive] pub struct netring::prelude::FlowEstablished<P: netring::protocol::Protocol>
 pub netring::prelude::FlowEstablished::key: netring::protocol::FlowKey
 pub netring::prelude::FlowEstablished::ts: flowscope::timestamp::Timestamp
+impl<P: netring::protocol::Protocol> netring::protocol::event_typed::FlowEstablished<P>
+pub fn netring::protocol::event_typed::FlowEstablished<P>::community_id(&self) -> core::option::Option<alloc::string::String>
 impl<P: netring::protocol::FlowProtocol> netring::protocol::event_typed::Event for netring::protocol::event_typed::FlowEstablished<P>
 pub type netring::protocol::event_typed::FlowEstablished<P>::Payload = netring::protocol::event_typed::FlowEstablished<P>
 pub fn netring::protocol::event_typed::FlowEstablished<P>::protocol_marker() -> core::option::Option<core::any::TypeId>
@@ -4501,6 +4811,7 @@ pub netring::prelude::FlowPacket::side: flowscope::event::FlowSide
 pub netring::prelude::FlowPacket::tcp: core::option::Option<flowscope::extractor::TcpInfo>
 pub netring::prelude::FlowPacket::ts: flowscope::timestamp::Timestamp
 impl netring::protocol::event_typed::FlowPacket
+pub fn netring::protocol::event_typed::FlowPacket::community_id(&self) -> core::option::Option<alloc::string::String>
 pub fn netring::protocol::event_typed::FlowPacket::with_orientation(self, orientation: flowscope::extractor::Orientation) -> Self
 impl core::clone::Clone for netring::protocol::event_typed::FlowPacket
 pub fn netring::protocol::event_typed::FlowPacket::clone(&self) -> netring::protocol::event_typed::FlowPacket
@@ -4517,6 +4828,7 @@ pub netring::prelude::FlowStarted::l4: core::option::Option<flowscope::extractor
 pub netring::prelude::FlowStarted::orientation: flowscope::extractor::Orientation
 pub netring::prelude::FlowStarted::ts: flowscope::timestamp::Timestamp
 impl<P: netring::protocol::Protocol> netring::protocol::event_typed::FlowStarted<P>
+pub fn netring::protocol::event_typed::FlowStarted<P>::community_id(&self) -> core::option::Option<alloc::string::String>
 pub fn netring::protocol::event_typed::FlowStarted<P>::new_for_bench(key: netring::protocol::FlowKey, l4: core::option::Option<flowscope::extractor::L4Proto>, ts: flowscope::timestamp::Timestamp) -> Self
 pub fn netring::protocol::event_typed::FlowStarted<P>::with_orientation(self, orientation: flowscope::extractor::Orientation) -> Self
 impl<P: netring::protocol::FlowProtocol> netring::protocol::event_typed::Event for netring::protocol::event_typed::FlowStarted<P>
@@ -4530,6 +4842,8 @@ pub fn netring::protocol::event_typed::FlowStarted<P>::fmt(&self, f: &mut core::
 pub netring::prelude::FlowTick::key: netring::protocol::FlowKey
 pub netring::prelude::FlowTick::stats: flowscope::event::FlowStats
 pub netring::prelude::FlowTick::ts: flowscope::timestamp::Timestamp
+impl<P: netring::protocol::Protocol> netring::protocol::event_typed::FlowTick<P>
+pub fn netring::protocol::event_typed::FlowTick<P>::community_id(&self) -> core::option::Option<alloc::string::String>
 impl<P: netring::protocol::FlowProtocol> netring::protocol::event_typed::Event for netring::protocol::event_typed::FlowTick<P>
 pub type netring::protocol::event_typed::FlowTick<P>::Payload = netring::protocol::event_typed::FlowTick<P>
 pub fn netring::protocol::event_typed::FlowTick<P>::protocol_marker() -> core::option::Option<core::any::TypeId>
@@ -4613,26 +4927,6 @@ pub type netring::protocol::event_typed::IcmpError::Payload = netring::protocol:
 pub fn netring::protocol::event_typed::IcmpError::protocol_marker() -> core::option::Option<core::any::TypeId>
 pub fn netring::protocol::event_typed::IcmpError::protocol_name() -> &'static str
 pub fn netring::protocol::event_typed::IcmpError::traffic_class() -> netring::protocol::TrafficClass
-pub struct netring::prelude::IocSet
-impl netring::monitor::ioc::IocSet
-pub fn netring::monitor::ioc::IocSet::domain(self, d: impl core::convert::AsRef<str>) -> Self
-pub fn netring::monitor::ioc::IocSet::domains<S: core::convert::AsRef<str>>(self, it: impl core::iter::traits::collect::IntoIterator<Item = S>) -> Self
-pub fn netring::monitor::ioc::IocSet::ip(self, ip: core::net::ip_addr::IpAddr) -> Self
-pub fn netring::monitor::ioc::IocSet::ips(self, it: impl core::iter::traits::collect::IntoIterator<Item = core::net::ip_addr::IpAddr>) -> Self
-pub fn netring::monitor::ioc::IocSet::is_empty(&self) -> bool
-pub fn netring::monitor::ioc::IocSet::ja3(self, fp: impl core::convert::Into<alloc::string::String>) -> Self
-pub fn netring::monitor::ioc::IocSet::ja4(self, fp: impl core::convert::Into<alloc::string::String>) -> Self
-pub fn netring::monitor::ioc::IocSet::matches_domain(&self, name: &str) -> core::option::Option<&str>
-pub fn netring::monitor::ioc::IocSet::matches_ip(&self, ip: &core::net::ip_addr::IpAddr) -> bool
-pub fn netring::monitor::ioc::IocSet::matches_ja3(&self, fp: &str) -> bool
-pub fn netring::monitor::ioc::IocSet::matches_ja4(&self, fp: &str) -> bool
-pub fn netring::monitor::ioc::IocSet::new() -> Self
-impl core::clone::Clone for netring::monitor::ioc::IocSet
-pub fn netring::monitor::ioc::IocSet::clone(&self) -> netring::monitor::ioc::IocSet
-impl core::default::Default for netring::monitor::ioc::IocSet
-pub fn netring::monitor::ioc::IocSet::default() -> netring::monitor::ioc::IocSet
-impl core::fmt::Debug for netring::monitor::ioc::IocSet
-pub fn netring::monitor::ioc::IocSet::fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result
 pub struct netring::prelude::JsonReportSink
 impl core::clone::Clone for netring::report::JsonReportSink
 pub fn netring::report::JsonReportSink::clone(&self) -> netring::report::JsonReportSink
@@ -4753,6 +5047,8 @@ pub fn netring::monitor::Monitor::fmt(&self, f: &mut core::fmt::Formatter<'_>) -
 pub struct netring::prelude::MonitorBuilder
 impl netring::monitor::MonitorBuilder
 pub fn netring::monitor::MonitorBuilder::active_idle_threshold(self, threshold: core::option::Option<core::time::Duration>) -> Self
+pub fn netring::monitor::MonitorBuilder::aggregate(self) -> Self
+pub fn netring::monitor::MonitorBuilder::aggregate_with(self, cfg: netring::monitor::aggregate::AggregateConfig) -> Self
 pub fn netring::monitor::MonitorBuilder::all_l4(self) -> Self
 pub fn netring::monitor::MonitorBuilder::all_l7(self) -> Self
 pub fn netring::monitor::MonitorBuilder::arp_allow(self, ip: core::net::ip_addr::Ipv4Addr, mac: flowscope::mac_addr::MacAddr) -> Self
@@ -4771,17 +5067,21 @@ pub fn netring::monitor::MonitorBuilder::capture_metrics(self, period: core::tim
 pub fn netring::monitor::MonitorBuilder::catch_handler_panics(self, on: bool) -> Self
 pub fn netring::monitor::MonitorBuilder::counter<K>(self, window: core::time::Duration, bucket: core::time::Duration) -> Self where K: core::hash::Hash + core::cmp::Eq + core::clone::Clone + core::marker::Send + 'static
 pub fn netring::monitor::MonitorBuilder::detect<E, F>(self, detector: netring::detector_macro::Detector<E, F>) -> Self where E: netring::protocol::event_typed::Event, F: netring::monitor::handler::Handler<E, netring::monitor::handler::PayloadCtx>
+pub fn netring::monitor::MonitorBuilder::detector(self, detector: impl flowscope::detect::registry::Detector<netring::protocol::FlowKey> + 'static) -> Self
+pub fn netring::monitor::MonitorBuilder::detectors(self, registry: flowscope::detect::registry::DetectorRegistry<netring::protocol::FlowKey>) -> Self
 pub fn netring::monitor::MonitorBuilder::drain_timeout(self, t: core::time::Duration) -> Self
 pub fn netring::monitor::MonitorBuilder::export_active_timeout(self, period: core::time::Duration) -> Self
 pub fn netring::monitor::MonitorBuilder::export_flows<E>(self, exporter: E) -> Self where E: netring::export::FlowExporter + 'static
 pub fn netring::monitor::MonitorBuilder::fanout(self, mode: netring::config::FanoutMode, group_id: u16) -> Self
+pub fn netring::monitor::MonitorBuilder::flow_analysis(self) -> Self
+pub fn netring::monitor::MonitorBuilder::flow_analysis_with(self, cfg: netring::monitor::analysis::FlowAnalysisConfig) -> Self
 pub fn netring::monitor::MonitorBuilder::flow_risk(self) -> Self
 pub fn netring::monitor::MonitorBuilder::flow_state<T>(self, idle_timeout: core::time::Duration) -> Self where T: core::default::Default + core::marker::Send + 'static
 pub fn netring::monitor::MonitorBuilder::handler_error_policy(self, policy: netring::monitor::HandlerErrorPolicy) -> Self
 pub fn netring::monitor::MonitorBuilder::infer_tcp_initiator(self, enable: bool) -> Self
 pub fn netring::monitor::MonitorBuilder::interface(self, iface: impl core::convert::Into<alloc::string::String>) -> Self
 pub fn netring::monitor::MonitorBuilder::interfaces<I, S>(self, ifaces: I) -> Self where I: core::iter::traits::collect::IntoIterator<Item = S>, S: core::convert::Into<alloc::string::String>
-pub fn netring::monitor::MonitorBuilder::ioc(self, set: netring::monitor::ioc::IocSet) -> Self
+pub fn netring::monitor::MonitorBuilder::ioc(self, set: flowscope::detect::ioc::IocSet) -> Self
 pub fn netring::monitor::MonitorBuilder::kernel_prefilter(&self) -> core::option::Option<netring::config::bpf::BpfFilter>
 pub fn netring::monitor::MonitorBuilder::label_table(self, table: flowscope::well_known::LabelTable) -> Self
 pub fn netring::monitor::MonitorBuilder::layer<L: netring::layer::Layer + 'static>(self, layer: L) -> Self
@@ -4789,12 +5089,16 @@ pub fn netring::monitor::MonitorBuilder::max_scan_bytes(self, max: usize) -> Sel
 pub fn netring::monitor::MonitorBuilder::max_tracked_nprint_flows(self, max: usize) -> Self
 pub fn netring::monitor::MonitorBuilder::max_tracked_yara_flows(self, max: usize) -> Self
 pub fn netring::monitor::MonitorBuilder::name(self, name: impl core::convert::Into<alloc::boxed::Box<str>>) -> Self
+pub fn netring::monitor::MonitorBuilder::name_map(self) -> Self
+pub fn netring::monitor::MonitorBuilder::name_map_with(self, config: flowscope::dns::name_map::NameMapConfig) -> Self
 pub fn netring::monitor::MonitorBuilder::ndp_allow(self, ip: core::net::ip_addr::Ipv6Addr, mac: flowscope::mac_addr::MacAddr) -> Self
 pub fn netring::monitor::MonitorBuilder::ndp_report_new_binding(self, enabled: bool) -> Self
 pub fn netring::monitor::MonitorBuilder::ndp_report_unsolicited(self, enabled: bool) -> Self
 pub fn netring::monitor::MonitorBuilder::ndp_warmup(self, window: core::time::Duration) -> Self
 pub fn netring::monitor::MonitorBuilder::nprint(self, config: flowscope::nprint::matrix::NPrintConfig) -> Self
 pub fn netring::monitor::MonitorBuilder::on<E: netring::protocol::event_typed::Event>(self, handler: impl netring::monitor::handler::Handler<E, netring::monitor::handler::PayloadOnly>) -> Self
+pub fn netring::monitor::MonitorBuilder::on_aggregate<F>(self, period: core::time::Duration, f: F) -> Self where F: core::ops::function::Fn(&netring::monitor::aggregate::AggregateReport<'_>) -> netring::error::Result<()> + core::marker::Send + core::marker::Sync + 'static
+pub fn netring::monitor::MonitorBuilder::on_analyzed_flow(self, handler: impl core::ops::function::Fn(&flowscope::analysis::analyzed_flow::AnalyzedFlow<netring::protocol::FlowKey>, &mut netring::ctx::Ctx<'_>) + core::marker::Send + core::marker::Sync + 'static) -> Self
 pub fn netring::monitor::MonitorBuilder::on_arp<F>(self, handler: F) -> Self where F: core::ops::function::Fn(&flowscope::arp::types::ArpMessage, &mut netring::ctx::Ctx<'_>) -> netring::error::Result<()> + core::marker::Send + 'static
 pub fn netring::monitor::MonitorBuilder::on_arp_anomaly<F>(self, handler: F) -> Self where F: core::ops::function::Fn(&netring::monitor::arp::ArpAnomaly, &mut netring::ctx::Ctx<'_>) -> netring::error::Result<()> + core::marker::Send + 'static
 pub fn netring::monitor::MonitorBuilder::on_asset<F>(self, handler: F) -> Self where F: core::ops::function::Fn(&flowscope::asset::core::Asset, &mut netring::ctx::Ctx<'_>) -> netring::error::Result<()> + core::marker::Send + 'static
@@ -4803,24 +5107,35 @@ pub fn netring::monitor::MonitorBuilder::on_bandwidth<F>(self, period: core::tim
 pub fn netring::monitor::MonitorBuilder::on_capture_stats<F>(self, period: core::time::Duration, handler: F) -> Self where F: core::ops::function::FnMut(&netring::monitor::telemetry::CaptureTelemetry, &mut netring::ctx::Ctx<'_>) -> netring::error::Result<()> + core::marker::Send + 'static
 pub fn netring::monitor::MonitorBuilder::on_cdp<F>(self, handler: F) -> Self where F: core::ops::function::Fn(&flowscope::cdp::types::CdpMessage, &mut netring::ctx::Ctx<'_>) -> netring::error::Result<()> + core::marker::Send + 'static
 pub fn netring::monitor::MonitorBuilder::on_ctx<E: netring::protocol::event_typed::Event>(self, handler: impl netring::monitor::handler::Handler<E, netring::monitor::handler::PayloadCtx>) -> Self
+pub fn netring::monitor::MonitorBuilder::on_dns<F>(self, handler: F) -> Self where F: core::ops::function::Fn(&netring::monitor::dns::DnsView<'_>, &mut netring::ctx::Ctx<'_>) -> netring::error::Result<()> + core::marker::Send + core::marker::Sync + 'static
 pub fn netring::monitor::MonitorBuilder::on_effect<E: netring::protocol::event_typed::Event>(self, handler: impl netring::monitor::effect::EffectHandler<E>) -> Self
+pub fn netring::monitor::MonitorBuilder::on_encrypted_dns<F>(self, handler: F) -> Self where F: core::ops::function::Fn(&netring::monitor::fingerprint::EncryptedDns, &mut netring::ctx::Ctx<'_>) -> netring::error::Result<()> + core::marker::Send + core::marker::Sync + 'static
 pub fn netring::monitor::MonitorBuilder::on_fingerprint<F>(self, handler: F) -> Self where F: core::ops::function::Fn(&netring::monitor::fingerprint::TlsFingerprint, &mut netring::ctx::Ctx<'_>) -> netring::error::Result<()> + core::marker::Send + core::marker::Sync + 'static
 pub fn netring::monitor::MonitorBuilder::on_http_fingerprint<F>(self, handler: F) -> Self where F: core::ops::function::Fn(&netring::monitor::fingerprint::HttpFingerprint, &mut netring::ctx::Ctx<'_>) -> netring::error::Result<()> + core::marker::Send + core::marker::Sync + 'static
 pub fn netring::monitor::MonitorBuilder::on_icmp_error(self, handler: impl netring::monitor::handler::Handler<netring::protocol::event_typed::IcmpError, netring::monitor::handler::PayloadCtx>) -> Self
 pub fn netring::monitor::MonitorBuilder::on_lldp<F>(self, handler: F) -> Self where F: core::ops::function::Fn(&flowscope::lldp::types::LldpMessage, &mut netring::ctx::Ctx<'_>) -> netring::error::Result<()> + core::marker::Send + 'static
 pub fn netring::monitor::MonitorBuilder::on_ml_features<F>(self, handler: F) -> Self where F: core::ops::function::FnMut(&flowscope::ml_features::features::CicFlowFeatures) + core::marker::Send + 'static
+pub fn netring::monitor::MonitorBuilder::on_name<F>(self, handler: F) -> Self where F: core::ops::function::Fn(core::net::ip_addr::IpAddr, &flowscope::dns::name_map::NameClaim, &mut netring::ctx::Ctx<'_>) + core::marker::Send + core::marker::Sync + 'static
 pub fn netring::monitor::MonitorBuilder::on_named<E: netring::protocol::event_typed::Event>(self, name: &'static str, handler: impl netring::monitor::handler::Handler<E, netring::monitor::handler::PayloadCtx>) -> Self
 pub fn netring::monitor::MonitorBuilder::on_ndp<F>(self, handler: F) -> Self where F: core::ops::function::Fn(&flowscope::ndp::types::NdpMessage, &mut netring::ctx::Ctx<'_>) -> netring::error::Result<()> + core::marker::Send + 'static
 pub fn netring::monitor::MonitorBuilder::on_ndp_anomaly<F>(self, handler: F) -> Self where F: core::ops::function::Fn(&netring::monitor::ndp::NdpAnomaly, &mut netring::ctx::Ctx<'_>) -> netring::error::Result<()> + core::marker::Send + 'static
 pub fn netring::monitor::MonitorBuilder::on_nprint<F>(self, handler: F) -> Self where F: core::ops::function::FnMut(&netring::protocol::FlowKey, &flowscope::nprint::matrix::NPrintMatrix) + core::marker::Send + 'static
+pub fn netring::monitor::MonitorBuilder::on_owner_bandwidth<F>(self, period: core::time::Duration, f: F) -> Self where F: core::ops::function::Fn(&netring::monitor::owner_bandwidth::OwnerBandwidthReport<'_>) -> netring::error::Result<()> + core::marker::Send + core::marker::Sync + 'static
 pub fn netring::monitor::MonitorBuilder::on_p0f<F>(self, handler: F) -> Self where F: core::ops::function::Fn(&flowscope::tcp_fingerprint::fingerprint::TcpFingerprint, &mut netring::ctx::Ctx<'_>) -> netring::error::Result<()> + core::marker::Send + 'static
+pub fn netring::monitor::MonitorBuilder::on_quic_fingerprint<F>(self, handler: F) -> Self where F: core::ops::function::Fn(&netring::monitor::fingerprint::QuicFingerprint, &mut netring::ctx::Ctx<'_>) -> netring::error::Result<()> + core::marker::Send + core::marker::Sync + 'static
+pub fn netring::monitor::MonitorBuilder::on_red<F>(self, period: core::time::Duration, f: F) -> Self where F: core::ops::function::Fn(&netring::monitor::red::RedReport<'_>) -> netring::error::Result<()> + core::marker::Send + core::marker::Sync + 'static
+pub fn netring::monitor::MonitorBuilder::on_ssh_fingerprint<F>(self, handler: F) -> Self where F: core::ops::function::Fn(&netring::monitor::fingerprint::SshFingerprint, &mut netring::ctx::Ctx<'_>) -> netring::error::Result<()> + core::marker::Send + core::marker::Sync + 'static
 pub fn netring::monitor::MonitorBuilder::on_tcp_reset(self, handler: impl netring::monitor::handler::Handler<netring::protocol::event_typed::TcpRst, netring::monitor::handler::PayloadCtx>) -> Self
 pub fn netring::monitor::MonitorBuilder::on_yara_match<F>(self, handler: F) -> Self where F: core::ops::function::FnMut(&netring::protocol::FlowKey, &netring::monitor::yara::YaraMatch) + core::marker::Send + 'static
+pub fn netring::monitor::MonitorBuilder::owner_bandwidth(self) -> Self
+pub fn netring::monitor::MonitorBuilder::owner_bandwidth_windowed(self, window: core::time::Duration, bucket: core::time::Duration) -> Self
 pub fn netring::monitor::MonitorBuilder::pcap_source(self, path: impl core::convert::Into<std::path::PathBuf>) -> Self
 pub fn netring::monitor::MonitorBuilder::pcap_speed_factor(self, factor: f32) -> Self
 pub fn netring::monitor::MonitorBuilder::promiscuous(self, enable: bool) -> Self
 pub fn netring::monitor::MonitorBuilder::protocol<P: netring::protocol::Protocol>(self) -> Self
 pub fn netring::monitor::MonitorBuilder::reassembly_memcap(self, bytes: u64, policy: flowscope::event::MemcapPolicy) -> Self
+pub fn netring::monitor::MonitorBuilder::red(self) -> Self
+pub fn netring::monitor::MonitorBuilder::red_with(self, cfg: netring::monitor::red::RedConfig) -> Self
 pub fn netring::monitor::MonitorBuilder::report<F>(self, period: core::time::Duration, f: F) -> Self where F: core::ops::function::Fn(netring::report::ReportSnapshot<'_, '_>) -> netring::error::Result<()> + core::marker::Send + core::marker::Sync + 'static
 pub fn netring::monitor::MonitorBuilder::report_to<R, B, S>(self, period: core::time::Duration, build: B, sink: S) -> Self where R: netring::report::Report, B: core::ops::function::Fn(netring::report::ReportSnapshot<'_, '_>) -> R + core::marker::Send + core::marker::Sync + 'static, S: netring::report::ReportSink<R> + 'static
 pub fn netring::monitor::MonitorBuilder::resolved_capture_plan(&self) -> &[(alloc::string::String, alloc::string::String)]
@@ -4835,6 +5150,7 @@ pub fn netring::monitor::MonitorBuilder::tick<H, M>(self, period: core::time::Du
 pub fn netring::monitor::MonitorBuilder::tick_ctx(self, period: core::time::Duration, handler: impl netring::monitor::handler::Handler<netring::protocol::event_typed::Tick, netring::monitor::handler::CtxOnly>) -> Self
 pub fn netring::monitor::MonitorBuilder::tracker_config(&self) -> &flowscope::tracker::FlowTrackerConfig
 pub fn netring::monitor::MonitorBuilder::with_broadcast<P: netring::protocol::MessageProtocol>(self) -> Self where <P as netring::protocol::Protocol>::Message: core::marker::Send + core::marker::Sync + core::clone::Clone + 'static
+pub fn netring::monitor::MonitorBuilder::with_flow_attribution<F>(self, hook: F) -> Self where F: core::ops::function::Fn(&netring::protocol::FlowKey) -> core::option::Option<flowscope::correlate::bandwidth::Attribution> + core::marker::Send + core::marker::Sync + 'static
 pub fn netring::monitor::MonitorBuilder::xdp_interface(self, iface: impl core::convert::Into<alloc::string::String>) -> Self
 pub fn netring::monitor::MonitorBuilder::xdp_interface_loaded(self, iface: impl core::convert::Into<alloc::string::String>) -> Self
 pub fn netring::monitor::MonitorBuilder::xdp_queues(self, queues: netring::afxdp::Queues) -> Self
@@ -4903,6 +5219,8 @@ pub netring::prelude::ParserClosed::key: netring::protocol::FlowKey
 pub netring::prelude::ParserClosed::parser_kind: flowscope::parser_kind::ParserKind
 pub netring::prelude::ParserClosed::reason: flowscope::event::EndReason
 pub netring::prelude::ParserClosed::ts: flowscope::timestamp::Timestamp
+impl<P: netring::protocol::Protocol> netring::protocol::event_typed::ParserClosed<P>
+pub fn netring::protocol::event_typed::ParserClosed<P>::community_id(&self) -> core::option::Option<alloc::string::String>
 impl<P: netring::protocol::Protocol> core::fmt::Debug for netring::protocol::event_typed::ParserClosed<P>
 pub fn netring::protocol::event_typed::ParserClosed<P>::fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result
 impl<P: netring::protocol::Protocol> netring::protocol::event_typed::Event for netring::protocol::event_typed::ParserClosed<P>
@@ -5142,6 +5460,8 @@ pub netring::prelude::TcpRst::key: netring::protocol::FlowKey
 pub netring::prelude::TcpRst::stats: flowscope::event::FlowStats
 pub netring::prelude::TcpRst::ts: flowscope::timestamp::Timestamp
 pub netring::prelude::TcpRst::zero_payload: bool
+impl netring::protocol::event_typed::TcpRst
+pub fn netring::protocol::event_typed::TcpRst::community_id(&self) -> core::option::Option<alloc::string::String>
 impl core::clone::Clone for netring::protocol::event_typed::TcpRst
 pub fn netring::protocol::event_typed::TcpRst::clone(&self) -> netring::protocol::event_typed::TcpRst
 impl core::fmt::Debug for netring::protocol::event_typed::TcpRst
@@ -5201,11 +5521,13 @@ pub fn netring::prelude::Tls::register(builder: &mut flowscope::driver::typed::D
 pub fn netring::prelude::Tls::register_broadcast(_builder: &mut flowscope::driver::typed::DriverBuilder<flowscope::extract::five_tuple::FiveTuple>) -> core::result::Result<flowscope::driver::broadcast::BroadcastSlotHandle<Self::Message, flowscope::extract::five_tuple::FiveTupleKey>, netring::protocol::ProtocolInitError> where Self::Message: core::marker::Send + core::marker::Sync + core::clone::Clone + 'static
 pub struct netring::prelude::TlsFingerprint
 pub netring::prelude::TlsFingerprint::alpn: core::option::Option<alloc::string::String>
+pub netring::prelude::TlsFingerprint::app_protocol: flowscope::app_proto::AppProtocol
 pub netring::prelude::TlsFingerprint::ja3: core::option::Option<alloc::string::String>
 pub netring::prelude::TlsFingerprint::ja4: core::option::Option<alloc::string::String>
 pub netring::prelude::TlsFingerprint::ja4s: core::option::Option<alloc::string::String>
 pub netring::prelude::TlsFingerprint::ja4x: core::option::Option<alloc::string::String>
 pub netring::prelude::TlsFingerprint::key: core::option::Option<netring::protocol::FlowKey>
+pub netring::prelude::TlsFingerprint::pq_key_share: bool
 pub netring::prelude::TlsFingerprint::sni: core::option::Option<alloc::string::String>
 impl netring::monitor::fingerprint::TlsFingerprint
 pub fn netring::monitor::fingerprint::TlsFingerprint::has_fingerprint(&self) -> bool
@@ -5323,6 +5645,20 @@ impl<E, F> netring::monitor::handler::Handler<E, netring::monitor::handler::Payl
 pub fn netring::detector_macro::Detector<E, F>::call(&self, payload: &<E as netring::protocol::event_typed::Event>::Payload, ctx: &mut netring::ctx::Ctx<'_>) -> netring::error::Result<()>
 impl<E, F> netring::monitor::handler::Handler<E, netring::monitor::handler::PayloadOnly> for F where E: netring::protocol::event_typed::Event, F: core::ops::function::Fn(&<E as netring::protocol::event_typed::Event>::Payload) -> netring::error::Result<()> + core::marker::Send + core::marker::Sync + 'static
 pub fn F::call(&self, p: &<E as netring::protocol::event_typed::Event>::Payload, _ctx: &mut netring::ctx::Ctx<'_>) -> netring::error::Result<()>
+pub trait netring::prelude::IocSetExt: core::marker::Sized
+pub fn netring::prelude::IocSetExt::domain(self, d: impl core::convert::AsRef<str>) -> Self
+pub fn netring::prelude::IocSetExt::domains<S: core::convert::AsRef<str>>(self, it: impl core::iter::traits::collect::IntoIterator<Item = S>) -> Self
+pub fn netring::prelude::IocSetExt::ip(self, ip: core::net::ip_addr::IpAddr) -> Self
+pub fn netring::prelude::IocSetExt::ips(self, it: impl core::iter::traits::collect::IntoIterator<Item = core::net::ip_addr::IpAddr>) -> Self
+pub fn netring::prelude::IocSetExt::ja3(self, fp: impl core::convert::AsRef<str>) -> Self
+pub fn netring::prelude::IocSetExt::ja4(self, fp: impl core::convert::AsRef<str>) -> Self
+impl netring::monitor::ioc::IocSetExt for flowscope::detect::ioc::IocSet
+pub fn flowscope::detect::ioc::IocSet::domain(self, d: impl core::convert::AsRef<str>) -> Self
+pub fn flowscope::detect::ioc::IocSet::domains<S: core::convert::AsRef<str>>(self, it: impl core::iter::traits::collect::IntoIterator<Item = S>) -> Self
+pub fn flowscope::detect::ioc::IocSet::ip(self, ip: core::net::ip_addr::IpAddr) -> Self
+pub fn flowscope::detect::ioc::IocSet::ips(self, it: impl core::iter::traits::collect::IntoIterator<Item = core::net::ip_addr::IpAddr>) -> Self
+pub fn flowscope::detect::ioc::IocSet::ja3(self, fp: impl core::convert::AsRef<str>) -> Self
+pub fn flowscope::detect::ioc::IocSet::ja4(self, fp: impl core::convert::AsRef<str>) -> Self
 pub trait netring::prelude::Key: core::any::Any + core::fmt::Debug + core::marker::Send + core::marker::Sync
 pub fn netring::prelude::Key::as_any(&self) -> &dyn core::any::Any
 impl<T> netring::anomaly::key::Key for T where T: core::any::Any + core::fmt::Debug + core::marker::Send + core::marker::Sync
@@ -5978,6 +6314,8 @@ pub netring::protocol::event_typed::FlowEnded::l4: core::option::Option<flowscop
 pub netring::protocol::event_typed::FlowEnded::reason: flowscope::event::EndReason
 pub netring::protocol::event_typed::FlowEnded::stats: flowscope::event::FlowStats
 pub netring::protocol::event_typed::FlowEnded::ts: flowscope::timestamp::Timestamp
+impl<P: netring::protocol::Protocol> netring::protocol::event_typed::FlowEnded<P>
+pub fn netring::protocol::event_typed::FlowEnded<P>::community_id(&self) -> core::option::Option<alloc::string::String>
 impl<P: netring::protocol::FlowProtocol> netring::protocol::event_typed::Event for netring::protocol::event_typed::FlowEnded<P>
 pub type netring::protocol::event_typed::FlowEnded<P>::Payload = netring::protocol::event_typed::FlowEnded<P>
 pub fn netring::protocol::event_typed::FlowEnded<P>::protocol_marker() -> core::option::Option<core::any::TypeId>
@@ -5988,6 +6326,8 @@ pub fn netring::protocol::event_typed::FlowEnded<P>::fmt(&self, f: &mut core::fm
 #[non_exhaustive] pub struct netring::protocol::event_typed::FlowEstablished<P: netring::protocol::Protocol>
 pub netring::protocol::event_typed::FlowEstablished::key: netring::protocol::FlowKey
 pub netring::protocol::event_typed::FlowEstablished::ts: flowscope::timestamp::Timestamp
+impl<P: netring::protocol::Protocol> netring::protocol::event_typed::FlowEstablished<P>
+pub fn netring::protocol::event_typed::FlowEstablished<P>::community_id(&self) -> core::option::Option<alloc::string::String>
 impl<P: netring::protocol::FlowProtocol> netring::protocol::event_typed::Event for netring::protocol::event_typed::FlowEstablished<P>
 pub type netring::protocol::event_typed::FlowEstablished<P>::Payload = netring::protocol::event_typed::FlowEstablished<P>
 pub fn netring::protocol::event_typed::FlowEstablished<P>::protocol_marker() -> core::option::Option<core::any::TypeId>
@@ -6004,6 +6344,7 @@ pub netring::protocol::event_typed::FlowPacket::side: flowscope::event::FlowSide
 pub netring::protocol::event_typed::FlowPacket::tcp: core::option::Option<flowscope::extractor::TcpInfo>
 pub netring::protocol::event_typed::FlowPacket::ts: flowscope::timestamp::Timestamp
 impl netring::protocol::event_typed::FlowPacket
+pub fn netring::protocol::event_typed::FlowPacket::community_id(&self) -> core::option::Option<alloc::string::String>
 pub fn netring::protocol::event_typed::FlowPacket::with_orientation(self, orientation: flowscope::extractor::Orientation) -> Self
 impl core::clone::Clone for netring::protocol::event_typed::FlowPacket
 pub fn netring::protocol::event_typed::FlowPacket::clone(&self) -> netring::protocol::event_typed::FlowPacket
@@ -6020,6 +6361,7 @@ pub netring::protocol::event_typed::FlowStarted::l4: core::option::Option<flowsc
 pub netring::protocol::event_typed::FlowStarted::orientation: flowscope::extractor::Orientation
 pub netring::protocol::event_typed::FlowStarted::ts: flowscope::timestamp::Timestamp
 impl<P: netring::protocol::Protocol> netring::protocol::event_typed::FlowStarted<P>
+pub fn netring::protocol::event_typed::FlowStarted<P>::community_id(&self) -> core::option::Option<alloc::string::String>
 pub fn netring::protocol::event_typed::FlowStarted<P>::new_for_bench(key: netring::protocol::FlowKey, l4: core::option::Option<flowscope::extractor::L4Proto>, ts: flowscope::timestamp::Timestamp) -> Self
 pub fn netring::protocol::event_typed::FlowStarted<P>::with_orientation(self, orientation: flowscope::extractor::Orientation) -> Self
 impl<P: netring::protocol::FlowProtocol> netring::protocol::event_typed::Event for netring::protocol::event_typed::FlowStarted<P>
@@ -6033,6 +6375,8 @@ pub fn netring::protocol::event_typed::FlowStarted<P>::fmt(&self, f: &mut core::
 pub netring::protocol::event_typed::FlowTick::key: netring::protocol::FlowKey
 pub netring::protocol::event_typed::FlowTick::stats: flowscope::event::FlowStats
 pub netring::protocol::event_typed::FlowTick::ts: flowscope::timestamp::Timestamp
+impl<P: netring::protocol::Protocol> netring::protocol::event_typed::FlowTick<P>
+pub fn netring::protocol::event_typed::FlowTick<P>::community_id(&self) -> core::option::Option<alloc::string::String>
 impl<P: netring::protocol::FlowProtocol> netring::protocol::event_typed::Event for netring::protocol::event_typed::FlowTick<P>
 pub type netring::protocol::event_typed::FlowTick<P>::Payload = netring::protocol::event_typed::FlowTick<P>
 pub fn netring::protocol::event_typed::FlowTick<P>::protocol_marker() -> core::option::Option<core::any::TypeId>
@@ -6060,6 +6404,8 @@ pub netring::protocol::event_typed::ParserClosed::key: netring::protocol::FlowKe
 pub netring::protocol::event_typed::ParserClosed::parser_kind: flowscope::parser_kind::ParserKind
 pub netring::protocol::event_typed::ParserClosed::reason: flowscope::event::EndReason
 pub netring::protocol::event_typed::ParserClosed::ts: flowscope::timestamp::Timestamp
+impl<P: netring::protocol::Protocol> netring::protocol::event_typed::ParserClosed<P>
+pub fn netring::protocol::event_typed::ParserClosed<P>::community_id(&self) -> core::option::Option<alloc::string::String>
 impl<P: netring::protocol::Protocol> core::fmt::Debug for netring::protocol::event_typed::ParserClosed<P>
 pub fn netring::protocol::event_typed::ParserClosed<P>::fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result
 impl<P: netring::protocol::Protocol> netring::protocol::event_typed::Event for netring::protocol::event_typed::ParserClosed<P>
@@ -6072,6 +6418,8 @@ pub netring::protocol::event_typed::TcpRst::key: netring::protocol::FlowKey
 pub netring::protocol::event_typed::TcpRst::stats: flowscope::event::FlowStats
 pub netring::protocol::event_typed::TcpRst::ts: flowscope::timestamp::Timestamp
 pub netring::protocol::event_typed::TcpRst::zero_payload: bool
+impl netring::protocol::event_typed::TcpRst
+pub fn netring::protocol::event_typed::TcpRst::community_id(&self) -> core::option::Option<alloc::string::String>
 impl core::clone::Clone for netring::protocol::event_typed::TcpRst
 pub fn netring::protocol::event_typed::TcpRst::clone(&self) -> netring::protocol::event_typed::TcpRst
 impl core::fmt::Debug for netring::protocol::event_typed::TcpRst
@@ -6247,6 +6595,8 @@ pub netring::protocol::FlowEnded::l4: core::option::Option<flowscope::extractor:
 pub netring::protocol::FlowEnded::reason: flowscope::event::EndReason
 pub netring::protocol::FlowEnded::stats: flowscope::event::FlowStats
 pub netring::protocol::FlowEnded::ts: flowscope::timestamp::Timestamp
+impl<P: netring::protocol::Protocol> netring::protocol::event_typed::FlowEnded<P>
+pub fn netring::protocol::event_typed::FlowEnded<P>::community_id(&self) -> core::option::Option<alloc::string::String>
 impl<P: netring::protocol::FlowProtocol> netring::protocol::event_typed::Event for netring::protocol::event_typed::FlowEnded<P>
 pub type netring::protocol::event_typed::FlowEnded<P>::Payload = netring::protocol::event_typed::FlowEnded<P>
 pub fn netring::protocol::event_typed::FlowEnded<P>::protocol_marker() -> core::option::Option<core::any::TypeId>
@@ -6257,6 +6607,8 @@ pub fn netring::protocol::event_typed::FlowEnded<P>::fmt(&self, f: &mut core::fm
 #[non_exhaustive] pub struct netring::protocol::FlowEstablished<P: netring::protocol::Protocol>
 pub netring::protocol::FlowEstablished::key: netring::protocol::FlowKey
 pub netring::protocol::FlowEstablished::ts: flowscope::timestamp::Timestamp
+impl<P: netring::protocol::Protocol> netring::protocol::event_typed::FlowEstablished<P>
+pub fn netring::protocol::event_typed::FlowEstablished<P>::community_id(&self) -> core::option::Option<alloc::string::String>
 impl<P: netring::protocol::FlowProtocol> netring::protocol::event_typed::Event for netring::protocol::event_typed::FlowEstablished<P>
 pub type netring::protocol::event_typed::FlowEstablished<P>::Payload = netring::protocol::event_typed::FlowEstablished<P>
 pub fn netring::protocol::event_typed::FlowEstablished<P>::protocol_marker() -> core::option::Option<core::any::TypeId>
@@ -6273,6 +6625,7 @@ pub netring::protocol::FlowPacket::side: flowscope::event::FlowSide
 pub netring::protocol::FlowPacket::tcp: core::option::Option<flowscope::extractor::TcpInfo>
 pub netring::protocol::FlowPacket::ts: flowscope::timestamp::Timestamp
 impl netring::protocol::event_typed::FlowPacket
+pub fn netring::protocol::event_typed::FlowPacket::community_id(&self) -> core::option::Option<alloc::string::String>
 pub fn netring::protocol::event_typed::FlowPacket::with_orientation(self, orientation: flowscope::extractor::Orientation) -> Self
 impl core::clone::Clone for netring::protocol::event_typed::FlowPacket
 pub fn netring::protocol::event_typed::FlowPacket::clone(&self) -> netring::protocol::event_typed::FlowPacket
@@ -6289,6 +6642,7 @@ pub netring::protocol::FlowStarted::l4: core::option::Option<flowscope::extracto
 pub netring::protocol::FlowStarted::orientation: flowscope::extractor::Orientation
 pub netring::protocol::FlowStarted::ts: flowscope::timestamp::Timestamp
 impl<P: netring::protocol::Protocol> netring::protocol::event_typed::FlowStarted<P>
+pub fn netring::protocol::event_typed::FlowStarted<P>::community_id(&self) -> core::option::Option<alloc::string::String>
 pub fn netring::protocol::event_typed::FlowStarted<P>::new_for_bench(key: netring::protocol::FlowKey, l4: core::option::Option<flowscope::extractor::L4Proto>, ts: flowscope::timestamp::Timestamp) -> Self
 pub fn netring::protocol::event_typed::FlowStarted<P>::with_orientation(self, orientation: flowscope::extractor::Orientation) -> Self
 impl<P: netring::protocol::FlowProtocol> netring::protocol::event_typed::Event for netring::protocol::event_typed::FlowStarted<P>
@@ -6302,6 +6656,8 @@ pub fn netring::protocol::event_typed::FlowStarted<P>::fmt(&self, f: &mut core::
 pub netring::protocol::FlowTick::key: netring::protocol::FlowKey
 pub netring::protocol::FlowTick::stats: flowscope::event::FlowStats
 pub netring::protocol::FlowTick::ts: flowscope::timestamp::Timestamp
+impl<P: netring::protocol::Protocol> netring::protocol::event_typed::FlowTick<P>
+pub fn netring::protocol::event_typed::FlowTick<P>::community_id(&self) -> core::option::Option<alloc::string::String>
 impl<P: netring::protocol::FlowProtocol> netring::protocol::event_typed::Event for netring::protocol::event_typed::FlowTick<P>
 pub type netring::protocol::event_typed::FlowTick<P>::Payload = netring::protocol::event_typed::FlowTick<P>
 pub fn netring::protocol::event_typed::FlowTick<P>::protocol_marker() -> core::option::Option<core::any::TypeId>
@@ -6428,6 +6784,8 @@ pub netring::protocol::ParserClosed::key: netring::protocol::FlowKey
 pub netring::protocol::ParserClosed::parser_kind: flowscope::parser_kind::ParserKind
 pub netring::protocol::ParserClosed::reason: flowscope::event::EndReason
 pub netring::protocol::ParserClosed::ts: flowscope::timestamp::Timestamp
+impl<P: netring::protocol::Protocol> netring::protocol::event_typed::ParserClosed<P>
+pub fn netring::protocol::event_typed::ParserClosed<P>::community_id(&self) -> core::option::Option<alloc::string::String>
 impl<P: netring::protocol::Protocol> core::fmt::Debug for netring::protocol::event_typed::ParserClosed<P>
 pub fn netring::protocol::event_typed::ParserClosed<P>::fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result
 impl<P: netring::protocol::Protocol> netring::protocol::event_typed::Event for netring::protocol::event_typed::ParserClosed<P>
@@ -7994,6 +8352,7 @@ pub fn netring::afpacket::rx::CaptureBuilder::fill_rxhash(self, enable: bool) ->
 pub fn netring::afpacket::rx::CaptureBuilder::frame_size(self, bytes: usize) -> Self
 pub fn netring::afpacket::rx::CaptureBuilder::ignore_outgoing(self, enable: bool) -> Self
 pub fn netring::afpacket::rx::CaptureBuilder::interface(self, name: &str) -> Self
+pub fn netring::afpacket::rx::CaptureBuilder::netns(self, ns: &netring::netns::NetNs) -> core::result::Result<netring::afpacket::rx::Capture, netring::error::Error>
 pub fn netring::afpacket::rx::CaptureBuilder::poll_timeout(self, timeout: core::time::Duration) -> Self
 pub fn netring::afpacket::rx::CaptureBuilder::prefer_busy_poll(self, enable: bool) -> Self
 pub fn netring::afpacket::rx::CaptureBuilder::profile(self, profile: netring::config::RingProfile) -> Self

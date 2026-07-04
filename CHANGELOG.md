@@ -1,6 +1,6 @@
 # Changelog
 
-## 0.29.0 — 2026-07-03 — flowscope 0.22, threat/detection redesign & the observability surface
+## 0.29.0 — 2026-07-04 — flowscope 0.22, threat/detection redesign & the observability surface
 
 Depends on **flowscope 0.22**. A breaking release (still pre-1.0). Migration:
 `docs/MIGRATING_0.28_TO_0.29.md`.

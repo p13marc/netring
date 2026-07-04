@@ -20,12 +20,12 @@ built on AF_PACKET with TPACKET_V3 (block-based mmap ring buffers) and AF_XDP.
 
 ## Implementation Status
 
-**0.29.0 — RELEASE-PREPPED on `master` (NOT yet published)** 2026-07-03.
+**0.29.0 — RELEASED 2026-07-04** (published to crates.io, tag `0.29.0`,
+alongside **`netring-exporters` 0.5.0**).
 "flowscope 0.22, threat/detection redesign & the observability surface". Depends
 on **flowscope 0.22**. Migration: `docs/MIGRATING_0.28_TO_0.29.md`. A breaking
-release (still pre-1.0; the 1.0 freeze is deferred under [#37]). Version bumped,
-CHANGELOG + migration doc written, `just ci` green — the `cargo publish` +
-`git tag 0.29.0` remain a maintainer action. 16 feature commits closing issues
+release (still pre-1.0; the 1.0 freeze is deferred under [#37]). 16 feature
+commits closing issues
 #131, #132, #124, #127, #128, #53, #123, #133, #120, #130, #121, #122, #125,
 #126, #134 (+ a feature-matrix CI hardening under #37):
 

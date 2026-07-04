@@ -825,6 +825,21 @@ just ci-full         # setcap + full test suite
 
 ## Key Files
 
+### 0.29 additions (threat/detection redesign + observability + capture)
+
+- `src/monitor/ioc.rs` — re-exports flowscope `detect::ioc::IocSet` + `IocSetExt` (retype, #124).
+- `src/monitor/analysis.rs` — `FlowAnalyzer`-based risk (`flow_analysis` / `on_analyzed_flow`, #124).
+- `src/monitor/detectors.rs` — `DetectorRegistry` seam + ATT&CK observation label (#127).
+- `src/monitor/fingerprint.rs` — gated `any(tls,ssh,quic)`; `TlsFingerprint` (+`pq_key_share`/`app_protocol`), `SshFingerprint`, `QuicFingerprint`, `EncryptedDns` (#128/#133).
+- `src/monitor/dns.rs` — `DnsView` + `on_dns`, `NameMapState` + `name_map`/`on_name` (#120).
+- `src/monitor/owner_bandwidth.rs` — `with_flow_attribution` + `owner_bandwidth`/`on_owner_bandwidth` (#130).
+- `src/monitor/aggregate.rs` — `aggregate`/`on_aggregate`: talkers/matrix/domains/SNI (#121).
+- `src/monitor/red.rs` — `red`/`on_red`: RED metrics per protocol (#122).
+- `src/monitor/ip_frag.rs` — `reassemble_ip_fragments[_with]`; reassembler fed before `track_into` at both run-loop sites + frame synthesis (#134).
+- `src/netns.rs` — `NetNs` + `run_in` scoped-setns; `CaptureBuilder::netns` (#126).
+- `src/pcap_rotate.rs` — `RotatingPcapWriter` + `TriggeredPcapWriter`/`PreTriggerRing`/`TriggerHandle` (#125).
+- CI: `check` job gained a tokio-on monitor feature-combo pass + a `semver-checks` job (#37).
+
 ### 0.25 additions (subscriptions, effects, TX, exporters)
 
 - `src/monitor/subscription/` — the typed subscription engine (Phase A):

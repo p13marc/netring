@@ -57,6 +57,7 @@ pub mod analysis;
 pub mod arp;
 #[cfg(feature = "asset")]
 pub mod asset;
+pub mod ip_frag;
 pub mod red;
 // L3 IPv6 Neighbor Discovery — the ARP sibling (feature `ndp`).
 pub mod async_handler;
@@ -282,6 +283,9 @@ pub struct Monitor {
     /// and/or the YARA payload scanner (issue #45); the trait object keeps
     /// `run.rs` feature-agnostic. Empty (the common case) is zero cost.
     pub(crate) byte_accumulators: Vec<Box<dyn nprint::FlowByteAccumulator>>,
+    /// Issue #134: IP-fragment reassembly config (off unless
+    /// [`MonitorBuilder::reassemble_ip_fragments`] armed it).
+    pub(crate) ip_frag_config: Option<ip_frag::IpFragConfig>,
     /// Issue #53: the live IOC set, for [`Self::reload_handle`].
     pub(crate) ioc_swap: Option<std::sync::Arc<arc_swap::ArcSwap<ioc::IocSet>>>,
     /// Issue #53: the live Sigma rule set, for [`Self::reload_handle`].
@@ -892,6 +896,8 @@ pub struct MonitorBuilder {
     aggregate_armed: bool,
     /// Issue #122: `true` once [`Self::red`] wired its feeds (idempotent).
     red_armed: bool,
+    /// Issue #134: IP-fragment reassembly config (off = `None`).
+    ip_frag_config: Option<ip_frag::IpFragConfig>,
     /// Issue #130: set if `owner_bandwidth()` was armed without an attribution
     /// hook available at that point — surfaces [`BuildError::AttributionHookRequired`].
     owner_bandwidth_needs_hook: bool,
@@ -2252,6 +2258,28 @@ impl MonitorBuilder {
                 Ok(())
             },
         )
+    }
+
+    /// Issue #134: reassemble IPv4 fragments before the flow tracker parses
+    /// them, so a payload split across fragments (the classic evasion) reaches
+    /// the L7 parsers whole. Off by default. Sugar for
+    /// [`reassemble_ip_fragments_with`](Self::reassemble_ip_fragments_with)`(Default)`.
+    ///
+    /// Only the tracker input is reassembled — per-frame taps, packet
+    /// subscriptions, and p0f still see the raw wire fragments. Overlapping
+    /// fragments (teardrop / RFC 5722) are dropped, so an evasion payload behind
+    /// an overlap never reassembles.
+    pub fn reassemble_ip_fragments(self) -> Self {
+        self.reassemble_ip_fragments_with(ip_frag::IpFragConfig::default())
+    }
+
+    /// Issue #134: [`reassemble_ip_fragments`](Self::reassemble_ip_fragments)
+    /// with explicit [`IpFragConfig`](ip_frag::IpFragConfig) tuning (concurrent-
+    /// datagram / per-datagram-byte caps + timeout). Idempotent — the last call
+    /// wins.
+    pub fn reassemble_ip_fragments_with(mut self, config: ip_frag::IpFragConfig) -> Self {
+        self.ip_frag_config = Some(config);
+        self
     }
 
     /// 0.22 §2.5: handle ICMP errors — Destination Unreachable / Time
@@ -4230,6 +4258,7 @@ impl MonitorBuilder {
             flow_exporters: self.flow_exporters,
             ml_feature_handlers: self.ml_feature_handlers,
             byte_accumulators,
+            ip_frag_config: self.ip_frag_config,
             ioc_swap: self.ioc_swap,
             #[cfg(feature = "sigma")]
             sigma_swap: self.sigma_swap,

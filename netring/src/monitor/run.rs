@@ -204,6 +204,7 @@ pub(crate) async fn run_loop(monitor: Monitor, stop: StopCondition) -> Result<()
         mut flow_exporters,
         mut ml_feature_handlers,
         mut byte_accumulators,
+        ip_frag_config,
         ioc_swap: _,
         #[cfg(feature = "sigma")]
             sigma_swap: _,
@@ -230,6 +231,11 @@ pub(crate) async fn run_loop(monitor: Monitor, stop: StopCondition) -> Result<()
         #[cfg(feature = "p0f")]
         mut p0f_watch,
     } = monitor;
+    // Issue #134: build the IP-fragment reassembler if armed. It lives in this
+    // stack frame and is fed per-frame before `track_into`.
+    let mut ip_reassembly = ip_frag_config
+        .as_ref()
+        .map(crate::monitor::ip_frag::IpFragReassembly::new);
     // Borrow the monitor name as `&str` for the run loop's
     // dispatch sites. The owned `Box<str>` lives in this stack
     // frame so the borrow is valid for the run loop's lifetime.
@@ -660,7 +666,22 @@ pub(crate) async fn run_loop(monitor: Monitor, stop: StopCondition) -> Result<()
                 for acc in byte_accumulators.iter_mut() {
                     acc.feed(&view);
                 }
-                driver.track_into(view, &mut events)
+                // Issue #134: reassemble IPv4 fragments before the tracker sees
+                // them (taps/accumulators above already saw the raw fragment).
+                match ip_reassembly.as_mut() {
+                    None => driver.track_into(view, &mut events),
+                    Some(r) => match r.intercept(&view) {
+                        crate::monitor::ip_frag::FragAction::PassThrough => {
+                            driver.track_into(view, &mut events)
+                        }
+                        crate::monitor::ip_frag::FragAction::Buffered => {}
+                        crate::monitor::ip_frag::FragAction::Reassembled(frame) => {
+                            let rv = flowscope::PacketView::new(&frame, view.timestamp)
+                                .with_rx_metadata(view.rx_metadata);
+                            driver.track_into(rv, &mut events);
+                        }
+                    },
+                }
             })
             .await?;
         if let Some(e) = packet_err {
@@ -669,6 +690,10 @@ pub(crate) async fn run_loop(monitor: Monitor, stop: StopCondition) -> Result<()
 
         // A spurious wake (no retired block) leaves `last_ts == None`.
         let Some(ts) = last_ts else { continue };
+        // Issue #134: age out fragment datagrams that never completed.
+        if let Some(r) = ip_reassembly.as_mut() {
+            r.evict(ts);
+        }
 
         // Issue #23: borrow the learned ARP table (the drain's `&mut` borrow was
         // released above) so flow/session/lifecycle handlers can resolve IP→MAC
@@ -805,6 +830,7 @@ pub(crate) async fn replay_loop(
         mut flow_exporters,
         mut ml_feature_handlers,
         mut byte_accumulators,
+        ip_frag_config,
         ioc_swap: _,
         #[cfg(feature = "sigma")]
             sigma_swap: _,
@@ -832,6 +858,11 @@ pub(crate) async fn replay_loop(
         #[cfg(feature = "p0f")]
         mut p0f_watch,
     } = monitor;
+    // Issue #134: IP-fragment reassembler for offline replay (armed via
+    // `reassemble_ip_fragments`). Same interception as the live loop.
+    let mut ip_reassembly = ip_frag_config
+        .as_ref()
+        .map(crate::monitor::ip_frag::IpFragReassembly::new);
     let monitor_name_borrow: Option<&str> = monitor_name.as_deref();
 
     let mut source = crate::pcap_source::AsyncPcapSource::open_with_config(&path, config).await?;
@@ -989,7 +1020,21 @@ pub(crate) async fn replay_loop(
         for acc in byte_accumulators.iter_mut() {
             acc.feed(&view);
         }
-        driver.track_into(view, &mut events);
+        // Issue #134: reassemble IPv4 fragments for the tracker (offline replay).
+        match ip_reassembly.as_mut() {
+            None => driver.track_into(view, &mut events),
+            Some(r) => match r.intercept(&view) {
+                crate::monitor::ip_frag::FragAction::PassThrough => {
+                    driver.track_into(view, &mut events)
+                }
+                crate::monitor::ip_frag::FragAction::Buffered => {}
+                crate::monitor::ip_frag::FragAction::Reassembled(frame) => {
+                    let rv = flowscope::PacketView::new(&frame, view.timestamp)
+                        .with_rx_metadata(view.rx_metadata);
+                    driver.track_into(rv, &mut events);
+                }
+            },
+        }
         dispatch_tracked_events(
             &mut dispatcher,
             sink.as_mut(),

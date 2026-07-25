@@ -17,6 +17,11 @@ use netring::protocol::{FlowProtocol, MessageProtocol};
 
 fn assert_event<E: Event>() {}
 fn assert_flow_protocol<P: FlowProtocol>() {}
+// Only referenced by feature-gated tests (icmp/http/dns).
+#[cfg_attr(
+    not(any(feature = "icmp", feature = "http", feature = "dns")),
+    allow(dead_code)
+)]
 fn assert_message_protocol<P: MessageProtocol>() {}
 
 #[test]

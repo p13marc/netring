@@ -474,10 +474,9 @@ impl<'cap> Packets<'cap> {
 
             // Effective timeout = min(self.timeout, deadline - now).
             let effective_timeout = match self.deadline {
-                Some(d) => match d.checked_duration_since(Instant::now()) {
-                    Some(remaining) => remaining.min(self.timeout),
-                    None => return None,
-                },
+                Some(d) => d
+                    .checked_duration_since(Instant::now())?
+                    .min(self.timeout),
                 None => self.timeout,
             };
             match cap.next_batch_blocking(effective_timeout) {

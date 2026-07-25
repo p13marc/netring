@@ -59,7 +59,9 @@ jobs:
       - uses: https://data.forgejo.org/actions/checkout@v6
       - uses: https://github.com/dtolnay/rust-toolchain@stable
       - uses: https://github.com/Swatinem/rust-cache@v2
-      - run: cargo test --workspace --features tokio,channel
+      # run_in_current_namespace needs CAP_SYS_ADMIN (setns) — covered by the
+      # integration lane; the plain runner cannot grant it.
+      - run: cargo test --workspace --features tokio,channel -- --skip run_in_current_namespace
 
   test-monitor-lib:
     runs-on: ubuntu-24.04

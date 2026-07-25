@@ -9,7 +9,10 @@
 
 #![cfg(all(feature = "tokio", feature = "flow"))]
 
+// Only referenced by the feature-gated tests below.
+#[cfg(any(feature = "ssh", feature = "tls", feature = "quic"))]
 use netring::monitor::Monitor;
+#[cfg(any(feature = "ssh", feature = "tls", feature = "quic"))]
 use netring::prelude::StdoutSink;
 
 #[cfg(feature = "ssh")]

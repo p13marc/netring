@@ -1,0 +1,55 @@
+name: Integration
+# Runs on the privileged runner lane (label `integration`): jobs need
+# CAP_NET_RAW/CAP_NET_ADMIN and preloaded kernel modules (see
+# myserver docs/vm-runner.md). Kept separate from ci.yml so the main
+# pipeline stays green if that runner is offline.
+on:
+  push:
+    branches: [main, master]
+  pull_request:
+
+concurrency:
+  group: integration-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  CARGO_TERM_COLOR: always
+  RUST_BACKTRACE: 1
+
+jobs:
+  test-integration:
+    runs-on: integration
+    steps:
+      - uses: https://data.forgejo.org/actions/checkout@v6
+      - uses: https://github.com/dtolnay/rust-toolchain@stable
+      - uses: https://github.com/Swatinem/rust-cache@v2
+        with:
+          key: integration
+      - run: sudo apt-get update && sudo apt-get install -y jq libcap2-bin
+      - name: Build test binaries
+        run: cargo test -p netring --features "integration-tests,tokio,channel,af-xdp" --no-run
+      - name: Run capability tests
+        run: |
+          for bin in $(cargo test -p netring --features "integration-tests,tokio,channel,af-xdp" \
+                       --no-run --message-format=json 2>/dev/null \
+                       | jq -r 'select(.profile.test == true) | .executable' | sort -u); do
+            sudo setcap cap_net_raw,cap_net_admin+ep "$bin"
+          done
+          cargo test -p netring --features "integration-tests,tokio,channel,af-xdp" -- --test-threads=1
+
+  xdp-smoke:
+    runs-on: integration
+    steps:
+      - uses: https://data.forgejo.org/actions/checkout@v6
+      - uses: https://github.com/dtolnay/rust-toolchain@stable
+      - uses: https://github.com/Swatinem/rust-cache@v2
+        with:
+          key: xdp
+      - run: sudo apt-get update && sudo apt-get install -y jq
+      - name: XDP loopback smoke
+        run: |
+          cargo test -p netring --features "integration-tests,af-xdp,xdp-loader,flow,tokio,monitor" --test xdp_lo_smoke --no-run
+          bin=$(cargo test -p netring --features "integration-tests,af-xdp,xdp-loader,flow,tokio,monitor" \
+              --test xdp_lo_smoke --no-run --message-format=json 2>/dev/null \
+              | jq -r 'select(.profile.test == true) | .executable')
+          sudo "$bin" --nocapture --test-threads=1

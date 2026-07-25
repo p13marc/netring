@@ -1,0 +1,38 @@
+name: Nightly fuzz
+on:
+  schedule:
+    - cron: '17 4 * * *'
+  workflow_dispatch:
+    inputs:
+      minutes_per_target:
+        description: "Minutes to fuzz each target"
+        required: false
+        default: "10"
+
+jobs:
+  fuzz-deep:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 90
+    strategy:
+      fail-fast: false
+      matrix:
+        target: [bpf_matches, bpf_builder, expr_parse, bpf_interp_raw, ipnet_parse]
+    steps:
+      - uses: https://data.forgejo.org/actions/checkout@v6
+      - uses: https://github.com/dtolnay/rust-toolchain@nightly
+      - uses: https://github.com/Swatinem/rust-cache@v2
+        with:
+          key: fuzz
+      - run: cargo install cargo-fuzz --locked
+      - name: Deep fuzz
+        working-directory: netring
+        env:
+          MINUTES: ${{ inputs.minutes_per_target || '10' }}
+        run: >
+          cargo +nightly fuzz run ${{ matrix.target }} --
+          -max_total_time=$((MINUTES * 60)) -timeout=30 -rss_limit_mb=4096
+      - name: Report crash artifacts
+        if: failure()
+        run: |
+          echo "::error::fuzz target ${{ matrix.target }} crashed; artifacts below (re-run locally to reproduce)"
+          ls -la "netring/fuzz/artifacts/${{ matrix.target }}/" 2>/dev/null || true

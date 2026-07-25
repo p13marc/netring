@@ -1,0 +1,139 @@
+name: CI
+on:
+  push:
+    branches: [main, master]
+  pull_request:
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  CARGO_TERM_COLOR: always
+  RUST_BACKTRACE: 1
+
+jobs:
+  fmt:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: https://data.forgejo.org/actions/checkout@v6
+      - uses: https://github.com/dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt
+      - run: cargo fmt --all -- --check
+
+  clippy:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: https://data.forgejo.org/actions/checkout@v6
+      - uses: https://github.com/dtolnay/rust-toolchain@stable
+        with:
+          components: clippy
+      - uses: https://github.com/Swatinem/rust-cache@v2
+      - run: cargo clippy --workspace --all-targets -- --deny warnings
+
+  # Curated subset of the old ~37-combo sweep: the combos that broke most often.
+  clippy-features:
+    runs-on: ubuntu-24.04
+    strategy:
+      fail-fast: false
+      matrix:
+        features:
+          - "--no-default-features"
+          - "--features tokio,channel,flow,parse"
+          - "--features tokio,sigma,dns,http,tls"
+          - "--features tokio,metrics,flow,monitor"
+    steps:
+      - uses: https://data.forgejo.org/actions/checkout@v6
+      - uses: https://github.com/dtolnay/rust-toolchain@stable
+        with:
+          components: clippy
+      - uses: https://github.com/Swatinem/rust-cache@v2
+        with:
+          key: combos
+      - run: cargo clippy -p netring ${{ matrix.features }} -- -D warnings
+
+  test:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: https://data.forgejo.org/actions/checkout@v6
+      - uses: https://github.com/dtolnay/rust-toolchain@stable
+      - uses: https://github.com/Swatinem/rust-cache@v2
+      - run: cargo test --workspace --features tokio,channel
+
+  test-monitor-lib:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: https://data.forgejo.org/actions/checkout@v6
+      - uses: https://github.com/dtolnay/rust-toolchain@stable
+      - uses: https://github.com/Swatinem/rust-cache@v2
+        with:
+          key: monitor
+      - run: >
+          cargo test -p netring --features
+          "tokio,channel,flow,parse,pcap,http,dns,tls,ja4plus,icmp,arp,ndp,lldp,cdp,asset,p0f,ad-protocols,asset-protocols,ssh,quic,ocsf-sink,sigma,infra-protocols,ftp,smtp,modbus,dnp3,stun,wireguard,nprint,yara"
+          --lib
+
+  msrv:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: https://data.forgejo.org/actions/checkout@v6
+      - uses: https://github.com/dtolnay/rust-toolchain@master
+        with:
+          toolchain: "1.95"
+      - uses: https://github.com/Swatinem/rust-cache@v2
+        with:
+          key: msrv
+      - run: cargo check --workspace --features tokio,channel
+
+  miri:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: https://data.forgejo.org/actions/checkout@v6
+      - uses: https://github.com/dtolnay/rust-toolchain@nightly
+        with:
+          components: miri
+      - uses: https://github.com/Swatinem/rust-cache@v2
+        with:
+          key: miri
+      - name: Miri (key modules)
+        env:
+          MIRIFLAGS: -Zmiri-tree-borrows
+        run: |
+          cargo +nightly miri test -p netring --features tokio,channel config::
+          cargo +nightly miri test -p netring --features tokio,channel packet::
+          cargo +nightly miri test -p netring --features tokio,channel,monitor,flow,parse monitor::dispatcher
+
+  deny:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: https://data.forgejo.org/actions/checkout@v6
+      - uses: https://github.com/EmbarkStudios/cargo-deny-action@v2
+        with:
+          command: check bans licenses sources
+
+  docs:
+    runs-on: ubuntu-24.04
+    env:
+      RUSTDOCFLAGS: -D warnings
+    steps:
+      - uses: https://data.forgejo.org/actions/checkout@v6
+      - uses: https://github.com/dtolnay/rust-toolchain@stable
+      - uses: https://github.com/Swatinem/rust-cache@v2
+      - run: cargo doc --workspace --all-features --no-deps
+
+  fuzz-smoke:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: https://data.forgejo.org/actions/checkout@v6
+      - uses: https://github.com/dtolnay/rust-toolchain@nightly
+      - uses: https://github.com/Swatinem/rust-cache@v2
+        with:
+          key: fuzz
+      - run: cargo install cargo-fuzz --locked
+      - name: Fuzz smoke (60s per target)
+        working-directory: netring
+        run: |
+          for t in bpf_matches bpf_builder expr_parse bpf_interp_raw ipnet_parse; do
+            cargo +nightly fuzz run "$t" -- -max_total_time=60 -timeout=30 -rss_limit_mb=4096
+          done

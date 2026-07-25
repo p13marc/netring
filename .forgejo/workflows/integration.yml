@@ -37,6 +37,10 @@ jobs:
           done
           cargo test -p netring --features "integration-tests,tokio,channel,af-xdp" -- --test-threads=1
 
+  # INFORMATIONAL: bpf(BPF_MAP_CREATE) requires init-namespace CAP_BPF, which
+  # rootless podman cannot grant (and enabling unprivileged BPF on the
+  # untrusted CI VM is a deliberate non-option). AF_XDP suites must run on a
+  # real-root machine: cargo test --features integration-tests,af-xdp,...
   xdp-smoke:
     runs-on: integration
     steps:
@@ -47,6 +51,7 @@ jobs:
           key: xdp
       - run: sudo apt-get update && sudo apt-get install -y jq
       - name: XDP loopback smoke
+        continue-on-error: true
         run: |
           cargo test -p netring --features "integration-tests,af-xdp,xdp-loader,flow,tokio,monitor" --test xdp_lo_smoke --no-run
           bin=$(cargo test -p netring --features "integration-tests,af-xdp,xdp-loader,flow,tokio,monitor" \

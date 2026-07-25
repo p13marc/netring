@@ -108,9 +108,10 @@ jobs:
     runs-on: ubuntu-24.04
     steps:
       - uses: https://data.forgejo.org/actions/checkout@v6
-      - uses: https://github.com/EmbarkStudios/cargo-deny-action@v2
+      - uses: https://github.com/taiki-e/install-action@v2
         with:
-          command: check bans licenses sources
+          tool: cargo-deny
+      - run: cargo deny check bans licenses sources
 
   docs:
     runs-on: ubuntu-24.04

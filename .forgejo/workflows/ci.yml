@@ -11,6 +11,10 @@ concurrency:
 env:
   CARGO_TERM_COLOR: always
   RUST_BACKTRACE: 1
+  # shared compiler cache: sccache (mounted from the runner VM) -> garage S3
+  # on vm-runner-01; S3 endpoint+credentials come from the runner's env_file
+  RUSTC_WRAPPER: /srv/cache/bin/sccache
+  CARGO_INCREMENTAL: "0"
 
 jobs:
   fmt:
@@ -30,6 +34,8 @@ jobs:
         with:
           components: clippy
       - uses: https://github.com/Swatinem/rust-cache@v2
+        with:
+          cache-targets: false
       - run: cargo clippy --workspace --all-targets -- --deny warnings
 
   # Curated subset of the old ~37-combo sweep: the combos that broke most often.
@@ -51,6 +57,7 @@ jobs:
       - uses: https://github.com/Swatinem/rust-cache@v2
         with:
           key: combos
+          cache-targets: false
       - run: cargo clippy -p netring ${{ matrix.features }} -- -D warnings
 
   test:
@@ -59,9 +66,13 @@ jobs:
       - uses: https://data.forgejo.org/actions/checkout@v6
       - uses: https://github.com/dtolnay/rust-toolchain@stable
       - uses: https://github.com/Swatinem/rust-cache@v2
+        with:
+          cache-targets: false
       # run_in_current_namespace needs CAP_SYS_ADMIN (setns) — covered by the
       # integration lane; the plain runner cannot grant it.
       - run: cargo test --workspace --features tokio,channel -- --skip run_in_current_namespace
+      - name: sccache stats
+        run: /srv/cache/bin/sccache --show-stats
 
   test-monitor-lib:
     runs-on: ubuntu-24.04
@@ -71,6 +82,7 @@ jobs:
       - uses: https://github.com/Swatinem/rust-cache@v2
         with:
           key: monitor
+          cache-targets: false
       - run: >
           cargo test -p netring --features
           "tokio,channel,flow,parse,pcap,http,dns,tls,ja4plus,icmp,arp,ndp,lldp,cdp,asset,p0f,ad-protocols,asset-protocols,ssh,quic,ocsf-sink,sigma,infra-protocols,ftp,smtp,modbus,dnp3,stun,wireguard,nprint,yara"
@@ -86,10 +98,14 @@ jobs:
       - uses: https://github.com/Swatinem/rust-cache@v2
         with:
           key: msrv
+          cache-targets: false
       - run: cargo check --workspace --features tokio,channel
 
   miri:
     runs-on: ubuntu-24.04
+    env:
+      # miri intercepts rustc itself; sccache must stay out of the way
+      RUSTC_WRAPPER: ""
     steps:
       - uses: https://data.forgejo.org/actions/checkout@v6
       - uses: https://github.com/dtolnay/rust-toolchain@nightly
@@ -98,6 +114,7 @@ jobs:
       - uses: https://github.com/Swatinem/rust-cache@v2
         with:
           key: miri
+          cache-targets: false
       - name: Miri (key modules)
         env:
           MIRIFLAGS: -Zmiri-tree-borrows
@@ -126,6 +143,8 @@ jobs:
       - uses: https://data.forgejo.org/actions/checkout@v6
       - uses: https://github.com/dtolnay/rust-toolchain@stable
       - uses: https://github.com/Swatinem/rust-cache@v2
+        with:
+          cache-targets: false
       - run: cargo doc --workspace --all-features --no-deps
 
   fuzz-smoke:
@@ -136,6 +155,7 @@ jobs:
       - uses: https://github.com/Swatinem/rust-cache@v2
         with:
           key: fuzz
+          cache-targets: false
       - run: cargo install cargo-fuzz --locked
       # TEMPORARILY non-blocking: the smoke run found a real stack-overflow
       # crash in expr_parse (recursive parser). Make it blocking again once

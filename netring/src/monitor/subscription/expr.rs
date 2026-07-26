@@ -70,7 +70,11 @@ pub fn parse(input: &str) -> Result<Predicate, ParseError> {
         // An empty filter matches everything (the unfiltered subscription).
         return Ok(Predicate::Always);
     }
-    let mut p = Parser { tokens, pos: 0 };
+    let mut p = Parser {
+        tokens,
+        pos: 0,
+        depth: 0,
+    };
     let pred = p.parse_or()?;
     if p.pos != p.tokens.len() {
         return Err(ParseError::new(format!(
@@ -97,9 +101,17 @@ fn tokenize(input: &str) -> Vec<String> {
     spaced.split_whitespace().map(|s| s.to_string()).collect()
 }
 
+/// Nesting bound for `!` chains and parenthesised groups. Each level costs a
+/// handful of stack frames while parsing and one AST level for the recursive
+/// consumers (`eval`, `kernel_approx`, `Drop`), so the parser must bound it —
+/// unbounded input like `((((…` or `!!!!…` overflows the stack (found by the
+/// `expr_parse` fuzz target). 64 is far beyond any legitimate filter.
+const MAX_DEPTH: usize = 64;
+
 struct Parser {
     tokens: Vec<String>,
     pos: usize,
+    depth: usize,
 }
 
 impl Parser {
@@ -141,11 +153,20 @@ impl Parser {
     }
 
     fn parse_not(&mut self) -> Result<Predicate, ParseError> {
-        if matches!(self.peek_lc().as_deref(), Some("not") | Some("!")) {
-            self.advance();
-            return Ok(self.parse_not()?.negate());
+        // Every nesting step (`!`/`not` chain or parenthesised group) passes
+        // through here exactly once — the single choke point for the bound.
+        if self.depth >= MAX_DEPTH {
+            return Err(ParseError::new("expression too deeply nested"));
         }
-        self.parse_primary()
+        self.depth += 1;
+        let result = if matches!(self.peek_lc().as_deref(), Some("not") | Some("!")) {
+            self.advance();
+            self.parse_not().map(Predicate::negate)
+        } else {
+            self.parse_primary()
+        };
+        self.depth -= 1;
+        result
     }
 
     fn parse_primary(&mut self) -> Result<Predicate, ParseError> {
@@ -422,5 +443,19 @@ mod tests {
         assert!(parse("( tcp").is_err()); // unbalanced paren
         assert!(parse("frobnicate").is_err()); // unknown token
         assert!(parse("tcp udp").is_err()); // trailing token (no operator)
+    }
+
+    #[test]
+    fn nesting_depth_is_bounded() {
+        // Fuzz finding: unbounded `(`/`!` nesting overflowed the stack.
+        let deep_parens = format!("{}tcp{}", "( ".repeat(10_000), " )".repeat(10_000));
+        assert!(parse(&deep_parens).is_err());
+        let deep_bangs = format!("{}tcp", "! ".repeat(10_000));
+        assert!(parse(&deep_bangs).is_err());
+        // Anything a human would write still parses.
+        let plausible = format!("{}tcp{}", "( ".repeat(32), " )".repeat(32));
+        assert!(parse(&plausible).is_ok());
+        let bangs = format!("{}tcp", "! ".repeat(63));
+        assert!(parse(&bangs).is_ok());
     }
 }

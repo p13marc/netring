@@ -1,5 +1,55 @@
 # Changelog
 
+## Unreleased (0.30.0) — flowscope 0.23, HTTP/2 protocol marker
+
+Depends on **flowscope 0.23** (the inline-proxy / sans-IO L7 cycle). Migration:
+`docs/MIGRATING_0.29_TO_0.30.md` — there is nothing to do, the whole workspace
+was built and tested against 0.23 before the bump and no netring API changed.
+
+### Added
+
+- **`Http2` protocol marker** behind the new `http2` feature —
+  `on::<Http2>(|e: &Http2Event, ctx|)` over flowscope's HTTP/2 frame layer,
+  HPACK, and per-stream events, plus the gRPC routing surface.
+  - Dispatch is `Dispatch::Signature` over flowscope's exact 24-byte preface
+    check, because h2 has no standard cleartext port and h2-over-TLS is opaque
+    to a passive tap. This is the first builtin marker to use signature
+    dispatch.
+  - **It widens the kernel prefilter to `Predicate::Always`** — a signature
+    cannot be evaluated in the kernel, so every packet must reach userspace.
+    That is why `http2` joins `all-parsers` but *not* the curated `monitor` /
+    `monitor-quickstart` umbrellas: the feature is free, the prefilter should
+    be a deliberate `.on::<Http2>()`.
+  - Worth knowing for handlers: the routing key is the event's `stream_id`,
+    not the flow side — h2 multiplexes. And a *failed* gRPC call still carries
+    HTTP `200`; the real status is `grpc-status` in the trailers.
+
+### Changed
+
+- flowscope `0.22` → `0.23`; netring `0.29.0` → `0.30.0`; netring-exporters
+  `0.5.0` → `0.6.0`.
+- **Inherited: TCP reassembly is bounded by default.**
+  `FlowTrackerConfig::max_reassembler_buffer` now defaults to `Some(1 MiB)` per
+  side instead of `None`, so a pipeline that never set it explicitly was
+  unbounded and now is not. `SlidingWindow` still applies, so a breach
+  truncates visibly (counted in `reassembly_bytes_dropped_oversize_*`) rather
+  than ending the flow.
+
+### Inherited from flowscope 0.23
+
+No action needed; listed because they change observed behaviour:
+
+- Chunked HTTP/1 bodies are framed (they were not decoded at all before), and
+  a clean FIN no longer looks like a parse error.
+- RFC 9112 §6.3 request-smuggling defense in the streaming HTTP path.
+- Per-flow cleanup no longer keys off `Ended`, so shedding events under load
+  no longer leaks a reassembler pair and a parser per flow.
+- `MemcapPolicy` behaves as each variant documents.
+- QUIC CRYPTO reassembly bounded on connections / TTL / bytes / frames;
+  `PortScanDetector` capacity-bounded.
+- HTTP/2 frame parsing no longer copies the whole buffer per frame — 128 KiB
+  in 1024 frames went from 72.3 MB allocated to 222 KB.
+
 ## 0.29.0 — 2026-07-04 — flowscope 0.22, threat/detection redesign & the observability surface
 
 Depends on **flowscope 0.22**. A breaking release (still pre-1.0). Migration:

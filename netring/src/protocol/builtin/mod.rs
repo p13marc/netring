@@ -19,6 +19,8 @@ mod dns;
 mod ftp;
 #[cfg(feature = "http")]
 mod http;
+#[cfg(feature = "http2")]
+mod http2;
 #[cfg(feature = "kerberos")]
 mod kerberos;
 #[cfg(feature = "ldap")]
@@ -70,6 +72,8 @@ pub use dns::Dns;
 pub use ftp::Ftp;
 #[cfg(feature = "http")]
 pub use http::Http;
+#[cfg(feature = "http2")]
+pub use http2::Http2;
 #[cfg(feature = "kerberos")]
 pub use kerberos::Kerberos;
 #[cfg(feature = "ldap")]

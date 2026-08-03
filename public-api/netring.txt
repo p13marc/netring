@@ -5722,6 +5722,7 @@ impl netring::protocol::MessageProtocol for netring::prelude::Tftp
 impl netring::protocol::MessageProtocol for netring::prelude::Tls
 impl netring::protocol::MessageProtocol for netring::prelude::TlsHandshake
 impl netring::protocol::MessageProtocol for netring::prelude::WireGuard
+impl netring::protocol::MessageProtocol for netring::protocol::builtin::Http2
 pub trait netring::prelude::Protocol: core::marker::Send + core::marker::Sync + 'static
 pub type netring::prelude::Protocol::Message: core::marker::Send + core::marker::Sync + 'static
 pub const netring::prelude::Protocol::NAME: &'static str
@@ -5911,6 +5912,13 @@ pub fn netring::prelude::WireGuard::dispatch() -> netring::protocol::Dispatch
 pub fn netring::prelude::WireGuard::make_slot(handle: flowscope::driver::slot::SlotHandle<Self::Message, flowscope::extract::five_tuple::FiveTupleKey>) -> alloc::boxed::Box<dyn netring::monitor::registry::ProtocolSlot> where Self: core::marker::Sized
 pub fn netring::prelude::WireGuard::register(builder: &mut flowscope::driver::typed::DriverBuilder<flowscope::extract::five_tuple::FiveTuple>) -> core::result::Result<flowscope::driver::slot::SlotHandle<Self::Message, flowscope::extract::five_tuple::FiveTupleKey>, netring::protocol::ProtocolInitError>
 pub fn netring::prelude::WireGuard::register_broadcast(_builder: &mut flowscope::driver::typed::DriverBuilder<flowscope::extract::five_tuple::FiveTuple>) -> core::result::Result<flowscope::driver::broadcast::BroadcastSlotHandle<Self::Message, flowscope::extract::five_tuple::FiveTupleKey>, netring::protocol::ProtocolInitError> where Self::Message: core::marker::Send + core::marker::Sync + core::clone::Clone + 'static
+impl netring::protocol::Protocol for netring::protocol::builtin::Http2
+pub type netring::protocol::builtin::Http2::Message = flowscope::http2::stream::Http2Event
+pub const netring::protocol::builtin::Http2::NAME: &'static str
+pub fn netring::protocol::builtin::Http2::dispatch() -> netring::protocol::Dispatch
+pub fn netring::protocol::builtin::Http2::make_slot(handle: flowscope::driver::slot::SlotHandle<Self::Message, flowscope::extract::five_tuple::FiveTupleKey>) -> alloc::boxed::Box<dyn netring::monitor::registry::ProtocolSlot> where Self: core::marker::Sized
+pub fn netring::protocol::builtin::Http2::register(builder: &mut flowscope::driver::typed::DriverBuilder<flowscope::extract::five_tuple::FiveTuple>) -> core::result::Result<flowscope::driver::slot::SlotHandle<Self::Message, flowscope::extract::five_tuple::FiveTupleKey>, netring::protocol::ProtocolInitError>
+pub fn netring::protocol::builtin::Http2::register_broadcast(_builder: &mut flowscope::driver::typed::DriverBuilder<flowscope::extract::five_tuple::FiveTuple>) -> core::result::Result<flowscope::driver::broadcast::BroadcastSlotHandle<Self::Message, flowscope::extract::five_tuple::FiveTupleKey>, netring::protocol::ProtocolInitError> where Self::Message: core::marker::Send + core::marker::Sync + core::clone::Clone + 'static
 pub trait netring::prelude::Report: core::marker::Send + 'static
 pub const netring::prelude::Report::NAME: &'static str
 impl netring::report::Report for netring::monitor::bandwidth::BandwidthSnapshot
@@ -6002,6 +6010,20 @@ pub fn netring::prelude::Http::dispatch() -> netring::protocol::Dispatch
 pub fn netring::prelude::Http::make_slot(handle: flowscope::driver::slot::SlotHandle<Self::Message, flowscope::extract::five_tuple::FiveTupleKey>) -> alloc::boxed::Box<dyn netring::monitor::registry::ProtocolSlot> where Self: core::marker::Sized
 pub fn netring::prelude::Http::register(builder: &mut flowscope::driver::typed::DriverBuilder<flowscope::extract::five_tuple::FiveTuple>) -> core::result::Result<flowscope::driver::slot::SlotHandle<Self::Message, flowscope::extract::five_tuple::FiveTupleKey>, netring::protocol::ProtocolInitError>
 pub fn netring::prelude::Http::register_broadcast(builder: &mut flowscope::driver::typed::DriverBuilder<flowscope::extract::five_tuple::FiveTuple>) -> core::result::Result<flowscope::driver::broadcast::BroadcastSlotHandle<Self::Message, flowscope::extract::five_tuple::FiveTupleKey>, netring::protocol::ProtocolInitError>
+pub struct netring::protocol::builtin::Http2
+impl core::clone::Clone for netring::protocol::builtin::Http2
+pub fn netring::protocol::builtin::Http2::clone(&self) -> netring::protocol::builtin::Http2
+impl core::fmt::Debug for netring::protocol::builtin::Http2
+pub fn netring::protocol::builtin::Http2::fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::marker::Copy for netring::protocol::builtin::Http2
+impl netring::protocol::MessageProtocol for netring::protocol::builtin::Http2
+impl netring::protocol::Protocol for netring::protocol::builtin::Http2
+pub type netring::protocol::builtin::Http2::Message = flowscope::http2::stream::Http2Event
+pub const netring::protocol::builtin::Http2::NAME: &'static str
+pub fn netring::protocol::builtin::Http2::dispatch() -> netring::protocol::Dispatch
+pub fn netring::protocol::builtin::Http2::make_slot(handle: flowscope::driver::slot::SlotHandle<Self::Message, flowscope::extract::five_tuple::FiveTupleKey>) -> alloc::boxed::Box<dyn netring::monitor::registry::ProtocolSlot> where Self: core::marker::Sized
+pub fn netring::protocol::builtin::Http2::register(builder: &mut flowscope::driver::typed::DriverBuilder<flowscope::extract::five_tuple::FiveTuple>) -> core::result::Result<flowscope::driver::slot::SlotHandle<Self::Message, flowscope::extract::five_tuple::FiveTupleKey>, netring::protocol::ProtocolInitError>
+pub fn netring::protocol::builtin::Http2::register_broadcast(_builder: &mut flowscope::driver::typed::DriverBuilder<flowscope::extract::five_tuple::FiveTuple>) -> core::result::Result<flowscope::driver::broadcast::BroadcastSlotHandle<Self::Message, flowscope::extract::five_tuple::FiveTupleKey>, netring::protocol::ProtocolInitError> where Self::Message: core::marker::Send + core::marker::Sync + core::clone::Clone + 'static
 pub struct netring::protocol::builtin::Icmp
 impl core::clone::Clone for netring::prelude::Icmp
 pub fn netring::prelude::Icmp::clone(&self) -> netring::prelude::Icmp
@@ -7132,6 +7154,7 @@ impl netring::protocol::MessageProtocol for netring::prelude::Tftp
 impl netring::protocol::MessageProtocol for netring::prelude::Tls
 impl netring::protocol::MessageProtocol for netring::prelude::TlsHandshake
 impl netring::protocol::MessageProtocol for netring::prelude::WireGuard
+impl netring::protocol::MessageProtocol for netring::protocol::builtin::Http2
 pub trait netring::protocol::Protocol: core::marker::Send + core::marker::Sync + 'static
 pub type netring::protocol::Protocol::Message: core::marker::Send + core::marker::Sync + 'static
 pub const netring::protocol::Protocol::NAME: &'static str
@@ -7321,6 +7344,13 @@ pub fn netring::prelude::WireGuard::dispatch() -> netring::protocol::Dispatch
 pub fn netring::prelude::WireGuard::make_slot(handle: flowscope::driver::slot::SlotHandle<Self::Message, flowscope::extract::five_tuple::FiveTupleKey>) -> alloc::boxed::Box<dyn netring::monitor::registry::ProtocolSlot> where Self: core::marker::Sized
 pub fn netring::prelude::WireGuard::register(builder: &mut flowscope::driver::typed::DriverBuilder<flowscope::extract::five_tuple::FiveTuple>) -> core::result::Result<flowscope::driver::slot::SlotHandle<Self::Message, flowscope::extract::five_tuple::FiveTupleKey>, netring::protocol::ProtocolInitError>
 pub fn netring::prelude::WireGuard::register_broadcast(_builder: &mut flowscope::driver::typed::DriverBuilder<flowscope::extract::five_tuple::FiveTuple>) -> core::result::Result<flowscope::driver::broadcast::BroadcastSlotHandle<Self::Message, flowscope::extract::five_tuple::FiveTupleKey>, netring::protocol::ProtocolInitError> where Self::Message: core::marker::Send + core::marker::Sync + core::clone::Clone + 'static
+impl netring::protocol::Protocol for netring::protocol::builtin::Http2
+pub type netring::protocol::builtin::Http2::Message = flowscope::http2::stream::Http2Event
+pub const netring::protocol::builtin::Http2::NAME: &'static str
+pub fn netring::protocol::builtin::Http2::dispatch() -> netring::protocol::Dispatch
+pub fn netring::protocol::builtin::Http2::make_slot(handle: flowscope::driver::slot::SlotHandle<Self::Message, flowscope::extract::five_tuple::FiveTupleKey>) -> alloc::boxed::Box<dyn netring::monitor::registry::ProtocolSlot> where Self: core::marker::Sized
+pub fn netring::protocol::builtin::Http2::register(builder: &mut flowscope::driver::typed::DriverBuilder<flowscope::extract::five_tuple::FiveTuple>) -> core::result::Result<flowscope::driver::slot::SlotHandle<Self::Message, flowscope::extract::five_tuple::FiveTupleKey>, netring::protocol::ProtocolInitError>
+pub fn netring::protocol::builtin::Http2::register_broadcast(_builder: &mut flowscope::driver::typed::DriverBuilder<flowscope::extract::five_tuple::FiveTuple>) -> core::result::Result<flowscope::driver::broadcast::BroadcastSlotHandle<Self::Message, flowscope::extract::five_tuple::FiveTupleKey>, netring::protocol::ProtocolInitError> where Self::Message: core::marker::Send + core::marker::Sync + core::clone::Clone + 'static
 pub type netring::protocol::FlowKey = flowscope::extract::five_tuple::FiveTupleKey
 pub mod netring::report
 pub struct netring::report::JsonReportSink
@@ -9082,6 +9112,7 @@ impl netring::protocol::MessageProtocol for netring::prelude::Tftp
 impl netring::protocol::MessageProtocol for netring::prelude::Tls
 impl netring::protocol::MessageProtocol for netring::prelude::TlsHandshake
 impl netring::protocol::MessageProtocol for netring::prelude::WireGuard
+impl netring::protocol::MessageProtocol for netring::protocol::builtin::Http2
 pub trait netring::PacketSetFilter
 pub fn netring::PacketSetFilter::set_filter(&self, filter: &netring::config::bpf::BpfFilter) -> core::result::Result<(), netring::error::Error>
 impl netring::traits::PacketSetFilter for netring::afpacket::rx::Capture
@@ -9291,6 +9322,13 @@ pub fn netring::prelude::WireGuard::dispatch() -> netring::protocol::Dispatch
 pub fn netring::prelude::WireGuard::make_slot(handle: flowscope::driver::slot::SlotHandle<Self::Message, flowscope::extract::five_tuple::FiveTupleKey>) -> alloc::boxed::Box<dyn netring::monitor::registry::ProtocolSlot> where Self: core::marker::Sized
 pub fn netring::prelude::WireGuard::register(builder: &mut flowscope::driver::typed::DriverBuilder<flowscope::extract::five_tuple::FiveTuple>) -> core::result::Result<flowscope::driver::slot::SlotHandle<Self::Message, flowscope::extract::five_tuple::FiveTupleKey>, netring::protocol::ProtocolInitError>
 pub fn netring::prelude::WireGuard::register_broadcast(_builder: &mut flowscope::driver::typed::DriverBuilder<flowscope::extract::five_tuple::FiveTuple>) -> core::result::Result<flowscope::driver::broadcast::BroadcastSlotHandle<Self::Message, flowscope::extract::five_tuple::FiveTupleKey>, netring::protocol::ProtocolInitError> where Self::Message: core::marker::Send + core::marker::Sync + core::clone::Clone + 'static
+impl netring::protocol::Protocol for netring::protocol::builtin::Http2
+pub type netring::protocol::builtin::Http2::Message = flowscope::http2::stream::Http2Event
+pub const netring::protocol::builtin::Http2::NAME: &'static str
+pub fn netring::protocol::builtin::Http2::dispatch() -> netring::protocol::Dispatch
+pub fn netring::protocol::builtin::Http2::make_slot(handle: flowscope::driver::slot::SlotHandle<Self::Message, flowscope::extract::five_tuple::FiveTupleKey>) -> alloc::boxed::Box<dyn netring::monitor::registry::ProtocolSlot> where Self: core::marker::Sized
+pub fn netring::protocol::builtin::Http2::register(builder: &mut flowscope::driver::typed::DriverBuilder<flowscope::extract::five_tuple::FiveTuple>) -> core::result::Result<flowscope::driver::slot::SlotHandle<Self::Message, flowscope::extract::five_tuple::FiveTupleKey>, netring::protocol::ProtocolInitError>
+pub fn netring::protocol::builtin::Http2::register_broadcast(_builder: &mut flowscope::driver::typed::DriverBuilder<flowscope::extract::five_tuple::FiveTuple>) -> core::result::Result<flowscope::driver::broadcast::BroadcastSlotHandle<Self::Message, flowscope::extract::five_tuple::FiveTupleKey>, netring::protocol::ProtocolInitError> where Self::Message: core::marker::Send + core::marker::Sync + core::clone::Clone + 'static
 pub trait netring::StreamCapture: netring::async_adapters::stream_capture::sealed::Sealed
 pub type netring::StreamCapture::Source: netring::traits::PacketSource + std::os::fd::raw::AsRawFd
 pub fn netring::StreamCapture::capture(&self) -> &netring::async_adapters::tokio_adapter::AsyncCapture<Self::Source>

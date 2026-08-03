@@ -44,7 +44,7 @@ metrics = { workspace = true, optional = true }
 
 # Optional XDP program loader (plan 12). Pure Rust; pulls aya for
 # `bpf(2)` / netlink wrappers and XSKMAP map plumbing.
-aya = { version = "0.13", optional = true }
+aya = { version = "0.14", optional = true }
 
 # Optional serde derives on `Anomaly<K>` + `AnomalyContext` +
 # `Severity`. Pairs with `flowscope/serde` (shipped in 0.8).
@@ -78,8 +78,8 @@ flowscope = { version = "0.22", default-features = false, features = ["test-help
 env_logger = "0.11"
 tempfile = "3"
 divan = "0.1"
-criterion = { version = "0.5", features = ["html_reports"] }
-etherparse = "0.16"
+criterion = { version = "0.8", features = ["html_reports"] }
+etherparse = "0.21"
 core_affinity = "0.8"
 futures = "0.3"
 proptest = "1"

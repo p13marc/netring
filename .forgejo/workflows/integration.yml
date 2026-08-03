@@ -20,9 +20,9 @@ jobs:
   test-integration:
     runs-on: integration
     steps:
-      - uses: https://data.forgejo.org/actions/checkout@v6
+      - uses: https://data.forgejo.org/actions/checkout@v6.1.0
       - uses: https://github.com/dtolnay/rust-toolchain@stable
-      - uses: https://github.com/Swatinem/rust-cache@v2
+      - uses: https://github.com/Swatinem/rust-cache@v2.9.1
         with:
           key: integration
       - run: sudo apt-get update && sudo apt-get install -y jq libcap2-bin
@@ -44,9 +44,9 @@ jobs:
   xdp-smoke:
     runs-on: integration
     steps:
-      - uses: https://data.forgejo.org/actions/checkout@v6
+      - uses: https://data.forgejo.org/actions/checkout@v6.1.0
       - uses: https://github.com/dtolnay/rust-toolchain@stable
-      - uses: https://github.com/Swatinem/rust-cache@v2
+      - uses: https://github.com/Swatinem/rust-cache@v2.9.1
         with:
           key: xdp
       - run: sudo apt-get update && sudo apt-get install -y jq

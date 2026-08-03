@@ -252,6 +252,7 @@ Features are organized as orthogonal axes (full matrix + recipes in
 | `channel` | Runtime-agnostic thread + bounded-channel adapter |
 | `flow` | Flow & session tracking (pulls `flowscope`) |
 | `http` / `dns` / `tls` / `icmp` / `quic` | L7 parsers; `ja4plus` adds JA4S (FoxIO License) |
+| `http2` | HTTP/2 + HPACK + gRPC. Dispatches by preface *signature*, which widens the kernel prefilter to `Always` — opt in deliberately |
 | `arp` / `ndp` / `lldp` / `cdp` / `asset` | L2/discovery: ARP + IPv6 NDP watch, LLDP/CDP, passive `asset::Inventory` |
 | `ssh` / `infra-protocols` / `ot-protocols` / `ftp` / `smtp` / `stun` / `wireguard` | Tier-2 protocol markers (SSH/HASSH, NTP/SNMP/TFTP/RADIUS, Modbus/DNP3, …) |
 | `ad-protocols` / `asset-protocols` | Active-Directory (SMB/Kerberos/LDAP/RDP) + DHCP/SSDP/NBNS device facts |

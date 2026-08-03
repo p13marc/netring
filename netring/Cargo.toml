@@ -1,6 +1,6 @@
 [package]
 name = "netring"
-version = "0.29.0"
+version = "0.30.0"
 edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
@@ -23,7 +23,7 @@ exclude = ["CLAUDE.md", "SPEC.md"]
 # pulls only `bitflags` + `thiserror` — both already in netring's tree.
 # The `parse` feature additionally enables `flowscope/extractors`,
 # `flow` enables `tracker`/`reassembler`/`session`.
-flowscope = { version = "0.22", default-features = false }
+flowscope = { version = "0.23", default-features = false }
 
 libc = { workspace = true }
 nix = { workspace = true }
@@ -74,7 +74,7 @@ arc-swap = "1"
 # flowscope 0.22: `FlowEvent::Packet` / `driver::Event::Packet` are variant-level
 # `#[non_exhaustive]`, so tests synthesize them via `flowscope::test_helpers`
 # (behind flowscope's `test-helpers` feature) rather than struct literals.
-flowscope = { version = "0.22", default-features = false, features = ["test-helpers"] }
+flowscope = { version = "0.23", default-features = false, features = ["test-helpers"] }
 env_logger = "0.11"
 tempfile = "3"
 divan = "0.1"
@@ -123,6 +123,11 @@ parse = ["dep:etherparse", "flowscope/extractors"]
 flow = ["parse", "flowscope/tracker", "flowscope/reassembler", "flowscope/session", "flowscope/community-id", "flowscope/analysis", "dep:bytes", "dep:ahash"]
 # L7 parser pass-through — pull flowscope's HTTP/DNS/TLS/ICMP modules.
 http = ["flow", "flowscope/http"]
+# HTTP/2 + HPACK + gRPC (flowscope 0.23, #170/#171/#196). Dispatch is by
+# *signature* rather than port: h2 has no standard cleartext port, and h2 over
+# TLS is opaque to a passive tap anyway. See the `Http2` marker for the
+# kernel-prefilter cost that implies.
+http2 = ["flow", "flowscope/http2"]
 dns = ["flow", "flowscope/dns"]
 tls = ["flow", "flowscope/tls", "flowscope/tls-fingerprints"]
 icmp = ["flow", "flowscope/icmp"]
@@ -195,7 +200,7 @@ ot-protocols = ["modbus", "dnp3"]
 # UDP/443 → `flowscope::QuicInitial`.
 quic = ["flow", "flowscope/quic"]
 all-parsers = [
-    "http", "dns", "tls", "icmp",
+    "http", "http2", "dns", "tls", "icmp",
     "smb", "kerberos", "ldap", "rdp",
     "dhcp", "ssdp", "netbios-ns",
     "ssh", "quic",

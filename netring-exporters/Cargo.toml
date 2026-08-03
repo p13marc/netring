@@ -35,7 +35,7 @@ netring = { path = "../netring", version = "0.29", default-features = false, fea
 serde_json = { version = "1", optional = true }
 tracing = { workspace = true }
 # Blocking HTTP for the OTLP sink — sync, matches AnomalySink::flush.
-ureq = { version = "2", optional = true, default-features = false, features = ["tls"] }
+ureq = { version = "3", optional = true, default-features = false, features = ["tls"] }
 # Kafka producer (heavy C dep, opt-in).
 rdkafka = { version = "0.36", optional = true }
 arrow = { version = "59.0.0", optional = true }

@@ -37,8 +37,9 @@ loop {
 - **Async-first.** tokio adapters with a `Send + 'static` run loop you can
   `tokio::spawn`; a runtime-agnostic channel adapter too.
 - **Batteries included.** Typed BPF builder, flow/session tracking, L7 parsers
-  (HTTP/TLS/DNS/ICMP/QUIC + Tier-2: SSH, FTP, SMTP, NTP, SNMP, Modbus, DNP3,
-  STUN, WireGuard, SMB/Kerberos/LDAP/RDP), fingerprinting (JA3/JA4/JA4H/JA4X,
+  (HTTP/1, HTTP/2 + HPACK + gRPC, TLS/DNS/ICMP/QUIC + Tier-2: SSH, FTP, SMTP,
+  NTP, SNMP, Modbus, DNP3, STUN, WireGuard, SMB/Kerberos/LDAP/RDP),
+  fingerprinting (JA3/JA4/JA4H/JA4X,
   HASSH, p0f), and a fluent Monitor with detectors, middleware, sinks, and
   exporters.
 - **Network security monitoring.** Threat-intel IOC matching (flowscope's

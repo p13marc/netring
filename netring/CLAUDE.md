@@ -108,7 +108,9 @@ stabilization release** — mostly additive, with three breaking changes from th
   nDPI flow-risk (`flow_risk`), RITA beacon detector, passive `asset::Inventory`
   (ARP/NDP/LLDP/CDP/DHCP/SSDP/mDNS/NBNS), p0f (`p0f`), QUIC SNI (`quic`), Tier-2
   protocol markers (SSH/HASSH, NTP/SNMP/TFTP/RADIUS, FTP/SMTP, Modbus/DNP3, STUN/
-  WireGuard) + AD protocols (SMB/Kerberos/LDAP/RDP), nPrint + CICFlowMeter ML
+  WireGuard) + AD protocols (SMB/Kerberos/LDAP/RDP), HTTP/2 + HPACK + gRPC
+  (`http2`, signature-dispatched on the connection preface — see the `Http2`
+  marker for the kernel-prefilter cost), nPrint + CICFlowMeter ML
   export, OCSF Detection-Finding sink (`ocsf-sink`), overload/backpressure
   detection (`monitor::overload`), symmetric RSS (`netring::xdp::rss`), honest
   per-source `DropStats`, HW timestamping fix, pcapng writer, and IPv6 NDP watch.

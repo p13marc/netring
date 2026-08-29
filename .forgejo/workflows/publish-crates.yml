@@ -1,0 +1,49 @@
+name: Publish crates
+on:
+  workflow_dispatch:
+    inputs:
+      allow_breaking:
+        description: >-
+          Set to "yes" for a deliberately breaking release. Otherwise the
+          semver gate must pass.
+        required: false
+        default: "no"
+
+jobs:
+  publish:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: https://data.forgejo.org/actions/checkout@v6
+      - uses: https://github.com/dtolnay/rust-toolchain@stable
+      # Same invocation as ci.yml's test job: run_in_current_namespace needs
+      # CAP_SYS_ADMIN (setns), which the plain runner cannot grant.
+      - run: cargo test --workspace --features tokio,channel --locked -- --skip run_in_current_namespace
+
+      # Compare the public API against what is on crates.io. The marketplace
+      # action is GitHub-only, so this installs the tool directly — a
+      # prebuilt binary, since building it from source takes longer than the
+      # rest of the job. Both workspace members are published crates, so
+      # both are gated (netring/fuzz is publish = false and detached).
+      - uses: https://github.com/taiki-e/install-action@v2
+        with:
+          tool: cargo-semver-checks
+      - name: Check for unintended breaking changes
+        run: |
+          if [ "${{ inputs.allow_breaking }}" = "yes" ]; then
+            # A breaking release is a decision, so it is taken by a human at
+            # dispatch time rather than by the absence of a check. Still run
+            # it, to put the inventory of what broke in the log.
+            cargo semver-checks check-release -p netring --all-features || true
+            cargo semver-checks check-release -p netring-exporters --all-features || true
+          else
+            cargo semver-checks check-release -p netring --all-features
+            cargo semver-checks check-release -p netring-exporters --all-features
+          fi
+
+      # Virtual workspace: publish the two publishable members explicitly,
+      # in dependency order. netring MUST go first — netring-exporters'
+      # crates.io dependency on it only resolves once the matching version
+      # is live (cargo publish blocks until the index has it, so no manual
+      # wait).
+      - run: cargo publish -p netring --token ${{ secrets.CARGO_REGISTRY_TOKEN }}
+      - run: cargo publish -p netring-exporters --token ${{ secrets.CARGO_REGISTRY_TOKEN }}

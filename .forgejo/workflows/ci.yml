@@ -5,6 +5,8 @@ on:
     paths-ignore: ['**.md', 'docs/**', 'LICENSE*']
   pull_request:
     paths-ignore: ['**.md', 'docs/**', 'LICENSE*']
+  # manual re-run path (flaky job, runner was offline, cache experiments)
+  workflow_dispatch:
 
 concurrency:
   group: ci-${{ github.ref }}
@@ -135,10 +137,11 @@ jobs:
     steps:
       - uses: https://data.forgejo.org/actions/checkout@v6
       - uses: https://github.com/dtolnay/rust-toolchain@stable
+      # the docker cargo-deny action cannot see deny.toml -> install directly
       - uses: https://github.com/taiki-e/install-action@v2
         with:
           tool: cargo-deny
-      - run: cargo deny check bans licenses sources
+      - run: cargo deny check
 
   docs:
     runs-on: ubuntu-24.04

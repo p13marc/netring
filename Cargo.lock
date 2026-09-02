@@ -1334,6 +1334,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "etherparse"
+version = "0.21.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "17304d06addb3283cdc4bd528e42dd95e73c8ee2d6492ffce415e93660885449"
+dependencies = [
+ "arrayvec",
+]
+
+[[package]]
 name = "fallible-iterator"
 version = "0.3.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1383,7 +1392,7 @@ dependencies = [
  "bitflags",
  "bytes",
  "crossbeam-queue",
- "etherparse",
+ "etherparse 0.16.0",
  "hex",
  "httparse",
  "kerberos-parser",
@@ -2288,7 +2297,7 @@ dependencies = [
  "dhat",
  "divan",
  "env_logger",
- "etherparse",
+ "etherparse 0.21.0",
  "flowscope",
  "futures",
  "futures-core",

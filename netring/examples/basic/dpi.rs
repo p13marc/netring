@@ -90,7 +90,10 @@ fn format_ips(parsed: &SlicedPacket) -> (String, String) {
             format!("{}", ip.header().source_addr()),
             format!("{}", ip.header().destination_addr()),
         ),
-        None => ("--".into(), "--".into()),
+        // etherparse 0.17 added ARP to `NetSlice`. ARP carries hardware and
+        // protocol addresses rather than an IP header, and this demo prints
+        // L3 endpoints, so it is grouped with "no network layer".
+        Some(NetSlice::Arp(_)) | None => ("--".into(), "--".into()),
     }
 }
 
@@ -110,6 +113,9 @@ fn format_transport<'a>(parsed: &'a SlicedPacket<'a>) -> (&'static str, u16, u16
         ),
         Some(TransportSlice::Icmpv4(icmp)) => ("ICMP", 0, 0, icmp.payload()),
         Some(TransportSlice::Icmpv6(icmp)) => ("ICMPv6", 0, 0, icmp.payload()),
+        // etherparse 0.21 added IGMP. Like ICMP it is portless; unlike ICMP
+        // its slice is the whole message, so there is no separate payload.
+        Some(TransportSlice::Igmp(_)) => ("IGMP", 0, 0, &[]),
         None => {
             let payload = parsed.ip_payload().map(|p| p.payload).unwrap_or(&[]);
             ("???", 0, 0, payload)

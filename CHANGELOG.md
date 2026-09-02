@@ -8,6 +8,22 @@ action — the whole workspace was built and tested against 0.24 before the bump
 and no netring API changed by it. The breaking change in this release is the
 etherparse re-export; see **Breaking** below.
 
+### Breaking
+
+- **`etherparse` `0.16` → `0.21`.** netring re-exports `etherparse` types in its
+  own public API — `Packet::parse` / `PacketOwned::parse` return
+  `etherparse::SlicedPacket` and `etherparse::err::packet::SliceError` — so the
+  major bump is visible to callers and code that names those types must move
+  with it. Two new variants are the practical break: `NetSlice::Arp` (0.17) and
+  `TransportSlice::Igmp` (0.21). Both enums are matched exhaustively in user
+  code, so a `match` over them needs the new arms. 0.18's `SlicedPacket.vlan` →
+  `link_exts` and `Ipv4Ecn`/`Ipv4Dscp` → `IpEcn`/`IpDscp` renames are in range
+  too, but netring never surfaced those fields.
+- Note that **flowscope still pins etherparse `0.16`**, so the dependency tree
+  now carries both. That is sound — flowscope exposes no etherparse type in its
+  own public API, so nothing crosses the boundary — but `cargo deny`'s
+  `multiple-versions` check will report it until flowscope catches up.
+
 ### Added
 
 - **`Http2` protocol marker** behind the new `http2` feature —

@@ -31,6 +31,8 @@ pub use builtin::Dns;
 pub use builtin::Ftp;
 #[cfg(feature = "http")]
 pub use builtin::Http;
+#[cfg(feature = "http2")]
+pub use builtin::Http2;
 #[cfg(feature = "kerberos")]
 pub use builtin::Kerberos;
 #[cfg(feature = "ldap")]

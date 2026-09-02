@@ -329,4 +329,43 @@ mod tests {
     fn empty_interests_is_none() {
         assert!(compile_union(Vec::<Predicate>::new()).is_none());
     }
+
+    // ── Signature dispatch (0.30, the `Http2` marker) ───────────────────────
+
+    /// Stand-in for a real signature check; `dispatch_interest` never calls it.
+    fn never_matches(_: &[u8]) -> crate::protocol::SignatureMatch {
+        crate::protocol::SignatureMatch::NoMatch
+    }
+
+    #[test]
+    fn signature_dispatch_is_capture_all() {
+        // A signature cannot be evaluated in the kernel — the bytes have to
+        // reach userspace — so the only sound interest is `Always`. Narrowing
+        // this (e.g. to "h2 is TCP-only") would silently drop every non-TCP
+        // consumer registered alongside it.
+        assert!(matches!(
+            dispatch_interest(&Dispatch::Signature(never_matches)),
+            Predicate::Always
+        ));
+    }
+
+    #[test]
+    fn signature_dispatch_widens_a_narrow_union() {
+        // The documented cost of registering a signature-dispatched protocol:
+        // whatever else is registered, the kernel prefilter disappears.
+        let narrow = [dispatch_interest(&Dispatch::Tcp(vec![443]))];
+        assert!(
+            compile_union(narrow.clone()).is_some(),
+            "a port dispatch alone still compiles to a BPF filter"
+        );
+
+        let widened = [
+            dispatch_interest(&Dispatch::Tcp(vec![443])),
+            dispatch_interest(&Dispatch::Signature(never_matches)),
+        ];
+        assert!(
+            compile_union(widened).is_none(),
+            "a signature in the union must collapse it to capture-all",
+        );
+    }
 }

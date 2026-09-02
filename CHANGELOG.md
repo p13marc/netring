@@ -19,7 +19,12 @@ was built and tested against 0.23 before the bump and no netring API changed.
     cannot be evaluated in the kernel, so every packet must reach userspace.
     That is why `http2` joins `all-parsers` but *not* the curated `monitor` /
     `monitor-quickstart` umbrellas: the feature is free, the prefilter should
-    be a deliberate `.on::<Http2>()`.
+    be a deliberate `.protocol::<Http2>()`.
+  - The prefilter is not the whole bill: a signature dispatch probes every TCP
+    flow, holding one probe state per flow (map capped at 65 536) plus up to
+    16 KiB of replay buffer. And it matches *prior-knowledge* h2c only — h2c
+    negotiated over an HTTP/1 `Upgrade` delivers its preface after the probe
+    (4 packets, 64 bytes per side) has already given up.
   - Worth knowing for handlers: the routing key is the event's `stream_id`,
     not the flow side — h2 multiplexes. And a *failed* gRPC call still carries
     HTTP `200`; the real status is `grpc-status` in the trailers.

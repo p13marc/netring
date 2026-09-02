@@ -20,14 +20,25 @@ inherited from flowscope that is worth knowing about.
 ## 1. New: the `Http2` protocol marker (`http2` feature)
 
 ```rust
-use netring::protocol::builtin::Http2;
+use netring::prelude::Http2;   // also `netring::protocol::Http2`
 
-monitor.on::<Http2>(|ev, ctx| {
-    if let flowscope::http2::Http2Event::Head(head) = ev {
-        println!("stream {} -> {:?}", head.stream_id, head.authority());
-    }
-});
+Monitor::builder()
+    .interface("eth0")
+    .protocol::<Http2>()       // declares the marker AND installs the parser slot
+    .on::<Http2>(|ev: &flowscope::http2::Http2Event| {
+        if let flowscope::http2::Http2Event::Head(head) = ev {
+            println!("stream {} -> {:?}", head.stream_id, head.authority());
+        }
+        Ok(())
+    })
+    .build()?;
 ```
+
+`.on::<Http2>()` on its own is not enough — as for every other marker, the
+`.protocol::<Http2>()` call is what installs the parser slot, and `build()`
+rejects a handler for an undeclared protocol with
+`BuildError::HandlerForUnregisteredProtocol` rather than letting it silently
+never fire.
 
 Three things to internalise before using it.
 
@@ -45,9 +56,18 @@ subscription engine maps any signature dispatch to `Predicate::Always`,
 because a signature cannot be evaluated in the kernel. On a busy link that is
 the difference between a narrow BPF filter and none at all.
 
+The prefilter is not the whole bill: a signature dispatch also probes **every
+TCP flow**, holding one probe state per flow (map capped at 65 536) and up to
+16 KiB of buffered frames for replay. Size that before enabling it on a busy
+tap.
+
+Note also that this covers **prior-knowledge h2c**, not h2c negotiated over an
+HTTP/1 `Upgrade` — there the preface only arrives after the `101`, by which
+point the probe (4 packets, 64 bytes per side) has already given up.
+
 That is why `http2` is in `all-parsers` but **not** in the curated `monitor` /
 `monitor-quickstart` umbrellas: enabling the feature costs nothing, but paying
-the prefilter should be a deliberate `.on::<Http2>()`.
+the prefilter should be a deliberate `.protocol::<Http2>()`.
 
 **A gRPC call that failed still returns HTTP `200`.** The real status is
 `grpc-status`, in the trailers — or, for a Trailers-Only response, in the

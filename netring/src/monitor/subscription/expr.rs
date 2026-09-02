@@ -74,6 +74,7 @@ pub fn parse(input: &str) -> Result<Predicate, ParseError> {
         tokens,
         pos: 0,
         depth: 0,
+        nodes: 0,
     };
     let pred = p.parse_or()?;
     if p.pos != p.tokens.len() {
@@ -108,10 +109,27 @@ fn tokenize(input: &str) -> Vec<String> {
 /// `expr_parse` fuzz target). 64 is far beyond any legitimate filter.
 const MAX_DEPTH: usize = 64;
 
+/// Total-leaf bound for one expression.
+///
+/// [`MAX_DEPTH`] bounds *nesting*, but nesting is not the only way to build a
+/// deep AST. `parse_or` / `parse_and` loop iteratively — each iteration returns
+/// to depth 0 — while folding their operands into a **left-leaning**
+/// [`Predicate::And`] / [`Predicate::Or`] chain. So `tcp and tcp and tcp …`
+/// with N terms yields an AST N levels deep at depth counter 1, and the
+/// recursive consumers (`eval`, `kernel_approx`, and the derived `Drop` on a
+/// `Box`-linked enum) blow the stack on it — `Drop` alone, before the predicate
+/// is ever evaluated.
+///
+/// Bounding the leaf count bounds the node count and therefore the depth,
+/// whatever shape the expression has. 1024 atoms is orders of magnitude past
+/// any filter a human or a control plane writes.
+const MAX_NODES: usize = 1024;
+
 struct Parser {
     tokens: Vec<String>,
     pos: usize,
     depth: usize,
+    nodes: usize,
 }
 
 impl Parser {
@@ -183,6 +201,15 @@ impl Parser {
     }
 
     fn parse_atom(&mut self) -> Result<Predicate, ParseError> {
+        // Every leaf of the AST passes through here exactly once, so this is
+        // the choke point for the size bound. `parse_or` / `parse_and` fold
+        // their operands into a left-leaning chain whose depth is the operand
+        // count, which `MAX_DEPTH` does not see — capping leaves caps that too.
+        if self.nodes >= MAX_NODES {
+            return Err(ParseError::new("expression has too many terms"));
+        }
+        self.nodes += 1;
+
         let tok = self
             .advance()
             .ok_or_else(|| ParseError::new("unexpected end of expression"))?;
@@ -457,5 +484,43 @@ mod tests {
         assert!(parse(&plausible).is_ok());
         let bangs = format!("{}tcp", "! ".repeat(63));
         assert!(parse(&bangs).is_ok());
+    }
+
+    #[test]
+    fn term_count_is_bounded() {
+        // `MAX_DEPTH` alone did not cover this: `parse_and` / `parse_or` loop
+        // iteratively (depth returns to 0 each iteration) but fold into a
+        // left-leaning `And`/`Or` chain whose depth is the term count. A
+        // 100_000-term chain parsed fine and then overflowed the stack in the
+        // derived `Drop`, before `eval` was ever reached — reachable from
+        // `packet().expr(..)` with a filter string from config or a CLI.
+        let long_and = format!("{}tcp", "tcp and ".repeat(100_000));
+        assert!(parse(&long_and).is_err());
+        let long_or = format!("{}tcp", "tcp or ".repeat(100_000));
+        assert!(parse(&long_or).is_err());
+
+        // The bound is on leaves, so it holds whatever shape the chain has.
+        let long_mixed = format!("{}tcp", "tcp and udp or ".repeat(50_000));
+        assert!(parse(&long_mixed).is_err());
+
+        // Anything a human or a control plane would write still parses.
+        let plausible = (0..64)
+            .map(|p| format!("port {p}"))
+            .collect::<Vec<_>>()
+            .join(" or ");
+        assert!(parse(&plausible).is_ok());
+    }
+
+    #[test]
+    fn a_bounded_expression_survives_eval_and_drop() {
+        // The bound exists to keep the recursive consumers off the stack —
+        // assert they actually run on a maximally-sized accepted expression.
+        let at_limit = (0..MAX_NODES)
+            .map(|_| "tcp")
+            .collect::<Vec<_>>()
+            .join(" and ");
+        let pred = parse(&at_limit).expect("MAX_NODES terms is still accepted");
+        let _ = pred.kernel_approx();
+        drop(pred);
     }
 }

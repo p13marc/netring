@@ -558,22 +558,22 @@ pub use netring::anomaly::DetectorScore
 pub use netring::anomaly::KeyFields
 pub use netring::anomaly::OwnedAnomaly
 pub mod netring::anomaly::eve_sink
-pub struct netring::anomaly::eve_sink::EveSink<W: std::io::Write + core::marker::Send>
+pub struct netring::anomaly::eve_sink::EveSink<W: core::io::write::Write + core::marker::Send>
 impl netring::anomaly::eve_sink::EveSink<std::io::stdio::Stdout>
 pub fn netring::anomaly::eve_sink::EveSink<std::io::stdio::Stdout>::stdout(options: flowscope::emit::eve::EveOptions) -> Self
-impl<W: std::io::Write + core::marker::Send> netring::anomaly::eve_sink::EveSink<W>
-pub fn netring::anomaly::eve_sink::EveSink<W>::finish(self) -> std::io::error::Result<W>
+impl<W: core::io::write::Write + core::marker::Send> netring::anomaly::eve_sink::EveSink<W>
+pub fn netring::anomaly::eve_sink::EveSink<W>::finish(self) -> core::io::error::Result<W>
 pub fn netring::anomaly::eve_sink::EveSink<W>::new(sink: W, options: flowscope::emit::eve::EveOptions) -> Self
 pub fn netring::anomaly::eve_sink::EveSink<W>::writer(&self) -> &flowscope::emit::eve::EveJsonWriter<W>
-impl<W: std::io::Write + core::marker::Send> netring::anomaly::sink::AnomalySink for netring::anomaly::eve_sink::EveSink<W>
-pub fn netring::anomaly::eve_sink::EveSink<W>::flush(&mut self) -> core::result::Result<(), std::io::error::Error>
+impl<W: core::io::write::Write + core::marker::Send> netring::anomaly::sink::AnomalySink for netring::anomaly::eve_sink::EveSink<W>
+pub fn netring::anomaly::eve_sink::EveSink<W>::flush(&mut self) -> core::result::Result<(), core::io::error::Error>
 pub fn netring::anomaly::eve_sink::EveSink<W>::write(&mut self, kind: &'static str, severity: netring::Severity, ts: flowscope::timestamp::Timestamp, key: core::option::Option<&dyn netring::anomaly::key::Key>, observations: &[(&'static str, alloc::borrow::Cow<'_, str>)], metrics: &[(&'static str, f64)])
-pub struct netring::anomaly::eve_sink::EveTlsSink<W: std::io::Write + core::marker::Send>
-impl<W: std::io::Write + core::marker::Send> netring::anomaly::eve_sink::EveTlsSink<W>
-pub fn netring::anomaly::eve_sink::EveTlsSink<W>::flush(&mut self) -> std::io::error::Result<()>
+pub struct netring::anomaly::eve_sink::EveTlsSink<W: core::io::write::Write + core::marker::Send>
+impl<W: core::io::write::Write + core::marker::Send> netring::anomaly::eve_sink::EveTlsSink<W>
+pub fn netring::anomaly::eve_sink::EveTlsSink<W>::flush(&mut self) -> core::io::error::Result<()>
 pub fn netring::anomaly::eve_sink::EveTlsSink<W>::into_inner(self) -> W
 pub fn netring::anomaly::eve_sink::EveTlsSink<W>::new(writer: W, in_iface: impl core::convert::Into<alloc::string::String>) -> Self
-pub fn netring::anomaly::eve_sink::EveTlsSink<W>::write_tls(&mut self, fp: &netring::monitor::fingerprint::TlsFingerprint, ts: flowscope::timestamp::Timestamp) -> std::io::error::Result<()>
+pub fn netring::anomaly::eve_sink::EveTlsSink<W>::write_tls(&mut self, fp: &netring::monitor::fingerprint::TlsFingerprint, ts: flowscope::timestamp::Timestamp) -> core::io::error::Result<()>
 pub fn netring::anomaly::eve_sink::eve_tls_record(fp: &netring::monitor::fingerprint::TlsFingerprint, ts: flowscope::timestamp::Timestamp, in_iface: &str) -> serde_json::value::Value
 pub mod netring::anomaly::key
 pub use netring::anomaly::key::KeyFields
@@ -595,18 +595,18 @@ pub fn netring::anomaly::metrics_sink::MetricsSink::default() -> Self
 impl core::fmt::Debug for netring::anomaly::metrics_sink::MetricsSink
 pub fn netring::anomaly::metrics_sink::MetricsSink::fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result
 impl netring::anomaly::sink::AnomalySink for netring::anomaly::metrics_sink::MetricsSink
-pub fn netring::anomaly::metrics_sink::MetricsSink::flush(&mut self) -> core::result::Result<(), std::io::error::Error>
+pub fn netring::anomaly::metrics_sink::MetricsSink::flush(&mut self) -> core::result::Result<(), core::io::error::Error>
 pub fn netring::anomaly::metrics_sink::MetricsSink::write(&mut self, kind: &'static str, severity: netring::Severity, _ts: flowscope::timestamp::Timestamp, _key: core::option::Option<&dyn netring::anomaly::key::Key>, _observations: &[(&'static str, alloc::borrow::Cow<'_, str>)], metrics: &[(&'static str, f64)])
 pub mod netring::anomaly::ocsf_sink
-pub struct netring::anomaly::ocsf_sink::OcsfSink<W: std::io::Write + core::marker::Send>
+pub struct netring::anomaly::ocsf_sink::OcsfSink<W: core::io::write::Write + core::marker::Send>
 impl netring::anomaly::ocsf_sink::OcsfSink<std::io::stdio::Stdout>
 pub fn netring::anomaly::ocsf_sink::OcsfSink<std::io::stdio::Stdout>::stdout() -> Self
-impl<W: std::io::Write + core::marker::Send> netring::anomaly::ocsf_sink::OcsfSink<W>
+impl<W: core::io::write::Write + core::marker::Send> netring::anomaly::ocsf_sink::OcsfSink<W>
 pub fn netring::anomaly::ocsf_sink::OcsfSink<W>::into_inner(self) -> W
 pub fn netring::anomaly::ocsf_sink::OcsfSink<W>::new(out: W) -> Self
 pub fn netring::anomaly::ocsf_sink::OcsfSink<W>::product(self, name: &'static str, vendor: &'static str) -> Self
-impl<W: std::io::Write + core::marker::Send> netring::anomaly::sink::AnomalySink for netring::anomaly::ocsf_sink::OcsfSink<W>
-pub fn netring::anomaly::ocsf_sink::OcsfSink<W>::flush(&mut self) -> core::result::Result<(), std::io::error::Error>
+impl<W: core::io::write::Write + core::marker::Send> netring::anomaly::sink::AnomalySink for netring::anomaly::ocsf_sink::OcsfSink<W>
+pub fn netring::anomaly::ocsf_sink::OcsfSink<W>::flush(&mut self) -> core::result::Result<(), core::io::error::Error>
 pub fn netring::anomaly::ocsf_sink::OcsfSink<W>::write(&mut self, kind: &'static str, severity: netring::Severity, ts: flowscope::timestamp::Timestamp, key: core::option::Option<&dyn netring::anomaly::key::Key>, observations: &[(&'static str, alloc::borrow::Cow<'_, str>)], metrics: &[(&'static str, f64)])
 pub mod netring::anomaly::shipped_sinks
 pub struct netring::anomaly::shipped_sinks::ChannelSink
@@ -615,7 +615,7 @@ pub fn netring::anomaly::shipped_sinks::ChannelSink::bounded(capacity: usize) ->
 pub fn netring::anomaly::shipped_sinks::ChannelSink::channel() -> (Self, tokio::sync::mpsc::unbounded::UnboundedReceiver<flowscope::anomaly::OwnedAnomaly>)
 pub fn netring::anomaly::shipped_sinks::ChannelSink::new(tx: tokio::sync::mpsc::unbounded::UnboundedSender<flowscope::anomaly::OwnedAnomaly>) -> Self
 impl netring::anomaly::sink::AnomalySink for netring::anomaly::shipped_sinks::ChannelSink
-pub fn netring::anomaly::shipped_sinks::ChannelSink::flush(&mut self) -> core::result::Result<(), std::io::error::Error>
+pub fn netring::anomaly::shipped_sinks::ChannelSink::flush(&mut self) -> core::result::Result<(), core::io::error::Error>
 pub fn netring::anomaly::shipped_sinks::ChannelSink::write(&mut self, kind: &'static str, severity: netring::Severity, ts: flowscope::timestamp::Timestamp, key: core::option::Option<&dyn netring::anomaly::key::Key>, observations: &[(&'static str, alloc::borrow::Cow<'_, str>)], metrics: &[(&'static str, f64)])
 pub struct netring::anomaly::shipped_sinks::StdoutJsonSink
 impl netring::anomaly::shipped_sinks::StdoutJsonSink
@@ -623,7 +623,7 @@ pub fn netring::anomaly::shipped_sinks::StdoutJsonSink::with_capacity(cap: usize
 impl core::default::Default for netring::anomaly::shipped_sinks::StdoutJsonSink
 pub fn netring::anomaly::shipped_sinks::StdoutJsonSink::default() -> Self
 impl netring::anomaly::sink::AnomalySink for netring::anomaly::shipped_sinks::StdoutJsonSink
-pub fn netring::anomaly::shipped_sinks::StdoutJsonSink::flush(&mut self) -> core::result::Result<(), std::io::error::Error>
+pub fn netring::anomaly::shipped_sinks::StdoutJsonSink::flush(&mut self) -> core::result::Result<(), core::io::error::Error>
 pub fn netring::anomaly::shipped_sinks::StdoutJsonSink::write(&mut self, kind: &'static str, severity: netring::Severity, ts: flowscope::timestamp::Timestamp, key: core::option::Option<&dyn netring::anomaly::key::Key>, observations: &[(&'static str, alloc::borrow::Cow<'_, str>)], metrics: &[(&'static str, f64)])
 pub struct netring::anomaly::shipped_sinks::StdoutSink
 impl netring::anomaly::shipped_sinks::StdoutSink
@@ -631,7 +631,7 @@ pub fn netring::anomaly::shipped_sinks::StdoutSink::with_capacity(cap: usize) ->
 impl core::default::Default for netring::anomaly::shipped_sinks::StdoutSink
 pub fn netring::anomaly::shipped_sinks::StdoutSink::default() -> Self
 impl netring::anomaly::sink::AnomalySink for netring::anomaly::shipped_sinks::StdoutSink
-pub fn netring::anomaly::shipped_sinks::StdoutSink::flush(&mut self) -> core::result::Result<(), std::io::error::Error>
+pub fn netring::anomaly::shipped_sinks::StdoutSink::flush(&mut self) -> core::result::Result<(), core::io::error::Error>
 pub fn netring::anomaly::shipped_sinks::StdoutSink::write(&mut self, kind: &'static str, severity: netring::Severity, ts: flowscope::timestamp::Timestamp, key: core::option::Option<&dyn netring::anomaly::key::Key>, observations: &[(&'static str, alloc::borrow::Cow<'_, str>)], metrics: &[(&'static str, f64)])
 pub struct netring::anomaly::shipped_sinks::TracingSink
 impl netring::anomaly::shipped_sinks::TracingSink
@@ -639,7 +639,7 @@ pub fn netring::anomaly::shipped_sinks::TracingSink::with_capacity(cap: usize) -
 impl core::default::Default for netring::anomaly::shipped_sinks::TracingSink
 pub fn netring::anomaly::shipped_sinks::TracingSink::default() -> Self
 impl netring::anomaly::sink::AnomalySink for netring::anomaly::shipped_sinks::TracingSink
-pub fn netring::anomaly::shipped_sinks::TracingSink::flush(&mut self) -> core::result::Result<(), std::io::error::Error>
+pub fn netring::anomaly::shipped_sinks::TracingSink::flush(&mut self) -> core::result::Result<(), core::io::error::Error>
 pub fn netring::anomaly::shipped_sinks::TracingSink::write(&mut self, kind: &'static str, severity: netring::Severity, ts: flowscope::timestamp::Timestamp, key: core::option::Option<&dyn netring::anomaly::key::Key>, observations: &[(&'static str, alloc::borrow::Cow<'_, str>)], metrics: &[(&'static str, f64)])
 pub mod netring::anomaly::sink
 pub struct netring::anomaly::sink::AnomalyWriter<'sink>
@@ -654,38 +654,38 @@ pub fn netring::anomaly::sink::AnomalyWriter<'sink>::with_key<K: netring::anomal
 pub fn netring::anomaly::sink::AnomalyWriter<'sink>::with_metric(self, label: &'static str, value: f64) -> Self
 pub struct netring::anomaly::sink::NoopSink
 impl netring::anomaly::sink::AnomalySink for netring::anomaly::sink::NoopSink
-pub fn netring::anomaly::sink::NoopSink::flush(&mut self) -> core::result::Result<(), std::io::error::Error>
+pub fn netring::anomaly::sink::NoopSink::flush(&mut self) -> core::result::Result<(), core::io::error::Error>
 pub fn netring::anomaly::sink::NoopSink::write(&mut self, _kind: &'static str, _severity: netring::Severity, _ts: flowscope::timestamp::Timestamp, _key: core::option::Option<&dyn netring::anomaly::key::Key>, _observations: &[(&'static str, alloc::borrow::Cow<'_, str>)], _metrics: &[(&'static str, f64)])
 pub const netring::anomaly::sink::ANOMALY_INLINE_CAPACITY: usize
 pub trait netring::anomaly::sink::AnomalySink: core::marker::Send
-pub fn netring::anomaly::sink::AnomalySink::flush(&mut self) -> core::result::Result<(), std::io::error::Error>
+pub fn netring::anomaly::sink::AnomalySink::flush(&mut self) -> core::result::Result<(), core::io::error::Error>
 pub fn netring::anomaly::sink::AnomalySink::write(&mut self, kind: &'static str, severity: netring::Severity, ts: flowscope::timestamp::Timestamp, key: core::option::Option<&dyn netring::anomaly::key::Key>, observations: &[(&'static str, alloc::borrow::Cow<'_, str>)], metrics: &[(&'static str, f64)])
 impl netring::anomaly::sink::AnomalySink for netring::anomaly::metrics_sink::MetricsSink
-pub fn netring::anomaly::metrics_sink::MetricsSink::flush(&mut self) -> core::result::Result<(), std::io::error::Error>
+pub fn netring::anomaly::metrics_sink::MetricsSink::flush(&mut self) -> core::result::Result<(), core::io::error::Error>
 pub fn netring::anomaly::metrics_sink::MetricsSink::write(&mut self, kind: &'static str, severity: netring::Severity, _ts: flowscope::timestamp::Timestamp, _key: core::option::Option<&dyn netring::anomaly::key::Key>, _observations: &[(&'static str, alloc::borrow::Cow<'_, str>)], metrics: &[(&'static str, f64)])
 impl netring::anomaly::sink::AnomalySink for netring::anomaly::shipped_sinks::ChannelSink
-pub fn netring::anomaly::shipped_sinks::ChannelSink::flush(&mut self) -> core::result::Result<(), std::io::error::Error>
+pub fn netring::anomaly::shipped_sinks::ChannelSink::flush(&mut self) -> core::result::Result<(), core::io::error::Error>
 pub fn netring::anomaly::shipped_sinks::ChannelSink::write(&mut self, kind: &'static str, severity: netring::Severity, ts: flowscope::timestamp::Timestamp, key: core::option::Option<&dyn netring::anomaly::key::Key>, observations: &[(&'static str, alloc::borrow::Cow<'_, str>)], metrics: &[(&'static str, f64)])
 impl netring::anomaly::sink::AnomalySink for netring::anomaly::shipped_sinks::StdoutJsonSink
-pub fn netring::anomaly::shipped_sinks::StdoutJsonSink::flush(&mut self) -> core::result::Result<(), std::io::error::Error>
+pub fn netring::anomaly::shipped_sinks::StdoutJsonSink::flush(&mut self) -> core::result::Result<(), core::io::error::Error>
 pub fn netring::anomaly::shipped_sinks::StdoutJsonSink::write(&mut self, kind: &'static str, severity: netring::Severity, ts: flowscope::timestamp::Timestamp, key: core::option::Option<&dyn netring::anomaly::key::Key>, observations: &[(&'static str, alloc::borrow::Cow<'_, str>)], metrics: &[(&'static str, f64)])
 impl netring::anomaly::sink::AnomalySink for netring::anomaly::shipped_sinks::StdoutSink
-pub fn netring::anomaly::shipped_sinks::StdoutSink::flush(&mut self) -> core::result::Result<(), std::io::error::Error>
+pub fn netring::anomaly::shipped_sinks::StdoutSink::flush(&mut self) -> core::result::Result<(), core::io::error::Error>
 pub fn netring::anomaly::shipped_sinks::StdoutSink::write(&mut self, kind: &'static str, severity: netring::Severity, ts: flowscope::timestamp::Timestamp, key: core::option::Option<&dyn netring::anomaly::key::Key>, observations: &[(&'static str, alloc::borrow::Cow<'_, str>)], metrics: &[(&'static str, f64)])
 impl netring::anomaly::sink::AnomalySink for netring::anomaly::shipped_sinks::TracingSink
-pub fn netring::anomaly::shipped_sinks::TracingSink::flush(&mut self) -> core::result::Result<(), std::io::error::Error>
+pub fn netring::anomaly::shipped_sinks::TracingSink::flush(&mut self) -> core::result::Result<(), core::io::error::Error>
 pub fn netring::anomaly::shipped_sinks::TracingSink::write(&mut self, kind: &'static str, severity: netring::Severity, ts: flowscope::timestamp::Timestamp, key: core::option::Option<&dyn netring::anomaly::key::Key>, observations: &[(&'static str, alloc::borrow::Cow<'_, str>)], metrics: &[(&'static str, f64)])
 impl netring::anomaly::sink::AnomalySink for netring::anomaly::sink::NoopSink
-pub fn netring::anomaly::sink::NoopSink::flush(&mut self) -> core::result::Result<(), std::io::error::Error>
+pub fn netring::anomaly::sink::NoopSink::flush(&mut self) -> core::result::Result<(), core::io::error::Error>
 pub fn netring::anomaly::sink::NoopSink::write(&mut self, _kind: &'static str, _severity: netring::Severity, _ts: flowscope::timestamp::Timestamp, _key: core::option::Option<&dyn netring::anomaly::key::Key>, _observations: &[(&'static str, alloc::borrow::Cow<'_, str>)], _metrics: &[(&'static str, f64)])
-impl<W: std::io::Write + core::marker::Send> netring::anomaly::sink::AnomalySink for netring::anomaly::eve_sink::EveSink<W>
-pub fn netring::anomaly::eve_sink::EveSink<W>::flush(&mut self) -> core::result::Result<(), std::io::error::Error>
+impl<W: core::io::write::Write + core::marker::Send> netring::anomaly::sink::AnomalySink for netring::anomaly::eve_sink::EveSink<W>
+pub fn netring::anomaly::eve_sink::EveSink<W>::flush(&mut self) -> core::result::Result<(), core::io::error::Error>
 pub fn netring::anomaly::eve_sink::EveSink<W>::write(&mut self, kind: &'static str, severity: netring::Severity, ts: flowscope::timestamp::Timestamp, key: core::option::Option<&dyn netring::anomaly::key::Key>, observations: &[(&'static str, alloc::borrow::Cow<'_, str>)], metrics: &[(&'static str, f64)])
-impl<W: std::io::Write + core::marker::Send> netring::anomaly::sink::AnomalySink for netring::anomaly::ocsf_sink::OcsfSink<W>
-pub fn netring::anomaly::ocsf_sink::OcsfSink<W>::flush(&mut self) -> core::result::Result<(), std::io::error::Error>
+impl<W: core::io::write::Write + core::marker::Send> netring::anomaly::sink::AnomalySink for netring::anomaly::ocsf_sink::OcsfSink<W>
+pub fn netring::anomaly::ocsf_sink::OcsfSink<W>::flush(&mut self) -> core::result::Result<(), core::io::error::Error>
 pub fn netring::anomaly::ocsf_sink::OcsfSink<W>::write(&mut self, kind: &'static str, severity: netring::Severity, ts: flowscope::timestamp::Timestamp, key: core::option::Option<&dyn netring::anomaly::key::Key>, observations: &[(&'static str, alloc::borrow::Cow<'_, str>)], metrics: &[(&'static str, f64)])
-impl<W: std::io::Write + core::marker::Send> netring::anomaly::sink::AnomalySink for netring::anomaly::syslog_sink::SyslogSink<W>
-pub fn netring::anomaly::syslog_sink::SyslogSink<W>::flush(&mut self) -> core::result::Result<(), std::io::error::Error>
+impl<W: core::io::write::Write + core::marker::Send> netring::anomaly::sink::AnomalySink for netring::anomaly::syslog_sink::SyslogSink<W>
+pub fn netring::anomaly::syslog_sink::SyslogSink<W>::flush(&mut self) -> core::result::Result<(), core::io::error::Error>
 pub fn netring::anomaly::syslog_sink::SyslogSink<W>::write(&mut self, kind: &'static str, severity: netring::Severity, ts: flowscope::timestamp::Timestamp, key: core::option::Option<&dyn netring::anomaly::key::Key>, observations: &[(&'static str, alloc::borrow::Cow<'_, str>)], metrics: &[(&'static str, f64)])
 pub trait netring::anomaly::sink::AnomalySinkExt: netring::anomaly::sink::AnomalySink + core::marker::Sized
 pub fn netring::anomaly::sink::AnomalySinkExt::begin(&mut self, kind: &'static str, severity: netring::Severity, ts: flowscope::timestamp::Timestamp) -> netring::anomaly::sink::AnomalyWriter<'_>
@@ -718,10 +718,10 @@ impl core::fmt::Debug for netring::anomaly::syslog_sink::SyslogFacility
 pub fn netring::anomaly::syslog_sink::SyslogFacility::fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result
 impl core::marker::Copy for netring::anomaly::syslog_sink::SyslogFacility
 impl core::marker::StructuralPartialEq for netring::anomaly::syslog_sink::SyslogFacility
-pub struct netring::anomaly::syslog_sink::SyslogSink<W: std::io::Write + core::marker::Send>
+pub struct netring::anomaly::syslog_sink::SyslogSink<W: core::io::write::Write + core::marker::Send>
 impl netring::anomaly::syslog_sink::SyslogSink<std::io::stdio::Stdout>
 pub fn netring::anomaly::syslog_sink::SyslogSink<std::io::stdio::Stdout>::stdout() -> Self
-impl<W: std::io::Write + core::marker::Send> netring::anomaly::syslog_sink::SyslogSink<W>
+impl<W: core::io::write::Write + core::marker::Send> netring::anomaly::syslog_sink::SyslogSink<W>
 pub fn netring::anomaly::syslog_sink::SyslogSink<W>::app_name(self, name: impl core::convert::Into<alloc::borrow::Cow<'static, str>>) -> Self
 pub fn netring::anomaly::syslog_sink::SyslogSink<W>::enterprise_id(self, pen: impl core::convert::Into<alloc::borrow::Cow<'static, str>>) -> Self
 pub fn netring::anomaly::syslog_sink::SyslogSink<W>::facility(self, facility: netring::anomaly::syslog_sink::SyslogFacility) -> Self
@@ -729,8 +729,8 @@ pub fn netring::anomaly::syslog_sink::SyslogSink<W>::hostname(self, host: impl c
 pub fn netring::anomaly::syslog_sink::SyslogSink<W>::into_inner(self) -> W
 pub fn netring::anomaly::syslog_sink::SyslogSink<W>::new(writer: W) -> Self
 pub fn netring::anomaly::syslog_sink::SyslogSink<W>::procid(self, procid: impl core::convert::Into<alloc::borrow::Cow<'static, str>>) -> Self
-impl<W: std::io::Write + core::marker::Send> netring::anomaly::sink::AnomalySink for netring::anomaly::syslog_sink::SyslogSink<W>
-pub fn netring::anomaly::syslog_sink::SyslogSink<W>::flush(&mut self) -> core::result::Result<(), std::io::error::Error>
+impl<W: core::io::write::Write + core::marker::Send> netring::anomaly::sink::AnomalySink for netring::anomaly::syslog_sink::SyslogSink<W>
+pub fn netring::anomaly::syslog_sink::SyslogSink<W>::flush(&mut self) -> core::result::Result<(), core::io::error::Error>
 pub fn netring::anomaly::syslog_sink::SyslogSink<W>::write(&mut self, kind: &'static str, severity: netring::Severity, ts: flowscope::timestamp::Timestamp, key: core::option::Option<&dyn netring::anomaly::key::Key>, observations: &[(&'static str, alloc::borrow::Cow<'_, str>)], metrics: &[(&'static str, f64)])
 #[non_exhaustive] pub enum netring::anomaly::Severity
 pub netring::anomaly::Severity::Critical
@@ -826,22 +826,22 @@ impl core::fmt::Debug for netring::AnomalyContext
 pub fn netring::AnomalyContext::fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result
 impl serde_core::ser::Serialize for netring::AnomalyContext
 pub fn netring::AnomalyContext::serialize<__S>(&self, __serializer: __S) -> core::result::Result<<__S as serde_core::ser::Serializer>::Ok, <__S as serde_core::ser::Serializer>::Error> where __S: serde_core::ser::Serializer
-pub struct netring::anomaly::EveSink<W: std::io::Write + core::marker::Send>
+pub struct netring::anomaly::EveSink<W: core::io::write::Write + core::marker::Send>
 impl netring::anomaly::eve_sink::EveSink<std::io::stdio::Stdout>
 pub fn netring::anomaly::eve_sink::EveSink<std::io::stdio::Stdout>::stdout(options: flowscope::emit::eve::EveOptions) -> Self
-impl<W: std::io::Write + core::marker::Send> netring::anomaly::eve_sink::EveSink<W>
-pub fn netring::anomaly::eve_sink::EveSink<W>::finish(self) -> std::io::error::Result<W>
+impl<W: core::io::write::Write + core::marker::Send> netring::anomaly::eve_sink::EveSink<W>
+pub fn netring::anomaly::eve_sink::EveSink<W>::finish(self) -> core::io::error::Result<W>
 pub fn netring::anomaly::eve_sink::EveSink<W>::new(sink: W, options: flowscope::emit::eve::EveOptions) -> Self
 pub fn netring::anomaly::eve_sink::EveSink<W>::writer(&self) -> &flowscope::emit::eve::EveJsonWriter<W>
-impl<W: std::io::Write + core::marker::Send> netring::anomaly::sink::AnomalySink for netring::anomaly::eve_sink::EveSink<W>
-pub fn netring::anomaly::eve_sink::EveSink<W>::flush(&mut self) -> core::result::Result<(), std::io::error::Error>
+impl<W: core::io::write::Write + core::marker::Send> netring::anomaly::sink::AnomalySink for netring::anomaly::eve_sink::EveSink<W>
+pub fn netring::anomaly::eve_sink::EveSink<W>::flush(&mut self) -> core::result::Result<(), core::io::error::Error>
 pub fn netring::anomaly::eve_sink::EveSink<W>::write(&mut self, kind: &'static str, severity: netring::Severity, ts: flowscope::timestamp::Timestamp, key: core::option::Option<&dyn netring::anomaly::key::Key>, observations: &[(&'static str, alloc::borrow::Cow<'_, str>)], metrics: &[(&'static str, f64)])
-pub struct netring::anomaly::EveTlsSink<W: std::io::Write + core::marker::Send>
-impl<W: std::io::Write + core::marker::Send> netring::anomaly::eve_sink::EveTlsSink<W>
-pub fn netring::anomaly::eve_sink::EveTlsSink<W>::flush(&mut self) -> std::io::error::Result<()>
+pub struct netring::anomaly::EveTlsSink<W: core::io::write::Write + core::marker::Send>
+impl<W: core::io::write::Write + core::marker::Send> netring::anomaly::eve_sink::EveTlsSink<W>
+pub fn netring::anomaly::eve_sink::EveTlsSink<W>::flush(&mut self) -> core::io::error::Result<()>
 pub fn netring::anomaly::eve_sink::EveTlsSink<W>::into_inner(self) -> W
 pub fn netring::anomaly::eve_sink::EveTlsSink<W>::new(writer: W, in_iface: impl core::convert::Into<alloc::string::String>) -> Self
-pub fn netring::anomaly::eve_sink::EveTlsSink<W>::write_tls(&mut self, fp: &netring::monitor::fingerprint::TlsFingerprint, ts: flowscope::timestamp::Timestamp) -> std::io::error::Result<()>
+pub fn netring::anomaly::eve_sink::EveTlsSink<W>::write_tls(&mut self, fp: &netring::monitor::fingerprint::TlsFingerprint, ts: flowscope::timestamp::Timestamp) -> core::io::error::Result<()>
 pub struct netring::anomaly::MetricsSink
 impl netring::anomaly::metrics_sink::MetricsSink
 pub fn netring::anomaly::metrics_sink::MetricsSink::counter_name(&self) -> &'static str
@@ -855,12 +855,12 @@ pub fn netring::anomaly::metrics_sink::MetricsSink::default() -> Self
 impl core::fmt::Debug for netring::anomaly::metrics_sink::MetricsSink
 pub fn netring::anomaly::metrics_sink::MetricsSink::fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result
 impl netring::anomaly::sink::AnomalySink for netring::anomaly::metrics_sink::MetricsSink
-pub fn netring::anomaly::metrics_sink::MetricsSink::flush(&mut self) -> core::result::Result<(), std::io::error::Error>
+pub fn netring::anomaly::metrics_sink::MetricsSink::flush(&mut self) -> core::result::Result<(), core::io::error::Error>
 pub fn netring::anomaly::metrics_sink::MetricsSink::write(&mut self, kind: &'static str, severity: netring::Severity, _ts: flowscope::timestamp::Timestamp, _key: core::option::Option<&dyn netring::anomaly::key::Key>, _observations: &[(&'static str, alloc::borrow::Cow<'_, str>)], metrics: &[(&'static str, f64)])
-pub struct netring::anomaly::SyslogSink<W: std::io::Write + core::marker::Send>
+pub struct netring::anomaly::SyslogSink<W: core::io::write::Write + core::marker::Send>
 impl netring::anomaly::syslog_sink::SyslogSink<std::io::stdio::Stdout>
 pub fn netring::anomaly::syslog_sink::SyslogSink<std::io::stdio::Stdout>::stdout() -> Self
-impl<W: std::io::Write + core::marker::Send> netring::anomaly::syslog_sink::SyslogSink<W>
+impl<W: core::io::write::Write + core::marker::Send> netring::anomaly::syslog_sink::SyslogSink<W>
 pub fn netring::anomaly::syslog_sink::SyslogSink<W>::app_name(self, name: impl core::convert::Into<alloc::borrow::Cow<'static, str>>) -> Self
 pub fn netring::anomaly::syslog_sink::SyslogSink<W>::enterprise_id(self, pen: impl core::convert::Into<alloc::borrow::Cow<'static, str>>) -> Self
 pub fn netring::anomaly::syslog_sink::SyslogSink<W>::facility(self, facility: netring::anomaly::syslog_sink::SyslogFacility) -> Self
@@ -868,8 +868,8 @@ pub fn netring::anomaly::syslog_sink::SyslogSink<W>::hostname(self, host: impl c
 pub fn netring::anomaly::syslog_sink::SyslogSink<W>::into_inner(self) -> W
 pub fn netring::anomaly::syslog_sink::SyslogSink<W>::new(writer: W) -> Self
 pub fn netring::anomaly::syslog_sink::SyslogSink<W>::procid(self, procid: impl core::convert::Into<alloc::borrow::Cow<'static, str>>) -> Self
-impl<W: std::io::Write + core::marker::Send> netring::anomaly::sink::AnomalySink for netring::anomaly::syslog_sink::SyslogSink<W>
-pub fn netring::anomaly::syslog_sink::SyslogSink<W>::flush(&mut self) -> core::result::Result<(), std::io::error::Error>
+impl<W: core::io::write::Write + core::marker::Send> netring::anomaly::sink::AnomalySink for netring::anomaly::syslog_sink::SyslogSink<W>
+pub fn netring::anomaly::syslog_sink::SyslogSink<W>::flush(&mut self) -> core::result::Result<(), core::io::error::Error>
 pub fn netring::anomaly::syslog_sink::SyslogSink<W>::write(&mut self, kind: &'static str, severity: netring::Severity, ts: flowscope::timestamp::Timestamp, key: core::option::Option<&dyn netring::anomaly::key::Key>, observations: &[(&'static str, alloc::borrow::Cow<'_, str>)], metrics: &[(&'static str, f64)])
 pub trait netring::anomaly::Key: core::any::Any + core::fmt::Debug + core::marker::Send + core::marker::Sync
 pub fn netring::anomaly::Key::as_any(&self) -> &dyn core::any::Any
@@ -966,8 +966,8 @@ pub fn netring::async_adapters::datagram_stream::DatagramStream<C, E, F>::with_c
 pub fn netring::async_adapters::datagram_stream::DatagramStream<C, E, F>::with_dedup(self, dedup: netring::dedup::Dedup) -> Self
 pub fn netring::async_adapters::datagram_stream::DatagramStream<C, E, F>::with_idle_timeout_fn<G>(self, f: G) -> Self where G: core::ops::function::Fn(&<E as flowscope::extractor::FlowExtractor>::Key, core::option::Option<flowscope::extractor::L4Proto>) -> core::option::Option<core::time::Duration> + core::marker::Send + core::marker::Sync + 'static
 pub fn netring::async_adapters::datagram_stream::DatagramStream<C, E, F>::with_monotonic_timestamps(self, enable: bool) -> Self
-pub fn netring::async_adapters::datagram_stream::DatagramStream<C, E, F>::with_pcap_tap<W>(self, writer: netring::pcap::CaptureWriter<W>) -> Self where W: std::io::Write + core::marker::Send + 'static
-pub fn netring::async_adapters::datagram_stream::DatagramStream<C, E, F>::with_pcap_tap_policy<W>(self, writer: netring::pcap::CaptureWriter<W>, policy: netring::pcap_tap::TapErrorPolicy) -> Self where W: std::io::Write + core::marker::Send + 'static
+pub fn netring::async_adapters::datagram_stream::DatagramStream<C, E, F>::with_pcap_tap<W>(self, writer: netring::pcap::CaptureWriter<W>) -> Self where W: core::io::write::Write + core::marker::Send + 'static
+pub fn netring::async_adapters::datagram_stream::DatagramStream<C, E, F>::with_pcap_tap_policy<W>(self, writer: netring::pcap::CaptureWriter<W>, policy: netring::pcap_tap::TapErrorPolicy) -> Self where W: core::io::write::Write + core::marker::Send + 'static
 pub fn netring::async_adapters::datagram_stream::DatagramStream<C, E, F>::with_pcap_tap_snaplen(self, snaplen: u32) -> Self
 impl<E, F> netring::async_adapters::datagram_stream::DatagramStream<netring::async_adapters::tokio_xdp_capture::AsyncXdpCapture, E, F> where E: flowscope::extractor::FlowExtractor, <E as flowscope::extractor::FlowExtractor>::Key: core::cmp::Eq + core::hash::Hash + core::clone::Clone + core::marker::Send + 'static, F: flowscope::session::DatagramParserFactory<<E as flowscope::extractor::FlowExtractor>::Key>
 pub fn netring::async_adapters::datagram_stream::DatagramStream<netring::async_adapters::tokio_xdp_capture::AsyncXdpCapture, E, F>::capture_stats(&self) -> core::result::Result<netring::stats::CaptureStats, netring::error::Error>
@@ -987,8 +987,8 @@ pub struct netring::async_adapters::dedup_stream::DedupStream<S> where S: netrin
 impl<S> netring::async_adapters::dedup_stream::DedupStream<S> where S: netring::traits::PacketSource + std::os::fd::raw::AsRawFd
 pub fn netring::async_adapters::dedup_stream::DedupStream<S>::dedup(&self) -> &netring::dedup::Dedup
 pub fn netring::async_adapters::dedup_stream::DedupStream<S>::dedup_mut(&mut self) -> &mut netring::dedup::Dedup
-pub fn netring::async_adapters::dedup_stream::DedupStream<S>::with_pcap_tap<W>(self, writer: netring::pcap::CaptureWriter<W>) -> Self where W: std::io::Write + core::marker::Send + 'static
-pub fn netring::async_adapters::dedup_stream::DedupStream<S>::with_pcap_tap_policy<W>(self, writer: netring::pcap::CaptureWriter<W>, policy: netring::pcap_tap::TapErrorPolicy) -> Self where W: std::io::Write + core::marker::Send + 'static
+pub fn netring::async_adapters::dedup_stream::DedupStream<S>::with_pcap_tap<W>(self, writer: netring::pcap::CaptureWriter<W>) -> Self where W: core::io::write::Write + core::marker::Send + 'static
+pub fn netring::async_adapters::dedup_stream::DedupStream<S>::with_pcap_tap_policy<W>(self, writer: netring::pcap::CaptureWriter<W>, policy: netring::pcap_tap::TapErrorPolicy) -> Self where W: core::io::write::Write + core::marker::Send + 'static
 pub fn netring::async_adapters::dedup_stream::DedupStream<S>::with_pcap_tap_snaplen(self, snaplen: u32) -> Self
 impl<S> futures_core::stream::Stream for netring::async_adapters::dedup_stream::DedupStream<S> where S: netring::traits::PacketSource + std::os::fd::raw::AsRawFd + core::marker::Unpin
 pub type netring::async_adapters::dedup_stream::DedupStream<S>::Item = core::result::Result<netring::packet::OwnedPacket, netring::error::Error>
@@ -1033,8 +1033,8 @@ pub fn netring::async_adapters::flow_stream::FlowStream<C, E, U, R>::with_config
 pub fn netring::async_adapters::flow_stream::FlowStream<C, E, U, R>::with_dedup(self, dedup: netring::dedup::Dedup) -> Self
 pub fn netring::async_adapters::flow_stream::FlowStream<C, E, U, R>::with_idle_timeout_fn<F>(self, f: F) -> Self where F: core::ops::function::Fn(&<E as flowscope::extractor::FlowExtractor>::Key, core::option::Option<flowscope::extractor::L4Proto>) -> core::option::Option<core::time::Duration> + core::marker::Send + core::marker::Sync + 'static
 pub fn netring::async_adapters::flow_stream::FlowStream<C, E, U, R>::with_monotonic_timestamps(self, enable: bool) -> Self
-pub fn netring::async_adapters::flow_stream::FlowStream<C, E, U, R>::with_pcap_tap<W>(self, writer: netring::pcap::CaptureWriter<W>) -> Self where W: std::io::Write + core::marker::Send + 'static
-pub fn netring::async_adapters::flow_stream::FlowStream<C, E, U, R>::with_pcap_tap_policy<W>(self, writer: netring::pcap::CaptureWriter<W>, policy: netring::pcap_tap::TapErrorPolicy) -> Self where W: std::io::Write + core::marker::Send + 'static
+pub fn netring::async_adapters::flow_stream::FlowStream<C, E, U, R>::with_pcap_tap<W>(self, writer: netring::pcap::CaptureWriter<W>) -> Self where W: core::io::write::Write + core::marker::Send + 'static
+pub fn netring::async_adapters::flow_stream::FlowStream<C, E, U, R>::with_pcap_tap_policy<W>(self, writer: netring::pcap::CaptureWriter<W>, policy: netring::pcap_tap::TapErrorPolicy) -> Self where W: core::io::write::Write + core::marker::Send + 'static
 pub fn netring::async_adapters::flow_stream::FlowStream<C, E, U, R>::with_pcap_tap_snaplen(self, snaplen: u32) -> Self
 impl<C, E, U> netring::async_adapters::flow_stream::FlowStream<C, E, U, netring::async_adapters::flow_stream::NoReassembler> where E: flowscope::extractor::FlowExtractor, U: core::marker::Send + 'static
 pub fn netring::async_adapters::flow_stream::FlowStream<C, E, U, netring::async_adapters::flow_stream::NoReassembler>::with_async_reassembler<F>(self, factory: F) -> netring::async_adapters::flow_stream::FlowStream<C, E, U, netring::async_adapters::flow_stream::AsyncReassemblerSlot<<E as flowscope::extractor::FlowExtractor>::Key, F>> where F: netring::async_adapters::async_reassembler::AsyncReassemblerFactory<<E as flowscope::extractor::FlowExtractor>::Key>
@@ -1252,8 +1252,8 @@ pub fn netring::async_adapters::session_stream::SessionStream<C, E, F>::with_con
 pub fn netring::async_adapters::session_stream::SessionStream<C, E, F>::with_dedup(self, dedup: netring::dedup::Dedup) -> Self
 pub fn netring::async_adapters::session_stream::SessionStream<C, E, F>::with_idle_timeout_fn<G>(self, f: G) -> Self where G: core::ops::function::Fn(&<E as flowscope::extractor::FlowExtractor>::Key, core::option::Option<flowscope::extractor::L4Proto>) -> core::option::Option<core::time::Duration> + core::marker::Send + core::marker::Sync + 'static
 pub fn netring::async_adapters::session_stream::SessionStream<C, E, F>::with_monotonic_timestamps(self, enable: bool) -> Self
-pub fn netring::async_adapters::session_stream::SessionStream<C, E, F>::with_pcap_tap<W>(self, writer: netring::pcap::CaptureWriter<W>) -> Self where W: std::io::Write + core::marker::Send + 'static
-pub fn netring::async_adapters::session_stream::SessionStream<C, E, F>::with_pcap_tap_policy<W>(self, writer: netring::pcap::CaptureWriter<W>, policy: netring::pcap_tap::TapErrorPolicy) -> Self where W: std::io::Write + core::marker::Send + 'static
+pub fn netring::async_adapters::session_stream::SessionStream<C, E, F>::with_pcap_tap<W>(self, writer: netring::pcap::CaptureWriter<W>) -> Self where W: core::io::write::Write + core::marker::Send + 'static
+pub fn netring::async_adapters::session_stream::SessionStream<C, E, F>::with_pcap_tap_policy<W>(self, writer: netring::pcap::CaptureWriter<W>, policy: netring::pcap_tap::TapErrorPolicy) -> Self where W: core::io::write::Write + core::marker::Send + 'static
 pub fn netring::async_adapters::session_stream::SessionStream<C, E, F>::with_pcap_tap_snaplen(self, snaplen: u32) -> Self
 impl<E, F> netring::async_adapters::session_stream::SessionStream<netring::async_adapters::tokio_xdp_capture::AsyncXdpCapture, E, F> where E: flowscope::extractor::FlowExtractor, <E as flowscope::extractor::FlowExtractor>::Key: core::cmp::Eq + core::hash::Hash + core::clone::Clone + core::marker::Send + 'static, F: flowscope::session::SessionParserFactory<<E as flowscope::extractor::FlowExtractor>::Key>
 pub fn netring::async_adapters::session_stream::SessionStream<netring::async_adapters::tokio_xdp_capture::AsyncXdpCapture, E, F>::capture_stats(&self) -> core::result::Result<netring::stats::CaptureStats, netring::error::Error>
@@ -2102,6 +2102,8 @@ pub netring::error::BuildError::CounterNotRegistered::detector: &'static str
 pub netring::error::BuildError::CounterNotRegistered::type_name: &'static str
 pub netring::error::BuildError::HandlerForUnregisteredProtocol
 pub netring::error::BuildError::HandlerForUnregisteredProtocol::protocol_name: &'static str
+pub netring::error::BuildError::NetnsBackendUnsupported
+pub netring::error::BuildError::NetnsBackendUnsupported::interface: alloc::string::String
 pub netring::error::BuildError::NoInterface
 pub netring::error::BuildError::PcapSourceRequired
 pub netring::error::BuildError::ProtocolDispatchMismatch(alloc::string::String)
@@ -2118,28 +2120,31 @@ pub fn netring::error::BuildError::fmt(&self, f: &mut core::fmt::Formatter<'_>) 
 impl core::fmt::Display for netring::error::BuildError
 pub fn netring::error::BuildError::fmt(&self, __formatter: &mut core::fmt::Formatter<'_>) -> core::fmt::Result
 #[non_exhaustive] pub enum netring::error::Error
-pub netring::error::Error::Bind(std::io::error::Error)
+pub netring::error::Error::Bind(core::io::error::Error)
 pub netring::error::Error::Bpf(netring::config::bpf::BpfBuildError)
 pub netring::error::Error::Build(netring::error::BuildError)
 pub netring::error::Error::Config(alloc::string::String)
 pub netring::error::Error::HandlerPanic(alloc::string::String)
 pub netring::error::Error::InterfaceNotFound(alloc::string::String)
-pub netring::error::Error::Io(std::io::error::Error)
+pub netring::error::Error::Io(core::io::error::Error)
 pub netring::error::Error::Loader(alloc::string::String)
-pub netring::error::Error::Mmap(std::io::error::Error)
+pub netring::error::Error::Mmap(core::io::error::Error)
+pub netring::error::Error::Netns
+pub netring::error::Error::Netns::label: alloc::string::String
+pub netring::error::Error::Netns::source: core::io::error::Error
 pub netring::error::Error::PermissionDenied
 pub netring::error::Error::SockOpt
 pub netring::error::Error::SockOpt::option: &'static str
-pub netring::error::Error::SockOpt::source: std::io::error::Error
-pub netring::error::Error::Socket(std::io::error::Error)
+pub netring::error::Error::SockOpt::source: core::io::error::Error
+pub netring::error::Error::Socket(core::io::error::Error)
+impl core::convert::From<core::io::error::Error> for netring::error::Error
+pub fn netring::error::Error::from(source: core::io::error::Error) -> Self
 impl core::convert::From<netring::afxdp::loader::LoaderError> for netring::error::Error
 pub fn netring::error::Error::from(e: netring::afxdp::loader::LoaderError) -> Self
 impl core::convert::From<netring::config::bpf::BpfBuildError> for netring::error::Error
 pub fn netring::error::Error::from(source: netring::config::bpf::BpfBuildError) -> Self
 impl core::convert::From<netring::error::BuildError> for netring::error::Error
 pub fn netring::error::Error::from(source: netring::error::BuildError) -> Self
-impl core::convert::From<std::io::error::Error> for netring::error::Error
-pub fn netring::error::Error::from(source: std::io::error::Error) -> Self
 impl core::error::Error for netring::error::Error
 pub fn netring::error::Error::source(&self) -> core::option::Option<&(dyn core::error::Error + 'static)>
 impl core::fmt::Debug for netring::error::Error
@@ -2149,14 +2154,14 @@ pub fn netring::error::Error::fmt(&self, __formatter: &mut core::fmt::Formatter<
 pub type netring::error::Result<T> = core::result::Result<T, netring::error::Error>
 pub mod netring::export
 pub mod netring::export::ipfix
-pub struct netring::export::ipfix::IpfixExporter<W: std::io::Write + core::marker::Send>
-impl<W: std::io::Write + core::marker::Send> netring::export::ipfix::IpfixExporter<W>
+pub struct netring::export::ipfix::IpfixExporter<W: core::io::write::Write + core::marker::Send>
+impl<W: core::io::write::Write + core::marker::Send> netring::export::ipfix::IpfixExporter<W>
 pub fn netring::export::ipfix::IpfixExporter<W>::into_inner(self) -> W
 pub fn netring::export::ipfix::IpfixExporter<W>::new(writer: W, observation_domain_id: u32) -> Self
 pub fn netring::export::ipfix::IpfixExporter<W>::resend_templates_every(self, n: u32) -> Self
-impl<W: std::io::Write + core::marker::Send> netring::export::FlowExporter for netring::export::ipfix::IpfixExporter<W>
+impl<W: core::io::write::Write + core::marker::Send> netring::export::FlowExporter for netring::export::ipfix::IpfixExporter<W>
 pub fn netring::export::ipfix::IpfixExporter<W>::export(&mut self, record: &netring::export::FlowRecord)
-pub fn netring::export::ipfix::IpfixExporter<W>::flush(&mut self) -> std::io::error::Result<()>
+pub fn netring::export::ipfix::IpfixExporter<W>::flush(&mut self) -> core::io::error::Result<()>
 pub struct netring::export::FlowRecord
 pub netring::export::FlowRecord::a: core::net::socket_addr::SocketAddr
 pub netring::export::FlowRecord::b: core::net::socket_addr::SocketAddr
@@ -2185,35 +2190,35 @@ pub fn netring::export::FlowRecord::fmt(&self, f: &mut core::fmt::Formatter<'_>)
 impl core::marker::StructuralPartialEq for netring::export::FlowRecord
 impl serde_core::ser::Serialize for netring::export::FlowRecord
 pub fn netring::export::FlowRecord::serialize<__S>(&self, __serializer: __S) -> core::result::Result<<__S as serde_core::ser::Serializer>::Ok, <__S as serde_core::ser::Serializer>::Error> where __S: serde_core::ser::Serializer
-pub struct netring::export::IpfixExporter<W: std::io::Write + core::marker::Send>
-impl<W: std::io::Write + core::marker::Send> netring::export::ipfix::IpfixExporter<W>
+pub struct netring::export::IpfixExporter<W: core::io::write::Write + core::marker::Send>
+impl<W: core::io::write::Write + core::marker::Send> netring::export::ipfix::IpfixExporter<W>
 pub fn netring::export::ipfix::IpfixExporter<W>::into_inner(self) -> W
 pub fn netring::export::ipfix::IpfixExporter<W>::new(writer: W, observation_domain_id: u32) -> Self
 pub fn netring::export::ipfix::IpfixExporter<W>::resend_templates_every(self, n: u32) -> Self
-impl<W: std::io::Write + core::marker::Send> netring::export::FlowExporter for netring::export::ipfix::IpfixExporter<W>
+impl<W: core::io::write::Write + core::marker::Send> netring::export::FlowExporter for netring::export::ipfix::IpfixExporter<W>
 pub fn netring::export::ipfix::IpfixExporter<W>::export(&mut self, record: &netring::export::FlowRecord)
-pub fn netring::export::ipfix::IpfixExporter<W>::flush(&mut self) -> std::io::error::Result<()>
-pub struct netring::export::JsonFlowExporter<W: std::io::Write + core::marker::Send>
+pub fn netring::export::ipfix::IpfixExporter<W>::flush(&mut self) -> core::io::error::Result<()>
+pub struct netring::export::JsonFlowExporter<W: core::io::write::Write + core::marker::Send>
 impl netring::export::JsonFlowExporter<std::io::stdio::Stdout>
 pub fn netring::export::JsonFlowExporter<std::io::stdio::Stdout>::stdout() -> Self
-impl<W: std::io::Write + core::marker::Send> netring::export::JsonFlowExporter<W>
+impl<W: core::io::write::Write + core::marker::Send> netring::export::JsonFlowExporter<W>
 pub fn netring::export::JsonFlowExporter<W>::into_inner(self) -> W
 pub fn netring::export::JsonFlowExporter<W>::new(writer: W) -> Self
-impl<W: std::io::Write + core::marker::Send> netring::export::FlowExporter for netring::export::JsonFlowExporter<W>
+impl<W: core::io::write::Write + core::marker::Send> netring::export::FlowExporter for netring::export::JsonFlowExporter<W>
 pub fn netring::export::JsonFlowExporter<W>::export(&mut self, record: &netring::export::FlowRecord)
-pub fn netring::export::JsonFlowExporter<W>::flush(&mut self) -> std::io::error::Result<()>
+pub fn netring::export::JsonFlowExporter<W>::flush(&mut self) -> core::io::error::Result<()>
 pub trait netring::export::FlowExporter: core::marker::Send
 pub fn netring::export::FlowExporter::export(&mut self, record: &netring::export::FlowRecord)
-pub fn netring::export::FlowExporter::flush(&mut self) -> std::io::error::Result<()>
+pub fn netring::export::FlowExporter::flush(&mut self) -> core::io::error::Result<()>
 impl<F: core::ops::function::FnMut(&netring::export::FlowRecord) + core::marker::Send> netring::export::FlowExporter for F
 pub fn F::export(&mut self, record: &netring::export::FlowRecord)
-pub fn F::flush(&mut self) -> std::io::error::Result<()>
-impl<W: std::io::Write + core::marker::Send> netring::export::FlowExporter for netring::export::JsonFlowExporter<W>
+pub fn F::flush(&mut self) -> core::io::error::Result<()>
+impl<W: core::io::write::Write + core::marker::Send> netring::export::FlowExporter for netring::export::JsonFlowExporter<W>
 pub fn netring::export::JsonFlowExporter<W>::export(&mut self, record: &netring::export::FlowRecord)
-pub fn netring::export::JsonFlowExporter<W>::flush(&mut self) -> std::io::error::Result<()>
-impl<W: std::io::Write + core::marker::Send> netring::export::FlowExporter for netring::export::ipfix::IpfixExporter<W>
+pub fn netring::export::JsonFlowExporter<W>::flush(&mut self) -> core::io::error::Result<()>
+impl<W: core::io::write::Write + core::marker::Send> netring::export::FlowExporter for netring::export::ipfix::IpfixExporter<W>
 pub fn netring::export::ipfix::IpfixExporter<W>::export(&mut self, record: &netring::export::FlowRecord)
-pub fn netring::export::ipfix::IpfixExporter<W>::flush(&mut self) -> std::io::error::Result<()>
+pub fn netring::export::ipfix::IpfixExporter<W>::flush(&mut self) -> core::io::error::Result<()>
 pub mod netring::flow
 pub use netring::flow::AnomalyKind
 pub use netring::flow::AppProtocol
@@ -3047,13 +3052,13 @@ impl core::fmt::Debug for netring::monitor::shard::ShardedRunner
 pub fn netring::monitor::shard::ShardedRunner::fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result
 pub mod netring::monitor::sigma
 #[non_exhaustive] pub enum netring::monitor::sigma::SigmaError
-pub netring::monitor::sigma::SigmaError::Io(std::io::error::Error)
+pub netring::monitor::sigma::SigmaError::Io(core::io::error::Error)
 pub netring::monitor::sigma::SigmaError::Parse(alloc::string::String)
 pub netring::monitor::sigma::SigmaError::UnsupportedLogsource
 pub netring::monitor::sigma::SigmaError::UnsupportedLogsource::category: core::option::Option<alloc::string::String>
 pub netring::monitor::sigma::SigmaError::UnsupportedLogsource::title: alloc::string::String
-impl core::convert::From<std::io::error::Error> for netring::monitor::sigma::SigmaError
-pub fn netring::monitor::sigma::SigmaError::from(e: std::io::error::Error) -> Self
+impl core::convert::From<core::io::error::Error> for netring::monitor::sigma::SigmaError
+pub fn netring::monitor::sigma::SigmaError::from(e: core::io::error::Error) -> Self
 impl core::error::Error for netring::monitor::sigma::SigmaError
 impl core::fmt::Debug for netring::monitor::sigma::SigmaError
 pub fn netring::monitor::sigma::SigmaError::fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result
@@ -3637,6 +3642,19 @@ impl core::fmt::Debug for netring::monitor::BackendErrorPolicy
 pub fn netring::monitor::BackendErrorPolicy::fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result
 impl core::marker::Copy for netring::monitor::BackendErrorPolicy
 impl core::marker::StructuralPartialEq for netring::monitor::BackendErrorPolicy
+#[non_exhaustive] pub enum netring::monitor::CaptureSourceBackend
+pub netring::monitor::CaptureSourceBackend::AfPacket
+pub netring::monitor::CaptureSourceBackend::AfXdp
+pub netring::monitor::CaptureSourceBackend::AfXdpProvided
+impl core::clone::Clone for netring::monitor::CaptureSourceBackend
+pub fn netring::monitor::CaptureSourceBackend::clone(&self) -> netring::monitor::CaptureSourceBackend
+impl core::cmp::Eq for netring::monitor::CaptureSourceBackend
+impl core::cmp::PartialEq for netring::monitor::CaptureSourceBackend
+pub fn netring::monitor::CaptureSourceBackend::eq(&self, other: &netring::monitor::CaptureSourceBackend) -> bool
+impl core::fmt::Debug for netring::monitor::CaptureSourceBackend
+pub fn netring::monitor::CaptureSourceBackend::fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::marker::Copy for netring::monitor::CaptureSourceBackend
+impl core::marker::StructuralPartialEq for netring::monitor::CaptureSourceBackend
 #[non_exhaustive] pub enum netring::monitor::DropBreakdown
 pub netring::monitor::DropBreakdown::AfPacket
 pub netring::monitor::DropBreakdown::AfPacket::freezes: u64
@@ -3769,6 +3787,18 @@ impl netring::report::Report for netring::monitor::telemetry::CaptureHealth
 pub const netring::monitor::telemetry::CaptureHealth::NAME: &'static str
 impl serde_core::ser::Serialize for netring::monitor::telemetry::CaptureHealth
 pub fn netring::monitor::telemetry::CaptureHealth::serialize<__S>(&self, __serializer: __S) -> core::result::Result<<__S as serde_core::ser::Serializer>::Ok, <__S as serde_core::ser::Serializer>::Error> where __S: serde_core::ser::Serializer
+#[non_exhaustive] pub struct netring::monitor::CaptureSource
+pub netring::monitor::CaptureSource::backend: netring::monitor::CaptureSourceBackend
+pub netring::monitor::CaptureSource::interface: alloc::string::String
+pub netring::monitor::CaptureSource::netns_label: core::option::Option<alloc::string::String>
+impl core::clone::Clone for netring::monitor::CaptureSource
+pub fn netring::monitor::CaptureSource::clone(&self) -> netring::monitor::CaptureSource
+impl core::cmp::Eq for netring::monitor::CaptureSource
+impl core::cmp::PartialEq for netring::monitor::CaptureSource
+pub fn netring::monitor::CaptureSource::eq(&self, other: &netring::monitor::CaptureSource) -> bool
+impl core::fmt::Debug for netring::monitor::CaptureSource
+pub fn netring::monitor::CaptureSource::fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::marker::StructuralPartialEq for netring::monitor::CaptureSource
 #[non_exhaustive] pub struct netring::monitor::CaptureTelemetry
 pub netring::monitor::CaptureTelemetry::detail: netring::stats::DropBreakdown
 pub netring::monitor::CaptureTelemetry::drop_rate: f64
@@ -3860,6 +3890,7 @@ pub fn netring::monitor::fingerprint::HttpFingerprint::serialize<__S>(&self, __s
 pub struct netring::monitor::Monitor
 impl netring::monitor::Monitor
 pub fn netring::monitor::Monitor::builder() -> netring::monitor::MonitorBuilder
+pub fn netring::monitor::Monitor::capture_sources(&self) -> alloc::vec::Vec<netring::monitor::CaptureSource>
 pub fn netring::monitor::Monitor::detector_names(&self) -> impl core::iter::traits::iterator::Iterator<Item = &'static str> + '_
 pub fn netring::monitor::Monitor::fanout(&self) -> core::option::Option<(netring::config::FanoutMode, u16)>
 pub fn netring::monitor::Monitor::health(&self) -> netring::monitor::health::MonitorHealth
@@ -3893,6 +3924,7 @@ pub fn netring::monitor::MonitorBuilder::bandwidth_windowed(self, window: core::
 pub fn netring::monitor::MonitorBuilder::build(self) -> netring::error::Result<netring::monitor::Monitor>
 pub fn netring::monitor::MonitorBuilder::capture(self, iface: impl core::convert::Into<alloc::string::String>, backend: netring::monitor::auto::Backend) -> Self
 pub fn netring::monitor::MonitorBuilder::capture_health<S>(self, period: core::time::Duration, sink: S) -> Self where S: netring::report::ReportSink<netring::monitor::telemetry::CaptureHealth> + 'static
+pub fn netring::monitor::MonitorBuilder::capture_in_netns(self, iface: impl core::convert::Into<alloc::string::String>, backend: netring::monitor::auto::Backend, netns: alloc::sync::Arc<netring::netns::NetNs>) -> Self
 pub fn netring::monitor::MonitorBuilder::capture_metrics(self, period: core::time::Duration) -> Self
 pub fn netring::monitor::MonitorBuilder::catch_handler_panics(self, on: bool) -> Self
 pub fn netring::monitor::MonitorBuilder::counter<K>(self, window: core::time::Duration, bucket: core::time::Duration) -> Self where K: core::hash::Hash + core::cmp::Eq + core::clone::Clone + core::marker::Send + 'static
@@ -4163,14 +4195,14 @@ pub mod netring::netns
 pub struct netring::netns::NetNs
 impl netring::netns::NetNs
 pub fn netring::netns::NetNs::as_fd(&self) -> std::os::fd::owned::BorrowedFd<'_>
-pub fn netring::netns::NetNs::current() -> std::io::error::Result<Self>
-pub fn netring::netns::NetNs::from_name(name: &str) -> std::io::error::Result<Self>
-pub fn netring::netns::NetNs::from_path(path: impl core::convert::AsRef<std::path::Path>, label: impl core::convert::Into<alloc::string::String>) -> std::io::error::Result<Self>
-pub fn netring::netns::NetNs::from_pid(pid: u32) -> std::io::error::Result<Self>
-pub fn netring::netns::NetNs::inode(&self) -> std::io::error::Result<u64>
+pub fn netring::netns::NetNs::current() -> core::io::error::Result<Self>
+pub fn netring::netns::NetNs::from_name(name: &str) -> core::io::error::Result<Self>
+pub fn netring::netns::NetNs::from_path(path: impl core::convert::AsRef<std::path::Path>, label: impl core::convert::Into<alloc::string::String>) -> core::io::error::Result<Self>
+pub fn netring::netns::NetNs::from_pid(pid: u32) -> core::io::error::Result<Self>
+pub fn netring::netns::NetNs::inode(&self) -> core::io::error::Result<u64>
 pub fn netring::netns::NetNs::label(&self) -> &str
-pub fn netring::netns::NetNs::run_in<T, F>(&self, f: F) -> std::io::error::Result<T> where F: core::ops::function::FnOnce() -> T + core::marker::Send, T: core::marker::Send
-pub fn netring::netns::NetNs::try_clone(&self) -> std::io::error::Result<Self>
+pub fn netring::netns::NetNs::run_in<T, F>(&self, f: F) -> core::io::error::Result<T> where F: core::ops::function::FnOnce() -> T + core::marker::Send, T: core::marker::Send
+pub fn netring::netns::NetNs::try_clone(&self) -> core::io::error::Result<Self>
 impl core::fmt::Debug for netring::netns::NetNs
 pub fn netring::netns::NetNs::fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result
 pub mod netring::packet
@@ -4297,8 +4329,8 @@ pub fn netring::packet::PacketStatus::fmt(&self, f: &mut core::fmt::Formatter<'_
 impl core::marker::Copy for netring::packet::PacketStatus
 impl core::marker::StructuralPartialEq for netring::packet::PacketStatus
 pub mod netring::pcap
-pub struct netring::pcap::CaptureWriter<W: std::io::Write>
-impl<W: std::io::Write> netring::pcap::CaptureWriter<W>
+pub struct netring::pcap::CaptureWriter<W: core::io::write::Write>
+impl<W: core::io::write::Write> netring::pcap::CaptureWriter<W>
 pub fn netring::pcap::CaptureWriter<W>::create(out: W) -> core::result::Result<Self, pcap_file::errors::PcapError>
 pub fn netring::pcap::CaptureWriter<W>::into_inner(self) -> W
 pub fn netring::pcap::CaptureWriter<W>::new_with_linktype(out: W, linktype: u32) -> core::result::Result<Self, pcap_file::errors::PcapError>
@@ -4306,8 +4338,8 @@ pub fn netring::pcap::CaptureWriter<W>::write_owned(&mut self, pkt: &netring::pa
 pub fn netring::pcap::CaptureWriter<W>::write_packet(&mut self, pkt: &netring::packet::Packet<'_>) -> core::result::Result<(), pcap_file::errors::PcapError>
 pub fn netring::pcap::CaptureWriter<W>::write_packet_truncated(&mut self, pkt: &netring::packet::Packet<'_>, caplen: usize) -> core::result::Result<(), pcap_file::errors::PcapError>
 pub fn netring::pcap::CaptureWriter<W>::write_raw(&mut self, data: &[u8], ts: flowscope::timestamp::Timestamp, original_len: usize, snaplen: core::option::Option<u32>) -> core::result::Result<(), pcap_file::errors::PcapError>
-pub struct netring::pcap::CaptureWriterNg<W: std::io::Write>
-impl<W: std::io::Write> netring::pcap::CaptureWriterNg<W>
+pub struct netring::pcap::CaptureWriterNg<W: core::io::write::Write>
+impl<W: core::io::write::Write> netring::pcap::CaptureWriterNg<W>
 pub fn netring::pcap::CaptureWriterNg<W>::create(out: W) -> core::result::Result<Self, pcap_file::errors::PcapError>
 pub fn netring::pcap::CaptureWriterNg<W>::into_inner(self) -> W
 pub fn netring::pcap::CaptureWriterNg<W>::new_with_linktype(out: W, linktype: u32) -> core::result::Result<Self, pcap_file::errors::PcapError>
@@ -4363,7 +4395,7 @@ impl core::marker::Copy for netring::pcap_rotate::FileNaming
 impl core::marker::StructuralPartialEq for netring::pcap_rotate::FileNaming
 pub struct netring::pcap_rotate::PreTriggerRing
 impl netring::pcap_rotate::PreTriggerRing
-pub fn netring::pcap_rotate::PreTriggerRing::drain_into(&mut self, w: &mut netring::pcap_rotate::RotatingPcapWriter) -> std::io::error::Result<()>
+pub fn netring::pcap_rotate::PreTriggerRing::drain_into(&mut self, w: &mut netring::pcap_rotate::RotatingPcapWriter) -> core::io::error::Result<()>
 pub fn netring::pcap_rotate::PreTriggerRing::is_empty(&self) -> bool
 pub fn netring::pcap_rotate::PreTriggerRing::len(&self) -> usize
 pub fn netring::pcap_rotate::PreTriggerRing::new(max_bytes: usize) -> Self
@@ -4383,13 +4415,13 @@ impl core::fmt::Debug for netring::pcap_rotate::RotatingConfig
 pub fn netring::pcap_rotate::RotatingConfig::fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result
 pub struct netring::pcap_rotate::RotatingPcapWriter
 impl netring::pcap_rotate::RotatingPcapWriter
-pub fn netring::pcap_rotate::RotatingPcapWriter::create(dir: impl core::convert::AsRef<std::path::Path>, base: impl core::convert::Into<alloc::string::String>, config: netring::pcap_rotate::RotatingConfig) -> std::io::error::Result<Self>
+pub fn netring::pcap_rotate::RotatingPcapWriter::create(dir: impl core::convert::AsRef<std::path::Path>, base: impl core::convert::Into<alloc::string::String>, config: netring::pcap_rotate::RotatingConfig) -> core::io::error::Result<Self>
 pub fn netring::pcap_rotate::RotatingPcapWriter::current_path(&self) -> core::option::Option<&std::path::Path>
 pub fn netring::pcap_rotate::RotatingPcapWriter::file_paths(&self) -> alloc::vec::Vec<std::path::PathBuf>
-pub fn netring::pcap_rotate::RotatingPcapWriter::rotate_now(&mut self) -> std::io::error::Result<()>
-pub fn netring::pcap_rotate::RotatingPcapWriter::sync_and_close(&mut self) -> std::io::error::Result<()>
-pub fn netring::pcap_rotate::RotatingPcapWriter::write(&mut self, pkt: &netring::packet::Packet<'_>, snaplen: core::option::Option<u32>) -> std::io::error::Result<()>
-pub fn netring::pcap_rotate::RotatingPcapWriter::write_raw(&mut self, data: &[u8], ts: flowscope::timestamp::Timestamp, original_len: usize, snaplen: core::option::Option<u32>) -> std::io::error::Result<()>
+pub fn netring::pcap_rotate::RotatingPcapWriter::rotate_now(&mut self) -> core::io::error::Result<()>
+pub fn netring::pcap_rotate::RotatingPcapWriter::sync_and_close(&mut self) -> core::io::error::Result<()>
+pub fn netring::pcap_rotate::RotatingPcapWriter::write(&mut self, pkt: &netring::packet::Packet<'_>, snaplen: core::option::Option<u32>) -> core::io::error::Result<()>
+pub fn netring::pcap_rotate::RotatingPcapWriter::write_raw(&mut self, data: &[u8], ts: flowscope::timestamp::Timestamp, original_len: usize, snaplen: core::option::Option<u32>) -> core::io::error::Result<()>
 pub struct netring::pcap_rotate::TriggerHandle(_)
 impl netring::pcap_rotate::TriggerHandle
 pub fn netring::pcap_rotate::TriggerHandle::fire(&self)
@@ -4405,8 +4437,8 @@ pub struct netring::pcap_rotate::TriggeredPcapWriter
 impl netring::pcap_rotate::TriggeredPcapWriter
 pub fn netring::pcap_rotate::TriggeredPcapWriter::is_recording(&self) -> bool
 pub fn netring::pcap_rotate::TriggeredPcapWriter::new(ring_bytes: usize, writer: netring::pcap_rotate::RotatingPcapWriter) -> (Self, netring::pcap_rotate::TriggerHandle)
-pub fn netring::pcap_rotate::TriggeredPcapWriter::sync_and_close(&mut self) -> std::io::error::Result<()>
-pub fn netring::pcap_rotate::TriggeredPcapWriter::write_raw(&mut self, data: &[u8], ts: flowscope::timestamp::Timestamp, original_len: usize) -> std::io::error::Result<()>
+pub fn netring::pcap_rotate::TriggeredPcapWriter::sync_and_close(&mut self) -> core::io::error::Result<()>
+pub fn netring::pcap_rotate::TriggeredPcapWriter::write_raw(&mut self, data: &[u8], ts: flowscope::timestamp::Timestamp, original_len: usize) -> core::io::error::Result<()>
 pub mod netring::pcap_source
 #[non_exhaustive] pub enum netring::pcap_source::PcapFormat
 pub netring::pcap_source::PcapFormat::LegacyPcap
@@ -4700,7 +4732,7 @@ pub fn netring::anomaly::shipped_sinks::ChannelSink::bounded(capacity: usize) ->
 pub fn netring::anomaly::shipped_sinks::ChannelSink::channel() -> (Self, tokio::sync::mpsc::unbounded::UnboundedReceiver<flowscope::anomaly::OwnedAnomaly>)
 pub fn netring::anomaly::shipped_sinks::ChannelSink::new(tx: tokio::sync::mpsc::unbounded::UnboundedSender<flowscope::anomaly::OwnedAnomaly>) -> Self
 impl netring::anomaly::sink::AnomalySink for netring::anomaly::shipped_sinks::ChannelSink
-pub fn netring::anomaly::shipped_sinks::ChannelSink::flush(&mut self) -> core::result::Result<(), std::io::error::Error>
+pub fn netring::anomaly::shipped_sinks::ChannelSink::flush(&mut self) -> core::result::Result<(), core::io::error::Error>
 pub fn netring::anomaly::shipped_sinks::ChannelSink::write(&mut self, kind: &'static str, severity: netring::Severity, ts: flowscope::timestamp::Timestamp, key: core::option::Option<&dyn netring::anomaly::key::Key>, observations: &[(&'static str, alloc::borrow::Cow<'_, str>)], metrics: &[(&'static str, f64)])
 pub struct netring::prelude::Ctx<'a>
 pub netring::prelude::Ctx::flow: core::option::Option<netring::protocol::FlowKey>
@@ -4779,15 +4811,15 @@ pub fn netring::prelude::Dns::dispatch() -> netring::protocol::Dispatch
 pub fn netring::prelude::Dns::make_slot(handle: flowscope::driver::slot::SlotHandle<Self::Message, flowscope::extract::five_tuple::FiveTupleKey>) -> alloc::boxed::Box<dyn netring::monitor::registry::ProtocolSlot> where Self: core::marker::Sized
 pub fn netring::prelude::Dns::register(builder: &mut flowscope::driver::typed::DriverBuilder<flowscope::extract::five_tuple::FiveTuple>) -> core::result::Result<flowscope::driver::slot::SlotHandle<Self::Message, flowscope::extract::five_tuple::FiveTupleKey>, netring::protocol::ProtocolInitError>
 pub fn netring::prelude::Dns::register_broadcast(_builder: &mut flowscope::driver::typed::DriverBuilder<flowscope::extract::five_tuple::FiveTuple>) -> core::result::Result<flowscope::driver::broadcast::BroadcastSlotHandle<Self::Message, flowscope::extract::five_tuple::FiveTupleKey>, netring::protocol::ProtocolInitError> where Self::Message: core::marker::Send + core::marker::Sync + core::clone::Clone + 'static
-pub struct netring::prelude::EveSink<W: std::io::Write + core::marker::Send>
+pub struct netring::prelude::EveSink<W: core::io::write::Write + core::marker::Send>
 impl netring::anomaly::eve_sink::EveSink<std::io::stdio::Stdout>
 pub fn netring::anomaly::eve_sink::EveSink<std::io::stdio::Stdout>::stdout(options: flowscope::emit::eve::EveOptions) -> Self
-impl<W: std::io::Write + core::marker::Send> netring::anomaly::eve_sink::EveSink<W>
-pub fn netring::anomaly::eve_sink::EveSink<W>::finish(self) -> std::io::error::Result<W>
+impl<W: core::io::write::Write + core::marker::Send> netring::anomaly::eve_sink::EveSink<W>
+pub fn netring::anomaly::eve_sink::EveSink<W>::finish(self) -> core::io::error::Result<W>
 pub fn netring::anomaly::eve_sink::EveSink<W>::new(sink: W, options: flowscope::emit::eve::EveOptions) -> Self
 pub fn netring::anomaly::eve_sink::EveSink<W>::writer(&self) -> &flowscope::emit::eve::EveJsonWriter<W>
-impl<W: std::io::Write + core::marker::Send> netring::anomaly::sink::AnomalySink for netring::anomaly::eve_sink::EveSink<W>
-pub fn netring::anomaly::eve_sink::EveSink<W>::flush(&mut self) -> core::result::Result<(), std::io::error::Error>
+impl<W: core::io::write::Write + core::marker::Send> netring::anomaly::sink::AnomalySink for netring::anomaly::eve_sink::EveSink<W>
+pub fn netring::anomaly::eve_sink::EveSink<W>::flush(&mut self) -> core::result::Result<(), core::io::error::Error>
 pub fn netring::anomaly::eve_sink::EveSink<W>::write(&mut self, kind: &'static str, severity: netring::Severity, ts: flowscope::timestamp::Timestamp, key: core::option::Option<&dyn netring::anomaly::key::Key>, observations: &[(&'static str, alloc::borrow::Cow<'_, str>)], metrics: &[(&'static str, f64)])
 #[non_exhaustive] pub struct netring::prelude::FlowEnded<P: netring::protocol::Protocol>
 pub netring::prelude::FlowEnded::key: netring::protocol::FlowKey
@@ -4894,6 +4926,20 @@ pub fn netring::prelude::Http::dispatch() -> netring::protocol::Dispatch
 pub fn netring::prelude::Http::make_slot(handle: flowscope::driver::slot::SlotHandle<Self::Message, flowscope::extract::five_tuple::FiveTupleKey>) -> alloc::boxed::Box<dyn netring::monitor::registry::ProtocolSlot> where Self: core::marker::Sized
 pub fn netring::prelude::Http::register(builder: &mut flowscope::driver::typed::DriverBuilder<flowscope::extract::five_tuple::FiveTuple>) -> core::result::Result<flowscope::driver::slot::SlotHandle<Self::Message, flowscope::extract::five_tuple::FiveTupleKey>, netring::protocol::ProtocolInitError>
 pub fn netring::prelude::Http::register_broadcast(builder: &mut flowscope::driver::typed::DriverBuilder<flowscope::extract::five_tuple::FiveTuple>) -> core::result::Result<flowscope::driver::broadcast::BroadcastSlotHandle<Self::Message, flowscope::extract::five_tuple::FiveTupleKey>, netring::protocol::ProtocolInitError>
+pub struct netring::prelude::Http2
+impl core::clone::Clone for netring::prelude::Http2
+pub fn netring::prelude::Http2::clone(&self) -> netring::prelude::Http2
+impl core::fmt::Debug for netring::prelude::Http2
+pub fn netring::prelude::Http2::fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::marker::Copy for netring::prelude::Http2
+impl netring::protocol::MessageProtocol for netring::prelude::Http2
+impl netring::protocol::Protocol for netring::prelude::Http2
+pub type netring::prelude::Http2::Message = flowscope::http2::stream::Http2Event
+pub const netring::prelude::Http2::NAME: &'static str
+pub fn netring::prelude::Http2::dispatch() -> netring::protocol::Dispatch
+pub fn netring::prelude::Http2::make_slot(handle: flowscope::driver::slot::SlotHandle<Self::Message, flowscope::extract::five_tuple::FiveTupleKey>) -> alloc::boxed::Box<dyn netring::monitor::registry::ProtocolSlot> where Self: core::marker::Sized
+pub fn netring::prelude::Http2::register(builder: &mut flowscope::driver::typed::DriverBuilder<flowscope::extract::five_tuple::FiveTuple>) -> core::result::Result<flowscope::driver::slot::SlotHandle<Self::Message, flowscope::extract::five_tuple::FiveTupleKey>, netring::protocol::ProtocolInitError>
+pub fn netring::prelude::Http2::register_broadcast(_builder: &mut flowscope::driver::typed::DriverBuilder<flowscope::extract::five_tuple::FiveTuple>) -> core::result::Result<flowscope::driver::broadcast::BroadcastSlotHandle<Self::Message, flowscope::extract::five_tuple::FiveTupleKey>, netring::protocol::ProtocolInitError> where Self::Message: core::marker::Send + core::marker::Sync + core::clone::Clone + 'static
 pub struct netring::prelude::HttpFingerprint
 pub netring::prelude::HttpFingerprint::host: core::option::Option<alloc::string::String>
 pub netring::prelude::HttpFingerprint::ja4h: alloc::string::String
@@ -4950,7 +4996,7 @@ impl core::fmt::Debug for netring::report::JsonReportSink
 pub fn netring::report::JsonReportSink::fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result
 impl core::marker::Copy for netring::report::JsonReportSink
 impl<R: netring::report::Report + serde_core::ser::Serialize> netring::report::ReportSink<R> for netring::report::JsonReportSink
-pub fn netring::report::JsonReportSink::flush(&mut self) -> std::io::error::Result<()>
+pub fn netring::report::JsonReportSink::flush(&mut self) -> core::io::error::Result<()>
 pub fn netring::report::JsonReportSink::record(&mut self, report: &R)
 pub struct netring::prelude::Kerberos
 impl core::clone::Clone for netring::prelude::Kerberos
@@ -5012,7 +5058,7 @@ pub fn netring::anomaly::metrics_sink::MetricsSink::default() -> Self
 impl core::fmt::Debug for netring::anomaly::metrics_sink::MetricsSink
 pub fn netring::anomaly::metrics_sink::MetricsSink::fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result
 impl netring::anomaly::sink::AnomalySink for netring::anomaly::metrics_sink::MetricsSink
-pub fn netring::anomaly::metrics_sink::MetricsSink::flush(&mut self) -> core::result::Result<(), std::io::error::Error>
+pub fn netring::anomaly::metrics_sink::MetricsSink::flush(&mut self) -> core::result::Result<(), core::io::error::Error>
 pub fn netring::anomaly::metrics_sink::MetricsSink::write(&mut self, kind: &'static str, severity: netring::Severity, _ts: flowscope::timestamp::Timestamp, _key: core::option::Option<&dyn netring::anomaly::key::Key>, _observations: &[(&'static str, alloc::borrow::Cow<'_, str>)], metrics: &[(&'static str, f64)])
 pub struct netring::prelude::MinSeverity
 impl netring::layer::MinSeverity
@@ -5044,6 +5090,7 @@ pub fn netring::prelude::Modbus::register_broadcast(_builder: &mut flowscope::dr
 pub struct netring::prelude::Monitor
 impl netring::monitor::Monitor
 pub fn netring::monitor::Monitor::builder() -> netring::monitor::MonitorBuilder
+pub fn netring::monitor::Monitor::capture_sources(&self) -> alloc::vec::Vec<netring::monitor::CaptureSource>
 pub fn netring::monitor::Monitor::detector_names(&self) -> impl core::iter::traits::iterator::Iterator<Item = &'static str> + '_
 pub fn netring::monitor::Monitor::fanout(&self) -> core::option::Option<(netring::config::FanoutMode, u16)>
 pub fn netring::monitor::Monitor::health(&self) -> netring::monitor::health::MonitorHealth
@@ -5077,6 +5124,7 @@ pub fn netring::monitor::MonitorBuilder::bandwidth_windowed(self, window: core::
 pub fn netring::monitor::MonitorBuilder::build(self) -> netring::error::Result<netring::monitor::Monitor>
 pub fn netring::monitor::MonitorBuilder::capture(self, iface: impl core::convert::Into<alloc::string::String>, backend: netring::monitor::auto::Backend) -> Self
 pub fn netring::monitor::MonitorBuilder::capture_health<S>(self, period: core::time::Duration, sink: S) -> Self where S: netring::report::ReportSink<netring::monitor::telemetry::CaptureHealth> + 'static
+pub fn netring::monitor::MonitorBuilder::capture_in_netns(self, iface: impl core::convert::Into<alloc::string::String>, backend: netring::monitor::auto::Backend, netns: alloc::sync::Arc<netring::netns::NetNs>) -> Self
 pub fn netring::monitor::MonitorBuilder::capture_metrics(self, period: core::time::Duration) -> Self
 pub fn netring::monitor::MonitorBuilder::catch_handler_panics(self, on: bool) -> Self
 pub fn netring::monitor::MonitorBuilder::counter<K>(self, window: core::time::Duration, bucket: core::time::Duration) -> Self where K: core::hash::Hash + core::cmp::Eq + core::clone::Clone + core::marker::Send + 'static
@@ -5204,7 +5252,7 @@ pub fn netring::monitor::ndp::NdpAnomaly::fmt(&self, f: &mut core::fmt::Formatte
 impl core::marker::Copy for netring::monitor::ndp::NdpAnomaly
 pub struct netring::prelude::NoopSink
 impl netring::anomaly::sink::AnomalySink for netring::anomaly::sink::NoopSink
-pub fn netring::anomaly::sink::NoopSink::flush(&mut self) -> core::result::Result<(), std::io::error::Error>
+pub fn netring::anomaly::sink::NoopSink::flush(&mut self) -> core::result::Result<(), core::io::error::Error>
 pub fn netring::anomaly::sink::NoopSink::write(&mut self, _kind: &'static str, _severity: netring::Severity, _ts: flowscope::timestamp::Timestamp, _key: core::option::Option<&dyn netring::anomaly::key::Key>, _observations: &[(&'static str, alloc::borrow::Cow<'_, str>)], _metrics: &[(&'static str, f64)])
 pub struct netring::prelude::Ntp
 impl core::clone::Clone for netring::prelude::Ntp
@@ -5220,15 +5268,15 @@ pub fn netring::prelude::Ntp::dispatch() -> netring::protocol::Dispatch
 pub fn netring::prelude::Ntp::make_slot(handle: flowscope::driver::slot::SlotHandle<Self::Message, flowscope::extract::five_tuple::FiveTupleKey>) -> alloc::boxed::Box<dyn netring::monitor::registry::ProtocolSlot> where Self: core::marker::Sized
 pub fn netring::prelude::Ntp::register(builder: &mut flowscope::driver::typed::DriverBuilder<flowscope::extract::five_tuple::FiveTuple>) -> core::result::Result<flowscope::driver::slot::SlotHandle<Self::Message, flowscope::extract::five_tuple::FiveTupleKey>, netring::protocol::ProtocolInitError>
 pub fn netring::prelude::Ntp::register_broadcast(_builder: &mut flowscope::driver::typed::DriverBuilder<flowscope::extract::five_tuple::FiveTuple>) -> core::result::Result<flowscope::driver::broadcast::BroadcastSlotHandle<Self::Message, flowscope::extract::five_tuple::FiveTupleKey>, netring::protocol::ProtocolInitError> where Self::Message: core::marker::Send + core::marker::Sync + core::clone::Clone + 'static
-pub struct netring::prelude::OcsfSink<W: std::io::Write + core::marker::Send>
+pub struct netring::prelude::OcsfSink<W: core::io::write::Write + core::marker::Send>
 impl netring::anomaly::ocsf_sink::OcsfSink<std::io::stdio::Stdout>
 pub fn netring::anomaly::ocsf_sink::OcsfSink<std::io::stdio::Stdout>::stdout() -> Self
-impl<W: std::io::Write + core::marker::Send> netring::anomaly::ocsf_sink::OcsfSink<W>
+impl<W: core::io::write::Write + core::marker::Send> netring::anomaly::ocsf_sink::OcsfSink<W>
 pub fn netring::anomaly::ocsf_sink::OcsfSink<W>::into_inner(self) -> W
 pub fn netring::anomaly::ocsf_sink::OcsfSink<W>::new(out: W) -> Self
 pub fn netring::anomaly::ocsf_sink::OcsfSink<W>::product(self, name: &'static str, vendor: &'static str) -> Self
-impl<W: std::io::Write + core::marker::Send> netring::anomaly::sink::AnomalySink for netring::anomaly::ocsf_sink::OcsfSink<W>
-pub fn netring::anomaly::ocsf_sink::OcsfSink<W>::flush(&mut self) -> core::result::Result<(), std::io::error::Error>
+impl<W: core::io::write::Write + core::marker::Send> netring::anomaly::sink::AnomalySink for netring::anomaly::ocsf_sink::OcsfSink<W>
+pub fn netring::anomaly::ocsf_sink::OcsfSink<W>::flush(&mut self) -> core::result::Result<(), core::io::error::Error>
 pub fn netring::anomaly::ocsf_sink::OcsfSink<W>::write(&mut self, kind: &'static str, severity: netring::Severity, ts: flowscope::timestamp::Timestamp, key: core::option::Option<&dyn netring::anomaly::key::Key>, observations: &[(&'static str, alloc::borrow::Cow<'_, str>)], metrics: &[(&'static str, f64)])
 #[non_exhaustive] pub struct netring::prelude::ParserClosed<P: netring::protocol::Protocol>
 pub netring::prelude::ParserClosed::key: netring::protocol::FlowKey
@@ -5422,7 +5470,7 @@ pub fn netring::anomaly::shipped_sinks::StdoutJsonSink::with_capacity(cap: usize
 impl core::default::Default for netring::anomaly::shipped_sinks::StdoutJsonSink
 pub fn netring::anomaly::shipped_sinks::StdoutJsonSink::default() -> Self
 impl netring::anomaly::sink::AnomalySink for netring::anomaly::shipped_sinks::StdoutJsonSink
-pub fn netring::anomaly::shipped_sinks::StdoutJsonSink::flush(&mut self) -> core::result::Result<(), std::io::error::Error>
+pub fn netring::anomaly::shipped_sinks::StdoutJsonSink::flush(&mut self) -> core::result::Result<(), core::io::error::Error>
 pub fn netring::anomaly::shipped_sinks::StdoutJsonSink::write(&mut self, kind: &'static str, severity: netring::Severity, ts: flowscope::timestamp::Timestamp, key: core::option::Option<&dyn netring::anomaly::key::Key>, observations: &[(&'static str, alloc::borrow::Cow<'_, str>)], metrics: &[(&'static str, f64)])
 pub struct netring::prelude::StdoutReportSink
 impl core::clone::Clone for netring::report::StdoutReportSink
@@ -5433,7 +5481,7 @@ impl core::fmt::Debug for netring::report::StdoutReportSink
 pub fn netring::report::StdoutReportSink::fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result
 impl core::marker::Copy for netring::report::StdoutReportSink
 impl<R: netring::report::Report + core::fmt::Debug> netring::report::ReportSink<R> for netring::report::StdoutReportSink
-pub fn netring::report::StdoutReportSink::flush(&mut self) -> std::io::error::Result<()>
+pub fn netring::report::StdoutReportSink::flush(&mut self) -> core::io::error::Result<()>
 pub fn netring::report::StdoutReportSink::record(&mut self, report: &R)
 pub struct netring::prelude::StdoutSink
 impl netring::anomaly::shipped_sinks::StdoutSink
@@ -5441,7 +5489,7 @@ pub fn netring::anomaly::shipped_sinks::StdoutSink::with_capacity(cap: usize) ->
 impl core::default::Default for netring::anomaly::shipped_sinks::StdoutSink
 pub fn netring::anomaly::shipped_sinks::StdoutSink::default() -> Self
 impl netring::anomaly::sink::AnomalySink for netring::anomaly::shipped_sinks::StdoutSink
-pub fn netring::anomaly::shipped_sinks::StdoutSink::flush(&mut self) -> core::result::Result<(), std::io::error::Error>
+pub fn netring::anomaly::shipped_sinks::StdoutSink::flush(&mut self) -> core::result::Result<(), core::io::error::Error>
 pub fn netring::anomaly::shipped_sinks::StdoutSink::write(&mut self, kind: &'static str, severity: netring::Severity, ts: flowscope::timestamp::Timestamp, key: core::option::Option<&dyn netring::anomaly::key::Key>, observations: &[(&'static str, alloc::borrow::Cow<'_, str>)], metrics: &[(&'static str, f64)])
 pub struct netring::prelude::Stun
 impl core::clone::Clone for netring::prelude::Stun
@@ -5579,7 +5627,7 @@ pub fn netring::anomaly::shipped_sinks::TracingSink::with_capacity(cap: usize) -
 impl core::default::Default for netring::anomaly::shipped_sinks::TracingSink
 pub fn netring::anomaly::shipped_sinks::TracingSink::default() -> Self
 impl netring::anomaly::sink::AnomalySink for netring::anomaly::shipped_sinks::TracingSink
-pub fn netring::anomaly::shipped_sinks::TracingSink::flush(&mut self) -> core::result::Result<(), std::io::error::Error>
+pub fn netring::anomaly::shipped_sinks::TracingSink::flush(&mut self) -> core::result::Result<(), core::io::error::Error>
 pub fn netring::anomaly::shipped_sinks::TracingSink::write(&mut self, kind: &'static str, severity: netring::Severity, ts: flowscope::timestamp::Timestamp, key: core::option::Option<&dyn netring::anomaly::key::Key>, observations: &[(&'static str, alloc::borrow::Cow<'_, str>)], metrics: &[(&'static str, f64)])
 pub struct netring::prelude::Udp
 impl core::clone::Clone for netring::prelude::Udp
@@ -5610,34 +5658,34 @@ pub fn netring::prelude::WireGuard::make_slot(handle: flowscope::driver::slot::S
 pub fn netring::prelude::WireGuard::register(builder: &mut flowscope::driver::typed::DriverBuilder<flowscope::extract::five_tuple::FiveTuple>) -> core::result::Result<flowscope::driver::slot::SlotHandle<Self::Message, flowscope::extract::five_tuple::FiveTupleKey>, netring::protocol::ProtocolInitError>
 pub fn netring::prelude::WireGuard::register_broadcast(_builder: &mut flowscope::driver::typed::DriverBuilder<flowscope::extract::five_tuple::FiveTuple>) -> core::result::Result<flowscope::driver::broadcast::BroadcastSlotHandle<Self::Message, flowscope::extract::five_tuple::FiveTupleKey>, netring::protocol::ProtocolInitError> where Self::Message: core::marker::Send + core::marker::Sync + core::clone::Clone + 'static
 pub trait netring::prelude::AnomalySink: core::marker::Send
-pub fn netring::prelude::AnomalySink::flush(&mut self) -> core::result::Result<(), std::io::error::Error>
+pub fn netring::prelude::AnomalySink::flush(&mut self) -> core::result::Result<(), core::io::error::Error>
 pub fn netring::prelude::AnomalySink::write(&mut self, kind: &'static str, severity: netring::Severity, ts: flowscope::timestamp::Timestamp, key: core::option::Option<&dyn netring::anomaly::key::Key>, observations: &[(&'static str, alloc::borrow::Cow<'_, str>)], metrics: &[(&'static str, f64)])
 impl netring::anomaly::sink::AnomalySink for netring::anomaly::metrics_sink::MetricsSink
-pub fn netring::anomaly::metrics_sink::MetricsSink::flush(&mut self) -> core::result::Result<(), std::io::error::Error>
+pub fn netring::anomaly::metrics_sink::MetricsSink::flush(&mut self) -> core::result::Result<(), core::io::error::Error>
 pub fn netring::anomaly::metrics_sink::MetricsSink::write(&mut self, kind: &'static str, severity: netring::Severity, _ts: flowscope::timestamp::Timestamp, _key: core::option::Option<&dyn netring::anomaly::key::Key>, _observations: &[(&'static str, alloc::borrow::Cow<'_, str>)], metrics: &[(&'static str, f64)])
 impl netring::anomaly::sink::AnomalySink for netring::anomaly::shipped_sinks::ChannelSink
-pub fn netring::anomaly::shipped_sinks::ChannelSink::flush(&mut self) -> core::result::Result<(), std::io::error::Error>
+pub fn netring::anomaly::shipped_sinks::ChannelSink::flush(&mut self) -> core::result::Result<(), core::io::error::Error>
 pub fn netring::anomaly::shipped_sinks::ChannelSink::write(&mut self, kind: &'static str, severity: netring::Severity, ts: flowscope::timestamp::Timestamp, key: core::option::Option<&dyn netring::anomaly::key::Key>, observations: &[(&'static str, alloc::borrow::Cow<'_, str>)], metrics: &[(&'static str, f64)])
 impl netring::anomaly::sink::AnomalySink for netring::anomaly::shipped_sinks::StdoutJsonSink
-pub fn netring::anomaly::shipped_sinks::StdoutJsonSink::flush(&mut self) -> core::result::Result<(), std::io::error::Error>
+pub fn netring::anomaly::shipped_sinks::StdoutJsonSink::flush(&mut self) -> core::result::Result<(), core::io::error::Error>
 pub fn netring::anomaly::shipped_sinks::StdoutJsonSink::write(&mut self, kind: &'static str, severity: netring::Severity, ts: flowscope::timestamp::Timestamp, key: core::option::Option<&dyn netring::anomaly::key::Key>, observations: &[(&'static str, alloc::borrow::Cow<'_, str>)], metrics: &[(&'static str, f64)])
 impl netring::anomaly::sink::AnomalySink for netring::anomaly::shipped_sinks::StdoutSink
-pub fn netring::anomaly::shipped_sinks::StdoutSink::flush(&mut self) -> core::result::Result<(), std::io::error::Error>
+pub fn netring::anomaly::shipped_sinks::StdoutSink::flush(&mut self) -> core::result::Result<(), core::io::error::Error>
 pub fn netring::anomaly::shipped_sinks::StdoutSink::write(&mut self, kind: &'static str, severity: netring::Severity, ts: flowscope::timestamp::Timestamp, key: core::option::Option<&dyn netring::anomaly::key::Key>, observations: &[(&'static str, alloc::borrow::Cow<'_, str>)], metrics: &[(&'static str, f64)])
 impl netring::anomaly::sink::AnomalySink for netring::anomaly::shipped_sinks::TracingSink
-pub fn netring::anomaly::shipped_sinks::TracingSink::flush(&mut self) -> core::result::Result<(), std::io::error::Error>
+pub fn netring::anomaly::shipped_sinks::TracingSink::flush(&mut self) -> core::result::Result<(), core::io::error::Error>
 pub fn netring::anomaly::shipped_sinks::TracingSink::write(&mut self, kind: &'static str, severity: netring::Severity, ts: flowscope::timestamp::Timestamp, key: core::option::Option<&dyn netring::anomaly::key::Key>, observations: &[(&'static str, alloc::borrow::Cow<'_, str>)], metrics: &[(&'static str, f64)])
 impl netring::anomaly::sink::AnomalySink for netring::anomaly::sink::NoopSink
-pub fn netring::anomaly::sink::NoopSink::flush(&mut self) -> core::result::Result<(), std::io::error::Error>
+pub fn netring::anomaly::sink::NoopSink::flush(&mut self) -> core::result::Result<(), core::io::error::Error>
 pub fn netring::anomaly::sink::NoopSink::write(&mut self, _kind: &'static str, _severity: netring::Severity, _ts: flowscope::timestamp::Timestamp, _key: core::option::Option<&dyn netring::anomaly::key::Key>, _observations: &[(&'static str, alloc::borrow::Cow<'_, str>)], _metrics: &[(&'static str, f64)])
-impl<W: std::io::Write + core::marker::Send> netring::anomaly::sink::AnomalySink for netring::anomaly::eve_sink::EveSink<W>
-pub fn netring::anomaly::eve_sink::EveSink<W>::flush(&mut self) -> core::result::Result<(), std::io::error::Error>
+impl<W: core::io::write::Write + core::marker::Send> netring::anomaly::sink::AnomalySink for netring::anomaly::eve_sink::EveSink<W>
+pub fn netring::anomaly::eve_sink::EveSink<W>::flush(&mut self) -> core::result::Result<(), core::io::error::Error>
 pub fn netring::anomaly::eve_sink::EveSink<W>::write(&mut self, kind: &'static str, severity: netring::Severity, ts: flowscope::timestamp::Timestamp, key: core::option::Option<&dyn netring::anomaly::key::Key>, observations: &[(&'static str, alloc::borrow::Cow<'_, str>)], metrics: &[(&'static str, f64)])
-impl<W: std::io::Write + core::marker::Send> netring::anomaly::sink::AnomalySink for netring::anomaly::ocsf_sink::OcsfSink<W>
-pub fn netring::anomaly::ocsf_sink::OcsfSink<W>::flush(&mut self) -> core::result::Result<(), std::io::error::Error>
+impl<W: core::io::write::Write + core::marker::Send> netring::anomaly::sink::AnomalySink for netring::anomaly::ocsf_sink::OcsfSink<W>
+pub fn netring::anomaly::ocsf_sink::OcsfSink<W>::flush(&mut self) -> core::result::Result<(), core::io::error::Error>
 pub fn netring::anomaly::ocsf_sink::OcsfSink<W>::write(&mut self, kind: &'static str, severity: netring::Severity, ts: flowscope::timestamp::Timestamp, key: core::option::Option<&dyn netring::anomaly::key::Key>, observations: &[(&'static str, alloc::borrow::Cow<'_, str>)], metrics: &[(&'static str, f64)])
-impl<W: std::io::Write + core::marker::Send> netring::anomaly::sink::AnomalySink for netring::anomaly::syslog_sink::SyslogSink<W>
-pub fn netring::anomaly::syslog_sink::SyslogSink<W>::flush(&mut self) -> core::result::Result<(), std::io::error::Error>
+impl<W: core::io::write::Write + core::marker::Send> netring::anomaly::sink::AnomalySink for netring::anomaly::syslog_sink::SyslogSink<W>
+pub fn netring::anomaly::syslog_sink::SyslogSink<W>::flush(&mut self) -> core::result::Result<(), core::io::error::Error>
 pub fn netring::anomaly::syslog_sink::SyslogSink<W>::write(&mut self, kind: &'static str, severity: netring::Severity, ts: flowscope::timestamp::Timestamp, key: core::option::Option<&dyn netring::anomaly::key::Key>, observations: &[(&'static str, alloc::borrow::Cow<'_, str>)], metrics: &[(&'static str, f64)])
 pub trait netring::prelude::AnomalySinkExt: netring::anomaly::sink::AnomalySink + core::marker::Sized
 pub fn netring::prelude::AnomalySinkExt::begin(&mut self, kind: &'static str, severity: netring::Severity, ts: flowscope::timestamp::Timestamp) -> netring::anomaly::sink::AnomalyWriter<'_>
@@ -5703,6 +5751,7 @@ impl netring::protocol::MessageProtocol for netring::prelude::Dnp3
 impl netring::protocol::MessageProtocol for netring::prelude::Dns
 impl netring::protocol::MessageProtocol for netring::prelude::Ftp
 impl netring::protocol::MessageProtocol for netring::prelude::Http
+impl netring::protocol::MessageProtocol for netring::prelude::Http2
 impl netring::protocol::MessageProtocol for netring::prelude::Icmp
 impl netring::protocol::MessageProtocol for netring::prelude::Kerberos
 impl netring::protocol::MessageProtocol for netring::prelude::Ldap
@@ -5722,7 +5771,6 @@ impl netring::protocol::MessageProtocol for netring::prelude::Tftp
 impl netring::protocol::MessageProtocol for netring::prelude::Tls
 impl netring::protocol::MessageProtocol for netring::prelude::TlsHandshake
 impl netring::protocol::MessageProtocol for netring::prelude::WireGuard
-impl netring::protocol::MessageProtocol for netring::protocol::builtin::Http2
 pub trait netring::prelude::Protocol: core::marker::Send + core::marker::Sync + 'static
 pub type netring::prelude::Protocol::Message: core::marker::Send + core::marker::Sync + 'static
 pub const netring::prelude::Protocol::NAME: &'static str
@@ -5765,6 +5813,13 @@ pub fn netring::prelude::Http::dispatch() -> netring::protocol::Dispatch
 pub fn netring::prelude::Http::make_slot(handle: flowscope::driver::slot::SlotHandle<Self::Message, flowscope::extract::five_tuple::FiveTupleKey>) -> alloc::boxed::Box<dyn netring::monitor::registry::ProtocolSlot> where Self: core::marker::Sized
 pub fn netring::prelude::Http::register(builder: &mut flowscope::driver::typed::DriverBuilder<flowscope::extract::five_tuple::FiveTuple>) -> core::result::Result<flowscope::driver::slot::SlotHandle<Self::Message, flowscope::extract::five_tuple::FiveTupleKey>, netring::protocol::ProtocolInitError>
 pub fn netring::prelude::Http::register_broadcast(builder: &mut flowscope::driver::typed::DriverBuilder<flowscope::extract::five_tuple::FiveTuple>) -> core::result::Result<flowscope::driver::broadcast::BroadcastSlotHandle<Self::Message, flowscope::extract::five_tuple::FiveTupleKey>, netring::protocol::ProtocolInitError>
+impl netring::protocol::Protocol for netring::prelude::Http2
+pub type netring::prelude::Http2::Message = flowscope::http2::stream::Http2Event
+pub const netring::prelude::Http2::NAME: &'static str
+pub fn netring::prelude::Http2::dispatch() -> netring::protocol::Dispatch
+pub fn netring::prelude::Http2::make_slot(handle: flowscope::driver::slot::SlotHandle<Self::Message, flowscope::extract::five_tuple::FiveTupleKey>) -> alloc::boxed::Box<dyn netring::monitor::registry::ProtocolSlot> where Self: core::marker::Sized
+pub fn netring::prelude::Http2::register(builder: &mut flowscope::driver::typed::DriverBuilder<flowscope::extract::five_tuple::FiveTuple>) -> core::result::Result<flowscope::driver::slot::SlotHandle<Self::Message, flowscope::extract::five_tuple::FiveTupleKey>, netring::protocol::ProtocolInitError>
+pub fn netring::prelude::Http2::register_broadcast(_builder: &mut flowscope::driver::typed::DriverBuilder<flowscope::extract::five_tuple::FiveTuple>) -> core::result::Result<flowscope::driver::broadcast::BroadcastSlotHandle<Self::Message, flowscope::extract::five_tuple::FiveTupleKey>, netring::protocol::ProtocolInitError> where Self::Message: core::marker::Send + core::marker::Sync + core::clone::Clone + 'static
 impl netring::protocol::Protocol for netring::prelude::Icmp
 pub type netring::prelude::Icmp::Message = flowscope::icmp::types::IcmpMessage
 pub const netring::prelude::Icmp::NAME: &'static str
@@ -5912,13 +5967,6 @@ pub fn netring::prelude::WireGuard::dispatch() -> netring::protocol::Dispatch
 pub fn netring::prelude::WireGuard::make_slot(handle: flowscope::driver::slot::SlotHandle<Self::Message, flowscope::extract::five_tuple::FiveTupleKey>) -> alloc::boxed::Box<dyn netring::monitor::registry::ProtocolSlot> where Self: core::marker::Sized
 pub fn netring::prelude::WireGuard::register(builder: &mut flowscope::driver::typed::DriverBuilder<flowscope::extract::five_tuple::FiveTuple>) -> core::result::Result<flowscope::driver::slot::SlotHandle<Self::Message, flowscope::extract::five_tuple::FiveTupleKey>, netring::protocol::ProtocolInitError>
 pub fn netring::prelude::WireGuard::register_broadcast(_builder: &mut flowscope::driver::typed::DriverBuilder<flowscope::extract::five_tuple::FiveTuple>) -> core::result::Result<flowscope::driver::broadcast::BroadcastSlotHandle<Self::Message, flowscope::extract::five_tuple::FiveTupleKey>, netring::protocol::ProtocolInitError> where Self::Message: core::marker::Send + core::marker::Sync + core::clone::Clone + 'static
-impl netring::protocol::Protocol for netring::protocol::builtin::Http2
-pub type netring::protocol::builtin::Http2::Message = flowscope::http2::stream::Http2Event
-pub const netring::protocol::builtin::Http2::NAME: &'static str
-pub fn netring::protocol::builtin::Http2::dispatch() -> netring::protocol::Dispatch
-pub fn netring::protocol::builtin::Http2::make_slot(handle: flowscope::driver::slot::SlotHandle<Self::Message, flowscope::extract::five_tuple::FiveTupleKey>) -> alloc::boxed::Box<dyn netring::monitor::registry::ProtocolSlot> where Self: core::marker::Sized
-pub fn netring::protocol::builtin::Http2::register(builder: &mut flowscope::driver::typed::DriverBuilder<flowscope::extract::five_tuple::FiveTuple>) -> core::result::Result<flowscope::driver::slot::SlotHandle<Self::Message, flowscope::extract::five_tuple::FiveTupleKey>, netring::protocol::ProtocolInitError>
-pub fn netring::protocol::builtin::Http2::register_broadcast(_builder: &mut flowscope::driver::typed::DriverBuilder<flowscope::extract::five_tuple::FiveTuple>) -> core::result::Result<flowscope::driver::broadcast::BroadcastSlotHandle<Self::Message, flowscope::extract::five_tuple::FiveTupleKey>, netring::protocol::ProtocolInitError> where Self::Message: core::marker::Send + core::marker::Sync + core::clone::Clone + 'static
 pub trait netring::prelude::Report: core::marker::Send + 'static
 pub const netring::prelude::Report::NAME: &'static str
 impl netring::report::Report for netring::monitor::bandwidth::BandwidthSnapshot
@@ -5926,13 +5974,13 @@ pub const netring::monitor::bandwidth::BandwidthSnapshot::NAME: &'static str
 impl netring::report::Report for netring::monitor::telemetry::CaptureHealth
 pub const netring::monitor::telemetry::CaptureHealth::NAME: &'static str
 pub trait netring::prelude::ReportSink<R: netring::report::Report>: core::marker::Send + 'static
-pub fn netring::prelude::ReportSink::flush(&mut self) -> std::io::error::Result<()>
+pub fn netring::prelude::ReportSink::flush(&mut self) -> core::io::error::Result<()>
 pub fn netring::prelude::ReportSink::record(&mut self, report: &R)
 impl<R: netring::report::Report + core::fmt::Debug> netring::report::ReportSink<R> for netring::report::StdoutReportSink
-pub fn netring::report::StdoutReportSink::flush(&mut self) -> std::io::error::Result<()>
+pub fn netring::report::StdoutReportSink::flush(&mut self) -> core::io::error::Result<()>
 pub fn netring::report::StdoutReportSink::record(&mut self, report: &R)
 impl<R: netring::report::Report + serde_core::ser::Serialize> netring::report::ReportSink<R> for netring::report::JsonReportSink
-pub fn netring::report::JsonReportSink::flush(&mut self) -> std::io::error::Result<()>
+pub fn netring::report::JsonReportSink::flush(&mut self) -> core::io::error::Result<()>
 pub fn netring::report::JsonReportSink::record(&mut self, report: &R)
 pub type netring::prelude::FlowKey = flowscope::extract::five_tuple::FiveTupleKey
 pub mod netring::protocol
@@ -6011,19 +6059,19 @@ pub fn netring::prelude::Http::make_slot(handle: flowscope::driver::slot::SlotHa
 pub fn netring::prelude::Http::register(builder: &mut flowscope::driver::typed::DriverBuilder<flowscope::extract::five_tuple::FiveTuple>) -> core::result::Result<flowscope::driver::slot::SlotHandle<Self::Message, flowscope::extract::five_tuple::FiveTupleKey>, netring::protocol::ProtocolInitError>
 pub fn netring::prelude::Http::register_broadcast(builder: &mut flowscope::driver::typed::DriverBuilder<flowscope::extract::five_tuple::FiveTuple>) -> core::result::Result<flowscope::driver::broadcast::BroadcastSlotHandle<Self::Message, flowscope::extract::five_tuple::FiveTupleKey>, netring::protocol::ProtocolInitError>
 pub struct netring::protocol::builtin::Http2
-impl core::clone::Clone for netring::protocol::builtin::Http2
-pub fn netring::protocol::builtin::Http2::clone(&self) -> netring::protocol::builtin::Http2
-impl core::fmt::Debug for netring::protocol::builtin::Http2
-pub fn netring::protocol::builtin::Http2::fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result
-impl core::marker::Copy for netring::protocol::builtin::Http2
-impl netring::protocol::MessageProtocol for netring::protocol::builtin::Http2
-impl netring::protocol::Protocol for netring::protocol::builtin::Http2
-pub type netring::protocol::builtin::Http2::Message = flowscope::http2::stream::Http2Event
-pub const netring::protocol::builtin::Http2::NAME: &'static str
-pub fn netring::protocol::builtin::Http2::dispatch() -> netring::protocol::Dispatch
-pub fn netring::protocol::builtin::Http2::make_slot(handle: flowscope::driver::slot::SlotHandle<Self::Message, flowscope::extract::five_tuple::FiveTupleKey>) -> alloc::boxed::Box<dyn netring::monitor::registry::ProtocolSlot> where Self: core::marker::Sized
-pub fn netring::protocol::builtin::Http2::register(builder: &mut flowscope::driver::typed::DriverBuilder<flowscope::extract::five_tuple::FiveTuple>) -> core::result::Result<flowscope::driver::slot::SlotHandle<Self::Message, flowscope::extract::five_tuple::FiveTupleKey>, netring::protocol::ProtocolInitError>
-pub fn netring::protocol::builtin::Http2::register_broadcast(_builder: &mut flowscope::driver::typed::DriverBuilder<flowscope::extract::five_tuple::FiveTuple>) -> core::result::Result<flowscope::driver::broadcast::BroadcastSlotHandle<Self::Message, flowscope::extract::five_tuple::FiveTupleKey>, netring::protocol::ProtocolInitError> where Self::Message: core::marker::Send + core::marker::Sync + core::clone::Clone + 'static
+impl core::clone::Clone for netring::prelude::Http2
+pub fn netring::prelude::Http2::clone(&self) -> netring::prelude::Http2
+impl core::fmt::Debug for netring::prelude::Http2
+pub fn netring::prelude::Http2::fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::marker::Copy for netring::prelude::Http2
+impl netring::protocol::MessageProtocol for netring::prelude::Http2
+impl netring::protocol::Protocol for netring::prelude::Http2
+pub type netring::prelude::Http2::Message = flowscope::http2::stream::Http2Event
+pub const netring::prelude::Http2::NAME: &'static str
+pub fn netring::prelude::Http2::dispatch() -> netring::protocol::Dispatch
+pub fn netring::prelude::Http2::make_slot(handle: flowscope::driver::slot::SlotHandle<Self::Message, flowscope::extract::five_tuple::FiveTupleKey>) -> alloc::boxed::Box<dyn netring::monitor::registry::ProtocolSlot> where Self: core::marker::Sized
+pub fn netring::prelude::Http2::register(builder: &mut flowscope::driver::typed::DriverBuilder<flowscope::extract::five_tuple::FiveTuple>) -> core::result::Result<flowscope::driver::slot::SlotHandle<Self::Message, flowscope::extract::five_tuple::FiveTupleKey>, netring::protocol::ProtocolInitError>
+pub fn netring::prelude::Http2::register_broadcast(_builder: &mut flowscope::driver::typed::DriverBuilder<flowscope::extract::five_tuple::FiveTuple>) -> core::result::Result<flowscope::driver::broadcast::BroadcastSlotHandle<Self::Message, flowscope::extract::five_tuple::FiveTupleKey>, netring::protocol::ProtocolInitError> where Self::Message: core::marker::Send + core::marker::Sync + core::clone::Clone + 'static
 pub struct netring::protocol::builtin::Icmp
 impl core::clone::Clone for netring::prelude::Icmp
 pub fn netring::prelude::Icmp::clone(&self) -> netring::prelude::Icmp
@@ -6732,6 +6780,20 @@ pub fn netring::prelude::Http::dispatch() -> netring::protocol::Dispatch
 pub fn netring::prelude::Http::make_slot(handle: flowscope::driver::slot::SlotHandle<Self::Message, flowscope::extract::five_tuple::FiveTupleKey>) -> alloc::boxed::Box<dyn netring::monitor::registry::ProtocolSlot> where Self: core::marker::Sized
 pub fn netring::prelude::Http::register(builder: &mut flowscope::driver::typed::DriverBuilder<flowscope::extract::five_tuple::FiveTuple>) -> core::result::Result<flowscope::driver::slot::SlotHandle<Self::Message, flowscope::extract::five_tuple::FiveTupleKey>, netring::protocol::ProtocolInitError>
 pub fn netring::prelude::Http::register_broadcast(builder: &mut flowscope::driver::typed::DriverBuilder<flowscope::extract::five_tuple::FiveTuple>) -> core::result::Result<flowscope::driver::broadcast::BroadcastSlotHandle<Self::Message, flowscope::extract::five_tuple::FiveTupleKey>, netring::protocol::ProtocolInitError>
+pub struct netring::protocol::Http2
+impl core::clone::Clone for netring::prelude::Http2
+pub fn netring::prelude::Http2::clone(&self) -> netring::prelude::Http2
+impl core::fmt::Debug for netring::prelude::Http2
+pub fn netring::prelude::Http2::fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::marker::Copy for netring::prelude::Http2
+impl netring::protocol::MessageProtocol for netring::prelude::Http2
+impl netring::protocol::Protocol for netring::prelude::Http2
+pub type netring::prelude::Http2::Message = flowscope::http2::stream::Http2Event
+pub const netring::prelude::Http2::NAME: &'static str
+pub fn netring::prelude::Http2::dispatch() -> netring::protocol::Dispatch
+pub fn netring::prelude::Http2::make_slot(handle: flowscope::driver::slot::SlotHandle<Self::Message, flowscope::extract::five_tuple::FiveTupleKey>) -> alloc::boxed::Box<dyn netring::monitor::registry::ProtocolSlot> where Self: core::marker::Sized
+pub fn netring::prelude::Http2::register(builder: &mut flowscope::driver::typed::DriverBuilder<flowscope::extract::five_tuple::FiveTuple>) -> core::result::Result<flowscope::driver::slot::SlotHandle<Self::Message, flowscope::extract::five_tuple::FiveTupleKey>, netring::protocol::ProtocolInitError>
+pub fn netring::prelude::Http2::register_broadcast(_builder: &mut flowscope::driver::typed::DriverBuilder<flowscope::extract::five_tuple::FiveTuple>) -> core::result::Result<flowscope::driver::broadcast::BroadcastSlotHandle<Self::Message, flowscope::extract::five_tuple::FiveTupleKey>, netring::protocol::ProtocolInitError> where Self::Message: core::marker::Send + core::marker::Sync + core::clone::Clone + 'static
 pub struct netring::protocol::Icmp
 impl core::clone::Clone for netring::prelude::Icmp
 pub fn netring::prelude::Icmp::clone(&self) -> netring::prelude::Icmp
@@ -7135,6 +7197,7 @@ impl netring::protocol::MessageProtocol for netring::prelude::Dnp3
 impl netring::protocol::MessageProtocol for netring::prelude::Dns
 impl netring::protocol::MessageProtocol for netring::prelude::Ftp
 impl netring::protocol::MessageProtocol for netring::prelude::Http
+impl netring::protocol::MessageProtocol for netring::prelude::Http2
 impl netring::protocol::MessageProtocol for netring::prelude::Icmp
 impl netring::protocol::MessageProtocol for netring::prelude::Kerberos
 impl netring::protocol::MessageProtocol for netring::prelude::Ldap
@@ -7154,7 +7217,6 @@ impl netring::protocol::MessageProtocol for netring::prelude::Tftp
 impl netring::protocol::MessageProtocol for netring::prelude::Tls
 impl netring::protocol::MessageProtocol for netring::prelude::TlsHandshake
 impl netring::protocol::MessageProtocol for netring::prelude::WireGuard
-impl netring::protocol::MessageProtocol for netring::protocol::builtin::Http2
 pub trait netring::protocol::Protocol: core::marker::Send + core::marker::Sync + 'static
 pub type netring::protocol::Protocol::Message: core::marker::Send + core::marker::Sync + 'static
 pub const netring::protocol::Protocol::NAME: &'static str
@@ -7197,6 +7259,13 @@ pub fn netring::prelude::Http::dispatch() -> netring::protocol::Dispatch
 pub fn netring::prelude::Http::make_slot(handle: flowscope::driver::slot::SlotHandle<Self::Message, flowscope::extract::five_tuple::FiveTupleKey>) -> alloc::boxed::Box<dyn netring::monitor::registry::ProtocolSlot> where Self: core::marker::Sized
 pub fn netring::prelude::Http::register(builder: &mut flowscope::driver::typed::DriverBuilder<flowscope::extract::five_tuple::FiveTuple>) -> core::result::Result<flowscope::driver::slot::SlotHandle<Self::Message, flowscope::extract::five_tuple::FiveTupleKey>, netring::protocol::ProtocolInitError>
 pub fn netring::prelude::Http::register_broadcast(builder: &mut flowscope::driver::typed::DriverBuilder<flowscope::extract::five_tuple::FiveTuple>) -> core::result::Result<flowscope::driver::broadcast::BroadcastSlotHandle<Self::Message, flowscope::extract::five_tuple::FiveTupleKey>, netring::protocol::ProtocolInitError>
+impl netring::protocol::Protocol for netring::prelude::Http2
+pub type netring::prelude::Http2::Message = flowscope::http2::stream::Http2Event
+pub const netring::prelude::Http2::NAME: &'static str
+pub fn netring::prelude::Http2::dispatch() -> netring::protocol::Dispatch
+pub fn netring::prelude::Http2::make_slot(handle: flowscope::driver::slot::SlotHandle<Self::Message, flowscope::extract::five_tuple::FiveTupleKey>) -> alloc::boxed::Box<dyn netring::monitor::registry::ProtocolSlot> where Self: core::marker::Sized
+pub fn netring::prelude::Http2::register(builder: &mut flowscope::driver::typed::DriverBuilder<flowscope::extract::five_tuple::FiveTuple>) -> core::result::Result<flowscope::driver::slot::SlotHandle<Self::Message, flowscope::extract::five_tuple::FiveTupleKey>, netring::protocol::ProtocolInitError>
+pub fn netring::prelude::Http2::register_broadcast(_builder: &mut flowscope::driver::typed::DriverBuilder<flowscope::extract::five_tuple::FiveTuple>) -> core::result::Result<flowscope::driver::broadcast::BroadcastSlotHandle<Self::Message, flowscope::extract::five_tuple::FiveTupleKey>, netring::protocol::ProtocolInitError> where Self::Message: core::marker::Send + core::marker::Sync + core::clone::Clone + 'static
 impl netring::protocol::Protocol for netring::prelude::Icmp
 pub type netring::prelude::Icmp::Message = flowscope::icmp::types::IcmpMessage
 pub const netring::prelude::Icmp::NAME: &'static str
@@ -7344,13 +7413,6 @@ pub fn netring::prelude::WireGuard::dispatch() -> netring::protocol::Dispatch
 pub fn netring::prelude::WireGuard::make_slot(handle: flowscope::driver::slot::SlotHandle<Self::Message, flowscope::extract::five_tuple::FiveTupleKey>) -> alloc::boxed::Box<dyn netring::monitor::registry::ProtocolSlot> where Self: core::marker::Sized
 pub fn netring::prelude::WireGuard::register(builder: &mut flowscope::driver::typed::DriverBuilder<flowscope::extract::five_tuple::FiveTuple>) -> core::result::Result<flowscope::driver::slot::SlotHandle<Self::Message, flowscope::extract::five_tuple::FiveTupleKey>, netring::protocol::ProtocolInitError>
 pub fn netring::prelude::WireGuard::register_broadcast(_builder: &mut flowscope::driver::typed::DriverBuilder<flowscope::extract::five_tuple::FiveTuple>) -> core::result::Result<flowscope::driver::broadcast::BroadcastSlotHandle<Self::Message, flowscope::extract::five_tuple::FiveTupleKey>, netring::protocol::ProtocolInitError> where Self::Message: core::marker::Send + core::marker::Sync + core::clone::Clone + 'static
-impl netring::protocol::Protocol for netring::protocol::builtin::Http2
-pub type netring::protocol::builtin::Http2::Message = flowscope::http2::stream::Http2Event
-pub const netring::protocol::builtin::Http2::NAME: &'static str
-pub fn netring::protocol::builtin::Http2::dispatch() -> netring::protocol::Dispatch
-pub fn netring::protocol::builtin::Http2::make_slot(handle: flowscope::driver::slot::SlotHandle<Self::Message, flowscope::extract::five_tuple::FiveTupleKey>) -> alloc::boxed::Box<dyn netring::monitor::registry::ProtocolSlot> where Self: core::marker::Sized
-pub fn netring::protocol::builtin::Http2::register(builder: &mut flowscope::driver::typed::DriverBuilder<flowscope::extract::five_tuple::FiveTuple>) -> core::result::Result<flowscope::driver::slot::SlotHandle<Self::Message, flowscope::extract::five_tuple::FiveTupleKey>, netring::protocol::ProtocolInitError>
-pub fn netring::protocol::builtin::Http2::register_broadcast(_builder: &mut flowscope::driver::typed::DriverBuilder<flowscope::extract::five_tuple::FiveTuple>) -> core::result::Result<flowscope::driver::broadcast::BroadcastSlotHandle<Self::Message, flowscope::extract::five_tuple::FiveTupleKey>, netring::protocol::ProtocolInitError> where Self::Message: core::marker::Send + core::marker::Sync + core::clone::Clone + 'static
 pub type netring::protocol::FlowKey = flowscope::extract::five_tuple::FiveTupleKey
 pub mod netring::report
 pub struct netring::report::JsonReportSink
@@ -7362,7 +7424,7 @@ impl core::fmt::Debug for netring::report::JsonReportSink
 pub fn netring::report::JsonReportSink::fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result
 impl core::marker::Copy for netring::report::JsonReportSink
 impl<R: netring::report::Report + serde_core::ser::Serialize> netring::report::ReportSink<R> for netring::report::JsonReportSink
-pub fn netring::report::JsonReportSink::flush(&mut self) -> std::io::error::Result<()>
+pub fn netring::report::JsonReportSink::flush(&mut self) -> core::io::error::Result<()>
 pub fn netring::report::JsonReportSink::record(&mut self, report: &R)
 pub struct netring::report::ReportSnapshot<'a, 'c>
 impl netring::report::ReportSnapshot<'_, '_>
@@ -7380,7 +7442,7 @@ impl core::fmt::Debug for netring::report::StdoutReportSink
 pub fn netring::report::StdoutReportSink::fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result
 impl core::marker::Copy for netring::report::StdoutReportSink
 impl<R: netring::report::Report + core::fmt::Debug> netring::report::ReportSink<R> for netring::report::StdoutReportSink
-pub fn netring::report::StdoutReportSink::flush(&mut self) -> std::io::error::Result<()>
+pub fn netring::report::StdoutReportSink::flush(&mut self) -> core::io::error::Result<()>
 pub fn netring::report::StdoutReportSink::record(&mut self, report: &R)
 pub trait netring::report::Report: core::marker::Send + 'static
 pub const netring::report::Report::NAME: &'static str
@@ -7389,13 +7451,13 @@ pub const netring::monitor::bandwidth::BandwidthSnapshot::NAME: &'static str
 impl netring::report::Report for netring::monitor::telemetry::CaptureHealth
 pub const netring::monitor::telemetry::CaptureHealth::NAME: &'static str
 pub trait netring::report::ReportSink<R: netring::report::Report>: core::marker::Send + 'static
-pub fn netring::report::ReportSink::flush(&mut self) -> std::io::error::Result<()>
+pub fn netring::report::ReportSink::flush(&mut self) -> core::io::error::Result<()>
 pub fn netring::report::ReportSink::record(&mut self, report: &R)
 impl<R: netring::report::Report + core::fmt::Debug> netring::report::ReportSink<R> for netring::report::StdoutReportSink
-pub fn netring::report::StdoutReportSink::flush(&mut self) -> std::io::error::Result<()>
+pub fn netring::report::StdoutReportSink::flush(&mut self) -> core::io::error::Result<()>
 pub fn netring::report::StdoutReportSink::record(&mut self, report: &R)
 impl<R: netring::report::Report + serde_core::ser::Serialize> netring::report::ReportSink<R> for netring::report::JsonReportSink
-pub fn netring::report::JsonReportSink::flush(&mut self) -> std::io::error::Result<()>
+pub fn netring::report::JsonReportSink::flush(&mut self) -> core::io::error::Result<()>
 pub fn netring::report::JsonReportSink::record(&mut self, report: &R)
 pub mod netring::stats
 #[non_exhaustive] pub enum netring::stats::DropBreakdown
@@ -7432,8 +7494,8 @@ pub fn netring::stats::CaptureStats::clone(&self) -> netring::stats::CaptureStat
 impl core::cmp::Eq for netring::stats::CaptureStats
 impl core::cmp::PartialEq for netring::stats::CaptureStats
 pub fn netring::stats::CaptureStats::eq(&self, other: &netring::stats::CaptureStats) -> bool
-impl core::convert::From<libc::unix::linux_like::linux::tpacket_stats_v3> for netring::stats::CaptureStats
-pub fn netring::stats::CaptureStats::from(s: libc::unix::linux_like::linux::tpacket_stats_v3) -> Self
+impl core::convert::From<libc::new::linux_uapi::linux::if_packet::tpacket_stats_v3> for netring::stats::CaptureStats
+pub fn netring::stats::CaptureStats::from(s: libc::new::linux_uapi::linux::if_packet::tpacket_stats_v3) -> Self
 impl core::default::Default for netring::stats::CaptureStats
 pub fn netring::stats::CaptureStats::default() -> netring::stats::CaptureStats
 impl core::fmt::Debug for netring::stats::CaptureStats
@@ -7789,28 +7851,31 @@ impl core::marker::StructuralPartialEq for netring::stats::DropBreakdown
 impl serde_core::ser::Serialize for netring::stats::DropBreakdown
 pub fn netring::stats::DropBreakdown::serialize<__S>(&self, __serializer: __S) -> core::result::Result<<__S as serde_core::ser::Serializer>::Ok, <__S as serde_core::ser::Serializer>::Error> where __S: serde_core::ser::Serializer
 #[non_exhaustive] pub enum netring::Error
-pub netring::Error::Bind(std::io::error::Error)
+pub netring::Error::Bind(core::io::error::Error)
 pub netring::Error::Bpf(netring::config::bpf::BpfBuildError)
 pub netring::Error::Build(netring::error::BuildError)
 pub netring::Error::Config(alloc::string::String)
 pub netring::Error::HandlerPanic(alloc::string::String)
 pub netring::Error::InterfaceNotFound(alloc::string::String)
-pub netring::Error::Io(std::io::error::Error)
+pub netring::Error::Io(core::io::error::Error)
 pub netring::Error::Loader(alloc::string::String)
-pub netring::Error::Mmap(std::io::error::Error)
+pub netring::Error::Mmap(core::io::error::Error)
+pub netring::Error::Netns
+pub netring::Error::Netns::label: alloc::string::String
+pub netring::Error::Netns::source: core::io::error::Error
 pub netring::Error::PermissionDenied
 pub netring::Error::SockOpt
 pub netring::Error::SockOpt::option: &'static str
-pub netring::Error::SockOpt::source: std::io::error::Error
-pub netring::Error::Socket(std::io::error::Error)
+pub netring::Error::SockOpt::source: core::io::error::Error
+pub netring::Error::Socket(core::io::error::Error)
+impl core::convert::From<core::io::error::Error> for netring::error::Error
+pub fn netring::error::Error::from(source: core::io::error::Error) -> Self
 impl core::convert::From<netring::afxdp::loader::LoaderError> for netring::error::Error
 pub fn netring::error::Error::from(e: netring::afxdp::loader::LoaderError) -> Self
 impl core::convert::From<netring::config::bpf::BpfBuildError> for netring::error::Error
 pub fn netring::error::Error::from(source: netring::config::bpf::BpfBuildError) -> Self
 impl core::convert::From<netring::error::BuildError> for netring::error::Error
 pub fn netring::error::Error::from(source: netring::error::BuildError) -> Self
-impl core::convert::From<std::io::error::Error> for netring::error::Error
-pub fn netring::error::Error::from(source: std::io::error::Error) -> Self
 impl core::error::Error for netring::error::Error
 pub fn netring::error::Error::source(&self) -> core::option::Option<&(dyn core::error::Error + 'static)>
 impl core::fmt::Debug for netring::error::Error
@@ -8421,8 +8486,8 @@ pub fn netring::stats::CaptureStats::clone(&self) -> netring::stats::CaptureStat
 impl core::cmp::Eq for netring::stats::CaptureStats
 impl core::cmp::PartialEq for netring::stats::CaptureStats
 pub fn netring::stats::CaptureStats::eq(&self, other: &netring::stats::CaptureStats) -> bool
-impl core::convert::From<libc::unix::linux_like::linux::tpacket_stats_v3> for netring::stats::CaptureStats
-pub fn netring::stats::CaptureStats::from(s: libc::unix::linux_like::linux::tpacket_stats_v3) -> Self
+impl core::convert::From<libc::new::linux_uapi::linux::if_packet::tpacket_stats_v3> for netring::stats::CaptureStats
+pub fn netring::stats::CaptureStats::from(s: libc::new::linux_uapi::linux::if_packet::tpacket_stats_v3) -> Self
 impl core::default::Default for netring::stats::CaptureStats
 pub fn netring::stats::CaptureStats::default() -> netring::stats::CaptureStats
 impl core::fmt::Debug for netring::stats::CaptureStats
@@ -8467,8 +8532,8 @@ pub struct netring::DedupStream<S> where S: netring::traits::PacketSource + std:
 impl<S> netring::async_adapters::dedup_stream::DedupStream<S> where S: netring::traits::PacketSource + std::os::fd::raw::AsRawFd
 pub fn netring::async_adapters::dedup_stream::DedupStream<S>::dedup(&self) -> &netring::dedup::Dedup
 pub fn netring::async_adapters::dedup_stream::DedupStream<S>::dedup_mut(&mut self) -> &mut netring::dedup::Dedup
-pub fn netring::async_adapters::dedup_stream::DedupStream<S>::with_pcap_tap<W>(self, writer: netring::pcap::CaptureWriter<W>) -> Self where W: std::io::Write + core::marker::Send + 'static
-pub fn netring::async_adapters::dedup_stream::DedupStream<S>::with_pcap_tap_policy<W>(self, writer: netring::pcap::CaptureWriter<W>, policy: netring::pcap_tap::TapErrorPolicy) -> Self where W: std::io::Write + core::marker::Send + 'static
+pub fn netring::async_adapters::dedup_stream::DedupStream<S>::with_pcap_tap<W>(self, writer: netring::pcap::CaptureWriter<W>) -> Self where W: core::io::write::Write + core::marker::Send + 'static
+pub fn netring::async_adapters::dedup_stream::DedupStream<S>::with_pcap_tap_policy<W>(self, writer: netring::pcap::CaptureWriter<W>, policy: netring::pcap_tap::TapErrorPolicy) -> Self where W: core::io::write::Write + core::marker::Send + 'static
 pub fn netring::async_adapters::dedup_stream::DedupStream<S>::with_pcap_tap_snaplen(self, snaplen: u32) -> Self
 impl<S> futures_core::stream::Stream for netring::async_adapters::dedup_stream::DedupStream<S> where S: netring::traits::PacketSource + std::os::fd::raw::AsRawFd + core::marker::Unpin
 pub type netring::async_adapters::dedup_stream::DedupStream<S>::Item = core::result::Result<netring::packet::OwnedPacket, netring::error::Error>
@@ -8588,8 +8653,8 @@ pub fn netring::async_adapters::flow_stream::FlowStream<C, E, U, R>::with_config
 pub fn netring::async_adapters::flow_stream::FlowStream<C, E, U, R>::with_dedup(self, dedup: netring::dedup::Dedup) -> Self
 pub fn netring::async_adapters::flow_stream::FlowStream<C, E, U, R>::with_idle_timeout_fn<F>(self, f: F) -> Self where F: core::ops::function::Fn(&<E as flowscope::extractor::FlowExtractor>::Key, core::option::Option<flowscope::extractor::L4Proto>) -> core::option::Option<core::time::Duration> + core::marker::Send + core::marker::Sync + 'static
 pub fn netring::async_adapters::flow_stream::FlowStream<C, E, U, R>::with_monotonic_timestamps(self, enable: bool) -> Self
-pub fn netring::async_adapters::flow_stream::FlowStream<C, E, U, R>::with_pcap_tap<W>(self, writer: netring::pcap::CaptureWriter<W>) -> Self where W: std::io::Write + core::marker::Send + 'static
-pub fn netring::async_adapters::flow_stream::FlowStream<C, E, U, R>::with_pcap_tap_policy<W>(self, writer: netring::pcap::CaptureWriter<W>, policy: netring::pcap_tap::TapErrorPolicy) -> Self where W: std::io::Write + core::marker::Send + 'static
+pub fn netring::async_adapters::flow_stream::FlowStream<C, E, U, R>::with_pcap_tap<W>(self, writer: netring::pcap::CaptureWriter<W>) -> Self where W: core::io::write::Write + core::marker::Send + 'static
+pub fn netring::async_adapters::flow_stream::FlowStream<C, E, U, R>::with_pcap_tap_policy<W>(self, writer: netring::pcap::CaptureWriter<W>, policy: netring::pcap_tap::TapErrorPolicy) -> Self where W: core::io::write::Write + core::marker::Send + 'static
 pub fn netring::async_adapters::flow_stream::FlowStream<C, E, U, R>::with_pcap_tap_snaplen(self, snaplen: u32) -> Self
 impl<C, E, U> netring::async_adapters::flow_stream::FlowStream<C, E, U, netring::async_adapters::flow_stream::NoReassembler> where E: flowscope::extractor::FlowExtractor, U: core::marker::Send + 'static
 pub fn netring::async_adapters::flow_stream::FlowStream<C, E, U, netring::async_adapters::flow_stream::NoReassembler>::with_async_reassembler<F>(self, factory: F) -> netring::async_adapters::flow_stream::FlowStream<C, E, U, netring::async_adapters::flow_stream::AsyncReassemblerSlot<<E as flowscope::extractor::FlowExtractor>::Key, F>> where F: netring::async_adapters::async_reassembler::AsyncReassemblerFactory<<E as flowscope::extractor::FlowExtractor>::Key>
@@ -9093,6 +9158,7 @@ impl netring::protocol::MessageProtocol for netring::prelude::Dnp3
 impl netring::protocol::MessageProtocol for netring::prelude::Dns
 impl netring::protocol::MessageProtocol for netring::prelude::Ftp
 impl netring::protocol::MessageProtocol for netring::prelude::Http
+impl netring::protocol::MessageProtocol for netring::prelude::Http2
 impl netring::protocol::MessageProtocol for netring::prelude::Icmp
 impl netring::protocol::MessageProtocol for netring::prelude::Kerberos
 impl netring::protocol::MessageProtocol for netring::prelude::Ldap
@@ -9112,7 +9178,6 @@ impl netring::protocol::MessageProtocol for netring::prelude::Tftp
 impl netring::protocol::MessageProtocol for netring::prelude::Tls
 impl netring::protocol::MessageProtocol for netring::prelude::TlsHandshake
 impl netring::protocol::MessageProtocol for netring::prelude::WireGuard
-impl netring::protocol::MessageProtocol for netring::protocol::builtin::Http2
 pub trait netring::PacketSetFilter
 pub fn netring::PacketSetFilter::set_filter(&self, filter: &netring::config::bpf::BpfFilter) -> core::result::Result<(), netring::error::Error>
 impl netring::traits::PacketSetFilter for netring::afpacket::rx::Capture
@@ -9175,6 +9240,13 @@ pub fn netring::prelude::Http::dispatch() -> netring::protocol::Dispatch
 pub fn netring::prelude::Http::make_slot(handle: flowscope::driver::slot::SlotHandle<Self::Message, flowscope::extract::five_tuple::FiveTupleKey>) -> alloc::boxed::Box<dyn netring::monitor::registry::ProtocolSlot> where Self: core::marker::Sized
 pub fn netring::prelude::Http::register(builder: &mut flowscope::driver::typed::DriverBuilder<flowscope::extract::five_tuple::FiveTuple>) -> core::result::Result<flowscope::driver::slot::SlotHandle<Self::Message, flowscope::extract::five_tuple::FiveTupleKey>, netring::protocol::ProtocolInitError>
 pub fn netring::prelude::Http::register_broadcast(builder: &mut flowscope::driver::typed::DriverBuilder<flowscope::extract::five_tuple::FiveTuple>) -> core::result::Result<flowscope::driver::broadcast::BroadcastSlotHandle<Self::Message, flowscope::extract::five_tuple::FiveTupleKey>, netring::protocol::ProtocolInitError>
+impl netring::protocol::Protocol for netring::prelude::Http2
+pub type netring::prelude::Http2::Message = flowscope::http2::stream::Http2Event
+pub const netring::prelude::Http2::NAME: &'static str
+pub fn netring::prelude::Http2::dispatch() -> netring::protocol::Dispatch
+pub fn netring::prelude::Http2::make_slot(handle: flowscope::driver::slot::SlotHandle<Self::Message, flowscope::extract::five_tuple::FiveTupleKey>) -> alloc::boxed::Box<dyn netring::monitor::registry::ProtocolSlot> where Self: core::marker::Sized
+pub fn netring::prelude::Http2::register(builder: &mut flowscope::driver::typed::DriverBuilder<flowscope::extract::five_tuple::FiveTuple>) -> core::result::Result<flowscope::driver::slot::SlotHandle<Self::Message, flowscope::extract::five_tuple::FiveTupleKey>, netring::protocol::ProtocolInitError>
+pub fn netring::prelude::Http2::register_broadcast(_builder: &mut flowscope::driver::typed::DriverBuilder<flowscope::extract::five_tuple::FiveTuple>) -> core::result::Result<flowscope::driver::broadcast::BroadcastSlotHandle<Self::Message, flowscope::extract::five_tuple::FiveTupleKey>, netring::protocol::ProtocolInitError> where Self::Message: core::marker::Send + core::marker::Sync + core::clone::Clone + 'static
 impl netring::protocol::Protocol for netring::prelude::Icmp
 pub type netring::prelude::Icmp::Message = flowscope::icmp::types::IcmpMessage
 pub const netring::prelude::Icmp::NAME: &'static str
@@ -9322,13 +9394,6 @@ pub fn netring::prelude::WireGuard::dispatch() -> netring::protocol::Dispatch
 pub fn netring::prelude::WireGuard::make_slot(handle: flowscope::driver::slot::SlotHandle<Self::Message, flowscope::extract::five_tuple::FiveTupleKey>) -> alloc::boxed::Box<dyn netring::monitor::registry::ProtocolSlot> where Self: core::marker::Sized
 pub fn netring::prelude::WireGuard::register(builder: &mut flowscope::driver::typed::DriverBuilder<flowscope::extract::five_tuple::FiveTuple>) -> core::result::Result<flowscope::driver::slot::SlotHandle<Self::Message, flowscope::extract::five_tuple::FiveTupleKey>, netring::protocol::ProtocolInitError>
 pub fn netring::prelude::WireGuard::register_broadcast(_builder: &mut flowscope::driver::typed::DriverBuilder<flowscope::extract::five_tuple::FiveTuple>) -> core::result::Result<flowscope::driver::broadcast::BroadcastSlotHandle<Self::Message, flowscope::extract::five_tuple::FiveTupleKey>, netring::protocol::ProtocolInitError> where Self::Message: core::marker::Send + core::marker::Sync + core::clone::Clone + 'static
-impl netring::protocol::Protocol for netring::protocol::builtin::Http2
-pub type netring::protocol::builtin::Http2::Message = flowscope::http2::stream::Http2Event
-pub const netring::protocol::builtin::Http2::NAME: &'static str
-pub fn netring::protocol::builtin::Http2::dispatch() -> netring::protocol::Dispatch
-pub fn netring::protocol::builtin::Http2::make_slot(handle: flowscope::driver::slot::SlotHandle<Self::Message, flowscope::extract::five_tuple::FiveTupleKey>) -> alloc::boxed::Box<dyn netring::monitor::registry::ProtocolSlot> where Self: core::marker::Sized
-pub fn netring::protocol::builtin::Http2::register(builder: &mut flowscope::driver::typed::DriverBuilder<flowscope::extract::five_tuple::FiveTuple>) -> core::result::Result<flowscope::driver::slot::SlotHandle<Self::Message, flowscope::extract::five_tuple::FiveTupleKey>, netring::protocol::ProtocolInitError>
-pub fn netring::protocol::builtin::Http2::register_broadcast(_builder: &mut flowscope::driver::typed::DriverBuilder<flowscope::extract::five_tuple::FiveTuple>) -> core::result::Result<flowscope::driver::broadcast::BroadcastSlotHandle<Self::Message, flowscope::extract::five_tuple::FiveTupleKey>, netring::protocol::ProtocolInitError> where Self::Message: core::marker::Send + core::marker::Sync + core::clone::Clone + 'static
 pub trait netring::StreamCapture: netring::async_adapters::stream_capture::sealed::Sealed
 pub type netring::StreamCapture::Source: netring::traits::PacketSource + std::os::fd::raw::AsRawFd
 pub fn netring::StreamCapture::capture(&self) -> &netring::async_adapters::tokio_adapter::AsyncCapture<Self::Source>

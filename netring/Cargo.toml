@@ -264,7 +264,11 @@ monitor = [
     "http", "dns", "tls", "icmp", "arp", "ndp", "lldp", "cdp", "asset", "p0f", "ad-protocols", "asset-protocols", "ssh", "quic",
     "emit", "serde",
 ]
-# Maximal app-tier umbrella (every shipped sink + parser + flowscope bonus).
+# Curated app-tier umbrella. Deliberately not "everything": it leaves out the
+# features that cost something you should opt into knowingly — `http2` (signature
+# dispatch widens the kernel prefilter and probes every TCP flow), `sigma`,
+# `yara`, `ioc`, `nprint`/`ml-features`, `ja4plus` (FoxIO License), and the
+# Tier-2 / OT protocol sets.
 monitor-quickstart = [
     "tokio", "channel", "flow", "parse", "pcap", "metrics",
     "http", "dns", "tls", "icmp", "arp", "ndp", "lldp", "cdp", "asset", "p0f", "ad-protocols", "asset-protocols", "ssh", "quic",

@@ -168,6 +168,44 @@ jobs:
           cache-targets: false
       - run: cargo doc --workspace --all-features --no-deps
 
+  # §F of the 1.0 API-stability sweep (#37): regenerate the public-API snapshots
+  # and fail on any diff, so every change to the public surface is a reviewed
+  # change to public-api/*.txt. The job existed on GitHub and was lost in the
+  # migration; public-api/README.md documented it the whole time.
+  #
+  # The nightly pin must satisfy the workspace MSRV — the previous pin
+  # (nightly-2026-04-09, rustc 1.96) could not build the workspace at all after
+  # the 1.97 bump. Bump it here and regenerate in the same commit.
+  public-api:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: https://data.forgejo.org/actions/checkout@v7
+      - uses: https://github.com/dtolnay/rust-toolchain@master
+        with:
+          toolchain: nightly-2026-08-18
+      - uses: https://github.com/Swatinem/rust-cache@v2.9.2
+        with:
+          key: public-api
+          cache-targets: false
+      - uses: https://github.com/taiki-e/install-action@v2.87.2
+        with:
+          tool: cargo-public-api@0.51.0
+      - name: Regenerate and diff the public-API lock
+        run: |
+          cargo +nightly-2026-08-18 public-api -p netring \
+            --all-features -ss > /tmp/netring.txt
+          cargo +nightly-2026-08-18 public-api -p netring-exporters \
+            --all-features -ss > /tmp/netring-exporters.txt
+          # `diff` prints the change and exits non-zero, which is the report.
+          diff -u public-api/netring.txt /tmp/netring.txt
+          diff -u public-api/netring-exporters.txt /tmp/netring-exporters.txt
+      - name: How to fix a failure here
+        if: failure()
+        run: |
+          echo "The public API changed. If that was intentional, regenerate the"
+          echo "snapshots and commit them alongside your change — see"
+          echo "public-api/README.md. If it was not, fix the code, not the lock."
+
   fuzz-smoke:
     runs-on: ubuntu-24.04
     steps:

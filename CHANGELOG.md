@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased (0.30.0) — flowscope 0.24, HTTP/2 protocol marker
+## 0.30.0 — 2026-09-02 — flowscope 0.24, HTTP/2 marker, netns capture
 
 Depends on **flowscope 0.24** (the inline-proxy / sans-IO L7 cycle). Migration:
 `docs/MIGRATING_0.29_TO_0.30.md`. Nothing in the flowscope bump itself requires

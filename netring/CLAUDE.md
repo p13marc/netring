@@ -20,13 +20,11 @@ built on AF_PACKET with TPACKET_V3 (block-based mmap ring buffers) and AF_XDP.
 
 ## Implementation Status
 
-**0.30.0 — RELEASE-PREPPED on `master` (NOT yet published)** 2026-09-02.
+**0.30.0 — RELEASED 2026-09-02** (published to crates.io, tag `0.30.0`,
+alongside **`netring-exporters` 0.6.0**).
 "flowscope 0.24, HTTP/2 marker, netns capture & the dependency refresh".
 Depends on **flowscope 0.24**. Migration: `docs/MIGRATING_0.29_TO_0.30.md`.
 A breaking release (still pre-1.0; the 1.0 freeze is deferred under [#37]).
-Version bumped, CHANGELOG + migration doc written, `just ci` green — the
-`cargo publish` + `git tag 0.30.0` remain a maintainer action. Ships alongside
-**`netring-exporters` 0.6.0**.
 
 - **Breaking — `etherparse` 0.16 → 0.21.** netring re-exports it publicly
   (`Packet::parse` → `SlicedPacket`), so the bump is visible to callers. The

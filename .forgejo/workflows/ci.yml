@@ -187,9 +187,10 @@ jobs:
         with:
           key: public-api
           cache-targets: false
-      - uses: https://github.com/taiki-e/install-action@v2.87.2
-        with:
-          tool: cargo-public-api@0.51.0
+      # Not via taiki-e/install-action: cargo-public-api is not in its tool
+      # list, and an unsupported tool is an error rather than a fallback.
+      # `cargo install` is what public-api/README.md documents anyway.
+      - run: cargo install cargo-public-api --version 0.51.0 --locked
       - name: Regenerate and diff the public-API lock
         run: |
           cargo +nightly-2026-08-18 public-api -p netring \

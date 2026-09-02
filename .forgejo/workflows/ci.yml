@@ -27,7 +27,7 @@ jobs:
   fmt:
     runs-on: ubuntu-24.04
     steps:
-      - uses: https://data.forgejo.org/actions/checkout@v6
+      - uses: https://data.forgejo.org/actions/checkout@v7
       - uses: https://github.com/dtolnay/rust-toolchain@stable
         with:
           components: rustfmt
@@ -36,11 +36,11 @@ jobs:
   clippy:
     runs-on: ubuntu-24.04
     steps:
-      - uses: https://data.forgejo.org/actions/checkout@v6
+      - uses: https://data.forgejo.org/actions/checkout@v7
       - uses: https://github.com/dtolnay/rust-toolchain@stable
         with:
           components: clippy
-      - uses: https://github.com/Swatinem/rust-cache@v2
+      - uses: https://github.com/Swatinem/rust-cache@v2.9.2
         with:
           cache-targets: false
       - run: cargo clippy --workspace --all-targets -- --deny warnings
@@ -68,11 +68,11 @@ jobs:
           # compile error under it could surface only as a red test-integration.
           - "--features integration-tests,tokio,channel,af-xdp --all-targets"
     steps:
-      - uses: https://data.forgejo.org/actions/checkout@v6
+      - uses: https://data.forgejo.org/actions/checkout@v7
       - uses: https://github.com/dtolnay/rust-toolchain@stable
         with:
           components: clippy
-      - uses: https://github.com/Swatinem/rust-cache@v2
+      - uses: https://github.com/Swatinem/rust-cache@v2.9.2
         with:
           key: combos
           cache-targets: false
@@ -81,9 +81,9 @@ jobs:
   test:
     runs-on: ubuntu-24.04
     steps:
-      - uses: https://data.forgejo.org/actions/checkout@v6
+      - uses: https://data.forgejo.org/actions/checkout@v7
       - uses: https://github.com/dtolnay/rust-toolchain@stable
-      - uses: https://github.com/Swatinem/rust-cache@v2
+      - uses: https://github.com/Swatinem/rust-cache@v2.9.2
         with:
           cache-targets: false
       # No --skip for run_in_current_namespace any more: the test now guards on
@@ -97,9 +97,9 @@ jobs:
   test-monitor-lib:
     runs-on: ubuntu-24.04
     steps:
-      - uses: https://data.forgejo.org/actions/checkout@v6
+      - uses: https://data.forgejo.org/actions/checkout@v7
       - uses: https://github.com/dtolnay/rust-toolchain@stable
-      - uses: https://github.com/Swatinem/rust-cache@v2
+      - uses: https://github.com/Swatinem/rust-cache@v2.9.2
         with:
           key: monitor
           cache-targets: false
@@ -111,11 +111,11 @@ jobs:
   msrv:
     runs-on: ubuntu-24.04
     steps:
-      - uses: https://data.forgejo.org/actions/checkout@v6
+      - uses: https://data.forgejo.org/actions/checkout@v7
       - uses: https://github.com/dtolnay/rust-toolchain@master
         with:
           toolchain: "1.97"
-      - uses: https://github.com/Swatinem/rust-cache@v2
+      - uses: https://github.com/Swatinem/rust-cache@v2.9.2
         with:
           key: msrv
           cache-targets: false
@@ -127,11 +127,11 @@ jobs:
       # miri intercepts rustc itself; sccache must stay out of the way
       RUSTC_WRAPPER: ""
     steps:
-      - uses: https://data.forgejo.org/actions/checkout@v6
+      - uses: https://data.forgejo.org/actions/checkout@v7
       - uses: https://github.com/dtolnay/rust-toolchain@nightly
         with:
           components: miri
-      - uses: https://github.com/Swatinem/rust-cache@v2
+      - uses: https://github.com/Swatinem/rust-cache@v2.9.2
         with:
           key: miri
           cache-targets: false
@@ -148,10 +148,10 @@ jobs:
   deny:
     runs-on: ubuntu-24.04
     steps:
-      - uses: https://data.forgejo.org/actions/checkout@v6
+      - uses: https://data.forgejo.org/actions/checkout@v7
       - uses: https://github.com/dtolnay/rust-toolchain@stable
       # the docker cargo-deny action cannot see deny.toml -> install directly
-      - uses: https://github.com/taiki-e/install-action@v2
+      - uses: https://github.com/taiki-e/install-action@v2.87.2
         with:
           tool: cargo-deny
       - run: cargo deny check
@@ -161,9 +161,9 @@ jobs:
     env:
       RUSTDOCFLAGS: -D warnings
     steps:
-      - uses: https://data.forgejo.org/actions/checkout@v6
+      - uses: https://data.forgejo.org/actions/checkout@v7
       - uses: https://github.com/dtolnay/rust-toolchain@stable
-      - uses: https://github.com/Swatinem/rust-cache@v2
+      - uses: https://github.com/Swatinem/rust-cache@v2.9.2
         with:
           cache-targets: false
       - run: cargo doc --workspace --all-features --no-deps
@@ -171,9 +171,9 @@ jobs:
   fuzz-smoke:
     runs-on: ubuntu-24.04
     steps:
-      - uses: https://data.forgejo.org/actions/checkout@v6
+      - uses: https://data.forgejo.org/actions/checkout@v7
       - uses: https://github.com/dtolnay/rust-toolchain@nightly
-      - uses: https://github.com/Swatinem/rust-cache@v2
+      - uses: https://github.com/Swatinem/rust-cache@v2.9.2
         with:
           key: fuzz
           cache-targets: false

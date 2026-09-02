@@ -117,9 +117,10 @@ impl OtlpAnomalySink {
             service_name: service_name.into(),
             batch: Vec::new(),
             batch_size: 64,
-            agent: ureq::AgentBuilder::new()
-                .timeout(std::time::Duration::from_secs(5))
-                .build(),
+            agent: ureq::Agent::config_builder()
+                .timeout_global(Some(std::time::Duration::from_secs(5)))
+                .build()
+                .new_agent(),
         }
     }
 
@@ -138,8 +139,8 @@ impl OtlpAnomalySink {
         let envelope = build_envelope(&self.service_name, &self.batch);
         self.agent
             .post(&self.endpoint)
-            .set("content-type", "application/json")
-            .send_string(&envelope.to_string())
+            .header("content-type", "application/json")
+            .send(envelope.to_string())
             .map_err(|e| io::Error::other(e.to_string()))?;
         self.batch.clear();
         Ok(())

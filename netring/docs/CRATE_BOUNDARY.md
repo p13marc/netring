@@ -29,6 +29,6 @@ async capture + orchestration on top.
 
 ## Versioning
 
-netring pins a flowscope floor (currently `>= 0.15.0`). Computational work that netring
+netring pins a flowscope floor (currently `>= 0.24.0`). Computational work that netring
 needs lands in a flowscope release first (lockstep publish), then netring bumps the floor.
 See `CHANGELOG.md` for the per-release flowscope floor bumps.

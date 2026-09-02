@@ -1,16 +1,20 @@
 # Migrating netring 0.29 → 0.30
 
-0.30 adopts **flowscope 0.23** — the inline-proxy / sans-IO L7 cycle — and
+0.30 adopts **flowscope 0.24** — the inline-proxy / sans-IO L7 cycle — and
 exposes its HTTP/2 surface as a netring `Protocol` marker.
 
 > **Version note.** This ships as **`0.30.0`** — a pre-1.0 minor. The `1.0`
 > API-freeze is deferred and tracked in
 > [#37](https://github.com/p13marc/netring/issues/37).
 
-**There is nothing to do.** No netring API changed, and none of flowscope
-0.23's breaking changes reach netring's surface — verified by building and
-testing the whole workspace against 0.23 before the bump. Bump the version and
-rebuild.
+**The flowscope bump asks nothing of you.** No netring API changed because of
+it, and none of flowscope 0.23/0.24's breaking changes reach netring's surface
+— they are confined to the inline-proxy types (`HttpProxyParser`,
+`RequestHead`) that netring does not consume. Verified by building and testing
+the whole workspace against 0.24 before the bump.
+
+There *is* one break in this release, and it is netring's own: the publicly
+re-exported `etherparse` moved 0.16 → 0.21. See §4.
 
 The rest of this document is what you *gain*, and one behaviour change
 inherited from flowscope that is worth knowing about.
@@ -97,7 +101,7 @@ control the traffic.
 
 ## 3. Inherited fixes, no action needed
 
-flowscope 0.23 fixed several things netring gets for free:
+flowscope 0.23/0.24 fixed several things netring gets for free:
 
 - **Chunked HTTP/1 bodies are framed.** They were not decoded at all before;
   a clean FIN no longer looks like a parse error either.
@@ -110,5 +114,5 @@ flowscope 0.23 fixed several things netring gets for free:
 - **`PortScanDetector` is capacity-bounded** (10 000 sources, LRU).
 
 See flowscope's
-[`docs/migration-0.22-to-0.23.md`](https://docs.rs/crate/flowscope/0.23.0)
+[`docs/migration-0.22-to-0.23.md`](https://docs.rs/crate/flowscope/0.24.1)
 for the full list.

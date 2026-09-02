@@ -1074,7 +1074,7 @@ Cargo features unique to 0.21:
 - XDP loader (when `xdp-loader` enabled): `_xdp_attachment: Option<XdpAttachment>`
   in `XdpSocket` drops before the rings + fd, so the program detaches from
   the interface before AF_XDP shuts down
-- `flowscope` is a non-optional dep (currently `>= 0.13.0`) with
+- `flowscope` is a non-optional dep (currently `>= 0.24.0`) with
   `default-features = false` (just `bitflags` + `thiserror`);
   `Timestamp` and `PacketView` are unconditionally re-exported
   from it. The `parse` / `flow` features add flowscope's

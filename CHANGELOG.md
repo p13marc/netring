@@ -1,10 +1,12 @@
 # Changelog
 
-## Unreleased (0.30.0) — flowscope 0.23, HTTP/2 protocol marker
+## Unreleased (0.30.0) — flowscope 0.24, HTTP/2 protocol marker
 
-Depends on **flowscope 0.23** (the inline-proxy / sans-IO L7 cycle). Migration:
-`docs/MIGRATING_0.29_TO_0.30.md` — there is nothing to do, the whole workspace
-was built and tested against 0.23 before the bump and no netring API changed.
+Depends on **flowscope 0.24** (the inline-proxy / sans-IO L7 cycle). Migration:
+`docs/MIGRATING_0.29_TO_0.30.md`. Nothing in the flowscope bump itself requires
+action — the whole workspace was built and tested against 0.24 before the bump
+and no netring API changed by it. The breaking change in this release is the
+etherparse re-export; see **Breaking** below.
 
 ### Added
 
@@ -31,8 +33,12 @@ was built and tested against 0.23 before the bump and no netring API changed.
 
 ### Changed
 
-- flowscope `0.22` → `0.23`; netring `0.29.0` → `0.30.0`; netring-exporters
+- flowscope `0.22` → `0.24`; netring `0.29.0` → `0.30.0`; netring-exporters
   `0.5.0` → `0.6.0`.
+- flowscope `0.24`'s own additions are all on the inline-proxy surface
+  (`HttpProxyParser`'s tunnelled-`push` contract, `is_tunnelled`,
+  `take_tunnel_residue`, `RequestHead::upgrade_protocols`), which netring does
+  not consume — the bump is a no-op for netring's API.
 - **Inherited: TCP reassembly is bounded by default.**
   `FlowTrackerConfig::max_reassembler_buffer` now defaults to `Some(1 MiB)` per
   side instead of `None`, so a pipeline that never set it explicitly was
@@ -40,7 +46,7 @@ was built and tested against 0.23 before the bump and no netring API changed.
   truncates visibly (counted in `reassembly_bytes_dropped_oversize_*`) rather
   than ending the flow.
 
-### Inherited from flowscope 0.23
+### Inherited from flowscope 0.23/0.24
 
 No action needed; listed because they change observed behaviour:
 

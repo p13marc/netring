@@ -107,10 +107,14 @@ async-signal *args:    (example "async_signal" args)
 async-pipeline *args:  (example "async_pipeline" args)
 async-bridge *args:    (example "async_bridge" args)
 async-streamext *args: (example "async_streamext" args)
-async-xdp *args:       cargo run -p netring --example async_xdp --features tokio,af-xdp -- {{args}}
-async-xdp-busy *args:  cargo run -p netring --example async_xdp_busy_poll --features tokio,af-xdp -- {{args}}
-async-xdp-self *args:  cargo run -p netring --example async_xdp_self_loaded --features tokio,af-xdp,xdp-loader -- {{args}}
-async-metrics *args:   cargo run -p netring --example async_metrics --features tokio,metrics -- {{args}}
+async-xdp *args:
+    cargo run -p netring --example async_xdp --features tokio,af-xdp -- {{args}}
+async-xdp-busy *args:
+    cargo run -p netring --example async_xdp_busy_poll --features tokio,af-xdp -- {{args}}
+async-xdp-self *args:
+    cargo run -p netring --example async_xdp_self_loaded --features tokio,af-xdp,xdp-loader -- {{args}}
+async-metrics *args:
+    cargo run -p netring --example async_metrics --features tokio,metrics -- {{args}}
 channel *args:      (example "channel_consumer" args)
 ebpf *args:         (example "ebpf_filter" args)
 bpf-filter *args:   (example "bpf_filter" args)
@@ -118,19 +122,26 @@ dpi *args:          (example "dpi" args)
 bridge *args:       (example "bridge" args)
 
 # Flow tracking examples (require `flow` feature → flowscope)
-flow-keys *args:     cargo run -p netring --example async_flow_keys --features tokio,parse -- {{args}}
-flow-summary *args:  cargo run -p netring --example async_flow_summary --features tokio,flow -- {{args}}
-flow-filter *args:   cargo run -p netring --example async_flow_filter --features tokio,flow -- {{args}}
-flow-history *args:  cargo run -p netring --example async_flow_history --features tokio,flow -- {{args}}
-flow-channel *args:  cargo run -p netring --example async_flow_channel --features tokio,flow -- {{args}}
+flow-keys *args:
+    cargo run -p netring --example async_flow_keys --features tokio,parse -- {{args}}
+flow-summary *args:
+    cargo run -p netring --example async_flow_summary --features tokio,flow -- {{args}}
+flow-filter *args:
+    cargo run -p netring --example async_flow_filter --features tokio,flow -- {{args}}
+flow-history *args:
+    cargo run -p netring --example async_flow_history --features tokio,flow -- {{args}}
+flow-channel *args:
+    cargo run -p netring --example async_flow_channel --features tokio,flow -- {{args}}
 
 # Loopback dedup demo (no privileges-by-default; needs setcap for live capture)
-lo-dedup *args:      cargo run -p netring --example async_lo_dedup --features tokio -- {{args}}
+lo-dedup *args:
+    cargo run -p netring --example async_lo_dedup --features tokio -- {{args}}
 
 # Synthetic traffic generator — pair with the L7 / anomaly demos.
 # Userspace sockets only; no CAP_NET_RAW. Run in one terminal,
 # run the consumer example in another.
-synthetic-traffic *args:  cargo run -p netring --example synthetic_traffic --features tokio -- {{args}}
+synthetic-traffic *args:
+    cargo run -p netring --example synthetic_traffic --features tokio -- {{args}}
 
 # ── Lint & Format ───────────────────────────────────────────────────────────
 

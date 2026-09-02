@@ -197,10 +197,28 @@ mod tests {
 
     #[test]
     fn xdp_flags_round_trip_via_aya() {
-        let f = XdpFlags::DRV_MODE | XdpFlags::REPLACE;
-        let aya = f.to_aya();
-        // Sanity: flags carry through.
-        assert!(aya.contains(aya::programs::XdpFlags::DRV_MODE));
-        assert!(aya.contains(aya::programs::XdpFlags::REPLACE));
+        use aya::programs::XdpMode;
+
+        // aya 0.14 carries the attach mode as an enum, not bitflags, so the
+        // conversion collapses rather than ORs — and REPLACE, which aya no
+        // longer models at all, is dropped.
+        assert_eq!(
+            (XdpFlags::DRV_MODE | XdpFlags::REPLACE).to_aya(),
+            XdpMode::Driver
+        );
+        assert_eq!(XdpFlags::SKB_MODE.to_aya(), XdpMode::Skb);
+        assert_eq!(XdpFlags::HW_MODE.to_aya(), XdpMode::Hardware);
+        assert_eq!(XdpFlags::empty().to_aya(), XdpMode::Default);
+        assert_eq!(XdpFlags::REPLACE.to_aya(), XdpMode::Default);
+
+        // Mode bits are mutually exclusive in the kernel: most specific wins.
+        assert_eq!(
+            (XdpFlags::SKB_MODE | XdpFlags::DRV_MODE | XdpFlags::HW_MODE).to_aya(),
+            XdpMode::Hardware,
+        );
+        assert_eq!(
+            (XdpFlags::SKB_MODE | XdpFlags::DRV_MODE).to_aya(),
+            XdpMode::Driver,
+        );
     }
 }

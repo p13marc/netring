@@ -44,7 +44,7 @@ const MAP_NAME: &str = "xsks_map";
 /// [`super::XdpAttachment`]) to register AF_XDP sockets on the map.
 pub fn default_program(max_queues: u32) -> Result<XdpProgram, Error> {
     let bpf = aya::EbpfLoader::new()
-        .set_max_entries(MAP_NAME, max_queues.max(1))
+        .map_max_entries(MAP_NAME, max_queues.max(1))
         .load(REDIRECT_ALL_BYTECODE)
         .map_err(|e| LoaderError::Aya(e.to_string()))?;
     Ok(XdpProgram::new(bpf, PROGRAM_NAME, MAP_NAME))

@@ -19,6 +19,15 @@ etherparse re-export; see **Breaking** below.
   code, so a `match` over them needs the new arms. 0.18's `SlicedPacket.vlan` →
   `link_exts` and `Ipv4Ecn`/`Ipv4Dscp` → `IpEcn`/`IpDscp` renames are in range
   too, but netring never surfaced those fields.
+- **`XdpFlags::REPLACE` is now a no-op** (`xdp-loader`). aya `0.14` replaced its
+  `XdpFlags` bitflags with an `XdpMode` enum carrying the three mode bits and
+  nothing else, so `XDP_FLAGS_REPLACE` can no longer be passed through. It had
+  already stopped mattering in practice — aya attaches via `bpf_link_create`,
+  which rejects that flag on kernels ≥5.9 and does its own supersede handling,
+  falling back to netlink (mode only) otherwise. The constant is kept so
+  existing code compiles, and documented as inert. Relatedly, netring's
+  `XdpFlags` mode bits now collapse most-specific-first (`HW` > `DRV` > `SKB`)
+  instead of OR-ing, matching the kernel's mutually-exclusive flags.
 - Note that **flowscope still pins etherparse `0.16`**, so the dependency tree
   now carries both. That is sound — flowscope exposes no etherparse type in its
   own public API, so nothing crosses the boundary — but `cargo deny`'s

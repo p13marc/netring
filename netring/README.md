@@ -11,7 +11,7 @@ Flow/session logic lives in the companion crate
 
 ```toml
 [dependencies]
-netring = { version = "0.29", features = ["tokio"] }
+netring = { version = "0.30", features = ["tokio"] }
 ```
 
 ```rust,ignore
@@ -173,7 +173,7 @@ usable directly (flat `packets()` iterator or block-level batches). See
 ## Flow & session tracking
 
 ```toml
-netring = { version = "0.29", features = ["tokio", "flow"] }
+netring = { version = "0.30", features = ["tokio", "flow"] }
 ```
 
 ```rust,ignore
@@ -277,7 +277,7 @@ Features are organized as orthogonal axes (full matrix + recipes in
 ## Requirements
 
 - **Linux** kernel 3.2+ (TPACKET_V3), 5.4+ (AF_XDP).
-- **Rust** 1.95+ (edition 2024).
+- **Rust** 1.97+ (edition 2024).
 - **Capabilities:** `CAP_NET_RAW` (open sockets), `CAP_NET_ADMIN` (promiscuous,
   XDP attach), `CAP_IPC_LOCK` (`MAP_LOCKED`, or a sufficient `RLIMIT_MEMLOCK`).
 
@@ -300,9 +300,9 @@ Organized by topic under [`examples/`](examples/README.md) — `basic/`,
   [Tuning](docs/TUNING_GUIDE.md) · [Troubleshooting](docs/TROUBLESHOOTING.md)
 - [Writing detectors](docs/WRITING_DETECTORS.md) ·
   [Fingerprints](docs/FINGERPRINTS.md) · [Metrics](docs/METRICS.md)
-- **Migrating:** [0.27 → 0.28](docs/MIGRATING_0.27_TO_0.28.md) ·
-  [0.26 → 0.27](docs/MIGRATING_0.26_TO_0.27.md) ·
-  [0.24 → 0.25](docs/MIGRATING_0.24_TO_0.25.md) ·
+- **Migrating:** [0.29 → 0.30](docs/MIGRATING_0.29_TO_0.30.md) ·
+  [0.28 → 0.29](docs/MIGRATING_0.28_TO_0.29.md) ·
+  [0.27 → 0.28](docs/MIGRATING_0.27_TO_0.28.md) ·
   [earlier guides](docs/INDEX.md#migration-guides)
 
 ## License

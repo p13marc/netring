@@ -14,6 +14,9 @@ use std::time::{Duration, Instant};
 fn fanout_two_sockets() {
     let port = helpers::unique_port();
     let marker = format!("fanout_test_{port}");
+    // Not a hardcoded id: see `helpers::unique_fanout_group` — a group another
+    // run still holds silently swallows our packets.
+    let group = helpers::unique_fanout_group();
 
     let counters: Vec<Arc<AtomicU64>> = (0..2).map(|_| Arc::new(AtomicU64::new(0))).collect();
 
@@ -25,7 +28,7 @@ fn fanout_two_sockets() {
             thread::spawn(move || {
                 let mut rx = CaptureBuilder::default()
                     .interface(helpers::LOOPBACK)
-                    .fanout(FanoutMode::Hash, 9999)
+                    .fanout(FanoutMode::Hash, group)
                     .fanout_flags(FanoutFlags::ROLLOVER)
                     .block_timeout_ms(10)
                     .build()

@@ -23,7 +23,7 @@ exclude = ["CLAUDE.md", "SPEC.md"]
 # pulls only `bitflags` + `thiserror` — both already in netring's tree.
 # The `parse` feature additionally enables `flowscope/extractors`,
 # `flow` enables `tracker`/`reassembler`/`session`.
-flowscope = { version = "0.23", default-features = false }
+flowscope = { version = "0.24", default-features = false }
 
 libc = { workspace = true }
 nix = { workspace = true }
@@ -44,7 +44,7 @@ metrics = { workspace = true, optional = true }
 
 # Optional XDP program loader (plan 12). Pure Rust; pulls aya for
 # `bpf(2)` / netlink wrappers and XSKMAP map plumbing.
-aya = { version = "0.13", optional = true }
+aya = { version = "0.14", optional = true }
 
 # Optional serde derives on `Anomaly<K>` + `AnomalyContext` +
 # `Severity`. Pairs with `flowscope/serde` (shipped in 0.8).
@@ -71,15 +71,16 @@ yara-x = { version = "1.18", default-features = false, optional = true }
 arc-swap = "1"
 
 [dev-dependencies]
-# flowscope 0.22: `FlowEvent::Packet` / `driver::Event::Packet` are variant-level
-# `#[non_exhaustive]`, so tests synthesize them via `flowscope::test_helpers`
-# (behind flowscope's `test-helpers` feature) rather than struct literals.
-flowscope = { version = "0.23", default-features = false, features = ["test-helpers"] }
+# flowscope: `FlowEvent::Packet` / `driver::Event::Packet` are variant-level
+# `#[non_exhaustive]` (since 0.22), so tests synthesize them via
+# `flowscope::test_helpers` (behind flowscope's `test-helpers` feature) rather
+# than struct literals.
+flowscope = { version = "0.24", default-features = false, features = ["test-helpers"] }
 env_logger = "0.11"
 tempfile = "3"
 divan = "0.1"
-criterion = { version = "0.5", features = ["html_reports"] }
-etherparse = "0.16"
+criterion = { version = "0.8", features = ["html_reports"] }
+etherparse = "0.21"
 core_affinity = "0.8"
 futures = "0.3"
 proptest = "1"
@@ -123,7 +124,7 @@ parse = ["dep:etherparse", "flowscope/extractors"]
 flow = ["parse", "flowscope/tracker", "flowscope/reassembler", "flowscope/session", "flowscope/community-id", "flowscope/analysis", "dep:bytes", "dep:ahash"]
 # L7 parser pass-through — pull flowscope's HTTP/DNS/TLS/ICMP modules.
 http = ["flow", "flowscope/http"]
-# HTTP/2 + HPACK + gRPC (flowscope 0.23, #170/#171/#196). Dispatch is by
+# HTTP/2 + HPACK + gRPC (flowscope 0.23+, #170/#171/#196). Dispatch is by
 # *signature* rather than port: h2 has no standard cleartext port, and h2 over
 # TLS is opaque to a passive tap anyway. See the `Http2` marker for the
 # kernel-prefilter cost that implies.
@@ -263,7 +264,11 @@ monitor = [
     "http", "dns", "tls", "icmp", "arp", "ndp", "lldp", "cdp", "asset", "p0f", "ad-protocols", "asset-protocols", "ssh", "quic",
     "emit", "serde",
 ]
-# Maximal app-tier umbrella (every shipped sink + parser + flowscope bonus).
+# Curated app-tier umbrella. Deliberately not "everything": it leaves out the
+# features that cost something you should opt into knowingly — `http2` (signature
+# dispatch widens the kernel prefilter and probes every TCP flow), `sigma`,
+# `yara`, `ioc`, `nprint`/`ml-features`, `ja4plus` (FoxIO License), and the
+# Tier-2 / OT protocol sets.
 monitor-quickstart = [
     "tokio", "channel", "flow", "parse", "pcap", "metrics",
     "http", "dns", "tls", "icmp", "arp", "ndp", "lldp", "cdp", "asset", "p0f", "ad-protocols", "asset-protocols", "ssh", "quic",

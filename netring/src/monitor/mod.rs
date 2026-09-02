@@ -171,6 +171,73 @@ pub(crate) struct XdpIfaceSpec {
     pub(crate) queues: crate::xdp::Queues,
 }
 
+/// One AF_PACKET capture source: an interface, plus the network namespace to
+/// open it in (issue #135).
+///
+/// `netns: None` is the ordinary case — the socket is opened in whatever
+/// namespace the process is already in. `Some(ns)` opens it inside `ns` via
+/// [`CaptureBuilder::netns`](crate::CaptureBuilder::netns), which needs
+/// `CAP_SYS_ADMIN`.
+///
+/// The namespace is held behind an `Arc` because [`NetNs`](crate::netns::NetNs)
+/// is deliberately not `Clone` (cloning an owned fd is fallible — see
+/// `NetNs::try_clone`) while this spec is cloned by the run loop's reopen path.
+/// Sharing one handle across several interfaces in the same namespace is also
+/// the common case, so `Arc` is the right shape rather than a workaround.
+#[derive(Clone, Debug)]
+pub(crate) struct AfPacketIfaceSpec {
+    pub(crate) iface: String,
+    pub(crate) netns: Option<std::sync::Arc<crate::netns::NetNs>>,
+}
+
+impl AfPacketIfaceSpec {
+    /// A source in the current namespace.
+    pub(crate) fn host(iface: impl Into<String>) -> Self {
+        Self {
+            iface: iface.into(),
+            netns: None,
+        }
+    }
+}
+
+/// A resolved capture source, as reported by
+/// [`Monitor::capture_sources`].
+///
+/// The position in the returned slice **is** the [`SourceIdx`](crate::ctx::SourceIdx)
+/// that handlers see on `ctx.source`, so a consumer can build a
+/// `SourceIdx -> (interface, namespace)` map once at startup and look events up
+/// against it.
+///
+/// That lookup is the supported way to tell namespaces apart, and it matters:
+/// a `Monitor` is **fan-in**, with one flow tracker shared by every source, and
+/// the flow key is a bare 5-tuple with no namespace dimension. Two containers
+/// using the same RFC1918 range therefore produce colliding keys that the
+/// tracker merges. See [`MonitorBuilder::capture_in_netns`].
+#[derive(Clone, Debug, PartialEq, Eq)]
+#[non_exhaustive]
+pub struct CaptureSource {
+    /// Interface name, as passed to the builder.
+    pub interface: String,
+    /// The capture backend opened for it.
+    pub backend: CaptureSourceBackend,
+    /// Label of the network namespace the source is captured in
+    /// ([`NetNs::label`](crate::netns::NetNs::label)), or `None` for the
+    /// process's own namespace.
+    pub netns_label: Option<String>,
+}
+
+/// Which backend a [`CaptureSource`] is opened with.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[non_exhaustive]
+pub enum CaptureSourceBackend {
+    /// AF_PACKET (TPACKET_V3).
+    AfPacket,
+    /// AF_XDP.
+    AfXdp,
+    /// A pre-built AF_XDP socket handed to the monitor by a sharded runner.
+    AfXdpProvided,
+}
+
 /// The 0.20 top-level monitor — a fully-constructed graph of
 /// (driver, dispatcher, parser-slots, state) that runs to a
 /// stop condition.
@@ -180,7 +247,7 @@ pub(crate) struct XdpIfaceSpec {
 /// [`crate::ctx::SourceIdx`] reflecting which interface the packet
 /// came from (in builder-registration order).
 pub struct Monitor {
-    pub(crate) interfaces: Vec<String>,
+    pub(crate) interfaces: Vec<AfPacketIfaceSpec>,
     /// 0.24 Phase B: AF_XDP capture interfaces (feature `af-xdp`). The run
     /// loop opens an `AnyBackend::Xdp` for each, alongside the AF_PACKET
     /// `interfaces`. See [`MonitorBuilder::xdp_interface`].
@@ -553,6 +620,53 @@ impl Monitor {
         self.detector_names.iter().copied()
     }
 
+    /// Issue #135: the monitor's capture sources, **in `SourceIdx` order**.
+    ///
+    /// `capture_sources()[i]` describes the source that stamps
+    /// `SourceIdx(i)` on `ctx.source`, so a handler can be given a
+    /// `SourceIdx -> (interface, namespace)` map built once at startup:
+    ///
+    /// ```ignore
+    /// let sources = monitor.capture_sources();
+    /// // inside a handler:
+    /// let src = &sources[ctx.source.0 as usize];
+    /// tracing::info!(iface = %src.interface, netns = ?src.netns_label, "event");
+    /// ```
+    ///
+    /// The ordering is the run loop's open order — AF_PACKET interfaces first
+    /// (registration order), then AF_XDP, then any injected AF_XDP sockets —
+    /// which is the same order that produces the `SourceIdx` values.
+    ///
+    /// This is the supported way to tell namespaces apart. It has to be,
+    /// because the flow *key* cannot: see
+    /// [`MonitorBuilder::capture_in_netns`].
+    pub fn capture_sources(&self) -> Vec<CaptureSource> {
+        #[cfg_attr(not(feature = "af-xdp"), allow(unused_mut))]
+        let mut out: Vec<CaptureSource> = self
+            .interfaces
+            .iter()
+            .map(|spec| CaptureSource {
+                interface: spec.iface.clone(),
+                backend: CaptureSourceBackend::AfPacket,
+                netns_label: spec.netns.as_deref().map(|ns| ns.label().to_string()),
+            })
+            .collect();
+        #[cfg(feature = "af-xdp")]
+        {
+            out.extend(self.xdp_interfaces.iter().map(|spec| CaptureSource {
+                interface: spec.iface.clone(),
+                backend: CaptureSourceBackend::AfXdp,
+                netns_label: None,
+            }));
+            out.extend(self.injected_xdp.iter().map(|_| CaptureSource {
+                interface: String::new(),
+                backend: CaptureSourceBackend::AfXdpProvided,
+                netns_label: None,
+            }));
+        }
+        out
+    }
+
     /// 0.21 C: how many shards this monitor represents.
     ///
     /// A regular [`Monitor`] returns `1` — it is a single shard.
@@ -773,7 +887,12 @@ impl ReloadHandle {
 /// Builder for [`Monitor`]. Construct via [`Monitor::builder`].
 #[derive(Default)]
 pub struct MonitorBuilder {
-    interfaces: Vec<String>,
+    interfaces: Vec<AfPacketIfaceSpec>,
+    /// Issue #135: interface for which `capture_in_netns` was called with an
+    /// explicit AF_XDP backend. Recorded rather than rewritten, and raised as
+    /// `BuildError::NetnsBackendUnsupported` at `build()` — the builder methods
+    /// return `Self`, so there is nowhere earlier to report it.
+    netns_afxdp_conflict: Option<String>,
     /// 0.24 Phase B: AF_XDP capture interfaces. See [`Self::xdp_interface`].
     #[cfg(feature = "af-xdp")]
     xdp_interfaces: Vec<XdpIfaceSpec>,
@@ -1133,7 +1252,7 @@ impl MonitorBuilder {
         I: IntoIterator<Item = S>,
         S: Into<String>,
     {
-        self.interfaces = ifaces.into_iter().map(Into::into).collect();
+        self.interfaces = ifaces.into_iter().map(AfPacketIfaceSpec::host).collect();
         self
     }
 
@@ -1165,8 +1284,93 @@ impl MonitorBuilder {
     ///     .protocol::<Tcp>()
     ///     .build()?;
     /// ```
-    pub fn capture(mut self, iface: impl Into<String>, backend: Backend) -> Self {
-        let iface = iface.into();
+    pub fn capture(self, iface: impl Into<String>, backend: Backend) -> Self {
+        self.capture_inner(iface.into(), backend, None)
+    }
+
+    /// Issue #135: like [`capture`](Self::capture), but open the source inside
+    /// the network namespace `netns` — so a Monitor can watch a container's
+    /// interfaces without dropping to the low-level [`Capture`](crate::Capture)
+    /// builder and losing the flow table, detectors and bandwidth accounting.
+    ///
+    /// ```ignore
+    /// use std::sync::Arc;
+    /// use netring::{monitor::{Monitor, Backend}, netns::NetNs};
+    ///
+    /// let ns = Arc::new(NetNs::from_pid(container_pid)?);
+    /// Monitor::builder()
+    ///     .capture("eth0", Backend::AfPacket { fanout: Default::default() })  // host
+    ///     .capture_in_netns("eth0", Backend::af_packet(), ns)                 // container
+    ///     .build()?;
+    /// ```
+    ///
+    /// # Flow keys still alias across namespaces
+    ///
+    /// Read this before relying on it. A `Monitor` is **fan-in**: every source
+    /// feeds one shared flow tracker, and the flow key is a bare 5-tuple with
+    /// no namespace dimension (it is flowscope's `FiveTupleKey`). Two
+    /// containers using the same RFC1918 range therefore produce *identical*
+    /// keys, and the tracker merges them into one flow — silently.
+    ///
+    /// What you do get is per-source attribution: every event carries
+    /// `ctx.source`, and [`Monitor::capture_sources`] maps that index back to
+    /// `(interface, namespace)`. That is enough to label, route, or shard
+    /// events downstream. It is *not* enough to unmerge two flows that the
+    /// tracker already combined.
+    ///
+    /// **If key separation matters, run one `Monitor` per namespace.** That is
+    /// the only arrangement that gives each namespace its own tracker.
+    ///
+    /// # Backends
+    ///
+    /// AF_PACKET only. [`Backend::Auto`] resolves to AF_PACKET here rather than
+    /// preferring AF_XDP as it normally would, because AF_XDP in a non-root
+    /// namespace is not supported; asking for it *explicitly* is a
+    /// [`BuildError::NetnsBackendUnsupported`](crate::error::BuildError) at
+    /// `build()` rather than a silent downgrade.
+    ///
+    /// # Privileges
+    ///
+    /// Needs `CAP_SYS_ADMIN` (for `setns`) on top of the usual `CAP_NET_RAW`.
+    /// `build()` probes for it and fails with
+    /// [`Error::Netns`](crate::error::Error) rather than deferring the `EPERM`
+    /// to the first poll of the run loop.
+    #[doc(alias = "netns")]
+    pub fn capture_in_netns(
+        self,
+        iface: impl Into<String>,
+        backend: Backend,
+        netns: std::sync::Arc<crate::netns::NetNs>,
+    ) -> Self {
+        self.capture_inner(iface.into(), backend, Some(netns))
+    }
+
+    fn capture_inner(
+        mut self,
+        iface: String,
+        backend: Backend,
+        netns: Option<std::sync::Arc<crate::netns::NetNs>>,
+    ) -> Self {
+        // A namespaced source is AF_PACKET-only. `Auto` would otherwise prefer
+        // self-loading AF_XDP whenever `xdp-loader` is compiled in, which would
+        // turn "capture this container" into an unrelated failure mode; pin it
+        // to AF_PACKET before resolving so the recorded plan says so too. An
+        // *explicit* AF_XDP request is a configuration error, not something to
+        // quietly rewrite — that is recorded here and raised by `build()`.
+        let backend = if netns.is_some() {
+            match backend {
+                Backend::Auto => Backend::af_packet(),
+                #[cfg(all(feature = "af-xdp", feature = "xdp-loader"))]
+                Backend::AfXdp { .. } => {
+                    self.netns_afxdp_conflict
+                        .get_or_insert_with(|| iface.clone());
+                    Backend::af_packet()
+                }
+                other => other,
+            }
+        } else {
+            backend
+        };
         let resolved = auto::resolve(&iface, &backend, &auto::SystemProbe);
         tracing::info!(
             target: "netring::monitor::auto",
@@ -1174,11 +1378,14 @@ impl MonitorBuilder {
             plan = %resolved.description,
             "capture backend selected",
         );
-        self.resolved_backends
-            .push((iface.clone(), resolved.description));
+        let description = match netns.as_deref() {
+            Some(ns) => format!("{} (netns {})", resolved.description, ns.label()),
+            None => resolved.description,
+        };
+        self.resolved_backends.push((iface.clone(), description));
         match resolved.backend {
             Backend::AfPacket { fanout } => {
-                self.interfaces.push(iface);
+                self.interfaces.push(AfPacketIfaceSpec { iface, netns });
                 if let Some(spec) = auto::fanout_to_spec(fanout) {
                     self.fanout = Some(spec);
                 }
@@ -4141,6 +4348,34 @@ impl MonitorBuilder {
         if interface_required && no_capture_source {
             return Err(BuildError::NoInterface.into());
         }
+        // Issue #135: an explicit AF_XDP backend on a namespaced source. The
+        // builder methods return `Self`, so this is the first place it can be
+        // reported.
+        if let Some(interface) = self.netns_afxdp_conflict.take() {
+            return Err(BuildError::NetnsBackendUnsupported { interface }.into());
+        }
+        // Issue #135: prove we can actually enter each distinct namespace now,
+        // rather than letting the EPERM surface on the first poll of the run
+        // loop — by which point the caller has spawned a task and has nowhere
+        // good to put the error. `run_in` with an empty closure costs one
+        // scoped thread and one setns per namespace, once, at build time.
+        {
+            let mut probed: Vec<&str> = Vec::new();
+            for spec in &self.interfaces {
+                let Some(ns) = spec.netns.as_deref() else {
+                    continue;
+                };
+                if probed.contains(&ns.label()) {
+                    continue;
+                }
+                probed.push(ns.label());
+                ns.run_in(|| ())
+                    .map_err(|source| crate::error::Error::Netns {
+                        label: ns.label().to_string(),
+                        source,
+                    })?;
+            }
+        }
         // 0.25 S2: compute the kernel prefilter while the full consumer set is
         // still on the builder (before fields are moved into the Monitor).
         let kernel_prefilter = self.kernel_prefilter();
@@ -4332,6 +4567,12 @@ impl std::fmt::Debug for MonitorBuilder {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Interface names of a builder's/monitor's AF_PACKET sources, in
+    /// registration order — i.e. `SourceIdx` order.
+    fn iface_names(specs: &[AfPacketIfaceSpec]) -> Vec<&str> {
+        specs.iter().map(|s| s.iface.as_str()).collect()
+    }
     use crate::ctx::Ctx;
     use crate::protocol::builtin::Tcp;
     use crate::protocol::event_typed::FlowStarted;
@@ -4367,7 +4608,7 @@ mod tests {
         // Issue #106: an explicit backend pins the choice and wires the
         // matching fields directly.
         let b = Monitor::builder().capture("lo", Backend::af_packet_fanout(Fanout::Cpu(0x10)));
-        assert_eq!(b.interfaces, vec!["lo".to_string()]);
+        assert_eq!(iface_names(&b.interfaces), vec!["lo"]);
         assert_eq!(b.fanout, Some((crate::config::FanoutMode::Cpu, 0x10)));
         assert_eq!(b.resolved_capture_plan().len(), 1);
     }
@@ -4471,7 +4712,7 @@ mod tests {
             .on::<FlowStarted<Tcp>>(|_evt: &FlowStarted<Tcp>| Ok(()))
             .build()
             .unwrap();
-        assert_eq!(m.interfaces, vec!["lo".to_string(), "eth0".to_string()]);
+        assert_eq!(iface_names(&m.interfaces), vec!["lo", "eth0"]);
     }
 
     #[test]
@@ -4484,7 +4725,7 @@ mod tests {
             .on::<FlowStarted<Tcp>>(|_evt: &FlowStarted<Tcp>| Ok(()))
             .build()
             .unwrap();
-        assert_eq!(m.interfaces, vec!["lo".to_string()]);
+        assert_eq!(iface_names(&m.interfaces), vec!["lo"]);
     }
 
     #[test]

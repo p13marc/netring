@@ -3,7 +3,7 @@
 
 use aya::Ebpf;
 use aya::maps::xdp::XskMap;
-use aya::programs::{Xdp, XdpFlags as AyaXdpFlags, links::FdLink};
+use aya::programs::{Xdp, XdpMode as AyaXdpMode, links::FdLink};
 
 use crate::afxdp::XdpSocket;
 use crate::error::Error;
@@ -13,6 +13,10 @@ use super::LoaderError;
 bitflags::bitflags! {
     /// Flags controlling how an XDP program attaches to an interface.
     /// Mirrors `IFLA_XDP_FLAGS` in the kernel.
+    ///
+    /// Only one *mode* bit is meaningful per attach. If several are set the
+    /// most specific wins — `HW_MODE`, then `DRV_MODE`, then `SKB_MODE` —
+    /// because the kernel's own flags are likewise mutually exclusive.
     #[derive(Debug, Clone, Copy)]
     pub struct XdpFlags: u32 {
         /// Generic SKB-mode (works on every driver, slower).
@@ -21,29 +25,39 @@ bitflags::bitflags! {
         const DRV_MODE = 1 << 2;
         /// Hardware offload (Netronome SmartNIC etc.).
         const HW_MODE  = 1 << 3;
-        /// Replace any existing program. Without this, attach fails
-        /// with `EBUSY` if a program is already attached.
+        /// **No longer has any effect** (netring 0.30, aya 0.14).
+        ///
+        /// aya 0.14 replaced its `XdpFlags` bitflags with an `XdpMode` enum
+        /// that carries the three mode bits and nothing else, so there is no
+        /// longer a way to pass `XDP_FLAGS_REPLACE` through it. In practice
+        /// the flag had already stopped mattering: aya attaches via
+        /// `bpf_link_create`, which on kernels ≥5.9 rejects the REPLACE flag
+        /// outright and does its own supersede handling, and only falls back
+        /// to the netlink path (which takes the mode alone) when that is
+        /// unavailable.
+        ///
+        /// Kept so existing code still compiles; setting it is now a no-op.
         const REPLACE  = 1 << 4;
     }
 }
 
 impl XdpFlags {
-    /// Convert to aya's `XdpFlags`.
-    pub(crate) fn to_aya(self) -> AyaXdpFlags {
-        let mut out = AyaXdpFlags::default();
-        if self.contains(XdpFlags::SKB_MODE) {
-            out |= AyaXdpFlags::SKB_MODE;
-        }
-        if self.contains(XdpFlags::DRV_MODE) {
-            out |= AyaXdpFlags::DRV_MODE;
-        }
+    /// Convert to aya's `XdpMode`.
+    ///
+    /// Mode bits are mutually exclusive in the kernel, so this collapses them
+    /// most-specific-first rather than OR-ing. [`XdpFlags::REPLACE`] has no
+    /// representation in aya 0.14 and is dropped — see its docs.
+    pub(crate) fn to_aya(self) -> AyaXdpMode {
         if self.contains(XdpFlags::HW_MODE) {
-            out |= AyaXdpFlags::HW_MODE;
+            AyaXdpMode::Hardware
+        } else if self.contains(XdpFlags::DRV_MODE) {
+            AyaXdpMode::Driver
+        } else if self.contains(XdpFlags::SKB_MODE) {
+            AyaXdpMode::Skb
+        } else {
+            // No mode bit set — let the kernel choose, as before.
+            AyaXdpMode::Default
         }
-        if self.contains(XdpFlags::REPLACE) {
-            out |= AyaXdpFlags::REPLACE;
-        }
-        out
     }
 }
 

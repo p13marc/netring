@@ -39,6 +39,8 @@ pub use crate::protocol::builtin::Dns;
 pub use crate::protocol::builtin::Ftp;
 #[cfg(feature = "http")]
 pub use crate::protocol::builtin::Http;
+#[cfg(feature = "http2")]
+pub use crate::protocol::builtin::Http2;
 pub use crate::protocol::builtin::Icmp;
 #[cfg(feature = "kerberos")]
 pub use crate::protocol::builtin::Kerberos;

@@ -6,19 +6,23 @@ all-features = true
 [advisories]
 version = 2
 ignore = [
-    # wasmtime (pulled in by yara-x for compiled-rule execution, behind
-    # netring's opt-in `yara` feature). No fixed version is reachable:
-    # the fixes land in 24.0.12 / 36.0.13 / 46.0.2 / 47.0.3, while
-    # yara-x 1.18 requires ^43 and even the latest yara-x (1.20) requires
-    # ^45 — both outside every fixed range. Re-check on yara-x upgrades.
+    # Two wasmtime advisories, both pulled in by yara-x for compiled-rule
+    # execution, behind netring's opt-in `yara` feature. Re-checked
+    # 2026-09-02 against yara-x 1.20.0 (the latest), which requires
+    # wasmtime ^45.0.3 — the 1.18 → 1.20 bump moved us from wasmtime 43 to
+    # 45, but no fixed version is reachable through any published yara-x:
+    #   RUSTSEC-2026-0222 fixed in 24.0.12 / 36.0.13 / 46.0.2 / 47.0.3
+    #   RUSTSEC-2026-0269 fixed in 24.0.13 / 36.0.14 / 46.0.3 / 47.0.4
+    # 45.x is outside every one of those ranges. Re-check on yara-x upgrades.
     { id = "RUSTSEC-2026-0222", reason = "no reachable fixed wasmtime through yara-x; yara feature is opt-in" },
+    { id = "RUSTSEC-2026-0269", reason = "no reachable fixed wasmtime through yara-x; yara feature is opt-in" },
     # bincode is unmaintained; pulled in by yara-x (same opt-in `yara`
     # feature). No replacement available upstream — re-check on yara-x
     # upgrades.
     { id = "RUSTSEC-2025-0141", reason = "unmaintained bincode via yara-x; no upstream fix" },
-    # paste is unmaintained; pulled in by parquet 59 (netring-exporters'
-    # opt-in `parquet` feature). Goes away when arrow/parquet drop it.
-    { id = "RUSTSEC-2024-0436", reason = "unmaintained paste via parquet; no upstream fix" },
+    # RUSTSEC-2024-0436 (unmaintained `paste` via parquet) was dropped
+    # 2026-09-02: arrow/parquet 59.2 no longer pull it, and cargo-deny
+    # reports an unmatched ignore as a warning.
 ]
 
 [licenses]

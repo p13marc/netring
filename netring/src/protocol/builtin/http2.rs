@@ -21,9 +21,14 @@ impl MessageProtocol for Http2 {}
 /// HTTP/2 — RFC 9113 frames, HPACK, and per-stream events
 /// (flowscope 0.23, `#170`/`#171`/`#196`).
 ///
-/// `on::<Http2>(|e: &Http2Event, ctx|)` fires once per stream event:
-/// `Head` / `Body` / `Trailers` / `End`, plus `StreamReset` and
-/// `GoAway`. Its flow lifecycle is the underlying TCP flow.
+/// Declared with `.protocol::<Http2>()`; `on::<Http2>(|e: &Http2Event, ctx|)`
+/// then fires once per stream event: `Head` / `Body` / `Trailers` / `End`,
+/// plus `StreamReset`, `GoAway`, and `Settings` (the peer's frame-size and
+/// stream limits, which the parser used to consume unobserved). Its flow
+/// lifecycle is the underlying TCP flow.
+///
+/// [`Http2Event`](flowscope::http2::Http2Event) is `#[non_exhaustive]`, so
+/// match it with a catch-all arm — the variant list grows with the protocol.
 ///
 /// # The stream is the key, not the side
 ///
@@ -39,20 +44,36 @@ impl MessageProtocol for Http2 {}
 /// cleartext h2 (h2c) has no standard port, and h2 over TLS is
 /// opaque to a passive tap. So this dispatches on the 24-byte client
 /// connection preface via
-/// [`flowscope::detect::signatures::http2_preface`] — exact, not
-/// heuristic, since every h2 client opens with those same bytes.
+/// [`flowscope::detect::signatures::http2_preface`] — exact rather than
+/// heuristic, since a prior-knowledge h2 client opens with those same
+/// bytes: a proper prefix is `NeedMoreData` and anything else is a
+/// definitive `NoMatch`, so a probe stops early instead of burning its
+/// budget.
+///
+/// **This covers prior-knowledge h2c, not h2c negotiated over an HTTP/1
+/// `Upgrade`** (RFC 7540 §3.2). There the preface arrives only after the
+/// `101 Switching Protocols` response, by which point the probe — 4
+/// packets, 64 buffered bytes per side — has given up on the flow and
+/// will not re-arm. Those connections are silently not matched.
 ///
 /// **Registering `Http2` widens the kernel prefilter to
 /// `Predicate::Always`**, because a signature cannot be evaluated in
 /// the kernel: every packet has to reach userspace for the first
 /// bytes to be inspected. On a busy link that is the difference
-/// between a narrow BPF filter and none at all. Register it when you
-/// actually terminate or observe cleartext h2 — not by reflex.
+/// between a narrow BPF filter and none at all.
+///
+/// The prefilter is not the whole bill. A signature dispatch also
+/// installs a heuristic slot that probes **every TCP flow** the driver
+/// sees: one probe state per flow (in a map capped at 65 536 flows) and
+/// up to 16 KiB of buffered frames per flow held for replay. That is a
+/// memory cost, not just a CPU one — worth sizing before enabling it on
+/// a tap facing internet scan traffic. Register it when you actually
+/// observe cleartext h2 — not by reflex.
 ///
 /// That is also why `http2` is in `all-parsers` but not in the
 /// curated `monitor` / `monitor-quickstart` umbrellas: enabling the
-/// feature is free, but the prefilter cost should be a deliberate
-/// `.on::<Http2>()`.
+/// feature is free, but the prefilter and probe cost should be a
+/// deliberate `.protocol::<Http2>()`.
 ///
 /// # Joining late
 ///

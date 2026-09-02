@@ -1,6 +1,6 @@
 # netring — High-Performance Packet I/O for Rust
 
-> Edition 2024 · MSRV 1.85 · Linux only · Zero-copy · Pure Rust
+> Edition 2024 · MSRV 1.97 · Linux only · Zero-copy · Pure Rust
 
 ## 1. Overview
 

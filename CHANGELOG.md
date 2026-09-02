@@ -1,10 +1,37 @@
 # Changelog
 
-## Unreleased (0.30.0) — flowscope 0.23, HTTP/2 protocol marker
+## 0.30.0 — 2026-09-02 — flowscope 0.24, HTTP/2 marker, netns capture
 
-Depends on **flowscope 0.23** (the inline-proxy / sans-IO L7 cycle). Migration:
-`docs/MIGRATING_0.29_TO_0.30.md` — there is nothing to do, the whole workspace
-was built and tested against 0.23 before the bump and no netring API changed.
+Depends on **flowscope 0.24** (the inline-proxy / sans-IO L7 cycle). Migration:
+`docs/MIGRATING_0.29_TO_0.30.md`. Nothing in the flowscope bump itself requires
+action — the whole workspace was built and tested against 0.24 before the bump
+and no netring API changed by it. The breaking change in this release is the
+etherparse re-export; see **Breaking** below.
+
+### Breaking
+
+- **`etherparse` `0.16` → `0.21`.** netring re-exports `etherparse` types in its
+  own public API — `Packet::parse` / `PacketOwned::parse` return
+  `etherparse::SlicedPacket` and `etherparse::err::packet::SliceError` — so the
+  major bump is visible to callers and code that names those types must move
+  with it. Two new variants are the practical break: `NetSlice::Arp` (0.17) and
+  `TransportSlice::Igmp` (0.21). Both enums are matched exhaustively in user
+  code, so a `match` over them needs the new arms. 0.18's `SlicedPacket.vlan` →
+  `link_exts` and `Ipv4Ecn`/`Ipv4Dscp` → `IpEcn`/`IpDscp` renames are in range
+  too, but netring never surfaced those fields.
+- **`XdpFlags::REPLACE` is now a no-op** (`xdp-loader`). aya `0.14` replaced its
+  `XdpFlags` bitflags with an `XdpMode` enum carrying the three mode bits and
+  nothing else, so `XDP_FLAGS_REPLACE` can no longer be passed through. It had
+  already stopped mattering in practice — aya attaches via `bpf_link_create`,
+  which rejects that flag on kernels ≥5.9 and does its own supersede handling,
+  falling back to netlink (mode only) otherwise. The constant is kept so
+  existing code compiles, and documented as inert. Relatedly, netring's
+  `XdpFlags` mode bits now collapse most-specific-first (`HW` > `DRV` > `SKB`)
+  instead of OR-ing, matching the kernel's mutually-exclusive flags.
+- Note that **flowscope still pins etherparse `0.16`**, so the dependency tree
+  now carries both. That is sound — flowscope exposes no etherparse type in its
+  own public API, so nothing crosses the boundary — but `cargo deny`'s
+  `multiple-versions` check will report it until flowscope catches up.
 
 ### Added
 
@@ -19,15 +46,55 @@ was built and tested against 0.23 before the bump and no netring API changed.
     cannot be evaluated in the kernel, so every packet must reach userspace.
     That is why `http2` joins `all-parsers` but *not* the curated `monitor` /
     `monitor-quickstart` umbrellas: the feature is free, the prefilter should
-    be a deliberate `.on::<Http2>()`.
+    be a deliberate `.protocol::<Http2>()`.
+  - The prefilter is not the whole bill: a signature dispatch probes every TCP
+    flow, holding one probe state per flow (map capped at 65 536) plus up to
+    16 KiB of replay buffer. And it matches *prior-knowledge* h2c only — h2c
+    negotiated over an HTTP/1 `Upgrade` delivers its preface after the probe
+    (4 packets, 64 bytes per side) has already given up.
   - Worth knowing for handlers: the routing key is the event's `stream_id`,
     not the flow side — h2 multiplexes. And a *failed* gRPC call still carries
     HTTP `200`; the real status is `grpc-status` in the trailers.
 
+- **`MonitorBuilder::capture_in_netns` — network-namespace capture at the
+  monitor level** (issue
+  [#135](https://github.com/p13marc/netring/issues/135)). The `NetNs` support
+  added in 0.29 was reachable only through the low-level `Capture` builder, so
+  a `Monitor` consumer had to re-plumb its whole capture path — losing the flow
+  table, detectors and bandwidth accounting — to watch a container.
+  `.capture_in_netns(iface, backend, Arc<NetNs>)` composes with `.capture(..)`,
+  so one monitor can watch host and container interfaces at once.
+  - **Flow keys still alias across namespaces, and that is not a bug you can
+    configure away.** A `Monitor` is fan-in: every source feeds one shared flow
+    tracker, and the flow key is a bare 5-tuple with no namespace dimension.
+    Two containers on the same RFC1918 range produce identical keys and the
+    tracker merges them. Run one `Monitor` per namespace if key separation
+    matters.
+  - New `Monitor::capture_sources()` returns the sources **in `SourceIdx`
+    order**, each with its interface, backend and namespace label — so a
+    handler can map `ctx.source` back to where an event came from. This is the
+    supported way to tell namespaces apart.
+  - AF_PACKET only. `Backend::Auto` resolves to AF_PACKET for a namespaced
+    source instead of preferring AF_XDP; asking for AF_XDP *explicitly* is a
+    new `BuildError::NetnsBackendUnsupported` rather than a silent downgrade.
+  - `build()` probes each distinct namespace with one `setns`, so a missing
+    `CAP_SYS_ADMIN` surfaces there instead of on the first poll of the run
+    loop. The namespace is stored on the backend spec, so
+    `BackendErrorPolicy::Reopen` re-enters it rather than quietly rebuilding
+    the source in the host namespace.
+  - New `Error::Netns { label, source }`. `setns(2)` needs `CAP_SYS_ADMIN`,
+    while `Error::PermissionDenied`'s message names `CAP_NET_RAW` — reusing it
+    would have pointed operators at the wrong capability, and it could not say
+    *which* namespace failed. `CaptureBuilder::netns` now returns it too.
+
 ### Changed
 
-- flowscope `0.22` → `0.23`; netring `0.29.0` → `0.30.0`; netring-exporters
+- flowscope `0.22` → `0.24`; netring `0.29.0` → `0.30.0`; netring-exporters
   `0.5.0` → `0.6.0`.
+- flowscope `0.24`'s own additions are all on the inline-proxy surface
+  (`HttpProxyParser`'s tunnelled-`push` contract, `is_tunnelled`,
+  `take_tunnel_residue`, `RequestHead::upgrade_protocols`), which netring does
+  not consume — the bump is a no-op for netring's API.
 - **Inherited: TCP reassembly is bounded by default.**
   `FlowTrackerConfig::max_reassembler_buffer` now defaults to `Some(1 MiB)` per
   side instead of `None`, so a pipeline that never set it explicitly was
@@ -35,7 +102,7 @@ was built and tested against 0.23 before the bump and no netring API changed.
   truncates visibly (counted in `reassembly_bytes_dropped_oversize_*`) rather
   than ending the flow.
 
-### Inherited from flowscope 0.23
+### Inherited from flowscope 0.23/0.24
 
 No action needed; listed because they change observed behaviour:
 

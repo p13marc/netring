@@ -5,7 +5,7 @@
 netring is a pure Rust library for zero-copy packet capture and injection on Linux,
 built on AF_PACKET with TPACKET_V3 (block-based mmap ring buffers) and AF_XDP.
 
-- Edition 2024, MSRV 1.95, Linux only
+- Edition 2024, MSRV 1.97, Linux only
 - Two API levels: high-level `Capture`/`Injector` and low-level `AfPacketRx`/`AfPacketTx`
 - AF_XDP backend via `XdpSocket` (feature: `af-xdp`) for kernel-bypass packet I/O
 - Optional self-contained AF_XDP via `xdp-loader` feature (loads + attaches a redirect-all
@@ -19,6 +19,55 @@ built on AF_PACKET with TPACKET_V3 (block-based mmap ring buffers) and AF_XDP.
   `dedup_stream`, `flow_broadcast`).
 
 ## Implementation Status
+
+**0.30.0 — RELEASE-PREPPED on `master` (NOT yet published)** 2026-09-02.
+"flowscope 0.24, HTTP/2 marker, netns capture & the dependency refresh".
+Depends on **flowscope 0.24**. Migration: `docs/MIGRATING_0.29_TO_0.30.md`.
+A breaking release (still pre-1.0; the 1.0 freeze is deferred under [#37]).
+Version bumped, CHANGELOG + migration doc written, `just ci` green — the
+`cargo publish` + `git tag 0.30.0` remain a maintainer action. Ships alongside
+**`netring-exporters` 0.6.0**.
+
+- **Breaking — `etherparse` 0.16 → 0.21.** netring re-exports it publicly
+  (`Packet::parse` → `SlicedPacket`), so the bump is visible to callers. The
+  practical break is two new exhaustively-matched variants: `NetSlice::Arp`
+  (0.17) and `TransportSlice::Igmp` (0.21). flowscope still pins 0.16, so the
+  tree carries both — sound, since flowscope exposes no etherparse type
+  publicly, but `cargo deny` reports the duplicate.
+- **`Http2` protocol marker** (`http2` feature) — flowscope's HTTP/2 + HPACK +
+  gRPC surface, and the first builtin marker to use `Dispatch::Signature`
+  (the 24-byte preface). Signature dispatch widens the kernel prefilter to
+  `Predicate::Always` *and* installs a heuristic probe on every TCP flow, so
+  `http2` is in `all-parsers` but deliberately not in the `monitor` umbrellas.
+  Matches prior-knowledge h2c only — h2c over an HTTP/1 `Upgrade` delivers its
+  preface after the probe gives up.
+- **netns capture on `MonitorBuilder` (#135)** — `.capture_in_netns(iface,
+  backend, Arc<NetNs>)` plus `Monitor::capture_sources()` (sources in
+  `SourceIdx` order). AF_PACKET only; `Backend::Auto` resolves to AF_PACKET for
+  a namespaced source, explicit AF_XDP is `BuildError::NetnsBackendUnsupported`.
+  New `Error::Netns { label, source }`. **Flow keys still alias across
+  namespaces** — the Monitor is fan-in with one tracker and `FiveTupleKey` has
+  no namespace dimension; run one Monitor per namespace if that matters.
+- **Fixed — filter-expression parser could be crashed by untrusted input.**
+  974acd0's `MAX_DEPTH` bounded `!`/`(` nesting only; `parse_or`/`parse_and`
+  loop iteratively while folding a left-leaning `And`/`Or` chain, so N `and`
+  terms gave an N-deep AST and the recursive `Drop` overflowed the stack.
+  Bounded by a `MAX_NODES` leaf budget in `parse_atom`.
+- **Fixed — `Http2` was missing from `protocol::*` and the prelude**, so only
+  the long `protocol::builtin::Http2` path resolved; and four doc sites told
+  users to register it with `.on::<Http2>()`, which `build()` rejects with
+  `HandlerForUnregisteredProtocol`.
+- **Fixed — the `Integration/test-integration` CI lane**, red since the Forgejo
+  migration. `netns_capture::run_in_current_namespace` guarded on
+  `geteuid() == 0`, which is true for a rootless-podman container root that has
+  no `CAP_SYS_ADMIN`; and `fanout_two_sockets` used a hardcoded, system-wide
+  `PACKET_FANOUT` group id that a cancelled prior run could still hold.
+- **Dependency refresh:** aya 0.13 → 0.14 (`XdpFlags` → `XdpMode`;
+  `XdpFlags::REPLACE` is now inert), ureq 2 → 3, rdkafka 0.36 → 0.39,
+  criterion 0.5 → 0.8, arrow/parquet 59.2, yara-x 1.18 → 1.20, checkout v7.
+- **CI:** `clippy-features` gained `af-xdp,xdp-loader`, `http2`, and the
+  integration lane's own feature set — none of which were compiled anywhere
+  else. The first of those immediately caught dead code under `-D warnings`.
 
 **0.29.0 — RELEASED 2026-07-04** (published to crates.io, tag `0.29.0`,
 alongside **`netring-exporters` 0.5.0**).
@@ -827,6 +876,17 @@ just ci-full         # setcap + full test suite
 
 ## Key Files
 
+### 0.30 additions (HTTP/2 marker + netns capture)
+
+- `src/protocol/builtin/http2.rs` — the `Http2` marker: `Dispatch::Signature`
+  over flowscope's 24-byte preface check, registered as a
+  `session_heuristic` slot. Re-exported from `protocol::*` and the prelude.
+- `src/monitor/mod.rs` — `AfPacketIfaceSpec` (interface + optional
+  `Arc<NetNs>`), `MonitorBuilder::capture_in_netns`, `Monitor::capture_sources`,
+  `CaptureSource` / `CaptureSourceBackend` (#135).
+- `src/error.rs` — `Error::Netns { label, source }`,
+  `BuildError::NetnsBackendUnsupported` (#135).
+
 ### 0.29 additions (threat/detection redesign + observability + capture)
 
 - `src/monitor/ioc.rs` — re-exports flowscope `detect::ioc::IocSet` + `IocSetExt` (retype, #124).
@@ -1074,7 +1134,7 @@ Cargo features unique to 0.21:
 - XDP loader (when `xdp-loader` enabled): `_xdp_attachment: Option<XdpAttachment>`
   in `XdpSocket` drops before the rings + fd, so the program detaches from
   the interface before AF_XDP shuts down
-- `flowscope` is a non-optional dep (currently `>= 0.13.0`) with
+- `flowscope` is a non-optional dep (currently `>= 0.24.0`) with
   `default-features = false` (just `bitflags` + `thiserror`);
   `Timestamp` and `PacketView` are unconditionally re-exported
   from it. The `parse` / `flow` features add flowscope's
@@ -1100,23 +1160,32 @@ Cargo features unique to 0.21:
 
 ## Pre-publish checklist
 
-For the `0.28.0` `cargo publish` (release-prepped on `master`; run `just ci`
-before publishing). flowscope `0.20` is already published, so there's no
+For the `0.30.0` `cargo publish` (release-prepped on `master`; run `just ci`
+before publishing). flowscope `0.24.1` is already published, so there's no
 upstream-first step or `[patch.crates-io]` to remove — the registry resolves it.
 
-1. Confirm `netring/Cargo.toml` is `version = "0.28.0"` (done) and depends on
-   `flowscope 0.20` (done); the `## 0.28.0` CHANGELOG banner is finalized (done)
+1. Confirm `netring/Cargo.toml` is `version = "0.30.0"` (done) and depends on
+   `flowscope 0.24` (done); the `## 0.30.0` CHANGELOG banner is finalized (done)
    — adjust the date header to tag day and flip "Implementation Status" above to
    "released".
 2. `cargo publish -p netring --dry-run` to verify the package contents.
 3. `cargo publish -p netring`.
 4. **Then** publish the companion crate: `cargo publish -p netring-exporters`
-   (`0.4.0`; it depends on `netring = "0.28"`, so netring must be on crates.io
+   (`0.6.0`; it depends on `netring = "0.30"`, so netring must be on crates.io
    first). Its `kafka` feature needs `cmake`/librdkafka available at *its* build
    time, not at publish time.
-5. `git tag 0.28.0` (no `v` prefix, per the user's convention).
-6. Update the GitHub issue tracker (close shipped issues, file follow-ups).
-   Planning lives in issues now — there is no `plans/` directory.
+5. `git tag 0.30.0` (no `v` prefix, per the user's convention).
+6. Update the Forgejo issue tracker at
+   <https://git.marcpardo.eu/marcpardo/netring> (close shipped issues, file
+   follow-ups). Planning lives in issues now — there is no `plans/` directory.
+   GitHub is a synced mirror; the canonical tracker is Forgejo.
+
+Two lanes exist on the forge and are worth using rather than publishing by
+hand: `publish-crates.yml` is `workflow_dispatch`-only and runs the test suite
+plus a `cargo-semver-checks` gate before publishing both crates — **0.30.0 is a
+breaking release, so it needs `allow_breaking: yes`** or the gate will
+(correctly) stop it. `release.yml` fires on a bare-semver tag and attaches the
+tarball + `SHA256SUMS`.
 
 Run `just doc` (`RUSTDOCFLAGS="-D warnings"`) + `just ci` before publish — the
 CI doc job fails on broken intra-doc links. (Earlier-version notes: 0.22 needed

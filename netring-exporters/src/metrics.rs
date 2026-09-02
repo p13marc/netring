@@ -177,9 +177,10 @@ impl OtlpMetricsExporter {
             endpoint: endpoint.into(),
             service_name: service_name.into(),
             start_unix_nano: now_unix_nano(),
-            agent: ureq::AgentBuilder::new()
-                .timeout(std::time::Duration::from_secs(5))
-                .build(),
+            agent: ureq::Agent::config_builder()
+                .timeout_global(Some(std::time::Duration::from_secs(5)))
+                .build()
+                .new_agent(),
         }
     }
 
@@ -203,8 +204,8 @@ impl OtlpMetricsExporter {
         );
         self.agent
             .post(&self.endpoint)
-            .set("content-type", "application/json")
-            .send_string(&envelope.to_string())
+            .header("content-type", "application/json")
+            .send(envelope.to_string())
             .map_err(|e| io::Error::other(e.to_string()))
             .inspect_err(|e| tracing::warn!(error = %e, "OTLP metrics export failed"))?;
         Ok(())

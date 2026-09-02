@@ -20,7 +20,7 @@ bitflags = "2"
 tokio = { version = "1", features = ["io-util", "net", "macros", "rt-multi-thread", "time", "signal", "sync"] }
 futures-core = { version = "0.3", default-features = false, features = ["std"] }
 crossbeam-channel = "0.5"
-etherparse = "0.16"
+etherparse = "0.21"
 pcap-file = "2"
 metrics = "0.24"
 

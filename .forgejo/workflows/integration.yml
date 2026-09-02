@@ -6,7 +6,9 @@ name: Integration
 on:
   push:
     branches: [main, master]
+    paths-ignore: ['**.md', 'docs/**', 'LICENSE*']
   pull_request:
+    paths-ignore: ['**.md', 'docs/**', 'LICENSE*']
   # manual re-run path (privileged runner was offline, flaky suite)
   workflow_dispatch:
 
@@ -22,12 +24,26 @@ jobs:
   test-integration:
     runs-on: integration
     steps:
-      - uses: https://data.forgejo.org/actions/checkout@v6
+      - uses: https://data.forgejo.org/actions/checkout@v7
       - uses: https://github.com/dtolnay/rust-toolchain@stable
-      - uses: https://github.com/Swatinem/rust-cache@v2
+      - uses: https://github.com/Swatinem/rust-cache@v2.9.2
         with:
           key: integration
-      - run: sudo apt-get update && sudo apt-get install -y jq libcap2-bin
+      - run: sudo apt-get update && sudo apt-get install -y jq libcap2-bin iproute2
+      # This lane's failures have been undiagnosable from the outside: the tests
+      # need privileges the runner may or may not actually have, and the
+      # difference shows up only as a panic deep in the suite. Print the
+      # privilege state up front so a red run explains itself.
+      - name: Runner privilege state
+        run: |
+          echo "== id =="; id
+          echo "== process capabilities =="; getpcaps $$ 2>&1 || true
+          echo "== capsh =="; capsh --print 2>&1 | head -20 || true
+          echo "== can we open AF_PACKET without setcap? =="
+          python3 -c "import socket; socket.socket(socket.AF_PACKET, socket.SOCK_RAW, socket.htons(3)).close(); print('yes')" 2>&1 || true
+          echo "== is CAP_NET_RAW in the bounding set? (setcap +ep is unusable if not) =="
+          grep -E '^CapBnd' /proc/self/status || true
+          echo "== netns =="; readlink /proc/self/ns/net || true
       - name: Build test binaries
         run: cargo test -p netring --features "integration-tests,tokio,channel,af-xdp" --no-run
       - name: Run capability tests
@@ -37,7 +53,11 @@ jobs:
                        | jq -r 'select(.profile.test == true) | .executable' | sort -u); do
             sudo setcap cap_net_raw,cap_net_admin+ep "$bin"
           done
-          cargo test -p netring --features "integration-tests,tokio,channel,af-xdp" -- --test-threads=1
+          # --no-fail-fast so one failing binary does not mask the rest: this
+          # lane has had multiple independent failures at once, and stopping at
+          # the first turns a two-bug run into two more red runs.
+          cargo test -p netring --features "integration-tests,tokio,channel,af-xdp" \
+            --no-fail-fast -- --test-threads=1 --nocapture
 
   # INFORMATIONAL: bpf(BPF_MAP_CREATE) requires init-namespace CAP_BPF, which
   # rootless podman cannot grant (and enabling unprivileged BPF on the
@@ -46,9 +66,9 @@ jobs:
   xdp-smoke:
     runs-on: integration
     steps:
-      - uses: https://data.forgejo.org/actions/checkout@v6
+      - uses: https://data.forgejo.org/actions/checkout@v7
       - uses: https://github.com/dtolnay/rust-toolchain@stable
-      - uses: https://github.com/Swatinem/rust-cache@v2
+      - uses: https://github.com/Swatinem/rust-cache@v2.9.2
         with:
           key: xdp
       - run: sudo apt-get update && sudo apt-get install -y jq

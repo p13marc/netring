@@ -27,7 +27,7 @@ jobs:
   fmt:
     runs-on: ubuntu-24.04
     steps:
-      - uses: https://data.forgejo.org/actions/checkout@v6
+      - uses: https://data.forgejo.org/actions/checkout@v7
       - uses: https://github.com/dtolnay/rust-toolchain@stable
         with:
           components: rustfmt
@@ -36,11 +36,11 @@ jobs:
   clippy:
     runs-on: ubuntu-24.04
     steps:
-      - uses: https://data.forgejo.org/actions/checkout@v6
+      - uses: https://data.forgejo.org/actions/checkout@v7
       - uses: https://github.com/dtolnay/rust-toolchain@stable
         with:
           components: clippy
-      - uses: https://github.com/Swatinem/rust-cache@v2
+      - uses: https://github.com/Swatinem/rust-cache@v2.9.2
         with:
           cache-targets: false
       - run: cargo clippy --workspace --all-targets -- --deny warnings
@@ -56,12 +56,23 @@ jobs:
           - "--features tokio,channel,flow,parse"
           - "--features tokio,sigma,dns,http,tls"
           - "--features tokio,metrics,flow,monitor"
+          # The rows above lint the lib only (adding --all-targets to them
+          # needs `pcap`, which they deliberately omit). The three below carry
+          # it because what they exist to cover lives in tests/ and examples/.
+          #
+          # aya + the XDP loader are otherwise compiled only by the docs job.
+          - "--features tokio,af-xdp,xdp-loader --all-targets"
+          # http2 is in no umbrella, so nothing else lints or tests it.
+          - "--features tokio,http2 --all-targets"
+          # The integration lane's exact set. Compiled nowhere else, so a plain
+          # compile error under it could surface only as a red test-integration.
+          - "--features integration-tests,tokio,channel,af-xdp --all-targets"
     steps:
-      - uses: https://data.forgejo.org/actions/checkout@v6
+      - uses: https://data.forgejo.org/actions/checkout@v7
       - uses: https://github.com/dtolnay/rust-toolchain@stable
         with:
           components: clippy
-      - uses: https://github.com/Swatinem/rust-cache@v2
+      - uses: https://github.com/Swatinem/rust-cache@v2.9.2
         with:
           key: combos
           cache-targets: false
@@ -70,39 +81,41 @@ jobs:
   test:
     runs-on: ubuntu-24.04
     steps:
-      - uses: https://data.forgejo.org/actions/checkout@v6
+      - uses: https://data.forgejo.org/actions/checkout@v7
       - uses: https://github.com/dtolnay/rust-toolchain@stable
-      - uses: https://github.com/Swatinem/rust-cache@v2
+      - uses: https://github.com/Swatinem/rust-cache@v2.9.2
         with:
           cache-targets: false
-      # run_in_current_namespace needs CAP_SYS_ADMIN (setns) — covered by the
-      # integration lane; the plain runner cannot grant it.
-      - run: cargo test --workspace --features tokio,channel -- --skip run_in_current_namespace
+      # No --skip for run_in_current_namespace any more: the test now guards on
+      # the setns *outcome* (EPERM => skip) rather than on geteuid()==0, so it
+      # is correct on an unprivileged runner, in a rootless container, and as
+      # real root alike.
+      - run: cargo test --workspace --features tokio,channel
       - name: sccache stats
         run: /srv/cache/bin/sccache --show-stats
 
   test-monitor-lib:
     runs-on: ubuntu-24.04
     steps:
-      - uses: https://data.forgejo.org/actions/checkout@v6
+      - uses: https://data.forgejo.org/actions/checkout@v7
       - uses: https://github.com/dtolnay/rust-toolchain@stable
-      - uses: https://github.com/Swatinem/rust-cache@v2
+      - uses: https://github.com/Swatinem/rust-cache@v2.9.2
         with:
           key: monitor
           cache-targets: false
       - run: >
           cargo test -p netring --features
-          "tokio,channel,flow,parse,pcap,http,dns,tls,ja4plus,icmp,arp,ndp,lldp,cdp,asset,p0f,ad-protocols,asset-protocols,ssh,quic,ocsf-sink,sigma,infra-protocols,ftp,smtp,modbus,dnp3,stun,wireguard,nprint,yara"
+          "tokio,channel,flow,parse,pcap,http,http2,dns,tls,ja4plus,icmp,arp,ndp,lldp,cdp,asset,p0f,ad-protocols,asset-protocols,ssh,quic,ocsf-sink,sigma,infra-protocols,ftp,smtp,modbus,dnp3,stun,wireguard,nprint,yara"
           --lib
 
   msrv:
     runs-on: ubuntu-24.04
     steps:
-      - uses: https://data.forgejo.org/actions/checkout@v6
+      - uses: https://data.forgejo.org/actions/checkout@v7
       - uses: https://github.com/dtolnay/rust-toolchain@master
         with:
           toolchain: "1.97"
-      - uses: https://github.com/Swatinem/rust-cache@v2
+      - uses: https://github.com/Swatinem/rust-cache@v2.9.2
         with:
           key: msrv
           cache-targets: false
@@ -114,11 +127,11 @@ jobs:
       # miri intercepts rustc itself; sccache must stay out of the way
       RUSTC_WRAPPER: ""
     steps:
-      - uses: https://data.forgejo.org/actions/checkout@v6
+      - uses: https://data.forgejo.org/actions/checkout@v7
       - uses: https://github.com/dtolnay/rust-toolchain@nightly
         with:
           components: miri
-      - uses: https://github.com/Swatinem/rust-cache@v2
+      - uses: https://github.com/Swatinem/rust-cache@v2.9.2
         with:
           key: miri
           cache-targets: false
@@ -135,10 +148,10 @@ jobs:
   deny:
     runs-on: ubuntu-24.04
     steps:
-      - uses: https://data.forgejo.org/actions/checkout@v6
+      - uses: https://data.forgejo.org/actions/checkout@v7
       - uses: https://github.com/dtolnay/rust-toolchain@stable
       # the docker cargo-deny action cannot see deny.toml -> install directly
-      - uses: https://github.com/taiki-e/install-action@v2
+      - uses: https://github.com/taiki-e/install-action@v2.87.2
         with:
           tool: cargo-deny
       - run: cargo deny check
@@ -148,19 +161,58 @@ jobs:
     env:
       RUSTDOCFLAGS: -D warnings
     steps:
-      - uses: https://data.forgejo.org/actions/checkout@v6
+      - uses: https://data.forgejo.org/actions/checkout@v7
       - uses: https://github.com/dtolnay/rust-toolchain@stable
-      - uses: https://github.com/Swatinem/rust-cache@v2
+      - uses: https://github.com/Swatinem/rust-cache@v2.9.2
         with:
           cache-targets: false
       - run: cargo doc --workspace --all-features --no-deps
 
+  # §F of the 1.0 API-stability sweep (#37): regenerate the public-API snapshots
+  # and fail on any diff, so every change to the public surface is a reviewed
+  # change to public-api/*.txt. The job existed on GitHub and was lost in the
+  # migration; public-api/README.md documented it the whole time.
+  #
+  # The nightly pin must satisfy the workspace MSRV — the previous pin
+  # (nightly-2026-04-09, rustc 1.96) could not build the workspace at all after
+  # the 1.97 bump. Bump it here and regenerate in the same commit.
+  public-api:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: https://data.forgejo.org/actions/checkout@v7
+      - uses: https://github.com/dtolnay/rust-toolchain@master
+        with:
+          toolchain: nightly-2026-08-18
+      - uses: https://github.com/Swatinem/rust-cache@v2.9.2
+        with:
+          key: public-api
+          cache-targets: false
+      # Not via taiki-e/install-action: cargo-public-api is not in its tool
+      # list, and an unsupported tool is an error rather than a fallback.
+      # `cargo install` is what public-api/README.md documents anyway.
+      - run: cargo install cargo-public-api --version 0.51.0 --locked
+      - name: Regenerate and diff the public-API lock
+        run: |
+          cargo +nightly-2026-08-18 public-api -p netring \
+            --all-features -ss > /tmp/netring.txt
+          cargo +nightly-2026-08-18 public-api -p netring-exporters \
+            --all-features -ss > /tmp/netring-exporters.txt
+          # `diff` prints the change and exits non-zero, which is the report.
+          diff -u public-api/netring.txt /tmp/netring.txt
+          diff -u public-api/netring-exporters.txt /tmp/netring-exporters.txt
+      - name: How to fix a failure here
+        if: failure()
+        run: |
+          echo "The public API changed. If that was intentional, regenerate the"
+          echo "snapshots and commit them alongside your change — see"
+          echo "public-api/README.md. If it was not, fix the code, not the lock."
+
   fuzz-smoke:
     runs-on: ubuntu-24.04
     steps:
-      - uses: https://data.forgejo.org/actions/checkout@v6
+      - uses: https://data.forgejo.org/actions/checkout@v7
       - uses: https://github.com/dtolnay/rust-toolchain@nightly
-      - uses: https://github.com/Swatinem/rust-cache@v2
+      - uses: https://github.com/Swatinem/rust-cache@v2.9.2
         with:
           key: fuzz
           cache-targets: false

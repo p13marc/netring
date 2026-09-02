@@ -9,7 +9,13 @@
 //! Cap-free — driven entirely by `Monitor::replay()` over a synthesized pcap, so
 //! it needs no capture privileges.
 
-#![cfg(all(feature = "tokio", feature = "flow", feature = "dns"))]
+// `pcap` is required twice over and was missing from this gate: the test writes
+// its fixture with the `pcap_file` crate, which only that feature links, and it
+// drives the Monitor through `replay()`, which only that feature provides. The
+// omission went unnoticed because no CI lane built `flow + dns` *without*
+// `pcap`, and `monitor` happens to imply `dns` but not `pcap` — so
+// `--features tokio,flow,monitor` failed to compile the test suite.
+#![cfg(all(feature = "tokio", feature = "flow", feature = "dns", feature = "pcap"))]
 
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU32, Ordering};

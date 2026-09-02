@@ -56,6 +56,37 @@ etherparse re-export; see **Breaking** below.
     not the flow side — h2 multiplexes. And a *failed* gRPC call still carries
     HTTP `200`; the real status is `grpc-status` in the trailers.
 
+- **`MonitorBuilder::capture_in_netns` — network-namespace capture at the
+  monitor level** (issue
+  [#135](https://github.com/p13marc/netring/issues/135)). The `NetNs` support
+  added in 0.29 was reachable only through the low-level `Capture` builder, so
+  a `Monitor` consumer had to re-plumb its whole capture path — losing the flow
+  table, detectors and bandwidth accounting — to watch a container.
+  `.capture_in_netns(iface, backend, Arc<NetNs>)` composes with `.capture(..)`,
+  so one monitor can watch host and container interfaces at once.
+  - **Flow keys still alias across namespaces, and that is not a bug you can
+    configure away.** A `Monitor` is fan-in: every source feeds one shared flow
+    tracker, and the flow key is a bare 5-tuple with no namespace dimension.
+    Two containers on the same RFC1918 range produce identical keys and the
+    tracker merges them. Run one `Monitor` per namespace if key separation
+    matters.
+  - New `Monitor::capture_sources()` returns the sources **in `SourceIdx`
+    order**, each with its interface, backend and namespace label — so a
+    handler can map `ctx.source` back to where an event came from. This is the
+    supported way to tell namespaces apart.
+  - AF_PACKET only. `Backend::Auto` resolves to AF_PACKET for a namespaced
+    source instead of preferring AF_XDP; asking for AF_XDP *explicitly* is a
+    new `BuildError::NetnsBackendUnsupported` rather than a silent downgrade.
+  - `build()` probes each distinct namespace with one `setns`, so a missing
+    `CAP_SYS_ADMIN` surfaces there instead of on the first poll of the run
+    loop. The namespace is stored on the backend spec, so
+    `BackendErrorPolicy::Reopen` re-enters it rather than quietly rebuilding
+    the source in the host namespace.
+  - New `Error::Netns { label, source }`. `setns(2)` needs `CAP_SYS_ADMIN`,
+    while `Error::PermissionDenied`'s message names `CAP_NET_RAW` — reusing it
+    would have pointed operators at the wrong capability, and it could not say
+    *which* namespace failed. `CaptureBuilder::netns` now returns it too.
+
 ### Changed
 
 - flowscope `0.22` → `0.24`; netring `0.29.0` → `0.30.0`; netring-exporters

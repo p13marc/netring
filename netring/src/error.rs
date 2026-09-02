@@ -38,6 +38,22 @@ pub enum Error {
     #[error("insufficient privileges (need CAP_NET_RAW)")]
     PermissionDenied,
 
+    /// Issue #135: entering a network namespace failed.
+    ///
+    /// Distinct from [`Error::PermissionDenied`], whose message names
+    /// `CAP_NET_RAW`: `setns(2)` needs **`CAP_SYS_ADMIN`**, so reusing that
+    /// variant would send an operator looking at the wrong capability. Carries
+    /// the namespace label so a multi-namespace monitor says *which* one failed
+    /// instead of surfacing a bare `EPERM`.
+    #[error("cannot enter network namespace `{label}` (setns needs CAP_SYS_ADMIN): {source}")]
+    Netns {
+        /// The namespace's label (see [`crate::netns::NetNs::label`]).
+        label: String,
+        /// The underlying `setns(2)` error.
+        #[source]
+        source: std::io::Error,
+    },
+
     /// Generic I/O error.
     #[error(transparent)]
     Io(#[from] std::io::Error),
@@ -148,6 +164,21 @@ pub enum BuildError {
     ProtocolNotBroadcast {
         /// `Protocol::NAME` of the missing broadcast registration.
         protocol_name: &'static str,
+    },
+
+    /// Issue #135: [`capture_in_netns`](crate::monitor::MonitorBuilder::capture_in_netns)
+    /// was called with an explicit AF_XDP backend. AF_XDP capture inside a
+    /// non-root network namespace is not supported, and silently downgrading to
+    /// AF_PACKET would hide a real configuration mistake — so this is an error
+    /// rather than a fallback. [`Backend::Auto`](crate::monitor::Backend) *is*
+    /// resolved to AF_PACKET for a namespaced source; only an explicit request
+    /// is rejected.
+    #[error(
+        "AF_XDP capture is not supported inside a network namespace (interface `{interface}`); use Backend::af_packet(), or Backend::Auto which resolves to AF_PACKET for a namespaced source"
+    )]
+    NetnsBackendUnsupported {
+        /// The interface the unsupported backend was requested for.
+        interface: String,
     },
 
     /// 0.21 E.1: [`crate::monitor::Monitor::replay`] or

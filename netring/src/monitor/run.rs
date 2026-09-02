@@ -75,8 +75,11 @@ pub(crate) enum StopCondition {
 /// `caps` so `BackendErrorPolicy::Reopen` can rebuild a failed source with the
 /// same kind + filter as the original.
 enum BackendSpec {
-    /// AF_PACKET on the named interface.
-    AfPacket(String),
+    /// AF_PACKET on the named interface, in an optional network namespace
+    /// (issue #135). The namespace lives on the spec — not just on the initial
+    /// open — so `BackendErrorPolicy::Reopen` re-enters it instead of silently
+    /// rebuilding the source in the host namespace.
+    AfPacket(crate::monitor::AfPacketIfaceSpec),
     /// AF_XDP per its interface spec (bare vs self-loaded program).
     #[cfg(feature = "af-xdp")]
     Xdp(crate::monitor::XdpIfaceSpec),
@@ -100,14 +103,23 @@ fn open_backend(
         // 0.21 C: with a fanout set (single-shard or ShardedRunner) open the
         // ring in the configured fanout group; otherwise plain open. Either way
         // the AF_PACKET ring honors the monitor-wide promiscuous flag (issue #4).
-        BackendSpec::AfPacket(iface) => {
+        BackendSpec::AfPacket(spec) => {
             let mut builder = crate::Capture::builder()
-                .interface(iface)
+                .interface(&spec.iface)
                 .promiscuous(promiscuous);
             if let Some((mode, group_id)) = fanout {
                 builder = builder.fanout(mode, group_id);
             }
-            let cap = AsyncCapture::new(builder.build()?)?;
+            // Issue #135: with a namespace, the whole build runs on a scoped
+            // thread that has setns(2)'d into it, so the socket, the
+            // if_nametoindex lookup and the bind all resolve against that
+            // namespace's interfaces. The resulting fd is namespace-independent,
+            // so the capture is then driven from the ordinary runtime threads.
+            let capture = match &spec.netns {
+                Some(ns) => builder.netns(ns)?,
+                None => builder.build()?,
+            };
+            let cap = AsyncCapture::new(capture)?;
             // 0.25 S2: push the conservative fail-open kernel prefilter (union of
             // every consumer's interest) into the socket — a superset, so it only
             // sheds traffic nobody needs.
@@ -263,8 +275,8 @@ pub(crate) async fn run_loop(monitor: Monitor, stop: StopCondition) -> Result<()
     // in the exact order the run loop indexes `caps`: AF_PACKET interfaces
     // first, then AF_XDP (matching the prior two-loop open order).
     let mut specs: Vec<BackendSpec> = Vec::new();
-    for iface in &interfaces {
-        specs.push(BackendSpec::AfPacket(iface.clone()));
+    for spec in &interfaces {
+        specs.push(BackendSpec::AfPacket(spec.clone()));
     }
     #[cfg(feature = "af-xdp")]
     for spec in &xdp_interfaces {

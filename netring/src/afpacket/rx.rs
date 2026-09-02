@@ -797,7 +797,17 @@ impl CaptureBuilder {
     /// `Capture` is then usable from the caller's threads (including the tokio
     /// runtime). Requires `CAP_SYS_ADMIN` at runtime. See [`crate::netns`].
     pub fn netns(self, ns: &crate::netns::NetNs) -> Result<Capture, Error> {
-        ns.run_in(move || self.build())?
+        // Two failure layers: entering the namespace, and building once inside.
+        // Keep them apart — the outer one is `setns` (CAP_SYS_ADMIN) and used to
+        // surface as a bare `Error::Io(EPERM)`, which points an operator at the
+        // wrong capability and does not say which namespace failed.
+        match ns.run_in(move || self.build()) {
+            Ok(built) => built,
+            Err(source) => Err(Error::Netns {
+                label: ns.label().to_string(),
+                source,
+            }),
+        }
     }
 }
 

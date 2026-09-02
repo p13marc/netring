@@ -79,7 +79,60 @@ stream's single `HEADERS` block, which arrives as a `Head` rather than as
 `Trailers`. `flowscope::http2::grpc_status_of(&head)` covers that case. A
 handler that logs `:status` records every application failure as a success.
 
-## 2. Inherited: TCP reassembly is now bounded by default
+## 2. New: network-namespace capture on `MonitorBuilder` (#135)
+
+0.29 shipped `NetNs` and `CaptureBuilder::netns`, but only on the low-level
+`Capture` path — so watching a container meant rebuilding your capture on the
+raw builder and giving up the Monitor's flow table, detectors and bandwidth
+accounting. Now:
+
+```rust
+use std::sync::Arc;
+use netring::{monitor::{Monitor, Backend}, netns::NetNs};
+
+let ns = Arc::new(NetNs::from_pid(container_pid)?);
+Monitor::builder()
+    .capture("eth0", Backend::af_packet())              // host namespace
+    .capture_in_netns("eth0", Backend::af_packet(), ns) // container namespace
+    .protocol::<Tcp>()
+    .build()?;
+```
+
+**Read this before relying on it: flow keys still alias across namespaces.**
+A `Monitor` is fan-in — every source feeds one shared flow tracker — and the
+flow key is a bare 5-tuple with no namespace dimension. Two containers using
+the same RFC1918 range produce *identical* keys, and the tracker merges them
+into one flow, silently. Nothing you can configure changes that; separating
+them needs a tracker per namespace, which means **one `Monitor` per
+namespace**.
+
+What you do get is per-source attribution. Every event already carries
+`ctx.source`, and the new `Monitor::capture_sources()` returns the sources in
+`SourceIdx` order so you can map that index back:
+
+```rust
+let sources = monitor.capture_sources();
+// in a handler:
+let src = &sources[ctx.source.0 as usize];
+tracing::info!(iface = %src.interface, netns = ?src.netns_label, "event");
+```
+
+Three more things worth knowing:
+
+- **AF_PACKET only.** `Backend::Auto` resolves to AF_PACKET for a namespaced
+  source rather than preferring AF_XDP as it usually would. Naming AF_XDP
+  *explicitly* is `BuildError::NetnsBackendUnsupported` — an error, not a
+  silent downgrade.
+- **`build()` fails fast on privilege.** It probes each distinct namespace with
+  one `setns`, so a missing `CAP_SYS_ADMIN` (which is on top of `CAP_NET_RAW`)
+  surfaces at build rather than on the first poll of a spawned run loop.
+- **New `Error::Netns { label, source }`**, also returned by
+  `CaptureBuilder::netns`. If you were matching `Error::Io` or
+  `Error::PermissionDenied` to detect a namespace failure, match this instead
+  — the old bare `EPERM` named `CAP_NET_RAW`, which is the wrong capability for
+  `setns`, and could not tell you which namespace failed.
+
+## 3. Inherited: TCP reassembly is now bounded by default
 
 `FlowTrackerConfig::max_reassembler_buffer` changed in flowscope 0.23 from
 `None` to `Some(1 MiB)` per side. Any netring pipeline that did not set it
@@ -99,7 +152,28 @@ cfg.max_reassembler_buffer = Some(16 * 1024 * 1024);
 `None` still means unbounded and is still supported — it is only safe when you
 control the traffic.
 
-## 3. Inherited fixes, no action needed
+## 4. Breaking: the re-exported `etherparse` moved 0.16 → 0.21
+
+netring re-exports `etherparse` in its own public API — `Packet::parse` and
+`PacketOwned::parse` return `etherparse::SlicedPacket` and
+`etherparse::err::packet::SliceError` — so the bump is visible to you and your
+`etherparse` dependency has to move with netring's.
+
+In practice the break is two new enum variants, both of which an exhaustive
+`match` has to account for:
+
+- `NetSlice::Arp(_)` (etherparse 0.17, ARP support)
+- `TransportSlice::Igmp(_)` (etherparse 0.21, IGMP support)
+
+0.18 also renamed `SlicedPacket`'s `vlan` field to `link_exts` and
+`Ipv4Ecn`/`Ipv4Dscp` to `IpEcn`/`IpDscp`; netring never surfaced those, but
+code that reached into a `SlicedPacket` directly will see them.
+
+Note that flowscope still pins etherparse 0.16, so the dependency tree carries
+both versions. Nothing crosses the boundary — flowscope exposes no etherparse
+type in its public API — but `cargo deny` will report the duplicate.
+
+## 5. Inherited fixes, no action needed
 
 flowscope 0.23/0.24 fixed several things netring gets for free:
 

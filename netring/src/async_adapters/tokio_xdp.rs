@@ -88,7 +88,10 @@ impl AsyncXdpSocket {
 
     /// Poll-based readability check, mirroring
     /// [`AsyncCapture::poll_read_ready_mut`]. Used by the Monitor run
-    /// loop's backend round-robin select.
+    /// loop's backend round-robin select (`flow`) and by the multi-queue
+    /// XDP capture (`xdp-loader`) — gated on their union, because with
+    /// neither of those features there is no caller and this is dead code.
+    #[cfg(any(feature = "flow", feature = "xdp-loader"))]
     #[doc(hidden)]
     pub(crate) fn poll_read_ready_mut(
         &mut self,

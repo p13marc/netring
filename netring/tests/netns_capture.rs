@@ -34,19 +34,22 @@ fn from_pid_self_matches_current() {
 
 #[test]
 fn run_in_current_namespace() {
-    // setns even into our own namespace needs CAP_SYS_ADMIN — skip otherwise.
-    if !is_root() {
-        eprintln!("skipping run_in test: not root (setns needs CAP_SYS_ADMIN)");
-        return;
-    }
+    // setns even into our own namespace needs CAP_SYS_ADMIN, so skip where we
+    // do not have it. The guard has to be the *outcome*, not `geteuid() == 0`:
+    // in a rootless container (podman's default, which is what the CI
+    // integration runner is) the process is uid 0 inside its user namespace
+    // while CAP_SYS_ADMIN over the host netns is absent — euid says "root",
+    // setns says EPERM, and a uid guard walks straight into the panic. That is
+    // what kept the `Integration/test-integration` lane red.
+    //
+    // Reproduce the shape without a container:
+    //   unshare -Ur --map-root-user <this test binary> run_in_current_namespace
     let ns = NetNs::current().unwrap();
-    let out = ns
-        .run_in(|| 21 * 2)
-        .expect("run_in should enter our own netns and run the closure");
-    assert_eq!(out, 42);
-}
-
-fn is_root() -> bool {
-    // SAFETY: geteuid is always safe.
-    unsafe { libc::geteuid() == 0 }
+    match ns.run_in(|| 21 * 2) {
+        Ok(out) => assert_eq!(out, 42),
+        Err(e) if e.kind() == std::io::ErrorKind::PermissionDenied => {
+            eprintln!("skipping run_in assertion: setns needs CAP_SYS_ADMIN ({e})");
+        }
+        Err(e) => panic!("run_in failed for a reason other than privilege: {e}"),
+    }
 }

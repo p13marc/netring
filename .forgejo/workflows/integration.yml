@@ -6,7 +6,9 @@ name: Integration
 on:
   push:
     branches: [main, master]
+    paths-ignore: ['**.md', 'docs/**', 'LICENSE*']
   pull_request:
+    paths-ignore: ['**.md', 'docs/**', 'LICENSE*']
   # manual re-run path (privileged runner was offline, flaky suite)
   workflow_dispatch:
 

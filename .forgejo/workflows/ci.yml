@@ -56,6 +56,17 @@ jobs:
           - "--features tokio,channel,flow,parse"
           - "--features tokio,sigma,dns,http,tls"
           - "--features tokio,metrics,flow,monitor"
+          # The rows above lint the lib only (adding --all-targets to them
+          # needs `pcap`, which they deliberately omit). The three below carry
+          # it because what they exist to cover lives in tests/ and examples/.
+          #
+          # aya + the XDP loader are otherwise compiled only by the docs job.
+          - "--features tokio,af-xdp,xdp-loader --all-targets"
+          # http2 is in no umbrella, so nothing else lints or tests it.
+          - "--features tokio,http2 --all-targets"
+          # The integration lane's exact set. Compiled nowhere else, so a plain
+          # compile error under it could surface only as a red test-integration.
+          - "--features integration-tests,tokio,channel,af-xdp --all-targets"
     steps:
       - uses: https://data.forgejo.org/actions/checkout@v6
       - uses: https://github.com/dtolnay/rust-toolchain@stable
@@ -75,9 +86,11 @@ jobs:
       - uses: https://github.com/Swatinem/rust-cache@v2
         with:
           cache-targets: false
-      # run_in_current_namespace needs CAP_SYS_ADMIN (setns) — covered by the
-      # integration lane; the plain runner cannot grant it.
-      - run: cargo test --workspace --features tokio,channel -- --skip run_in_current_namespace
+      # No --skip for run_in_current_namespace any more: the test now guards on
+      # the setns *outcome* (EPERM => skip) rather than on geteuid()==0, so it
+      # is correct on an unprivileged runner, in a rootless container, and as
+      # real root alike.
+      - run: cargo test --workspace --features tokio,channel
       - name: sccache stats
         run: /srv/cache/bin/sccache --show-stats
 
@@ -92,7 +105,7 @@ jobs:
           cache-targets: false
       - run: >
           cargo test -p netring --features
-          "tokio,channel,flow,parse,pcap,http,dns,tls,ja4plus,icmp,arp,ndp,lldp,cdp,asset,p0f,ad-protocols,asset-protocols,ssh,quic,ocsf-sink,sigma,infra-protocols,ftp,smtp,modbus,dnp3,stun,wireguard,nprint,yara"
+          "tokio,channel,flow,parse,pcap,http,http2,dns,tls,ja4plus,icmp,arp,ndp,lldp,cdp,asset,p0f,ad-protocols,asset-protocols,ssh,quic,ocsf-sink,sigma,infra-protocols,ftp,smtp,modbus,dnp3,stun,wireguard,nprint,yara"
           --lib
 
   msrv:

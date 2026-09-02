@@ -17,6 +17,28 @@ pub fn unique_port() -> u16 {
     PORT_COUNTER.fetch_add(1, Ordering::Relaxed)
 }
 
+/// Fanout group counter, so one process never reuses a group id either.
+static FANOUT_GROUP_COUNTER: AtomicU16 = AtomicU16::new(0);
+
+/// Get a fanout group id no other test run is using.
+///
+/// `PACKET_FANOUT` group ids are a **system-wide** namespace, not a per-process
+/// one: joining an id another process still holds does not fail — the kernel
+/// adds our socket to *that* group and then hashes traffic across every member,
+/// including theirs. A test with a hardcoded id therefore goes quiet (not red at
+/// the join, but red at the "did we capture anything" assertion) whenever a
+/// previous or concurrent run still has sockets in the same group. The CI
+/// integration lane runs `cancel-in-progress: true`, which leaves exactly those
+/// stragglers behind.
+///
+/// Seeded from the pid so concurrent runs, and back-to-back runs racing kernel
+/// cleanup, both get distinct ids. Never returns 0.
+pub fn unique_fanout_group() -> u16 {
+    let seq = FANOUT_GROUP_COUNTER.fetch_add(1, Ordering::Relaxed);
+    let pid = std::process::id() as u16;
+    pid.wrapping_mul(31).wrapping_add(seq) | 1
+}
+
 /// Send `count` UDP packets to localhost on the given port.
 pub fn send_udp_to_loopback(port: u16, payload: &[u8], count: usize) {
     let sock = UdpSocket::bind("127.0.0.1:0").expect("bind sender");

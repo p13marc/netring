@@ -17,7 +17,7 @@ jobs:
       - uses: https://github.com/dtolnay/rust-toolchain@stable
       # Same invocation as ci.yml's test job: run_in_current_namespace needs
       # CAP_SYS_ADMIN (setns), which the plain runner cannot grant.
-      - run: cargo test --workspace --features tokio,channel --locked -- --skip run_in_current_namespace
+      - run: cargo test --workspace --features tokio,channel --locked
 
       # Compare the public API against what is on crates.io. The marketplace
       # action is GitHub-only, so this installs the tool directly — a

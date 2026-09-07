@@ -1,5 +1,5 @@
 # Fleet-uniformized toolchain: all p13marc/* repos build with the same
 # rustc; MSRV (rust-version in Cargo.toml) matches.
 [toolchain]
-channel = "1.97"
+channel = "1.98"
 components = ["rustfmt", "clippy"]

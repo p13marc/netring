@@ -13,7 +13,7 @@ jobs:
   publish:
     runs-on: ubuntu-24.04
     steps:
-      - uses: https://data.forgejo.org/actions/checkout@v7
+      - uses: https://data.forgejo.org/actions/checkout@v7.0.1
       - uses: https://github.com/dtolnay/rust-toolchain@stable
       # Same invocation as ci.yml's test job: run_in_current_namespace needs
       # CAP_SYS_ADMIN (setns), which the plain runner cannot grant.
@@ -24,7 +24,7 @@ jobs:
       # prebuilt binary, since building it from source takes longer than the
       # rest of the job. Both workspace members are published crates, so
       # both are gated (netring/fuzz is publish = false and detached).
-      - uses: https://github.com/taiki-e/install-action@v2.87.2
+      - uses: https://github.com/taiki-e/install-action@v2.87.7
         with:
           tool: cargo-semver-checks
       - name: Check for unintended breaking changes

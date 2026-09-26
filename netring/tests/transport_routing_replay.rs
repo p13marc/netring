@@ -31,7 +31,9 @@ fn dns_frame() -> Vec<u8> {
         [10, 0, 0, 53],
         40000,
         53,
-        &[3, 3, 1, 0, 0, 1, 0, 0, 0, 0, 0, 0, 3, b'w', b'w', b'w', 0, 0, 1, 0, 1],
+        &[
+            3, 3, 1, 0, 0, 1, 0, 0, 0, 0, 0, 0, 3, b'w', b'w', b'w', 0, 0, 1, 0, 1,
+        ],
     )
 }
 
@@ -81,7 +83,11 @@ async fn icmp_marker_ignores_udp_payloads() {
         .replay()
         .await
         .unwrap();
-    assert_eq!(*seen.lock().unwrap(), 1, "the echo only — not the DNS datagram");
+    assert_eq!(
+        *seen.lock().unwrap(),
+        1,
+        "the echo only — not the DNS datagram"
+    );
 }
 
 #[derive(Default, Clone)]

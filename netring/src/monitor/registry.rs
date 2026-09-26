@@ -55,6 +55,15 @@ pub struct HandlerRegistry {
 }
 
 impl HandlerRegistry {
+    /// Whether any handler (sync, async or effect) is registered for
+    /// event type `E`.
+    pub(crate) fn has_handlers_for<E: Event>(&self) -> bool {
+        let id = TypeId::of::<E::Payload>();
+        self.by_type.contains_key(&id)
+            || self.async_by_type.contains_key(&id)
+            || self.effect_by_type.contains_key(&id)
+    }
+
     /// Add a handler `H` for event type `E`.
     ///
     /// The handler is boxed and stored under
@@ -314,7 +323,7 @@ where
 /// 0.21 H.2: `Send` supertrait makes `Box<dyn ProtocolSlot>`
 /// `Send`, which in turn makes the parent `Monitor` `Send`
 /// (flowscope 0.13's `Driver<E>: Send + Sync` covered the rest).
-pub trait ProtocolSlot: Send {
+pub trait ProtocolSlot: Send + Sync {
     /// Move messages the parser produced since the last call into
     /// this slot's pending buffer.
     fn fetch(&mut self);
@@ -334,6 +343,136 @@ pub trait ProtocolSlot: Send {
         }
         Ok(())
     }
+
+    /// The flowscope registration of this protocol's parser — what
+    /// its parser closes / side stops carry. `None` for slots that
+    /// don't route them.
+    fn slot_id(&self) -> Option<flowscope::SlotId> {
+        None
+    }
+
+    /// Dispatch a close / side stop of this slot's parser to the sync
+    /// handlers of `ParserClosed<P>` / `ParserSideStopped<P>` (`P` =
+    /// the slot's protocol).
+    fn dispatch_parser_event(
+        &self,
+        _dispatcher: &mut Dispatcher,
+        _ctx: &mut Ctx<'_>,
+        _event: &ParserEvent,
+    ) -> Result<()> {
+        Ok(())
+    }
+
+    /// Async counterpart of [`Self::dispatch_parser_event`].
+    fn dispatch_parser_event_async<'a>(
+        &'a self,
+        _dispatcher: &'a mut Dispatcher,
+        _event: ParserEvent,
+    ) -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<()>> + Send + 'a>> {
+        Box::pin(async { Ok(()) })
+    }
+}
+
+/// A parser close or side stop, as the run loop routes it to the
+/// parser's protocol slot.
+#[derive(Debug, Clone)]
+pub struct ParserEvent {
+    /// Flow key.
+    pub key: flowscope::extract::FiveTupleKey,
+    /// The parser's kind.
+    pub parser_kind: flowscope::ParserKind,
+    /// `Some(side)` for a side stop, `None` for a parser close.
+    pub side: Option<flowscope::FlowSide>,
+    /// Why.
+    pub reason: flowscope::EndReason,
+    /// Detail (poison reason, gap size, stop reason).
+    pub detail: Option<String>,
+    /// When.
+    pub ts: flowscope::Timestamp,
+}
+
+/// Transport markers receive every parser event of their transport
+/// from the run loop directly; a slot of one of them must not
+/// dispatch it a second time.
+fn is_transport_marker<P: 'static>() -> bool {
+    use crate::protocol::builtin::{Tcp, Udp};
+    let id = TypeId::of::<P>();
+    #[cfg(feature = "icmp")]
+    if id == TypeId::of::<crate::protocol::builtin::Icmp>() {
+        return true;
+    }
+    id == TypeId::of::<Tcp>() || id == TypeId::of::<Udp>()
+}
+
+fn dispatch_typed_parser_event<P: Protocol>(
+    dispatcher: &mut Dispatcher,
+    ctx: &mut Ctx<'_>,
+    e: &ParserEvent,
+) -> Result<()> {
+    use crate::protocol::event_typed::{ParserClosed, ParserSideStopped};
+    if is_transport_marker::<P>() {
+        return Ok(());
+    }
+    let (flow, ts) = (ctx.flow, ctx.ts);
+    ctx.flow = Some(e.key);
+    ctx.ts = e.ts;
+    let r = match e.side {
+        None => dispatcher.dispatch::<ParserClosed<P>>(
+            &ParserClosed::<P>::new(e.key, e.parser_kind, e.reason, e.detail.clone(), e.ts),
+            ctx,
+        ),
+        Some(side) => dispatcher.dispatch::<ParserSideStopped<P>>(
+            &ParserSideStopped::<P>::new(
+                e.key,
+                e.parser_kind,
+                side,
+                e.reason,
+                e.detail.clone(),
+                e.ts,
+            ),
+            ctx,
+        ),
+    };
+    ctx.flow = flow;
+    ctx.ts = ts;
+    r
+}
+
+fn dispatch_typed_parser_event_async<'a, P: Protocol>(
+    dispatcher: &'a mut Dispatcher,
+    e: ParserEvent,
+) -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<()>> + Send + 'a>> {
+    use crate::protocol::event_typed::{ParserClosed, ParserSideStopped};
+    Box::pin(async move {
+        if is_transport_marker::<P>() {
+            return Ok(());
+        }
+        match e.side {
+            None => {
+                dispatcher
+                    .dispatch_async(&ParserClosed::<P>::new(
+                        e.key,
+                        e.parser_kind,
+                        e.reason,
+                        e.detail,
+                        e.ts,
+                    ))
+                    .await
+            }
+            Some(side) => {
+                dispatcher
+                    .dispatch_async(&ParserSideStopped::<P>::new(
+                        e.key,
+                        e.parser_kind,
+                        side,
+                        e.reason,
+                        e.detail,
+                        e.ts,
+                    ))
+                    .await
+            }
+        }
+    })
 }
 
 type Pending<M> = std::collections::VecDeque<SlotMessage<M, flowscope::extract::FiveTupleKey>>;
@@ -406,6 +545,27 @@ impl<P: Protocol> ProtocolSlot for TypedProtocolSlot<P> {
         with_message_ctx(ctx, &msg, |ctx| {
             dispatcher.dispatch::<P::Message>(&msg.message, ctx)
         })
+    }
+
+    fn slot_id(&self) -> Option<flowscope::SlotId> {
+        Some(self.handle.slot_id())
+    }
+
+    fn dispatch_parser_event(
+        &self,
+        dispatcher: &mut Dispatcher,
+        ctx: &mut Ctx<'_>,
+        event: &ParserEvent,
+    ) -> Result<()> {
+        dispatch_typed_parser_event::<P>(dispatcher, ctx, event)
+    }
+
+    fn dispatch_parser_event_async<'a>(
+        &'a self,
+        dispatcher: &'a mut Dispatcher,
+        event: ParserEvent,
+    ) -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<()>> + Send + 'a>> {
+        dispatch_typed_parser_event_async::<P>(dispatcher, event)
     }
 }
 
@@ -480,6 +640,9 @@ impl ProtocolSlot for IcmpSlot {
             Ok(())
         })
     }
+
+    // `Icmp` is a transport marker: the run loop hands it every ICMP
+    // parser event, so this slot routes none (no `slot_id`).
 }
 
 /// 0.21 F: broadcast variant of [`TypedProtocolSlot`]. Holds one
@@ -535,6 +698,27 @@ where
         with_message_ctx(ctx, &msg, |ctx| {
             dispatcher.dispatch::<P::Message>(&msg.message, ctx)
         })
+    }
+
+    fn slot_id(&self) -> Option<flowscope::SlotId> {
+        Some(self.handle.slot_id())
+    }
+
+    fn dispatch_parser_event(
+        &self,
+        dispatcher: &mut Dispatcher,
+        ctx: &mut Ctx<'_>,
+        event: &ParserEvent,
+    ) -> Result<()> {
+        dispatch_typed_parser_event::<P>(dispatcher, ctx, event)
+    }
+
+    fn dispatch_parser_event_async<'a>(
+        &'a self,
+        dispatcher: &'a mut Dispatcher,
+        event: ParserEvent,
+    ) -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<()>> + Send + 'a>> {
+        dispatch_typed_parser_event_async::<P>(dispatcher, event)
     }
 }
 

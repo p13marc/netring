@@ -43,7 +43,7 @@ use crate::protocol::builtin::Icmp;
 use crate::protocol::builtin::{Tcp, Udp};
 use crate::protocol::event_typed::{
     AnyFlowAnomaly, FlowEnded, FlowEstablished, FlowPacket, FlowStarted, FlowTick, ParserClosed,
-    TcpRst, Tick,
+    ParserSideStopped, TcpRst, Tick,
 };
 use std::time::SystemTime;
 
@@ -1534,6 +1534,7 @@ async fn dispatch_batch(
         )?;
         dispatch_tracked_event(
             dispatcher,
+            protocol_slots,
             sink,
             state_map,
             counters,
@@ -1636,6 +1637,7 @@ fn dispatch_slot_messages(
 #[allow(clippy::too_many_arguments)]
 async fn dispatch_tracked_event(
     dispatcher: &mut Dispatcher,
+    protocol_slots: &[Box<dyn crate::monitor::ProtocolSlot>],
     sink: &mut dyn AnomalySink,
     state_map: &mut StateMap,
     counters: &mut CounterRegistry,
@@ -1700,6 +1702,86 @@ async fn dispatch_tracked_event(
         }
         _ => None,
     };
+    // A parser close / side stop goes to the parser's own protocol
+    // (`ParserClosed<Http>`) through its slot; the transport marker's
+    // (`ParserClosed<Tcp>`) comes with the lifecycle dispatch below.
+    let parser_event = match &evt {
+        FsEvent::ParserClosed {
+            key,
+            slot,
+            parser_kind,
+            reason,
+            detail,
+            ts,
+            ..
+        } => Some((
+            *slot,
+            None,
+            *key,
+            *parser_kind,
+            *reason,
+            detail.clone(),
+            *ts,
+        )),
+        FsEvent::ParserSideStopped {
+            key,
+            slot,
+            parser_kind,
+            side,
+            reason,
+            detail,
+            ts,
+            ..
+        } => Some((
+            *slot,
+            Some(*side),
+            *key,
+            *parser_kind,
+            *reason,
+            detail.clone(),
+            *ts,
+        )),
+        _ => None,
+    };
+    if let Some((slot, side, key, parser_kind, reason, detail, ts)) = parser_event
+        && let Some(owner) = protocol_slots.iter().find(|s| s.slot_id() == Some(slot))
+    {
+        let pe = crate::monitor::registry::ParserEvent {
+            key,
+            parser_kind,
+            side,
+            reason,
+            detail,
+            ts,
+        };
+        let res = {
+            let mut ctx = Ctx::new(
+                Some(key),
+                ts,
+                source,
+                state_map,
+                sink,
+                counters,
+                flow_states,
+            );
+            ctx.monitor_name = monitor_name;
+            ctx.label_table = label_table;
+            owner.dispatch_parser_event(dispatcher, &mut ctx, &pe)
+        };
+        let res = match res {
+            Ok(()) => owner.dispatch_parser_event_async(dispatcher, pe).await,
+            e => e,
+        };
+        if let Err(e) = res {
+            match policy {
+                HandlerErrorPolicy::Propagate => return Err(e),
+                HandlerErrorPolicy::Isolate => {
+                    health.record_handler_error();
+                    tracing::warn!(error = %e, "handler error isolated (parser event)")
+                }
+            }
+        }
+    }
     // Sync handlers first, then async — but on the SAME event, so one error
     // is isolated per-event under `Isolate` (a malformed flow can't tear
     // down the pipeline).
@@ -2073,6 +2155,41 @@ async fn dispatch_lifecycle_async(
                     .dispatch_async(&ParserClosed::<Icmp>::new(
                         key,
                         parser_kind,
+                        reason,
+                        detail,
+                        ts,
+                    ))
+                    .await?;
+            }
+            _ => {}
+        },
+        FsEvent::ParserSideStopped {
+            key,
+            parser_kind,
+            side,
+            reason,
+            detail,
+            ts,
+            ..
+        } => match key.proto {
+            L4Proto::Tcp => {
+                dispatcher
+                    .dispatch_async(&ParserSideStopped::<Tcp>::new(
+                        key,
+                        parser_kind,
+                        side,
+                        reason,
+                        detail,
+                        ts,
+                    ))
+                    .await?;
+            }
+            L4Proto::Udp => {
+                dispatcher
+                    .dispatch_async(&ParserSideStopped::<Udp>::new(
+                        key,
+                        parser_kind,
+                        side,
                         reason,
                         detail,
                         ts,
@@ -2851,6 +2968,33 @@ fn dispatch_lifecycle(
                 dispatch_one!(
                     ParserClosed<Icmp>,
                     ParserClosed::<Icmp>::new(key, parser_kind, reason, detail, ts),
+                    Some(key),
+                    ts
+                );
+            }
+            _ => {}
+        },
+        FsEvent::ParserSideStopped {
+            key,
+            parser_kind,
+            side,
+            reason,
+            detail,
+            ts,
+            ..
+        } => match key.proto {
+            L4Proto::Tcp => {
+                dispatch_one!(
+                    ParserSideStopped<Tcp>,
+                    ParserSideStopped::<Tcp>::new(key, parser_kind, side, reason, detail, ts),
+                    Some(key),
+                    ts
+                );
+            }
+            L4Proto::Udp => {
+                dispatch_one!(
+                    ParserSideStopped<Udp>,
+                    ParserSideStopped::<Udp>::new(key, parser_kind, side, reason, detail, ts),
                     Some(key),
                     ts
                 );

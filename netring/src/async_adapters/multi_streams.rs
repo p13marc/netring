@@ -175,22 +175,7 @@ where
     ) -> Self {
         let streams = captures
             .into_iter()
-            .map(|cap| {
-                let mut s = cap
-                    .flow_stream(extractor.clone())
-                    .with_config(config.tracker_config.clone());
-                if let Some(d) = &config.dedup {
-                    s = s.with_dedup(d.clone());
-                }
-                if let Some(f) = &config.idle_timeout_fn {
-                    let f = f.clone();
-                    s = s.with_idle_timeout_fn(move |k, l4| f(k, l4));
-                }
-                if config.monotonic_ts {
-                    s = s.with_monotonic_timestamps(true);
-                }
-                s
-            })
+            .map(|cap| config.apply(cap.flow_stream(extractor.clone())))
             .collect();
         Self {
             select: SelectState::new(streams),
@@ -315,6 +300,27 @@ where
 #[cfg(all(feature = "af-xdp", feature = "xdp-loader"))]
 impl<E> XdpMultiFlowStream<E>
 where
+    E: FlowExtractor,
+{
+    /// Assemble from per-interface streams you built yourself, in
+    /// `source_idx` order, each with its label — per-source
+    /// configuration the `*_stream_with` constructors apply uniformly
+    /// (see [`MultiFlowStream::from_streams`]).
+    pub fn from_streams<I>(sources: I) -> Self
+    where
+        I: IntoIterator<Item = (String, FlowStream<crate::AsyncXdpCapture, E>)>,
+    {
+        let (labels, streams): (Vec<_>, Vec<_>) = sources.into_iter().unzip();
+        Self {
+            select: SelectState::new(streams),
+            labels,
+        }
+    }
+}
+
+#[cfg(all(feature = "af-xdp", feature = "xdp-loader"))]
+impl<E> XdpMultiFlowStream<E>
+where
     E: FlowExtractor + Clone + Unpin + Send + 'static,
     E::Key: Clone + Unpin + Send + 'static,
 {
@@ -326,22 +332,7 @@ where
     ) -> Self {
         let streams = captures
             .into_iter()
-            .map(|cap| {
-                let mut s = cap
-                    .flow_stream(extractor.clone())
-                    .with_config(config.tracker_config.clone());
-                if let Some(d) = &config.dedup {
-                    s = s.with_dedup(d.clone());
-                }
-                if let Some(f) = &config.idle_timeout_fn {
-                    let f = f.clone();
-                    s = s.with_idle_timeout_fn(move |k, l4| f(k, l4));
-                }
-                if config.monotonic_ts {
-                    s = s.with_monotonic_timestamps(true);
-                }
-                s
-            })
+            .map(|cap| config.apply(cap.flow_stream(extractor.clone())))
             .collect();
         Self {
             select: SelectState::new(streams),
@@ -454,6 +445,29 @@ where
 #[cfg(all(feature = "af-xdp", feature = "xdp-loader"))]
 impl<E, F> XdpMultiSessionStream<E, F>
 where
+    E: FlowExtractor,
+    E::Key: Eq + std::hash::Hash + Clone + Send + 'static,
+    F: SessionParserFactory<E::Key>,
+{
+    /// Assemble from per-interface streams you built yourself, in
+    /// `source_idx` order, each with its label — per-source
+    /// configuration the `*_stream_with` constructors apply uniformly
+    /// (see [`MultiFlowStream::from_streams`]).
+    pub fn from_streams<I>(sources: I) -> Self
+    where
+        I: IntoIterator<Item = (String, SessionStream<crate::AsyncXdpCapture, E, F>)>,
+    {
+        let (labels, streams): (Vec<_>, Vec<_>) = sources.into_iter().unzip();
+        Self {
+            select: SelectState::new(streams),
+            labels,
+        }
+    }
+}
+
+#[cfg(all(feature = "af-xdp", feature = "xdp-loader"))]
+impl<E, F> XdpMultiSessionStream<E, F>
+where
     E: FlowExtractor + Clone + Unpin + Send + 'static,
     E::Key: Eq + std::hash::Hash + Clone + Unpin + Send + 'static,
     F: SessionParserFactory<E::Key> + Clone + Unpin + Send + 'static,
@@ -470,19 +484,10 @@ where
         let streams = captures
             .into_iter()
             .map(|cap| {
-                let mut s = cap.flow_stream(extractor.clone());
-                if let Some(d) = &config.dedup {
-                    s = s.with_dedup(d.clone());
-                }
-                if let Some(f) = &config.idle_timeout_fn {
-                    let f = f.clone();
-                    s = s.with_idle_timeout_fn(move |k, l4| f(k, l4));
-                }
-                if config.monotonic_ts {
-                    s = s.with_monotonic_timestamps(true);
-                }
-                s.with_config(config.tracker_config.clone())
+                config
+                    .apply(cap.flow_stream(extractor.clone()))
                     .session_stream(factory.clone())
+                    .with_emit_anomalies(config.emit_anomalies)
             })
             .collect();
         Self {
@@ -583,6 +588,29 @@ where
 #[cfg(all(feature = "af-xdp", feature = "xdp-loader"))]
 impl<E, F> XdpMultiDatagramStream<E, F>
 where
+    E: FlowExtractor,
+    E::Key: Eq + std::hash::Hash + Clone + Send + 'static,
+    F: DatagramParserFactory<E::Key>,
+{
+    /// Assemble from per-interface streams you built yourself, in
+    /// `source_idx` order, each with its label — per-source
+    /// configuration the `*_stream_with` constructors apply uniformly
+    /// (see [`MultiFlowStream::from_streams`]).
+    pub fn from_streams<I>(sources: I) -> Self
+    where
+        I: IntoIterator<Item = (String, DatagramStream<crate::AsyncXdpCapture, E, F>)>,
+    {
+        let (labels, streams): (Vec<_>, Vec<_>) = sources.into_iter().unzip();
+        Self {
+            select: SelectState::new(streams),
+            labels,
+        }
+    }
+}
+
+#[cfg(all(feature = "af-xdp", feature = "xdp-loader"))]
+impl<E, F> XdpMultiDatagramStream<E, F>
+where
     E: FlowExtractor + Clone + Unpin + Send + 'static,
     E::Key: Eq + std::hash::Hash + Clone + Unpin + Send + 'static,
     F: DatagramParserFactory<E::Key> + Clone + Unpin + Send + 'static,
@@ -599,19 +627,10 @@ where
         let streams = captures
             .into_iter()
             .map(|cap| {
-                let mut s = cap.flow_stream(extractor.clone());
-                if let Some(d) = &config.dedup {
-                    s = s.with_dedup(d.clone());
-                }
-                if let Some(f) = &config.idle_timeout_fn {
-                    let f = f.clone();
-                    s = s.with_idle_timeout_fn(move |k, l4| f(k, l4));
-                }
-                if config.monotonic_ts {
-                    s = s.with_monotonic_timestamps(true);
-                }
-                s.with_config(config.tracker_config.clone())
+                config
+                    .apply(cap.flow_stream(extractor.clone()))
                     .datagram_stream(factory.clone())
+                    .with_emit_anomalies(config.emit_anomalies)
             })
             .collect();
         Self {
@@ -795,14 +814,14 @@ where
         self.tracker.flows().count()
     }
 
-    /// Borrow-iterator over live `(K, FlowStats)` pairs of the merged
-    /// tracker — the capture-leg fields (`source_idx_forward` /
-    /// `source_idx_reverse` / `capture_leg_inconsistent`) are readable
-    /// here mid-stream.
-    pub fn snapshot_flow_stats(
-        &self,
-    ) -> impl Iterator<Item = (&E::Key, &flowscope::FlowStats)> + '_ {
-        self.tracker.iter_active().map(|af| (af.key, af.stats))
+    /// Live `(key, stats)` pairs of the merged tracker, owned (like
+    /// every netring stream) — the capture-leg fields
+    /// (`source_idx_forward` / `source_idx_reverse` /
+    /// `capture_leg_inconsistent`) are readable here mid-stream.
+    pub fn snapshot_flow_stats(&self) -> impl Iterator<Item = (E::Key, flowscope::FlowStats)> + '_ {
+        self.tracker
+            .iter_active()
+            .map(|af| (af.key.clone(), af.stats.clone()))
     }
 
     /// Number of sources fed into the merge.
@@ -1042,19 +1061,10 @@ where
         let streams = captures
             .into_iter()
             .map(|cap| {
-                let mut s = cap.flow_stream(extractor.clone());
-                if let Some(d) = &config.dedup {
-                    s = s.with_dedup(d.clone());
-                }
-                if let Some(f) = &config.idle_timeout_fn {
-                    let f = f.clone();
-                    s = s.with_idle_timeout_fn(move |k, l4| f(k, l4));
-                }
-                if config.monotonic_ts {
-                    s = s.with_monotonic_timestamps(true);
-                }
-                s.with_config(config.tracker_config.clone())
+                config
+                    .apply(cap.flow_stream(extractor.clone()))
                     .session_stream(factory.clone())
+                    .with_emit_anomalies(config.emit_anomalies)
             })
             .collect();
         Self {
@@ -1240,19 +1250,10 @@ where
         let streams = captures
             .into_iter()
             .map(|cap| {
-                let mut s = cap.flow_stream(extractor.clone());
-                if let Some(d) = &config.dedup {
-                    s = s.with_dedup(d.clone());
-                }
-                if let Some(f) = &config.idle_timeout_fn {
-                    let f = f.clone();
-                    s = s.with_idle_timeout_fn(move |k, l4| f(k, l4));
-                }
-                if config.monotonic_ts {
-                    s = s.with_monotonic_timestamps(true);
-                }
-                s.with_config(config.tracker_config.clone())
+                config
+                    .apply(cap.flow_stream(extractor.clone()))
                     .datagram_stream(factory.clone())
+                    .with_emit_anomalies(config.emit_anomalies)
             })
             .collect();
         Self {
@@ -1401,14 +1402,30 @@ impl super::multi_capture::AsyncXdpMultiCapture {
         F::Parser: Unpin + Send + 'static,
         <F::Parser as SessionParser>::Message: Unpin + Send + 'static,
     {
-        let (captures, labels) = self.into_captures();
-        XdpMultiSessionStream::new_with_config(
-            captures,
-            labels,
+        self.session_stream_with(
             extractor,
             factory,
             super::multi_config::MultiStreamConfig::default(),
         )
+    }
+
+    /// Like [`session_stream`](Self::session_stream) with `config`
+    /// applied to every per-interface stream.
+    pub fn session_stream_with<E, F>(
+        self,
+        extractor: E,
+        factory: F,
+        config: super::multi_config::MultiStreamConfig<E::Key>,
+    ) -> XdpMultiSessionStream<E, F>
+    where
+        E: FlowExtractor + Clone + Unpin + Send + 'static,
+        E::Key: Eq + std::hash::Hash + Clone + Unpin + Send + 'static,
+        F: SessionParserFactory<E::Key> + Clone + Unpin + Send + 'static,
+        F::Parser: Unpin + Send + 'static,
+        <F::Parser as SessionParser>::Message: Unpin + Send + 'static,
+    {
+        let (captures, labels) = self.into_captures();
+        XdpMultiSessionStream::new_with_config(captures, labels, extractor, factory, config)
     }
 
     /// Convert into an [`XdpMultiDatagramStream`] — per-interface AF_XDP UDP
@@ -1421,14 +1438,30 @@ impl super::multi_capture::AsyncXdpMultiCapture {
         F::Parser: Unpin + Send + 'static,
         <F::Parser as DatagramParser>::Message: Unpin + Send + 'static,
     {
-        let (captures, labels) = self.into_captures();
-        XdpMultiDatagramStream::new_with_config(
-            captures,
-            labels,
+        self.datagram_stream_with(
             extractor,
             factory,
             super::multi_config::MultiStreamConfig::default(),
         )
+    }
+
+    /// Like [`datagram_stream`](Self::datagram_stream) with `config`
+    /// applied to every per-interface stream.
+    pub fn datagram_stream_with<E, F>(
+        self,
+        extractor: E,
+        factory: F,
+        config: super::multi_config::MultiStreamConfig<E::Key>,
+    ) -> XdpMultiDatagramStream<E, F>
+    where
+        E: FlowExtractor + Clone + Unpin + Send + 'static,
+        E::Key: Eq + std::hash::Hash + Clone + Unpin + Send + 'static,
+        F: DatagramParserFactory<E::Key> + Clone + Unpin + Send + 'static,
+        F::Parser: Unpin + Send + 'static,
+        <F::Parser as DatagramParser>::Message: Unpin + Send + 'static,
+    {
+        let (captures, labels) = self.into_captures();
+        XdpMultiDatagramStream::new_with_config(captures, labels, extractor, factory, config)
     }
 
     /// **Tap merge** over AF_XDP: fan all interfaces into **one** shared

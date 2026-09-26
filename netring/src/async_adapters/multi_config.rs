@@ -15,8 +15,9 @@
 use std::sync::Arc;
 use std::time::Duration;
 
-use flowscope::{FlowTrackerConfig, L4Proto};
+use flowscope::{FlowExtractor, FlowTrackerConfig, L4Proto};
 
+use crate::async_adapters::flow_stream::FlowStream;
 use crate::dedup::Dedup;
 
 /// Closure type for per-key idle-timeout overrides. Shared across
@@ -44,6 +45,9 @@ pub type SharedIdleTimeoutFn<K> =
 ///   invoked from every source.
 /// - `monotonic_ts`: a bool — when `true`, monotonic-timestamp
 ///   clamping is enabled on every inner stream.
+/// - `emit_anomalies`: session / datagram streams also yield
+///   `FlowAnomaly` / `TrackerAnomaly` events (gaps, overflow, memcap,
+///   eviction pressure). Flow streams reassemble nothing and ignore it.
 ///
 /// [`AsyncMultiCapture::flow_stream_with`]: super::multi_capture::AsyncMultiCapture::flow_stream_with
 /// [`session_stream_with`]: super::multi_capture::AsyncMultiCapture::session_stream_with
@@ -60,6 +64,8 @@ pub struct MultiStreamConfig<K> {
     pub idle_timeout_fn: Option<SharedIdleTimeoutFn<K>>,
     /// Apply monotonic-timestamp clamping to each inner stream.
     pub monotonic_ts: bool,
+    /// Session / datagram streams yield anomaly events.
+    pub emit_anomalies: bool,
 }
 
 impl<K> Default for MultiStreamConfig<K> {
@@ -69,6 +75,7 @@ impl<K> Default for MultiStreamConfig<K> {
             dedup: None,
             idle_timeout_fn: None,
             monotonic_ts: false,
+            emit_anomalies: false,
         }
     }
 }
@@ -80,6 +87,7 @@ impl<K> Clone for MultiStreamConfig<K> {
             dedup: self.dedup.clone(),
             idle_timeout_fn: self.idle_timeout_fn.clone(),
             monotonic_ts: self.monotonic_ts,
+            emit_anomalies: self.emit_anomalies,
         }
     }
 }
@@ -91,6 +99,7 @@ impl<K> std::fmt::Debug for MultiStreamConfig<K> {
             .field("has_dedup", &self.dedup.is_some())
             .field("has_idle_timeout_fn", &self.idle_timeout_fn.is_some())
             .field("monotonic_ts", &self.monotonic_ts)
+            .field("emit_anomalies", &self.emit_anomalies)
             .finish()
     }
 }
@@ -141,5 +150,33 @@ impl<K> MultiStreamConfig<K> {
     pub fn with_monotonic_timestamps(mut self, enable: bool) -> Self {
         self.monotonic_ts = enable;
         self
+    }
+
+    /// Session / datagram streams also yield `FlowAnomaly` /
+    /// `TrackerAnomaly` events. Default off.
+    pub fn with_emit_anomalies(mut self, enable: bool) -> Self {
+        self.emit_anomalies = enable;
+        self
+    }
+
+    /// Apply the flow-level knobs (tracker config, dedup, idle-timeout
+    /// predicate, clamp) to one source's stream.
+    pub(crate) fn apply<C, E>(&self, stream: FlowStream<C, E>) -> FlowStream<C, E>
+    where
+        E: FlowExtractor<Key = K>,
+        K: 'static,
+    {
+        let mut s = stream.with_config(self.tracker_config.clone());
+        if let Some(d) = &self.dedup {
+            s = s.with_dedup(d.clone());
+        }
+        if let Some(f) = &self.idle_timeout_fn {
+            let f = f.clone();
+            s = s.with_idle_timeout_fn(move |k, l4| f(k, l4));
+        }
+        if self.monotonic_ts {
+            s = s.with_monotonic_timestamps(true);
+        }
+        s
     }
 }

@@ -172,6 +172,7 @@ where
             self.cap,
             self.tracker,
             factory,
+            self.pending,
             self.dedup,
             self.monotonic_ts,
             #[cfg(feature = "pcap")]
@@ -199,6 +200,7 @@ where
             self.cap,
             self.tracker,
             factory,
+            self.pending,
             self.dedup,
             self.monotonic_ts,
             #[cfg(feature = "pcap")]
@@ -312,22 +314,20 @@ where
         self
     }
 
-    /// Borrow-iterator over live `(K, FlowStats)` pairs (a plain flow
-    /// stream reassembles nothing, so the reassembly fields stay zero —
-    /// see [`ReassemblyStream::snapshot_flow_stats`](crate::ReassemblyStream::snapshot_flow_stats)).
-    /// Lazy — pay only for what you consume.
-    ///
-    /// Built on
-    /// [`flowscope::FlowTracker::iter_active`] (flowscope 0.8+);
-    /// projects to the historical `(key, stats)` shape for
-    /// callers that don't need per-flow user state, TCP state,
-    /// or L4 protocol. New callers should reach
-    /// `self.tracker().iter_active()` directly for the richer
-    /// `ActiveFlow` shape.
-    pub fn snapshot_flow_stats(
-        &self,
-    ) -> impl Iterator<Item = (&E::Key, &flowscope::FlowStats)> + '_ {
-        self.tracker.iter_active().map(|af| (af.key, af.stats))
+    /// Live `(key, stats)` pairs, owned — the same shape as every other
+    /// netring stream's `snapshot_flow_stats` (a plain flow stream
+    /// reassembles nothing, so the reassembly fields stay zero — see
+    /// [`ReassemblyStream::snapshot_flow_stats`](crate::ReassemblyStream::snapshot_flow_stats)).
+    /// Lazy — pay only for what you consume. For borrowed access and
+    /// the richer `ActiveFlow` shape (user state, TCP state, L4), use
+    /// `self.tracker().iter_active()`.
+    pub fn snapshot_flow_stats(&self) -> impl Iterator<Item = (E::Key, flowscope::FlowStats)> + '_
+    where
+        E::Key: Clone,
+    {
+        self.tracker
+            .iter_active()
+            .map(|af| (af.key.clone(), af.stats.clone()))
     }
 
     /// Cumulative tracker counters: `flows_created`, `flows_ended`,
@@ -500,12 +500,13 @@ pub(crate) fn clamp_view<'a>(
         return view;
     };
     *last = (*last).max(view.timestamp);
-    // Preserve the per-packet capture leg across the monotonic-clamp
-    // rebuild (flowscope 0.20 #69 builder) so a shared/merged tracker
-    // can bind `FlowStats::source_idx_{forward,reverse}` (#120).
-    // Previously the rebuilt view defaulted `RxMetadata`, zeroing
-    // `source_idx` — the blocker #105 called out.
-    PacketView::new(view.frame, *last).with_source_idx(view.rx_metadata.source_idx)
+    // Only the timestamp changes: the RX metadata (capture leg for
+    // `FlowStats::source_idx_{forward,reverse}`, hardware hash / VLAN /
+    // checksum hints) is kept whole. It used to be rebuilt keeping
+    // `source_idx` only.
+    let mut clamped = view;
+    clamped.timestamp = *last;
+    clamped
 }
 
 /// Plan 19: clamp a sweep `now` argument against a running max if
@@ -658,6 +659,62 @@ mod monotonic_tests {
         let v3 = clamp_view(PacketView::new(&frame, t3), &mut state);
         assert_eq!(v3.timestamp, t3, "step-forward advances running max");
         assert_eq!(state, Some(t3));
+    }
+
+    /// #171: the clamp changes the timestamp only; the RX metadata
+    /// (not just `source_idx`) survives.
+    #[test]
+    fn clamp_view_keeps_rx_metadata() {
+        let mut state: Option<Timestamp> = Some(Timestamp::new(100, 0));
+        let frame = [0u8; 4];
+        let mut meta = flowscope::RxMetadata::default();
+        meta.hw_timestamp = Some(Timestamp::new(5, 5));
+        meta.source_idx = 3;
+        let v = PacketView::new(&frame, Timestamp::new(50, 0)).with_rx_metadata(meta);
+        let out = clamp_view(v, &mut state);
+        assert_eq!(out.timestamp, Timestamp::new(100, 0));
+        assert_eq!(out.rx_metadata, meta);
+    }
+
+    /// #171: events the flow stream had queued survive the conversion
+    /// to a session stream in their session form.
+    #[tokio::test(flavor = "current_thread")]
+    async fn session_conversion_keeps_queued_events() {
+        use crate::async_adapters::flow_source::VecSource;
+        use flowscope::extract::FiveTuple;
+        use flowscope::extract::parse::test_frames::ipv4_udp;
+        use flowscope::{DatagramParser, FlowSide, SessionEvent};
+        use futures::StreamExt;
+
+        #[derive(Clone, Default)]
+        struct Nop;
+        impl DatagramParser for Nop {
+            type Message = ();
+            fn parse(&mut self, _: &[u8], _: FlowSide, _: Timestamp, _: &mut Vec<()>) {}
+        }
+
+        let ts = current_timestamp();
+        // Two new UDP flows in one drain: Started + Packet each.
+        let frames = [
+            ipv4_udp([10, 0, 0, 1], [10, 0, 0, 2], 5000, 53, b"a"),
+            ipv4_udp([10, 0, 0, 1], [10, 0, 0, 2], 6000, 53, b"b"),
+        ];
+        let mut flows = FlowStream::new(
+            VecSource(frames.into_iter().map(|f| (f, ts)).collect()),
+            FiveTuple::bidirectional(),
+        );
+        let first = flows.next().await.unwrap().unwrap();
+        assert!(matches!(first, FlowEvent::Started { .. }));
+        let mut dgrams = flows.datagram_stream(Nop);
+        let next = tokio::time::timeout(std::time::Duration::from_secs(1), dgrams.next())
+            .await
+            .expect("the queued Started of the second flow")
+            .unwrap()
+            .unwrap();
+        assert!(
+            matches!(next, SessionEvent::Started { key, .. } if key.a.port().max(key.b.port()) == 6000),
+            "{next:?}"
+        );
     }
 
     #[test]

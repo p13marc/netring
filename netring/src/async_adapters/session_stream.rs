@@ -116,6 +116,7 @@ where
         cap: C,
         tracker: FlowTracker<E, ()>,
         parser_factory: F,
+        queued: VecDeque<flowscope::FlowEvent<E::Key>>,
         dedup: Option<Dedup>,
         monotonic_ts: Option<Timestamp>,
         #[cfg(feature = "pcap")] tap: Option<crate::pcap_tap::PcapTap>,
@@ -124,7 +125,12 @@ where
         Self {
             cap,
             driver: SessionDriver::from_tracker(tracker, parser_factory),
-            pending: VecDeque::new(),
+            // Flow events the source stream had queued keep their
+            // session form (a queued `Ended` must still close).
+            pending: queued
+                .into_iter()
+                .filter_map(SessionEvent::from_flow_event)
+                .collect(),
             scratch: Vec::new(),
             sweep,
             dedup,

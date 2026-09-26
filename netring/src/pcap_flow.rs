@@ -148,6 +148,11 @@ macro_rules! replay_builders {
             self.replay.dedup.as_ref()
         }
 
+        /// Mutable access to the dedup, if one is set.
+        pub fn dedup_mut(&mut self) -> Option<&mut Dedup> {
+            self.replay.dedup.as_mut()
+        }
+
         /// Clamp timestamps to a running max so time never goes
         /// backwards (merged captures, `loop_at_eof` replays).
         pub fn with_monotonic_timestamps(mut self, enable: bool) -> Self {
@@ -224,6 +229,15 @@ where
     /// Count of live flow entries.
     pub fn active_flows(&self) -> usize {
         self.tracker.flow_count()
+    }
+
+    /// Live `(key, stats)` for every tracked flow, owned (the same shape
+    /// as the session / datagram streams; no reassembly here, so those
+    /// fields stay zero).
+    pub fn snapshot_flow_stats(&self) -> impl Iterator<Item = (E::Key, FlowStats)> + '_ {
+        self.tracker
+            .iter_active()
+            .map(|af| (af.key.clone(), af.stats.clone()))
     }
 }
 
@@ -329,8 +343,8 @@ where
     E::Key: std::hash::Hash + Eq + Clone + Send + 'static,
 {
     /// Convert into a typed session stream. The tracker (config, idle
-    /// predicate, in-flight flows) and the replay settings (dedup,
-    /// monotonic clamp) carry over.
+    /// predicate, in-flight flows), the replay settings (dedup,
+    /// monotonic clamp) and already-queued events carry over.
     pub fn session_stream<P>(self, parser: P) -> PcapSessionStream<E, P>
     where
         P: SessionParser + Clone,
@@ -338,7 +352,12 @@ where
         PcapSessionStream {
             replay: self.replay,
             driver: SessionDriver::from_tracker(self.tracker, TemplateFactory(parser)),
-            pending: VecDeque::new(),
+            // Queued flow events keep their session form.
+            pending: self
+                .pending
+                .into_iter()
+                .filter_map(SessionEvent::from_flow_event)
+                .collect(),
             scratch: Vec::new(),
         }
     }
@@ -351,7 +370,12 @@ where
         PcapDatagramStream {
             replay: self.replay,
             driver: DatagramDriver::from_tracker(self.tracker, TemplateFactory(parser)),
-            pending: VecDeque::new(),
+            // Queued flow events keep their session form.
+            pending: self
+                .pending
+                .into_iter()
+                .filter_map(SessionEvent::from_flow_event)
+                .collect(),
             scratch: Vec::new(),
         }
     }

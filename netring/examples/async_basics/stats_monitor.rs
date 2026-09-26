@@ -63,7 +63,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 Some(Ok(FlowEvent::Started { .. })) => flow_started += 1,
                 Some(Ok(FlowEvent::Ended { reason, .. })) => {
                     flow_ended += 1;
-                    if matches!(reason, EndReason::Rst | EndReason::BufferOverflow | EndReason::ParseError) {
+                    // Flows end for transport reasons only (parser and
+                    // reassembly stops never end a flow).
+                    if matches!(reason, EndReason::Rst | EndReason::Evicted) {
                         // Aborted flows are interesting — surface them in the
                         // periodic line above by leaving a tracing hint.
                         tracing::debug!(?reason, "flow aborted");

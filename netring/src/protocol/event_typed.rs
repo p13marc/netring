@@ -591,15 +591,21 @@ impl<P: Protocol> std::fmt::Debug for FlowTick<P> {
     }
 }
 
-/// Parser-level close — a registered parser drained its
-/// `fin_*` accumulator or reported `is_done` / `is_poisoned`.
+/// A registered parser was closed for a flow — once per (parser,
+/// flow); flowscope never re-opens it for the same flow.
 ///
-/// Distinct from [`FlowEnded`]: this fires per (parser, flow); the
-/// flow may still be alive. Handlers scoped to `ParserClosed<P>`
-/// observe only closes for the parser tied to `P`'s `parser_kind`
-/// when the relevant l4 + parser context is set; for non-parser
-/// protocols (`Tcp`, `Udp`, `Icmp`) the dispatch arm uses `l4` to
-/// pick the marker.
+/// Early closes leave the flow alive: `reason` is
+/// [`EndReason::ParseError`] (poisoned), [`EndReason::ParserDone`],
+/// [`EndReason::StreamGap`] (bytes missing, parser declined to
+/// continue) or [`EndReason::BufferOverflow`] (a reassembly limit), and
+/// [`Self::detail`] says why. At the flow's end `reason` is the flow's
+/// end reason and the close comes right before [`FlowEnded`].
+///
+/// Distinct from [`FlowEnded`]: this fires per (parser, flow).
+/// Routed to the parser's own protocol — `ParserClosed<Http>` fires
+/// for the HTTP parser only — and to the flow's transport marker:
+/// `ParserClosed<Tcp>` / `<Udp>` / `<Icmp>` fire for every parser on
+/// that transport (match on `parser_kind` there).
 #[non_exhaustive]
 pub struct ParserClosed<P: Protocol> {
     /// Flow key.
@@ -611,6 +617,9 @@ pub struct ParserClosed<P: Protocol> {
     pub parser_kind: ParserKind,
     /// Why the parser closed.
     pub reason: EndReason,
+    /// Human-readable detail for early closes: the parser's
+    /// `poison_reason()`, the gap size, or the reassembly stop.
+    pub detail: Option<String>,
     /// Timestamp of the close.
     pub ts: Timestamp,
     _marker: PhantomData<fn() -> P>,
@@ -628,11 +637,18 @@ impl<P: Protocol> ParserClosed<P> {
     /// Constructor exposed for integration tests / dispatch
     /// translation. Not part of the documented public API.
     #[doc(hidden)]
-    pub fn new(key: FlowKey, parser_kind: ParserKind, reason: EndReason, ts: Timestamp) -> Self {
+    pub fn new(
+        key: FlowKey,
+        parser_kind: ParserKind,
+        reason: EndReason,
+        detail: Option<String>,
+        ts: Timestamp,
+    ) -> Self {
         Self {
             key,
             parser_kind,
             reason,
+            detail,
             ts,
             _marker: PhantomData,
         }
@@ -654,6 +670,79 @@ impl<P: Protocol> std::fmt::Debug for ParserClosed<P> {
             .field("key", &self.key)
             .field("parser_kind", &self.parser_kind)
             .field("reason", &self.reason)
+            .field("detail", &self.detail)
+            .field("ts", &self.ts)
+            .finish()
+    }
+}
+
+/// A registered parser stopped reading **one side** of a flow: a gap
+/// it cannot bridge ([`EndReason::StreamGap`]) or a reassembly limit
+/// on that side ([`EndReason::BufferOverflow`]). The other side keeps
+/// being parsed; when both sides are stopped a [`ParserClosed`]
+/// follows. New in 0.31.0 (flowscope 0.25).
+///
+/// Routed like [`ParserClosed`]: to the parser's own protocol `P`
+/// (`ParserSideStopped<Http>` for the HTTP parser), and to the
+/// transport marker (`ParserSideStopped<Tcp>` for every TCP parser).
+#[non_exhaustive]
+pub struct ParserSideStopped<P: Protocol> {
+    /// Flow key.
+    pub key: FlowKey,
+    /// Typed identity of the parser.
+    pub parser_kind: ParserKind,
+    /// The side the parser stopped reading.
+    pub side: flowscope::FlowSide,
+    /// Why.
+    pub reason: EndReason,
+    /// The gap size or the reassembly stop reason.
+    pub detail: Option<String>,
+    /// Timestamp of the stop.
+    pub ts: Timestamp,
+    _marker: PhantomData<fn() -> P>,
+}
+
+impl<P: Protocol> ParserSideStopped<P> {
+    /// Constructor exposed for integration tests / dispatch
+    /// translation. Not part of the documented public API.
+    #[doc(hidden)]
+    pub fn new(
+        key: FlowKey,
+        parser_kind: ParserKind,
+        side: flowscope::FlowSide,
+        reason: EndReason,
+        detail: Option<String>,
+        ts: Timestamp,
+    ) -> Self {
+        Self {
+            key,
+            parser_kind,
+            side,
+            reason,
+            detail,
+            ts,
+            _marker: PhantomData,
+        }
+    }
+}
+
+impl<P: Protocol> Event for ParserSideStopped<P> {
+    type Payload = ParserSideStopped<P>;
+
+    fn traffic_class() -> crate::protocol::TrafficClass {
+        crate::protocol::TrafficClass::Dispatch(P::dispatch())
+    }
+}
+
+impl<P: Protocol> std::fmt::Debug for ParserSideStopped<P> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("ParserSideStopped")
+            .field("protocol", &P::NAME)
+            .field("key", &self.key)
+            .field("parser_kind", &self.parser_kind)
+            .field("side", &self.side)
+            .field("reason", &self.reason)
+            .field("detail", &self.detail)
             .field("ts", &self.ts)
             .finish()
     }

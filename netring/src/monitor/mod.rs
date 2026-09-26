@@ -120,7 +120,9 @@ pub use handler::{CtxOnly, Handler, PayloadCtx, PayloadOnly};
 pub use health::{MonitorHealth, MonitorHealthSnapshot};
 #[cfg(feature = "ndp")]
 pub use ndp::{NdpAnomaly, NdpAnomalyKind};
-pub use registry::{HandlerRegistry, ProtocolSlot, TypedBroadcastProtocolSlot, TypedProtocolSlot};
+pub use registry::{
+    HandlerRegistry, ParserEvent, ProtocolSlot, TypedBroadcastProtocolSlot, TypedProtocolSlot,
+};
 pub use telemetry::{CaptureHealth, CaptureTelemetry};
 pub use tick::TickRegistration;
 
@@ -563,10 +565,12 @@ impl Monitor {
     ///
     /// The run loop resets a deadline each time a packet batch
     /// arrives (or a tick fires); if the deadline expires before
-    /// the next event, the loop exits. Useful for:
+    /// the next event, the loop exits. The periodic flow sweep
+    /// (idle `FlowEnded`, parser ticks) is housekeeping and does not
+    /// reset it. Useful for:
     ///
-    /// - **pcap replay** — auto-stop after EOF + a small grace
-    ///   window so trailing periodic-sweep events still land.
+    /// - **live captures that go quiet** — stop once the source is
+    ///   silent; flows still open are ended by the drain phase.
     /// - **one-shot scans** — record traffic until the upstream
     ///   source stops cleanly.
     /// - **test fixtures** — exit deterministically once the
@@ -938,6 +942,15 @@ pub struct MonitorBuilder {
     /// `Error::HandlerPanic` (then handled by `handler_error_policy`). Off by
     /// default. Set via [`Self::catch_handler_panics`].
     catch_handler_panics: bool,
+    /// Emit flowscope's reassembly / parser / tracker anomalies as
+    /// [`AnyFlowAnomaly`](crate::protocol::event_typed::AnyFlowAnomaly).
+    /// Set via [`Self::emit_anomalies`]; also on when an
+    /// `AnyFlowAnomaly` handler is registered.
+    emit_anomalies: bool,
+    /// Whether [`Self::emit_anomalies`] was called explicitly.
+    emit_anomalies_set: bool,
+    /// Fill `FlowPacket::tcp`. Set via [`Self::emit_packet_details`].
+    emit_packet_details: bool,
     /// 0.24 Phase C1/C2: optional capture-telemetry sampling hook.
     /// `None` until [`Self::on_capture_stats`] is called. Moved into
     /// [`Monitor::capture_stats`] at [`Self::build`].
@@ -1543,7 +1556,7 @@ impl MonitorBuilder {
     /// each shard its socket here. Counts as a capture source for `build()`.
     /// Not reopenable — the program/registration live outside the Monitor, so a
     /// backend error on an injected socket is terminal for that shard.
-    #[cfg(feature = "af-xdp")]
+    #[cfg(all(feature = "af-xdp", feature = "xdp-loader"))]
     pub(crate) fn inject_xdp_backend(mut self, socket: crate::AsyncXdpSocket) -> Self {
         self.injected_xdp.push(socket);
         self
@@ -1618,6 +1631,29 @@ impl MonitorBuilder {
     /// internally.
     pub fn catch_handler_panics(mut self, on: bool) -> Self {
         self.catch_handler_panics = on;
+        self
+    }
+
+    /// Deliver flowscope's per-flow and tracker anomalies — stream
+    /// gaps, stray / out-of-window segments, retransmits and overlap
+    /// inconsistencies, buffer overflows, parser poison, memcap hits,
+    /// eviction pressure — as
+    /// [`AnyFlowAnomaly`](crate::protocol::event_typed::AnyFlowAnomaly)
+    /// events. Turned on automatically when an `AnyFlowAnomaly`
+    /// handler is registered; call this to force it on (e.g. for a
+    /// sink-only pipeline) or off. New in 0.31.0.
+    pub fn emit_anomalies(mut self, on: bool) -> Self {
+        self.emit_anomalies = on;
+        self.emit_anomalies_set = true;
+        self
+    }
+
+    /// Fill [`FlowPacket::tcp`](crate::protocol::event_typed::FlowPacket)
+    /// (flags, sequence / ack numbers, window) for TCP packets. The
+    /// header is already parsed by the tracker, so this costs a copy
+    /// per packet event. Off by default. New in 0.31.0.
+    pub fn emit_packet_details(mut self, on: bool) -> Self {
+        self.emit_packet_details = on;
         self
     }
 
@@ -4415,6 +4451,14 @@ impl MonitorBuilder {
             .driver_builder
             .unwrap_or_else(|| Driver::builder(FiveTuple::bidirectional()));
         driver_builder.config(self.tracker_config);
+        let emit_anomalies = if self.emit_anomalies_set {
+            self.emit_anomalies
+        } else {
+            self.handlers
+                .has_handlers_for::<crate::protocol::event_typed::AnyFlowAnomaly>()
+        };
+        driver_builder.emit_anomalies(emit_anomalies);
+        driver_builder.emit_packet_details(self.emit_packet_details);
         let driver = driver_builder.build();
         let mut dispatcher = self.handlers.into_dispatcher()?;
         dispatcher.set_catch_panics(self.catch_handler_panics);

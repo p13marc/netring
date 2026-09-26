@@ -235,6 +235,8 @@ mod tests {
             label_table: crate::ctx::default_label_table(),
             tracker: None,
             arp_table: None,
+            side: None,
+            orientation: None,
         }
     }
 

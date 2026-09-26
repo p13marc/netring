@@ -142,6 +142,33 @@ impl AsyncFlowSource for crate::AsyncXdpCapture {
     }
 }
 
+/// Test source: hands every queued frame over in one drain, then stays
+/// pending (never wakes).
+#[cfg(test)]
+pub(crate) struct VecSource(pub(crate) std::collections::VecDeque<(Vec<u8>, flowscope::Timestamp)>);
+
+#[cfg(test)]
+impl AsyncFlowSource for VecSource {
+    fn poll_drain(
+        &mut self,
+        _cx: &mut Context<'_>,
+        sink: &mut dyn FnMut(SourcePacket<'_>),
+    ) -> Poll<std::io::Result<DrainOutcome>> {
+        if self.0.is_empty() {
+            return Poll::Pending;
+        }
+        for (f, ts) in self.0.drain(..) {
+            sink(SourcePacket {
+                view: PacketView::new(&f, ts),
+                data: &f,
+                direction: PacketDirection::Host,
+                original_len: f.len(),
+            });
+        }
+        Poll::Ready(Ok(DrainOutcome::Drained))
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

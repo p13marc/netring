@@ -55,6 +55,15 @@ pub struct HandlerRegistry {
 }
 
 impl HandlerRegistry {
+    /// Whether any handler (sync, async or effect) is registered for
+    /// event type `E`.
+    pub(crate) fn has_handlers_for<E: Event>(&self) -> bool {
+        let id = TypeId::of::<E::Payload>();
+        self.by_type.contains_key(&id)
+            || self.async_by_type.contains_key(&id)
+            || self.effect_by_type.contains_key(&id)
+    }
+
     /// Add a handler `H` for event type `E`.
     ///
     /// The handler is boxed and stored under
@@ -304,35 +313,215 @@ where
 /// `P: Protocol` parameter so the run loop can hold
 /// `Vec<Box<dyn ProtocolSlot>>`.
 ///
+/// Messages are fetched into the slot ([`Self::fetch`]) and then
+/// dispatched one at a time ([`Self::dispatch_next`]) so the run loop
+/// can interleave them with the lifecycle events in the order the
+/// engine produced them ([`Self::next_order`], flowscope's
+/// `SlotMessage::lifecycle_pos` / `seq`): a flow's last messages reach
+/// handlers before its `FlowEnded`.
+///
 /// 0.21 H.2: `Send` supertrait makes `Box<dyn ProtocolSlot>`
 /// `Send`, which in turn makes the parent `Monitor` `Send`
 /// (flowscope 0.13's `Driver<E>: Send + Sync` covered the rest).
-/// All shipped impls (`TypedProtocolSlot<P>`,
-/// `TypedBroadcastProtocolSlot<P>`) are `Send` structurally —
-/// flowscope's `SlotHandle`/`BroadcastSlotHandle` are `Send + Sync`
-/// and `P::Message: Send + Sync + 'static` per the `Protocol`
-/// trait bound.
-pub trait ProtocolSlot: Send {
-    /// Drain pending messages from the wrapped flowscope handle
-    /// and dispatch each one through the supplied dispatcher.
-    fn drain_and_dispatch(&mut self, dispatcher: &mut Dispatcher, ctx: &mut Ctx<'_>) -> Result<()>;
+pub trait ProtocolSlot: Send + Sync {
+    /// Move messages the parser produced since the last call into
+    /// this slot's pending buffer.
+    fn fetch(&mut self);
+
+    /// `(lifecycle_pos, seq)` of the next pending message, if any.
+    fn next_order(&self) -> Option<(u64, u64)>;
+
+    /// Dispatch the next pending message. `ctx.flow` / `ctx.ts` (and
+    /// the message side) are set for the call and restored after.
+    fn dispatch_next(&mut self, dispatcher: &mut Dispatcher, ctx: &mut Ctx<'_>) -> Result<()>;
+
+    /// Fetch and dispatch everything pending, in order.
+    fn drain_and_dispatch(&mut self, dispatcher: &mut Dispatcher, ctx: &mut Ctx<'_>) -> Result<()> {
+        self.fetch();
+        while self.next_order().is_some() {
+            self.dispatch_next(dispatcher, ctx)?;
+        }
+        Ok(())
+    }
+
+    /// The flowscope registration of this protocol's parser — what
+    /// its parser closes / side stops carry. `None` for slots that
+    /// don't route them.
+    fn slot_id(&self) -> Option<flowscope::SlotId> {
+        None
+    }
+
+    /// Dispatch a close / side stop of this slot's parser to the sync
+    /// handlers of `ParserClosed<P>` / `ParserSideStopped<P>` (`P` =
+    /// the slot's protocol).
+    fn dispatch_parser_event(
+        &self,
+        _dispatcher: &mut Dispatcher,
+        _ctx: &mut Ctx<'_>,
+        _event: &ParserEvent<'_>,
+    ) -> Result<()> {
+        Ok(())
+    }
+
+    /// Async counterpart of [`Self::dispatch_parser_event`].
+    fn dispatch_parser_event_async<'a>(
+        &'a self,
+        _dispatcher: &'a mut Dispatcher,
+        _event: ParserEvent<'a>,
+    ) -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<()>> + Send + 'a>> {
+        Box::pin(async { Ok(()) })
+    }
+}
+
+/// A parser close or side stop, as the run loop routes it to the
+/// parser's protocol slot. Borrows the event's detail: the typed
+/// `ParserClosed<P>` / `ParserSideStopped<P>` (and its `String`) is
+/// only built when a handler is registered for it.
+#[derive(Debug, Clone, Copy)]
+pub struct ParserEvent<'a> {
+    /// Flow key.
+    pub key: flowscope::extract::FiveTupleKey,
+    /// The parser's kind.
+    pub parser_kind: flowscope::ParserKind,
+    /// `Some(side)` for a side stop, `None` for a parser close.
+    pub side: Option<flowscope::FlowSide>,
+    /// Why.
+    pub reason: flowscope::EndReason,
+    /// Detail (poison reason, gap size, stop reason).
+    pub detail: Option<&'a str>,
+    /// When.
+    pub ts: flowscope::Timestamp,
+}
+
+/// Transport markers receive every parser event of their transport
+/// from the run loop directly; a slot of one of them must not
+/// dispatch it a second time.
+fn is_transport_marker<P: 'static>() -> bool {
+    use crate::protocol::builtin::{Tcp, Udp};
+    let id = TypeId::of::<P>();
+    #[cfg(feature = "icmp")]
+    if id == TypeId::of::<crate::protocol::builtin::Icmp>() {
+        return true;
+    }
+    id == TypeId::of::<Tcp>() || id == TypeId::of::<Udp>()
+}
+
+fn dispatch_typed_parser_event<P: Protocol>(
+    dispatcher: &mut Dispatcher,
+    ctx: &mut Ctx<'_>,
+    e: &ParserEvent<'_>,
+) -> Result<()> {
+    use crate::protocol::event_typed::{ParserClosed, ParserSideStopped};
+    let handled = match e.side {
+        None => dispatcher.handles::<ParserClosed<P>>(),
+        Some(_) => dispatcher.handles::<ParserSideStopped<P>>(),
+    };
+    if !handled || is_transport_marker::<P>() {
+        return Ok(());
+    }
+    let detail = e.detail.map(str::to_owned);
+    let (flow, ts) = (ctx.flow, ctx.ts);
+    ctx.flow = Some(e.key);
+    ctx.ts = e.ts;
+    let r = match e.side {
+        None => dispatcher.dispatch::<ParserClosed<P>>(
+            &ParserClosed::<P>::new(e.key, e.parser_kind, e.reason, detail, e.ts),
+            ctx,
+        ),
+        Some(side) => dispatcher.dispatch::<ParserSideStopped<P>>(
+            &ParserSideStopped::<P>::new(e.key, e.parser_kind, side, e.reason, detail, e.ts),
+            ctx,
+        ),
+    };
+    ctx.flow = flow;
+    ctx.ts = ts;
+    r
+}
+
+fn dispatch_typed_parser_event_async<'a, P: Protocol>(
+    dispatcher: &'a mut Dispatcher,
+    e: ParserEvent<'a>,
+) -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<()>> + Send + 'a>> {
+    use crate::protocol::event_typed::{ParserClosed, ParserSideStopped};
+    Box::pin(async move {
+        let handled = match e.side {
+            None => dispatcher.handles_async::<ParserClosed<P>>(),
+            Some(_) => dispatcher.handles_async::<ParserSideStopped<P>>(),
+        };
+        if !handled || is_transport_marker::<P>() {
+            return Ok(());
+        }
+        let detail = e.detail.map(str::to_owned);
+        match e.side {
+            None => {
+                dispatcher
+                    .dispatch_async(&ParserClosed::<P>::new(
+                        e.key,
+                        e.parser_kind,
+                        e.reason,
+                        detail,
+                        e.ts,
+                    ))
+                    .await
+            }
+            Some(side) => {
+                dispatcher
+                    .dispatch_async(&ParserSideStopped::<P>::new(
+                        e.key,
+                        e.parser_kind,
+                        side,
+                        e.reason,
+                        detail,
+                        e.ts,
+                    ))
+                    .await
+            }
+        }
+    })
+}
+
+type Pending<M> = std::collections::VecDeque<SlotMessage<M, flowscope::extract::FiveTupleKey>>;
+
+fn order_of<M>(pending: &Pending<M>) -> Option<(u64, u64)> {
+    pending.front().map(|m| (m.lifecycle_pos, m.seq))
+}
+
+/// Run `f` with `ctx` stamped for one message, restoring it after.
+fn with_message_ctx<M, R>(
+    ctx: &mut Ctx<'_>,
+    msg: &SlotMessage<M, flowscope::extract::FiveTupleKey>,
+    f: impl FnOnce(&mut Ctx<'_>) -> R,
+) -> R {
+    let (flow, ts, side, orientation) = (ctx.flow, ctx.ts, ctx.side, ctx.orientation);
+    // `FiveTupleKey` is `Copy` — stamp it on the ctx by value.
+    ctx.flow = Some(msg.key);
+    ctx.ts = msg.ts;
+    ctx.side = Some(msg.side);
+    ctx.orientation = Some(msg.orientation);
+    let r = f(ctx);
+    ctx.flow = flow;
+    ctx.ts = ts;
+    ctx.side = side;
+    ctx.orientation = orientation;
+    r
 }
 
 /// Generic, concrete impl: holds the flowscope `SlotHandle` for a
-/// `Protocol` `P` plus a reusable scratch buffer for drained
-/// messages.
+/// `Protocol` `P` plus the messages fetched but not yet dispatched.
 pub struct TypedProtocolSlot<P: Protocol> {
     handle: SlotHandle<P::Message, flowscope::extract::FiveTupleKey>,
     scratch: Vec<SlotMessage<P::Message, flowscope::extract::FiveTupleKey>>,
+    pending: Pending<P::Message>,
     _marker: PhantomData<fn() -> P>,
 }
 
 impl<P: Protocol> TypedProtocolSlot<P> {
-    /// Wrap a flowscope handle. Scratch capacity grows on demand.
+    /// Wrap a flowscope handle. Buffers grow on demand.
     pub fn new(handle: SlotHandle<P::Message, flowscope::extract::FiveTupleKey>) -> Self {
         Self {
             handle,
             scratch: Vec::new(),
+            pending: Pending::new(),
             _marker: PhantomData,
         }
     }
@@ -344,31 +533,44 @@ impl<P: Protocol> TypedProtocolSlot<P> {
 }
 
 impl<P: Protocol> ProtocolSlot for TypedProtocolSlot<P> {
-    fn drain_and_dispatch(&mut self, dispatcher: &mut Dispatcher, ctx: &mut Ctx<'_>) -> Result<()> {
-        self.scratch.clear();
-        let n = self.handle.drain(&mut self.scratch);
-        if n == 0 {
+    fn fetch(&mut self) {
+        if self.handle.drain(&mut self.scratch) > 0 {
+            self.pending.extend(self.scratch.drain(..));
+        }
+    }
+
+    fn next_order(&self) -> Option<(u64, u64)> {
+        order_of(&self.pending)
+    }
+
+    fn dispatch_next(&mut self, dispatcher: &mut Dispatcher, ctx: &mut Ctx<'_>) -> Result<()> {
+        let Some(msg) = self.pending.pop_front() else {
             return Ok(());
-        }
+        };
+        with_message_ctx(ctx, &msg, |ctx| {
+            dispatcher.dispatch::<P::Message>(&msg.message, ctx)
+        })
+    }
 
-        // Per-message flow + ts override for the dispatch call;
-        // restored after each message so a partial drain doesn't
-        // leak state into the lifecycle dispatch path.
-        let saved_flow = ctx.flow;
-        let saved_ts = ctx.ts;
+    fn slot_id(&self) -> Option<flowscope::SlotId> {
+        Some(self.handle.slot_id())
+    }
 
-        for slot_msg in self.scratch.drain(..) {
-            // `FiveTupleKey` is `Copy` — stamp it on the ctx by
-            // value so the borrow checker doesn't have to reason
-            // about a borrow that aliases the drained message.
-            ctx.flow = Some(slot_msg.key);
-            ctx.ts = slot_msg.ts;
-            dispatcher.dispatch::<P::Message>(&slot_msg.message, ctx)?;
-        }
+    fn dispatch_parser_event(
+        &self,
+        dispatcher: &mut Dispatcher,
+        ctx: &mut Ctx<'_>,
+        event: &ParserEvent<'_>,
+    ) -> Result<()> {
+        dispatch_typed_parser_event::<P>(dispatcher, ctx, event)
+    }
 
-        ctx.flow = saved_flow;
-        ctx.ts = saved_ts;
-        Ok(())
+    fn dispatch_parser_event_async<'a>(
+        &'a self,
+        dispatcher: &'a mut Dispatcher,
+        event: ParserEvent<'a>,
+    ) -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<()>> + Send + 'a>> {
+        dispatch_typed_parser_event_async::<P>(dispatcher, event)
     }
 }
 
@@ -384,6 +586,7 @@ impl<P: Protocol> ProtocolSlot for TypedProtocolSlot<P> {
 pub struct IcmpSlot {
     handle: SlotHandle<flowscope::icmp::IcmpMessage, flowscope::extract::FiveTupleKey>,
     scratch: Vec<SlotMessage<flowscope::icmp::IcmpMessage, flowscope::extract::FiveTupleKey>>,
+    pending: Pending<flowscope::icmp::IcmpMessage>,
 }
 
 #[cfg(feature = "icmp")]
@@ -395,27 +598,30 @@ impl IcmpSlot {
         Self {
             handle,
             scratch: Vec::new(),
+            pending: Pending::new(),
         }
     }
 }
 
 #[cfg(feature = "icmp")]
 impl ProtocolSlot for IcmpSlot {
-    fn drain_and_dispatch(&mut self, dispatcher: &mut Dispatcher, ctx: &mut Ctx<'_>) -> Result<()> {
+    fn fetch(&mut self) {
+        if self.handle.drain(&mut self.scratch) > 0 {
+            self.pending.extend(self.scratch.drain(..));
+        }
+    }
+
+    fn next_order(&self) -> Option<(u64, u64)> {
+        order_of(&self.pending)
+    }
+
+    fn dispatch_next(&mut self, dispatcher: &mut Dispatcher, ctx: &mut Ctx<'_>) -> Result<()> {
         use crate::protocol::event_typed::{IcmpError, classify_icmp_error};
 
-        self.scratch.clear();
-        let n = self.handle.drain(&mut self.scratch);
-        if n == 0 {
+        let Some(slot_msg) = self.pending.pop_front() else {
             return Ok(());
-        }
-        let saved_flow = ctx.flow;
-        let saved_ts = ctx.ts;
-
-        for slot_msg in self.scratch.drain(..) {
-            ctx.flow = Some(slot_msg.key);
-            ctx.ts = slot_msg.ts;
-
+        };
+        with_message_ctx(ctx, &slot_msg, |ctx| {
             // (1) raw message → `on::<Icmp>` handlers.
             dispatcher.dispatch::<flowscope::icmp::IcmpMessage>(&slot_msg.message, ctx)?;
 
@@ -436,26 +642,26 @@ impl ProtocolSlot for IcmpSlot {
                 };
                 dispatcher.dispatch::<IcmpError>(&err, ctx)?;
             }
-        }
-
-        ctx.flow = saved_flow;
-        ctx.ts = saved_ts;
-        Ok(())
+            Ok(())
+        })
     }
+
+    // `Icmp` is a transport marker: the run loop hands it every ICMP
+    // parser event, so this slot routes none (no `slot_id`).
 }
 
 /// 0.21 F: broadcast variant of [`TypedProtocolSlot`]. Holds one
 /// clone of the [`BroadcastSlotHandle`] returned by
 /// [`crate::protocol::Protocol::register_broadcast`]; user
 /// subscribers via [`crate::monitor::Monitor::subscribe`] clone
-/// independently. Drains the dispatcher's queue per packet batch
-/// the same way the regular slot does.
+/// independently.
 pub struct TypedBroadcastProtocolSlot<P: Protocol>
 where
     P::Message: Send + Sync + Clone + 'static,
 {
     handle: BroadcastSlotHandle<P::Message, flowscope::extract::FiveTupleKey>,
     scratch: Vec<SlotMessage<P::Message, flowscope::extract::FiveTupleKey>>,
+    pending: Pending<P::Message>,
     _marker: PhantomData<fn() -> P>,
 }
 
@@ -470,6 +676,7 @@ where
         Self {
             handle,
             scratch: Vec::new(),
+            pending: Pending::new(),
             _marker: PhantomData,
         }
     }
@@ -479,25 +686,44 @@ impl<P: Protocol> ProtocolSlot for TypedBroadcastProtocolSlot<P>
 where
     P::Message: Send + Sync + Clone + 'static,
 {
-    fn drain_and_dispatch(&mut self, dispatcher: &mut Dispatcher, ctx: &mut Ctx<'_>) -> Result<()> {
-        self.scratch.clear();
-        let n = self.handle.drain(&mut self.scratch);
-        if n == 0 {
+    fn fetch(&mut self) {
+        if self.handle.drain(&mut self.scratch) > 0 {
+            self.pending.extend(self.scratch.drain(..));
+        }
+    }
+
+    fn next_order(&self) -> Option<(u64, u64)> {
+        order_of(&self.pending)
+    }
+
+    fn dispatch_next(&mut self, dispatcher: &mut Dispatcher, ctx: &mut Ctx<'_>) -> Result<()> {
+        let Some(msg) = self.pending.pop_front() else {
             return Ok(());
-        }
+        };
+        with_message_ctx(ctx, &msg, |ctx| {
+            dispatcher.dispatch::<P::Message>(&msg.message, ctx)
+        })
+    }
 
-        let saved_flow = ctx.flow;
-        let saved_ts = ctx.ts;
+    fn slot_id(&self) -> Option<flowscope::SlotId> {
+        Some(self.handle.slot_id())
+    }
 
-        for slot_msg in self.scratch.drain(..) {
-            ctx.flow = Some(slot_msg.key);
-            ctx.ts = slot_msg.ts;
-            dispatcher.dispatch::<P::Message>(&slot_msg.message, ctx)?;
-        }
+    fn dispatch_parser_event(
+        &self,
+        dispatcher: &mut Dispatcher,
+        ctx: &mut Ctx<'_>,
+        event: &ParserEvent<'_>,
+    ) -> Result<()> {
+        dispatch_typed_parser_event::<P>(dispatcher, ctx, event)
+    }
 
-        ctx.flow = saved_flow;
-        ctx.ts = saved_ts;
-        Ok(())
+    fn dispatch_parser_event_async<'a>(
+        &'a self,
+        dispatcher: &'a mut Dispatcher,
+        event: ParserEvent<'a>,
+    ) -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<()>> + Send + 'a>> {
+        dispatch_typed_parser_event_async::<P>(dispatcher, event)
     }
 }
 
@@ -530,6 +756,8 @@ mod tests {
             label_table: crate::ctx::default_label_table(),
             tracker: None,
             arp_table: None,
+            side: None,
+            orientation: None,
         }
     }
 

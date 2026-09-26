@@ -44,11 +44,16 @@ jobs:
           echo "== is CAP_NET_RAW in the bounding set? (setcap +ep is unusable if not) =="
           grep -E '^CapBnd' /proc/self/status || true
           echo "== netns =="; readlink /proc/self/ns/net || true
+      # The feature set decides which privileged tests exist at all: with
+      # only `integration-tests,tokio,channel,af-xdp` every live Monitor /
+      # flow / multi-capture test (12 files) was compiled out, and two of
+      # them had been broken for months unseen (#144). `xdp-loader` stays
+      # out: it needs init-namespace CAP_BPF (see xdp-smoke below).
       - name: Build test binaries
-        run: cargo test -p netring --features "integration-tests,tokio,channel,af-xdp" --no-run
+        run: cargo test -p netring --features "integration-tests,tokio,channel,af-xdp,flow,parse,pcap,http,icmp" --no-run
       - name: Run capability tests
         run: |
-          for bin in $(cargo test -p netring --features "integration-tests,tokio,channel,af-xdp" \
+          for bin in $(cargo test -p netring --features "integration-tests,tokio,channel,af-xdp,flow,parse,pcap,http,icmp" \
                        --no-run --message-format=json 2>/dev/null \
                        | jq -r 'select(.profile.test == true) | .executable' | sort -u); do
             sudo setcap cap_net_raw,cap_net_admin+ep "$bin"
@@ -56,7 +61,7 @@ jobs:
           # --no-fail-fast so one failing binary does not mask the rest: this
           # lane has had multiple independent failures at once, and stopping at
           # the first turns a two-bug run into two more red runs.
-          cargo test -p netring --features "integration-tests,tokio,channel,af-xdp" \
+          cargo test -p netring --features "integration-tests,tokio,channel,af-xdp,flow,parse,pcap,http,icmp" \
             --no-fail-fast -- --test-threads=1 --nocapture
 
   # INFORMATIONAL: bpf(BPF_MAP_CREATE) requires init-namespace CAP_BPF, which

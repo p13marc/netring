@@ -59,8 +59,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                     EndReason::Fin => "fin ",
                     EndReason::Rst => "rst ",
                     EndReason::Evicted => "evt ",
-                    EndReason::BufferOverflow => "ovf ",
-                    EndReason::ParseError => "perr",
+                    // A flow stream ends flows only for transport
+                    // reasons (FIN / RST / idle / eviction / force).
                     _ => "????",
                 };
                 eprintln!(

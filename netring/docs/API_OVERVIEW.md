@@ -217,9 +217,11 @@ Each stream consumes an `AsyncCapture<S>` and emits typed events.
 
 | Stream | Item | Built via |
 |--------|------|-----------|
-| [`FlowStream<S, E, U, R>`](https://docs.rs/netring/latest/netring/struct.FlowStream.html) | `FlowEvent<K>` | `cap.flow_stream(extractor)` |
-| [`SessionStream<S, E, F>`](https://docs.rs/netring/latest/netring/struct.SessionStream.html) | `SessionEvent<K, M>` (TCP via reassembler) | `cap.flow_stream(ext).session_stream(parser)` |
-| [`DatagramStream<S, E, F>`](https://docs.rs/netring/latest/netring/struct.DatagramStream.html) | `SessionEvent<K, M>` (UDP, no reassembler) | `cap.flow_stream(ext).datagram_stream(parser)` |
+| [`FlowStream<C, E, U>`](https://docs.rs/netring/latest/netring/struct.FlowStream.html) | `FlowEvent<K>` | `cap.flow_stream(extractor)` |
+| [`SessionStream<C, E, F>`](https://docs.rs/netring/latest/netring/struct.SessionStream.html) | `SessionEvent<K, M>` (TCP, reassembled; flowscope's `SessionDriver`) | `cap.flow_stream(ext).session_stream(parser)` |
+| [`DatagramStream<C, E, F>`](https://docs.rs/netring/latest/netring/struct.DatagramStream.html) | `SessionEvent<K, M>` (datagrams of the parser's transports) | `cap.flow_stream(ext).datagram_stream(parser)` |
+| [`ReassemblyStream<C, E, U, F>`](https://docs.rs/netring/latest/netring/struct.ReassemblyStream.html) | `FlowEvent<K>`, plus reassembled bytes / gaps / close to your `AsyncReassembler`s | `cap.flow_stream(ext).with_async_reassembler(factory)` |
+| [`ConversationStream<C, E>`](https://docs.rs/netring/latest/netring/struct.ConversationStream.html) | one `Conversation<K>` per TCP flow (reassembled bytes, gaps, end reason) | `cap.flow_stream(ext).into_conversations()` |
 | [`FlowBroadcast<K>`](https://docs.rs/netring/latest/netring/struct.FlowBroadcast.html) | per-subscriber `FlowEvent<K>` | `flow_stream(...).broadcast(buffer)` |
 
 Each stream chain accepts the same builder knobs:
@@ -229,7 +231,7 @@ Each stream chain accepts the same builder knobs:
 - `.with_idle_timeout_fn(F)` — per-key idle override (`Fn(&K, Option<L4Proto>) -> Option<Duration>`).
 - `.with_monotonic_timestamps(bool)` — clamp NIC timestamps to a running max.
 - `.with_pcap_tap(writer)` — record every packet to a `CaptureWriter` before flow tracking.
-- `.snapshot_flow_stats()` — borrow-iterator over live `(&K, &FlowStats)`.
+- `.snapshot_flow_stats()` — live `(K, FlowStats)` pairs, owned (the same shape on every stream).
 
 The [`StreamCapture`](https://docs.rs/netring/latest/netring/trait.StreamCapture.html)
 trait gives all four stream types `capture()`, `capture_stats()`, and

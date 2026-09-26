@@ -20,6 +20,59 @@ built on AF_PACKET with TPACKET_V3 (block-based mmap ring buffers) and AF_XDP.
 
 ## Implementation Status
 
+**0.31.0 — unreleased** (breaking; `docs/MIGRATING_0.30_TO_0.31.md`).
+"flowscope 0.25: one session engine". Depends on **flowscope 0.25**
+(published to crates.io 2026-09-26; no `[patch.crates-io]`).
+Driven by a downstream report (des-capture) against 0.30.0.
+
+Milestone "0.31" on Forgejo, epic #173 (issues #144, #146–#174); the
+companion flowscope work is its milestone "0.25", epic #199.
+
+- **Session / datagram streams run flowscope's engine.**
+  `SessionStream` / `DatagramStream` / `PcapSessionStream` /
+  `PcapDatagramStream` wrap `flowscope::SessionDriver` /
+  `DatagramDriver` (`netring::flow::SessionEvent` = flowscope's).
+  Parser poison / done → `ParserClosed`; gaps and per-side limits →
+  `ParserSideStopped` (the other side keeps parsing); flows end for
+  transport reasons only; reassembly stats in `FlowStats`; datagram
+  `side` relative to the initiator; parsers see only their transports
+  (`DatagramParser::transports()`: `Icmp` off UDP, UDP streams off ICMP).
+- **Monitor lifecycle** (`monitor/run.rs`): sweeps live (`sweep_interval`
+  timer on the `PacketClock`) and on replay (packet time); one
+  `dispatch_batch` merges slot messages with lifecycle events by
+  flowscope's `SlotMessage::lifecycle_pos` / `seq` (messages before
+  their flow's `FlowEnded`); `ParserClosed<P>` / `ParserSideStopped<P>`
+  routed to the parser's protocol by `SlotId` (transport markers still
+  get all); `emit_anomalies` (auto with an `AnyFlowAnomaly` handler) /
+  `emit_packet_details`; `ctx.side()` / `ctx.orientation()`; per-flow
+  state freed on `FlowEnded` + sweep; outputs flushed on every exit;
+  tick handlers on replay (packet time) and packet-clock `now` live.
+- **Capture:** `Capture::stop_handle()` (eventfd `StopHandle`),
+  `Packets::next_packet_timeout()`; `ChannelCapture` stops with a full
+  channel; `EventStream` registers its waker.
+- **pcap:** `AsyncPcapSource` reads through flowscope's `CaptureReader`
+  (`pcap-reader`: SLL / SLL2 / RAW / NULL → Ethernet, EPB direction,
+  tsresol); `loop_at_eof` terminates and keeps time moving; pcap streams
+  sweep on packet time, have dedup / clamp / `snapshot_flow_stats`.
+- **Async reassembly:** `with_async_reassembler` → `ReassemblyStream`
+  over flowscope's `FlowDriver` (+ `sweep_pending_drain`):
+  `AsyncReassembler::{data, gap, close(EndReason)}`; `Conversation`
+  yields reassembled bytes / `Gap` / `SideStopped` / `Closed { reason }`.
+  `FlowStream` lost its `R` parameter.
+- **Stream API:** owned `snapshot_flow_stats` everywhere; conversions
+  keep queued events; the clamp keeps RX metadata; `from_streams` /
+  `_with` on the AF_XDP multi-streams; `MultiStreamConfig::with_emit_anomalies`.
+- **Allocation gates:** `tests/alloc_gate.rs` (engine + dispatch add 0
+  allocations per packet over replay; the source's 1 buffer is the
+  rest), `benches/zero_alloc.rs` asserts 0 total allocations; both run
+  in CI's `test-monitor-lib` job.
+- **CI:** the integration lane builds every privileged test
+  (`integration-tests,tokio,channel,af-xdp,flow,parse,pcap,http,icmp`).
+- Regression tests: `tests/session_engine_replay.rs`,
+  `monitor_reassembly_config_replay.rs`, `monitor_lifecycle_replay.rs`,
+  `monitor_parser_routing.rs`, `transport_routing_replay.rs`,
+  `stop_handle.rs`, `alloc_gate.rs`.
+
 **0.30.0 — RELEASED 2026-09-02** (published to crates.io, tag `0.30.0`,
 alongside **`netring-exporters` 0.6.0**).
 "flowscope 0.24, HTTP/2 marker, netns capture & the dependency refresh".
@@ -458,9 +511,10 @@ the existing 0.19 `ProtocolMonitor` / `AnomalyMonitor` surface
   `split_state_sink_counter::<T, K>()` — disjoint-field
   projection via audited `unsafe` (one `// SAFETY:` block per helper).
 - `benches/zero_alloc.rs` (`feature = "bench-zero-alloc"`) —
-  dhat profiler over 100k synthetic dispatches asserts
-  `Δ heap < 512 bytes / Δ blocks < 100`. Measured: **Δ 0 / 0**.
+  dhat profiler over 100k synthetic dispatches; since 0.31 it asserts
+  **0 allocations** (`total_blocks`), not just net growth.
   Run: `cargo bench --features bench-zero-alloc --bench zero_alloc`.
+  The full pipeline is gated by `tests/alloc_gate.rs` (0.31).
 
 **Phase D — Async escape hatch + 5 middleware layers:**
 - `src/monitor/async_handler.rs` — `AsyncHandler<E>` trait,
@@ -995,9 +1049,13 @@ just ci-full         # setcap + full test suite
   - `session_stream.rs` — `.session_stream(parser)` (plan 31)
   - `datagram_stream.rs` — `.datagram_stream(parser)` (plan 31)
   - `flow_broadcast.rs` — `.broadcast(buffer)` multi-subscriber (plan 50.6)
-  - `conversation.rs` — `Conversation<K>` aggregate
+  - `conversation.rs` — `Conversation<K>` aggregate over
+    `ReassemblyStream` (reassembled bytes, `Gap`, `SideStopped`,
+    `Closed { reason }`)
   - `dedup_stream.rs` — loopback dedup async wrapper
-  - `async_reassembler.rs` — async TCP reassembly hook
+  - `async_reassembler.rs` — `ReassemblyStream` (0.31): flowscope
+    `FlowDriver` + segment-buffer reassembly feeding per-side
+    `AsyncReassembler`s (`data` / `gap` / `close(EndReason)`)
   - `stream_capture.rs` — sealed `StreamCapture` trait (plan 20)
   - `multi_capture.rs` — `AsyncMultiCapture` + constructors (plan 22)
   - `multi_streams.rs` — `MultiFlowStream`/`MultiSessionStream`/
@@ -1006,9 +1064,9 @@ just ci-full         # setcap + full test suite
 - `src/pcap_source.rs` — `AsyncPcapSource` + `AsyncPcapConfig` +
   `PcapFormat` (plan 23; `pcap + tokio`)
 - `src/pcap_flow.rs` — `PcapFlowStream` bridge to flowscope's
-  `FlowTracker`, plus `PcapSessionStream` (over
-  `FlowSessionDriver`) and `PcapDatagramStream` (over
-  `FlowDatagramDriver`) for one-line offline L7 pipelines
+  `FlowTracker`, plus `PcapSessionStream` / `PcapDatagramStream`
+  over flowscope's `SessionDriver` / `DatagramDriver` (0.31) for
+  one-line offline L7 pipelines; packet-time sweeps
   (`pcap + tokio + flow`)
 - `docs/scaling.md` — fanout decision matrix + anti-patterns (plan 22)
 
@@ -1039,7 +1097,8 @@ just ci-full         # setcap + full test suite
     surfaced through `Ctx::monitor_name`.
 - `src/ctx/flow_state.rs` — `FlowStateMap` (lazy-create,
   TypeId-keyed) + `ctx.flow_state_mut::<T>()`. Backed by
-  flowscope's `FlowStateMap`; evicts on `FlowEnded` lifecycle.
+  flowscope's `FlowStateMap`; since 0.31 the slot is freed after the
+  flow's `FlowEnded` handlers and on the monitor's sweep.
 - `src/protocol/pattern.rs` — `pattern_detector!` macro_rules!
   wrapping `Arc<Mutex<D: DetectorScore>>`. Emits `Anomaly`
   scaffolded with `verdict.into()` mapping to `Severity`.
@@ -1132,7 +1191,7 @@ Cargo features unique to 0.21:
 - XDP loader (when `xdp-loader` enabled): `_xdp_attachment: Option<XdpAttachment>`
   in `XdpSocket` drops before the rings + fd, so the program detaches from
   the interface before AF_XDP shuts down
-- `flowscope` is a non-optional dep (currently `>= 0.24.0`) with
+- `flowscope` is a non-optional dep (currently `0.25`) with
   `default-features = false` (just `bitflags` + `thiserror`);
   `Timestamp` and `PacketView` are unconditionally re-exported
   from it. The `parse` / `flow` features add flowscope's
@@ -1158,29 +1217,28 @@ Cargo features unique to 0.21:
 
 ## Pre-publish checklist
 
-For the `0.30.0` `cargo publish` (release-prepped on `master`; run `just ci`
-before publishing). flowscope `0.24.1` is already published, so there's no
-upstream-first step or `[patch.crates-io]` to remove — the registry resolves it.
+For the `0.31.0` `cargo publish`. flowscope 0.25.0 is already on crates.io
+(published 2026-09-26) and the workspace resolves it from the registry — no
+upstream-first step or `[patch.crates-io]` to remove.
 
-1. Confirm `netring/Cargo.toml` is `version = "0.30.0"` (done) and depends on
-   `flowscope 0.24` (done); the `## 0.30.0` CHANGELOG banner is finalized (done)
-   — adjust the date header to tag day and flip "Implementation Status" above to
+1. Merge the 0.31 PR (#175) once CI is green.
+2. Confirm `netring/Cargo.toml` is `version = "0.31.0"` and
+   `netring-exporters` is `0.7.0` depending on `netring = "0.31"`; date the
+   `## 0.31.0` CHANGELOG banner and flip "Implementation Status" above to
    "released".
-2. `cargo publish -p netring --dry-run` to verify the package contents.
-3. `cargo publish -p netring`.
-4. **Then** publish the companion crate: `cargo publish -p netring-exporters`
-   (`0.6.0`; it depends on `netring = "0.30"`, so netring must be on crates.io
-   first). Its `kafka` feature needs `cmake`/librdkafka available at *its* build
-   time, not at publish time.
-5. `git tag 0.30.0` (no `v` prefix, per the user's convention).
+3. `cargo publish -p netring --dry-run`, then `cargo publish -p netring`.
+4. **Then** `cargo publish -p netring-exporters` (its `kafka` feature needs
+   `cmake`/librdkafka at *its* build time, not at publish time).
+5. `git tag 0.31.0` (no `v` prefix, per the user's convention).
 6. Update the Forgejo issue tracker at
-   <https://git.marcpardo.eu/marcpardo/netring> (close shipped issues, file
-   follow-ups). Planning lives in issues now — there is no `plans/` directory.
-   GitHub is a synced mirror; the canonical tracker is Forgejo.
+   <https://git.marcpardo.eu/marcpardo/netring> (the 0.31 issues close through
+   their commits on merge; close the epic #173). Planning lives in issues —
+   there is no `plans/` directory. GitHub is a synced mirror; the canonical
+   tracker is Forgejo.
 
 Two lanes exist on the forge and are worth using rather than publishing by
 hand: `publish-crates.yml` is `workflow_dispatch`-only and runs the test suite
-plus a `cargo-semver-checks` gate before publishing both crates — **0.30.0 is a
+plus a `cargo-semver-checks` gate before publishing both crates — **0.31.0 is a
 breaking release, so it needs `allow_breaking: yes`** or the gate will
 (correctly) stop it. `release.yml` fires on a bare-semver tag and attaches the
 tarball + `SHA256SUMS`.

@@ -1,5 +1,6 @@
 //! Async TCP reassembly with `channel_factory`: spawn a task per
-//! (flow, side), feed it bytes via mpsc with backpressure.
+//! (flow, side), feed it the side's reassembled bytes (and the gaps
+//! capture loss left) via mpsc with backpressure.
 //!
 //! Demonstrates the headline tokio + reassembler pattern. Open
 //! `AsyncCapture`, use `with_async_reassembler` + `channel_factory`,
@@ -10,13 +11,12 @@
 
 use std::env;
 
-use bytes::Bytes;
 use futures::StreamExt;
 use tokio::sync::mpsc;
 
 use netring::AsyncCapture;
 use netring::flow::extract::{FiveTuple, FiveTupleKey};
-use netring::flow::{FlowEvent, channel_factory};
+use netring::flow::{FlowEvent, ReassembledChunk, channel_factory};
 
 #[tokio::main(flavor = "current_thread")]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
@@ -27,16 +27,25 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let mut stream = cap
         .flow_stream(FiveTuple::bidirectional())
         .with_async_reassembler(channel_factory(|key: &FiveTupleKey, side| {
-            let (tx, mut rx) = mpsc::channel::<Bytes>(64);
+            let (tx, mut rx) = mpsc::channel::<ReassembledChunk>(64);
             let key_str = format!("{} <-> {}", key.a, key.b);
             tokio::spawn(async move {
                 let mut total: u64 = 0;
                 let mut chunks: u64 = 0;
-                while let Some(bytes) = rx.recv().await {
-                    total += bytes.len() as u64;
-                    chunks += 1;
+                let mut lost: u64 = 0;
+                while let Some(chunk) = rx.recv().await {
+                    match chunk {
+                        ReassembledChunk::Data(bytes) => {
+                            total += bytes.len() as u64;
+                            chunks += 1;
+                        }
+                        ReassembledChunk::Gap(n) => lost += n,
+                        _ => {}
+                    }
                 }
-                eprintln!("[done {key_str} side={side:?}] chunks={chunks} bytes={total}");
+                eprintln!(
+                    "[done {key_str} side={side:?}] chunks={chunks} bytes={total} lost={lost}"
+                );
             });
             tx
         }));

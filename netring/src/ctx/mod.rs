@@ -90,6 +90,15 @@ pub struct Ctx<'a> {
     /// Timestamp of the current event.
     pub ts: Timestamp,
 
+    /// Side of the flow whose bytes produced the current L7 message
+    /// (`None` for lifecycle events and ticks). Read through
+    /// [`Self::side`].
+    pub(crate) side: Option<flowscope::FlowSide>,
+
+    /// Canonical direction matching [`Self::side`]. Read through
+    /// [`Self::orientation`].
+    pub(crate) orientation: Option<flowscope::Orientation>,
+
     /// Source-interface index.
     pub source: SourceIdx,
 
@@ -172,6 +181,8 @@ impl<'a> Ctx<'a> {
             label_table: default_label_table(),
             tracker: None,
             arp_table: None,
+            side: None,
+            orientation: None,
         }
     }
 
@@ -204,7 +215,25 @@ impl<'a> Ctx<'a> {
             label_table: default_label_table(),
             tracker: None,
             arp_table: None,
+            side: None,
+            orientation: None,
         }
+    }
+
+    /// For an L7 message: which peer sent the bytes it was parsed from
+    /// (the flow's initiator or responder). `None` for lifecycle
+    /// events and ticks. New in 0.31.0.
+    #[inline]
+    pub fn side(&self) -> Option<flowscope::FlowSide> {
+        self.side
+    }
+
+    /// For an L7 message: the canonical (address-sorted) direction of
+    /// the bytes it was parsed from — `Forward` means `key.a → key.b`.
+    /// `None` for lifecycle events and ticks. New in 0.31.0.
+    #[inline]
+    pub fn orientation(&self) -> Option<flowscope::Orientation> {
+        self.orientation
     }
 
     /// The [Community ID](https://github.com/corelight/community-id-spec) v1
@@ -461,6 +490,8 @@ mod tests {
             label_table: default_label_table(),
             tracker: None,
             arp_table: None,
+            side: None,
+            orientation: None,
         }
     }
 

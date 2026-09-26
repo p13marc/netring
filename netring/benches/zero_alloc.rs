@@ -1,9 +1,12 @@
 //! Steady-state allocation regression bench, gated by `dhat`.
 //!
 //! Runs 100k synthetic dispatches through a fully-wired
-//! `Dispatcher` (3 event types + state mutation + counter bump +
-//! sink emission) and asserts the heap delta is below a small
-//! threshold.
+//! `Dispatcher` (3 handlers: state mutation + counter bump + sink
+//! emission) and asserts they perform **no allocation at all**
+//! (`total_blocks`, not just net heap growth — alloc-then-free counts).
+//!
+//! This covers the dispatcher only. The whole pipeline (pcap frames →
+//! engine → Monitor handlers) is gated by `tests/alloc_gate.rs`.
 //!
 //! Run with:
 //!
@@ -133,20 +136,19 @@ fn main() {
 
     let delta_bytes = after.curr_bytes as i64 - before.curr_bytes as i64;
     let delta_blocks = after.curr_blocks as i64 - before.curr_blocks as i64;
+    let allocations = after.total_blocks - before.total_blocks;
 
-    eprintln!("100k synthetic dispatches: Δ {delta_bytes} bytes, Δ {delta_blocks} blocks");
+    eprintln!(
+        "100k synthetic dispatches: {allocations} allocations; \
+         net Δ {delta_bytes} bytes, Δ {delta_blocks} live blocks"
+    );
 
-    // Threshold: 512 bytes of net heap growth and ≤100 new live
-    // blocks. The TimeBucketedCounter buckets churn on bump() —
-    // that's the only legitimate source of slow drift in steady
-    // state. Tightening past this would have to lift the bucket
-    // churn out of the bench.
-    assert!(
-        delta_bytes < 512,
-        "allocation regression: Δ {delta_bytes} bytes (limit 512). See dhat-heap.json."
+    assert_eq!(
+        allocations, 0,
+        "allocation regression: {allocations} allocations in 100k dispatches. See dhat-heap.json."
     );
     assert!(
-        delta_blocks < 100,
-        "block regression: Δ {delta_blocks} blocks (limit 100). See dhat-heap.json."
+        delta_bytes <= 0 && delta_blocks <= 0,
+        "heap growth: Δ {delta_bytes} bytes, Δ {delta_blocks} blocks. See dhat-heap.json."
     );
 }

@@ -272,8 +272,9 @@ is the run-mode counterpart to `run_until_signal()`.
 typed call: no `Box<dyn>` per event, no `HashMap` lookup.
 `AnomalyWriter<'sink>` is stack-only (`ArrayVec` for
 observations + metrics). The `benches/zero_alloc.rs` dhat
-profiler asserts `Δ 0 bytes / 0 blocks` per 100k synthetic
-dispatches.
+profiler asserts 0 allocations per 100k synthetic dispatches, and
+`tests/alloc_gate.rs` measures the whole replay pipeline (engine +
+dispatch add 0 per packet; see `docs/PERFORMANCE.md`).
 
 ## EINTR-safe syscalls
 

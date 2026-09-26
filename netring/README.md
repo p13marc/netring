@@ -30,8 +30,11 @@ loop {
 
 ## Why netring
 
-- **Zero-copy, zero-alloc hot path.** Borrowed batches; the Monitor run loop
-  does **0 allocations per packet** (enforced by a dhat regression bench).
+- **Zero-copy, zero-alloc hot path.** Borrowed batches; tracking, reassembly,
+  parsing and Monitor dispatch add **0 allocations per packet** in steady state
+  (measured end to end over pcap replay by `tests/alloc_gate.rs`; the replay
+  source's own per-packet buffer is the only one — live capture borrows the
+  ring).
 - **Two backends, one API.** AF_PACKET everywhere; AF_XDP for kernel-bypass
   line rate — same shapes, no native C deps (pure `libc`/`aya`).
 - **Async-first.** tokio adapters with a `Send + 'static` run loop you can
@@ -300,7 +303,7 @@ Organized by topic under [`examples/`](examples/README.md) — `basic/`,
   [Tuning](docs/TUNING_GUIDE.md) · [Troubleshooting](docs/TROUBLESHOOTING.md)
 - [Writing detectors](docs/WRITING_DETECTORS.md) ·
   [Fingerprints](docs/FINGERPRINTS.md) · [Metrics](docs/METRICS.md)
-- **Migrating:** [0.29 → 0.30](docs/MIGRATING_0.29_TO_0.30.md) ·
+- **Migrating:** [0.30 → 0.31](docs/MIGRATING_0.30_TO_0.31.md) · [0.29 → 0.30](docs/MIGRATING_0.29_TO_0.30.md) ·
   [0.28 → 0.29](docs/MIGRATING_0.28_TO_0.29.md) ·
   [0.27 → 0.28](docs/MIGRATING_0.27_TO_0.28.md) ·
   [earlier guides](docs/INDEX.md#migration-guides)

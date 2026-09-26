@@ -64,10 +64,12 @@ impl MessageProtocol for Http2 {}
 ///
 /// The prefilter is not the whole bill. A signature dispatch also
 /// installs a heuristic slot that probes **every TCP flow** the driver
-/// sees: one probe state per flow (in a map capped at 65 536 flows) and
-/// up to 16 KiB of buffered frames per flow held for replay. That is a
-/// memory cost, not just a CPU one — worth sizing before enabling it on
-/// a tap facing internet scan traffic. Register it when you actually
+/// sees: one probe state per flow (part of the flow's state, so bounded
+/// by the flow table's `max_flows`) and up to 64 KiB of stream bytes per
+/// flow held for replay until the signature decides (past that, a match
+/// starts the parser with a gap instead of rejecting the flow). That is
+/// a memory cost, not just a CPU one — worth sizing before enabling it
+/// on a tap facing internet scan traffic. Register it when you actually
 /// observe cleartext h2 — not by reflex.
 ///
 /// That is also why `http2` is in `all-parsers` but not in the
@@ -81,9 +83,11 @@ impl MessageProtocol for Http2 {}
 /// a *missing* preface — capture may start mid-connection, and the
 /// probe that pinned the flow has already consumed the bytes that
 /// identified it. It does not resynchronise: bytes that are not
-/// frame-aligned still fail, and the driver then drops the parser
-/// with `EndReason::ParseError` rather than keep feeding one whose
-/// HPACK state is meaningless.
+/// frame-aligned fail, and lost bytes break the HPACK state, so the
+/// parser is closed — [`ParserClosed<Http2>`](crate::protocol::event_typed::ParserClosed)
+/// with `EndReason::ParseError` or `EndReason::StreamGap` — rather than
+/// kept on a stream it can no longer decode. The flow itself stays
+/// tracked and ends normally.
 #[derive(Debug, Clone, Copy)]
 pub struct Http2;
 

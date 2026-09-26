@@ -74,8 +74,11 @@ fn open_two_lo_captures_yields_tagged_events() {
     });
 }
 
-#[test]
-fn open_workers_creates_n_captures_in_fanout_group() {
+// Async captures register with the tokio reactor: a runtime is needed
+// (these two ran without one and panicked — the integration lane's
+// feature set never compiled this file, so nobody saw it).
+#[tokio::test(flavor = "current_thread")]
+async fn open_workers_creates_n_captures_in_fanout_group() {
     // `lo` has no RSS so FanoutMode::Cpu will collapse to one
     // worker — use LoadBalance for the test instead so we get
     // round-robin and can observe distribution.
@@ -84,7 +87,8 @@ fn open_workers_creates_n_captures_in_fanout_group() {
     let multi = AsyncMultiCapture::open_workers_with_mode(
         helpers::LOOPBACK,
         4,
-        0xBEEF,
+        // Per-process id: a fixed one joins any straggler's group (#143).
+        helpers::unique_fanout_group(),
         FanoutMode::LoadBalance,
     )
     .expect("open_workers_with_mode");
@@ -105,23 +109,22 @@ fn aggregate_capture_stats_combines_per_source() {
             .expect("AsyncMultiCapture::open");
         let stream = multi.flow_stream(FiveTuple::bidirectional());
 
-        // Fresh capture — stats should be zero.
-        let agg = stream.capture_stats();
-        assert_eq!(agg.packets, 0);
-        assert_eq!(agg.drops, 0);
+        // Counts depend on whatever else talks on `lo` (and each read
+        // resets the kernel counters), so check the shape: one entry
+        // per source, each readable, and the aggregate readable too.
+        let _agg = stream.capture_stats();
 
         let per = stream.per_source_capture_stats();
         assert_eq!(per.len(), 2);
         for (label, stats) in per {
             assert!(label == helpers::LOOPBACK);
-            let s = stats.expect("alive").expect("stats");
-            assert_eq!(s.packets, 0);
+            let _s = stats.expect("alive").expect("stats");
         }
     });
 }
 
-#[test]
-fn from_captures_round_trips_with_labels() {
+#[tokio::test(flavor = "current_thread")]
+async fn from_captures_round_trips_with_labels() {
     use netring::{AsyncCapture, Capture, CaptureBuilder};
 
     let cap_a: Capture = CaptureBuilder::default()

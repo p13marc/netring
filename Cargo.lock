@@ -1425,9 +1425,9 @@ dependencies = [
 
 [[package]]
 name = "flowscope"
-version = "0.24.1"
+version = "0.25.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "1a011d3ef67b6a7ab93f2220098ae1e5758d6db5441a914aeebc7190cd810e7c"
+checksum = "0931e8ef80de5406923801cf4ed102f578e7c8963cd0cfc868384697b710a643"
 dependencies = [
  "ahash",
  "arrayvec",
@@ -1442,6 +1442,7 @@ dependencies = [
  "ldap-parser",
  "lru",
  "md-5",
+ "pcap-file",
  "quic-parser",
  "radius-parser",
  "serde",
@@ -1678,8 +1679,6 @@ version = "0.16.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "841d1cc9bed7f9236f321df977030373f4a4163ae1a7dbfe1a51a2c1a51d9100"
 dependencies = [
- "allocator-api2",
- "equivalent",
  "foldhash",
  "serde",
  "serde_core",
@@ -2091,11 +2090,11 @@ dependencies = [
 
 [[package]]
 name = "lru"
-version = "0.16.4"
+version = "0.18.5"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "7f66e8d5d03f609abc3a39e6f08e4164ebf1447a732906d39eb9b99b7919ef39"
+checksum = "ef9ac18847474e638e3702b76c65d4eb93428471a74778ef0f1be711717f89b5"
 dependencies = [
- "hashbrown 0.16.1",
+ "hashbrown 0.17.1",
 ]
 
 [[package]]
@@ -2212,7 +2211,7 @@ dependencies = [
 
 [[package]]
 name = "netring"
-version = "0.30.0"
+version = "0.31.0"
 dependencies = [
  "ahash",
  "arc-swap",
@@ -2251,7 +2250,7 @@ dependencies = [
 
 [[package]]
 name = "netring-exporters"
-version = "0.6.0"
+version = "0.7.0"
 dependencies = [
  "arrow",
  "bytes",
@@ -3045,9 +3044,9 @@ dependencies = [
 
 [[package]]
 name = "rustls"
-version = "0.23.43"
+version = "0.23.45"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "0283386ce02abc0151e1761d08802dfe86c173b0b494af5cbc086574e453da06"
+checksum = "0d41d731c7d2f962d1ccc364cec258de3c0e93b38c2fb3ba97ac74513048d634"
 dependencies = [
  "log",
  "once_cell",

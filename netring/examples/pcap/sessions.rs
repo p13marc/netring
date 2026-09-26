@@ -64,7 +64,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     eprintln!("[sessions] {path}");
 
     let source = AsyncPcapSource::open(&path).await?;
-    let mut sessions = source.sessions(FiveTuple::bidirectional(), ByteCounter);
+    let mut sessions = source
+        .sessions(FiveTuple::bidirectional(), ByteCounter)
+        // Report gaps, overflow and retransmit inconsistencies.
+        .with_emit_anomalies(true);
 
     let mut total_init = 0u64;
     let mut total_resp = 0u64;
@@ -87,6 +90,33 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             SessionEvent::Closed { key, reason, .. } => {
                 closed += 1;
                 println!("- {a} <-> {b} ({reason:?})", a = key.a, b = key.b);
+            }
+            // Bytes missing from the capture stop the parser's reading
+            // of that side (its `on_gap` default); the other side goes on.
+            SessionEvent::ParserSideStopped {
+                key,
+                side,
+                reason,
+                detail,
+                ..
+            } => {
+                eprintln!(
+                    "! {a} <-> {b}: {side:?} stopped ({reason:?} {detail:?})",
+                    a = key.a,
+                    b = key.b
+                );
+            }
+            SessionEvent::ParserClosed {
+                key,
+                reason,
+                detail,
+                ..
+            } => {
+                eprintln!(
+                    "! {a} <-> {b}: parser closed ({reason:?} {detail:?})",
+                    a = key.a,
+                    b = key.b
+                );
             }
             SessionEvent::FlowAnomaly { kind, .. } => {
                 eprintln!("! flow anomaly: {kind:?}");

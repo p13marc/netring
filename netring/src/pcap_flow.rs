@@ -1,13 +1,33 @@
-//! [`PcapFlowStream`] — flow tracking over offline pcap files.
+//! Flow and L7 streams over offline capture files.
 //!
-//! Bridges [`crate::pcap_source::AsyncPcapSource`]'s
-//! `OwnedPacket` output to flowscope's `FlowTracker`, yielding
-//! [`FlowEvent`]s through the same `Stream` trait as a live
-//! [`FlowStream`](crate::FlowStream).
+//! - [`PcapFlowStream`] — [`FlowEvent`]s from a flowscope
+//!   [`FlowTracker`], the offline twin of [`FlowStream`](crate::FlowStream).
+//! - [`PcapSessionStream`] / [`PcapDatagramStream`] — flowscope's
+//!   [`SessionDriver`] / [`DatagramDriver`] over the file, the offline
+//!   twins of [`SessionStream`](crate::SessionStream) /
+//!   [`DatagramStream`](crate::DatagramStream). Same engine, same
+//!   events.
 //!
-//! Available under `pcap + flow + tokio`. Live and offline pipelines
-//! can be unified by writing a generic consumer that takes any
-//! `Stream<Item = Result<FlowEvent<K>, Error>>`:
+//! Replaying a capture reproduces what the live path would have seen:
+//!
+//! - **Idle timeouts run on packet time.** Every
+//!   [`FlowTrackerConfig::sweep_interval`] of *capture* time the stream
+//!   sweeps at the current packet's timestamp (the live streams sweep
+//!   on a wall-clock timer), so a 10-minute pause in the capture ends
+//!   the flow exactly as it would have live — `idle_timeout_fn`
+//!   included. The end of the file flushes every remaining flow.
+//! - [`with_dedup`](PcapFlowStream::with_dedup) drops duplicate frames
+//!   before tracking. The packet direction is known when the capture
+//!   recorded it (pcapng EPB flags, Linux cooked `tcpdump -i any`
+//!   captures), so [`Dedup::loopback`](crate::Dedup::loopback) works on
+//!   those; otherwise use a direction-agnostic
+//!   [`Dedup::content`](crate::Dedup::content) — e.g. for merged
+//!   multi-interface captures.
+//! - [`with_monotonic_timestamps`](PcapFlowStream::with_monotonic_timestamps)
+//!   clamps timestamps to a running max — for merged captures whose
+//!   interfaces interleave out of order, or `loop_at_eof` replays.
+//!
+//! Available under `pcap + flow + tokio`.
 //!
 //! ```no_run
 //! # use futures::StreamExt;
@@ -15,7 +35,7 @@
 //! # async fn _ex() -> Result<(), Box<dyn std::error::Error>> {
 //! use netring::pcap_source::AsyncPcapSource;
 //!
-//! let source = AsyncPcapSource::open("trace.pcap").await?;
+//! let source = AsyncPcapSource::open("trace.pcapng").await?;
 //! let mut events = source.flow_events(FiveTuple::bidirectional());
 //! while let Some(evt) = events.next().await {
 //!     let _ = evt?;
@@ -24,41 +44,142 @@
 //! # Ok(()) }
 //! ```
 
-use std::collections::{HashMap, VecDeque};
+use std::collections::VecDeque;
 use std::pin::Pin;
 use std::task::{Context, Poll};
 use std::time::Duration;
 
-use ahash::RandomState;
-use flowscope::tracker::FlowEvents;
 use flowscope::{
-    BufferedReassembler, BufferedReassemblerFactory, DatagramParser, FlowEvent, FlowExtractor,
-    FlowSide, FlowTracker, FlowTrackerConfig, L4Proto, Orientation, PacketView, Reassembler,
-    ReassemblerFactory, SessionParser, SessionParserFactory, Timestamp,
+    DatagramDriver, DatagramParser, FlowEvent, FlowExtractor, FlowStats, FlowTracker,
+    FlowTrackerConfig, PacketView, SessionDriver, SessionEvent, SessionParser, TemplateFactory,
+    Timestamp,
 };
 use futures_core::Stream;
 
-use crate::async_adapters::datagram_stream::{convert_event, peek_udp_payload};
-use crate::async_adapters::session_event::SessionEvent;
-use crate::async_adapters::session_stream::{build_reassembler_factory, process_session_event};
+use crate::dedup::Dedup;
 use crate::error::Error;
+use crate::packet::OwnedPacket;
 use crate::pcap_source::AsyncPcapSource;
 
+/// Pre-tracking pipeline shared by the three pcap streams: dedup,
+/// timestamp clamp, and the packet-time sweep schedule.
+struct Replay {
+    source: AsyncPcapSource,
+    dedup: Option<Dedup>,
+    monotonic_ts: Option<Timestamp>,
+    sweep_interval: Duration,
+    last_sweep: Option<Timestamp>,
+    finished: bool,
+}
+
+/// What the replay produced on one poll.
+enum Step {
+    /// A packet to track, with its (clamped) timestamp. `sweep_first`
+    /// is `Some(now)` when a sweep is due before it.
+    Packet(OwnedPacket, Timestamp, Option<Timestamp>),
+    /// The file is exhausted: flush.
+    Eof,
+    Err(Error),
+    Pending,
+}
+
+impl Replay {
+    fn new(source: AsyncPcapSource, sweep_interval: Duration) -> Self {
+        Self {
+            source,
+            dedup: None,
+            monotonic_ts: None,
+            sweep_interval,
+            last_sweep: None,
+            finished: false,
+        }
+    }
+
+    fn poll_step(&mut self, cx: &mut Context<'_>) -> Step {
+        loop {
+            match Pin::new(&mut self.source).poll_next(cx) {
+                Poll::Ready(Some(Ok(pkt))) => {
+                    if let Some(d) = self.dedup.as_mut()
+                        && !d.keep_raw(&pkt.data, pkt.direction, pkt.timestamp)
+                    {
+                        continue;
+                    }
+                    let ts = match self.monotonic_ts.as_mut() {
+                        Some(last) => {
+                            *last = (*last).max(pkt.timestamp);
+                            *last
+                        }
+                        None => pkt.timestamp,
+                    };
+                    let sweep = match self.last_sweep {
+                        None => {
+                            self.last_sweep = Some(ts);
+                            None
+                        }
+                        Some(last) if ts.saturating_sub(last) >= self.sweep_interval => {
+                            self.last_sweep = Some(ts);
+                            Some(ts)
+                        }
+                        Some(_) => None,
+                    };
+                    return Step::Packet(pkt, ts, sweep);
+                }
+                Poll::Ready(Some(Err(e))) => return Step::Err(e),
+                Poll::Ready(None) => return Step::Eof,
+                Poll::Pending => return Step::Pending,
+            }
+        }
+    }
+}
+
+macro_rules! replay_builders {
+    () => {
+        /// Drop duplicate frames before tracking. The direction-aware
+        /// [`Dedup::loopback`](crate::Dedup::loopback) needs a capture
+        /// that recorded it (pcapng EPB flags, Linux cooked); otherwise
+        /// use [`Dedup::content`](crate::Dedup::content).
+        pub fn with_dedup(mut self, dedup: Dedup) -> Self {
+            self.replay.dedup = Some(dedup);
+            self
+        }
+
+        /// Borrow the dedup, if one is set (for its counters).
+        pub fn dedup(&self) -> Option<&Dedup> {
+            self.replay.dedup.as_ref()
+        }
+
+        /// Mutable access to the dedup, if one is set.
+        pub fn dedup_mut(&mut self) -> Option<&mut Dedup> {
+            self.replay.dedup.as_mut()
+        }
+
+        /// Clamp timestamps to a running max so time never goes
+        /// backwards (merged captures, `loop_at_eof` replays).
+        pub fn with_monotonic_timestamps(mut self, enable: bool) -> Self {
+            self.replay.monotonic_ts = enable.then(Timestamp::default);
+            self
+        }
+
+        /// Number of packets the upstream source has yielded so far.
+        /// Analogue of `capture_stats().packets` for offline replay.
+        pub fn packets_read(&self) -> u64 {
+            self.replay.source.packets_yielded()
+        }
+    };
+}
+
+// ── PcapFlowStream ────────────────────────────────────────────
+
 /// Async stream of [`FlowEvent`]s produced by feeding an offline
-/// pcap source through flowscope's [`FlowTracker`]. Mirrors the
-/// surface of [`FlowStream`](crate::FlowStream) for the bits that
-/// apply to offline replay (no `with_dedup`, since pcap files
-/// don't have loopback re-injection; no `capture_stats` since
-/// there's no kernel ring).
+/// capture through flowscope's [`FlowTracker`]. See the
+/// [module docs](self) for the replay semantics.
 pub struct PcapFlowStream<E>
 where
     E: FlowExtractor,
 {
-    source: AsyncPcapSource,
+    replay: Replay,
     tracker: FlowTracker<E, ()>,
     pending: VecDeque<FlowEvent<E::Key>>,
-    /// Set when the upstream source has signaled EOF.
-    eof: bool,
 }
 
 impl<E> PcapFlowStream<E>
@@ -67,16 +188,17 @@ where
     E::Key: Clone + Send + 'static,
 {
     pub(crate) fn new(source: AsyncPcapSource, extractor: E) -> Self {
+        let tracker = FlowTracker::new(extractor);
         Self {
-            source,
-            tracker: FlowTracker::new(extractor),
+            replay: Replay::new(source, tracker.config().sweep_interval),
+            tracker,
             pending: VecDeque::new(),
-            eof: false,
         }
     }
 
     /// Replace the inner [`FlowTracker`]'s config.
     pub fn with_config(mut self, config: FlowTrackerConfig) -> Self {
+        self.replay.sweep_interval = config.sweep_interval;
         self.tracker.set_config(config);
         self
     }
@@ -91,28 +213,31 @@ where
         self
     }
 
+    replay_builders!();
+
     /// Borrow the inner tracker for stats / introspection.
     pub fn tracker(&self) -> &FlowTracker<E, ()> {
         &self.tracker
     }
 
     /// Cumulative tracker counters: `flows_created`, `flows_ended`,
-    /// `flows_evicted`, `packets_unmatched`. One-call accessor for
-    /// the inner [`flowscope::FlowTrackerStats`].
+    /// `flows_evicted`, `packets_unmatched`.
     pub fn tracker_stats(&self) -> &flowscope::FlowTrackerStats {
         self.tracker.stats()
     }
 
-    /// Count of live flow entries. O(n) walk; call from a metrics
-    /// tick, not every poll.
+    /// Count of live flow entries.
     pub fn active_flows(&self) -> usize {
-        self.tracker.flows().count()
+        self.tracker.flow_count()
     }
 
-    /// Number of packets the upstream source has yielded so far.
-    /// Analogue of `capture_stats().packets` for offline replay.
-    pub fn packets_read(&self) -> u64 {
-        self.source.packets_yielded()
+    /// Live `(key, stats)` for every tracked flow, owned (the same shape
+    /// as the session / datagram streams; no reassembly here, so those
+    /// fields stay zero).
+    pub fn snapshot_flow_stats(&self) -> impl Iterator<Item = (E::Key, FlowStats)> + '_ {
+        self.tracker
+            .iter_active()
+            .map(|af| (af.key.clone(), af.stats.clone()))
     }
 }
 
@@ -129,35 +254,25 @@ where
             if let Some(evt) = this.pending.pop_front() {
                 return Poll::Ready(Some(Ok(evt)));
             }
-            if this.eof {
-                // flowscope 0.4: end-of-input flush via `Timestamp::MAX`.
-                // Every still-open flow exceeds its idle threshold against
-                // this anchor, so each emits its terminal `Ended` event.
-                for ev in this.tracker.sweep(Timestamp::MAX) {
-                    this.pending.push_back(ev);
-                }
-                if let Some(evt) = this.pending.pop_front() {
-                    return Poll::Ready(Some(Ok(evt)));
-                }
+            if this.replay.finished {
                 return Poll::Ready(None);
             }
-
-            // Pull the next OwnedPacket from the source.
-            match Pin::new(&mut this.source).poll_next(cx) {
-                Poll::Ready(Some(Ok(owned))) => {
-                    let view = PacketView::new(&owned.data, owned.timestamp);
-                    let evts: FlowEvents<E::Key> = this.tracker.track(view);
-                    for ev in evts {
-                        this.pending.push_back(ev);
+            match this.replay.poll_step(cx) {
+                Step::Packet(pkt, ts, sweep) => {
+                    if let Some(now) = sweep {
+                        this.pending.extend(this.tracker.sweep(now));
                     }
-                    // loop — pop the first pending event next iteration.
+                    this.pending
+                        .extend(this.tracker.track(PacketView::new(&pkt.data, ts)));
                 }
-                Poll::Ready(Some(Err(e))) => return Poll::Ready(Some(Err(e))),
-                Poll::Ready(None) => {
-                    this.eof = true;
-                    // loop — next iteration sweeps + drains tracker.
+                Step::Eof => {
+                    // End-of-input flush: every still-open flow exceeds
+                    // its idle threshold against `Timestamp::MAX`.
+                    this.pending.extend(this.tracker.sweep(Timestamp::MAX));
+                    this.replay.finished = true;
                 }
-                Poll::Pending => return Poll::Pending,
+                Step::Err(e) => return Poll::Ready(Some(Err(e))),
+                Step::Pending => return Poll::Pending,
             }
         }
     }
@@ -174,20 +289,10 @@ impl AsyncPcapSource {
         PcapFlowStream::new(self, extractor)
     }
 
-    /// One-step offline L7 pipeline: feed the pcap source through a
-    /// flowscope [`FlowTracker`] + per-flow [`SessionParser`] and
-    /// yield netring's typed [`SessionEvent`]s.
-    ///
-    /// The end-of-input flush (a final sweep at
-    /// [`Timestamp::MAX`](flowscope::Timestamp::MAX) that closes
-    /// every still-open flow) is folded in — no manual driver
-    /// `finish()` required.
-    ///
-    /// Reuses the exact translation the live
-    /// [`SessionStream`](crate::async_adapters::session_stream::SessionStream)
-    /// runs, so live and offline L7 pipelines are byte-for-byte
-    /// equivalent. (flowscope 0.20 retired the per-parser
-    /// `FlowSessionDriver`; netring drives the tracker directly.)
+    /// One-step offline L7 pipeline: flowscope's [`SessionDriver`]
+    /// (flow tracking, TCP reassembly, per-flow `parser` clones) over
+    /// the capture, yielding its [`SessionEvent`]s. The end-of-input
+    /// flush is folded in.
     ///
     /// ```no_run
     /// # use futures::StreamExt;
@@ -215,21 +320,20 @@ impl AsyncPcapSource {
     where
         E: FlowExtractor,
         E::Key: std::hash::Hash + Eq + Clone + Send + 'static,
-        P: SessionParser + Clone + Send + Sync,
+        P: SessionParser + Clone,
     {
-        PcapSessionStream::new(self, FlowTracker::new(extractor), parser)
+        self.flow_events(extractor).session_stream(parser)
     }
 
     /// One-step offline UDP-datagram pipeline — the
-    /// [`DatagramParser`] mirror of [`Self::sessions`]. The
-    /// end-of-input flush is automatic.
+    /// [`DatagramParser`] mirror of [`Self::sessions`].
     pub fn datagrams<E, P>(self, extractor: E, parser: P) -> PcapDatagramStream<E, P>
     where
         E: FlowExtractor,
         E::Key: std::hash::Hash + Eq + Clone + Send + 'static,
-        P: DatagramParser + Clone + Send + Sync,
+        P: DatagramParser + Clone,
     {
-        PcapDatagramStream::new(self, FlowTracker::new(extractor), parser)
+        self.flow_events(extractor).datagram_stream(parser)
     }
 }
 
@@ -238,369 +342,178 @@ where
     E: FlowExtractor,
     E::Key: std::hash::Hash + Eq + Clone + Send + 'static,
 {
-    /// Convert this flow-event stream into a typed session stream.
-    /// Tracker config (idle timeouts, reassembler buffer caps,
-    /// overflow policy) **and any in-flight flow state** carry over:
-    /// the existing [`FlowTracker`] is moved into the session stream
-    /// (flowscope 0.20 retired `FlowSessionDriver`, so netring no
-    /// longer has to rebuild a fresh tracker here).
+    /// Convert into a typed session stream. The tracker (config, idle
+    /// predicate, in-flight flows), the replay settings (dedup,
+    /// monotonic clamp) and already-queued events carry over.
     pub fn session_stream<P>(self, parser: P) -> PcapSessionStream<E, P>
     where
-        E::Key: std::hash::Hash + Eq,
-        P: SessionParser + Clone + Send + Sync,
+        P: SessionParser + Clone,
     {
-        PcapSessionStream::new(self.source, self.tracker, parser)
+        PcapSessionStream {
+            replay: self.replay,
+            driver: SessionDriver::from_tracker(self.tracker, TemplateFactory(parser)),
+            // Queued flow events keep their session form.
+            pending: self
+                .pending
+                .into_iter()
+                .filter_map(SessionEvent::from_flow_event)
+                .collect(),
+            scratch: Vec::new(),
+        }
     }
 
     /// UDP-datagram mirror of [`Self::session_stream`].
     pub fn datagram_stream<P>(self, parser: P) -> PcapDatagramStream<E, P>
     where
-        E::Key: std::hash::Hash + Eq,
-        P: DatagramParser + Clone + Send + Sync,
+        P: DatagramParser + Clone,
     {
-        PcapDatagramStream::new(self.source, self.tracker, parser)
-    }
-}
-
-/// A [`SessionParserFactory`] that clones a seed parser per flow.
-///
-/// flowscope's blanket `SessionParserFactory for P` uses `P::default()`,
-/// which would discard a builder-configured seed (e.g. a parser tuned
-/// via `with_*`). Cloning the seed preserves the config the retired
-/// `FlowSessionDriver::new(extractor, parser)` carried, so we only
-/// require `P: Clone`, not `P: Default`.
-struct CloneSeed<P>(P);
-
-impl<K, P> SessionParserFactory<K> for CloneSeed<P>
-where
-    P: SessionParser + Clone,
-{
-    type Parser = P;
-    fn new_parser(&mut self, _key: &K) -> P {
-        self.0.clone()
-    }
-}
-
-// ── PcapSessionStream ─────────────────────────────────────────
-
-/// Async stream of netring [`SessionEvent`]s produced by feeding an
-/// offline pcap source through a flowscope [`FlowTracker`] +
-/// per-flow [`SessionParser`].
-///
-/// flowscope 0.20 retired the per-parser `FlowSessionDriver`; this
-/// stream drives the tracker, reassemblers, and parsers directly,
-/// reusing the same `process_session_event` translation as the live
-/// [`SessionStream`](crate::async_adapters::session_stream::SessionStream)
-/// so the two paths stay equivalent. Drives `on_tick` on the EOF
-/// flush and emits every still-open flow's terminal `Closed` event
-/// (a final sweep at [`Timestamp::MAX`]).
-///
-/// Produced by [`AsyncPcapSource::sessions`] or
-/// [`PcapFlowStream::session_stream`].
-pub struct PcapSessionStream<E, P>
-where
-    E: FlowExtractor,
-    E::Key: std::hash::Hash + Eq + Clone + Send + 'static,
-    P: SessionParser + Clone + Send + Sync,
-{
-    source: AsyncPcapSource,
-    tracker: FlowTracker<E, ()>,
-    parser_factory: CloneSeed<P>,
-    parsers: HashMap<E::Key, P, RandomState>,
-    reassembler_factory: BufferedReassemblerFactory,
-    reassemblers: HashMap<(E::Key, FlowSide), BufferedReassembler, RandomState>,
-    pending: VecDeque<SessionEvent<E::Key, <P as SessionParser>::Message>>,
-    finished: bool,
-}
-
-impl<E, P> PcapSessionStream<E, P>
-where
-    E: FlowExtractor,
-    E::Key: std::hash::Hash + Eq + Clone + Send + 'static,
-    P: SessionParser + Clone + Send + Sync,
-{
-    pub(crate) fn new(source: AsyncPcapSource, tracker: FlowTracker<E, ()>, parser: P) -> Self {
-        let reassembler_factory = build_reassembler_factory(tracker.config());
-        Self {
-            source,
-            tracker,
-            parser_factory: CloneSeed(parser),
-            parsers: HashMap::with_hasher(RandomState::new()),
-            reassembler_factory,
-            reassemblers: HashMap::with_hasher(RandomState::new()),
-            pending: VecDeque::new(),
-            finished: false,
+        PcapDatagramStream {
+            replay: self.replay,
+            driver: DatagramDriver::from_tracker(self.tracker, TemplateFactory(parser)),
+            // Queued flow events keep their session form.
+            pending: self
+                .pending
+                .into_iter()
+                .filter_map(SessionEvent::from_flow_event)
+                .collect(),
+            scratch: Vec::new(),
         }
     }
-
-    /// Borrow the inner [`FlowTracker`] — useful for
-    /// `snapshot_flow_stats` / introspection mid-stream.
-    pub fn tracker(&self) -> &FlowTracker<E, ()> {
-        &self.tracker
-    }
-
-    /// Cumulative tracker counters.
-    pub fn tracker_stats(&self) -> &flowscope::FlowTrackerStats {
-        self.tracker.stats()
-    }
-
-    /// Count of live flow entries. O(n) walk.
-    pub fn active_flows(&self) -> usize {
-        self.tracker.flows().count()
-    }
-
-    /// Number of packets the upstream source has yielded so far.
-    pub fn packets_read(&self) -> u64 {
-        self.source.packets_yielded()
-    }
 }
 
-impl<E, P> Stream for PcapSessionStream<E, P>
-where
-    E: FlowExtractor + Unpin,
-    E::Key: std::hash::Hash + Eq + Clone + Send + Unpin + 'static,
-    P: SessionParser + Clone + Send + Sync + Unpin,
-    <P as SessionParser>::Message: Unpin,
-{
-    type Item = Result<SessionEvent<E::Key, <P as SessionParser>::Message>, Error>;
+// ── PcapSessionStream / PcapDatagramStream ────────────────────
 
-    fn poll_next(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
-        let this = self.get_mut();
-        loop {
-            if let Some(ev) = this.pending.pop_front() {
-                return Poll::Ready(Some(Ok(ev)));
-            }
-            if this.finished {
-                return Poll::Ready(None);
-            }
-            match Pin::new(&mut this.source).poll_next(cx) {
-                Poll::Ready(Some(Ok(owned))) => {
-                    let view = PacketView::new(&owned.data, owned.timestamp);
-                    let view_ts = view.timestamp;
-                    let parsers = &mut this.parsers;
-                    let parser_factory = &mut this.parser_factory;
-                    let reassemblers = &mut this.reassemblers;
-                    let reassembler_factory = &mut this.reassembler_factory;
-                    let pending = &mut this.pending;
+macro_rules! pcap_l7_stream {
+    ($name:ident, $driver:ident, $parser:ident, $what:literal) => {
+        #[doc = concat!("Async stream of [`SessionEvent`]s from flowscope's [`", stringify!($driver), "`] over an offline capture — ", $what, ".")]
+        ///
+        /// The offline twin of the live stream: same engine, same
+        /// events, same parser-close / gap / overflow semantics; idle
+        /// timeouts run on packet time (see the [module docs](self)).
+        pub struct $name<E, P>
+        where
+            E: FlowExtractor,
+            E::Key: std::hash::Hash + Eq + Clone + Send + 'static,
+            P: $parser + Clone,
+        {
+            replay: Replay,
+            driver: $driver<E, TemplateFactory<P>>,
+            pending: VecDeque<SessionEvent<E::Key, <P as $parser>::Message>>,
+            scratch: Vec<SessionEvent<E::Key, <P as $parser>::Message>>,
+        }
 
-                    // Route each TCP segment into its per-(flow, side)
-                    // reassembler, then translate the tracker events
-                    // exactly like the live SessionStream.
-                    let evts = this
-                        .tracker
-                        .track_with_payload(view, |key, side, seq, payload| {
-                            if payload.is_empty() {
-                                return;
+        impl<E, P> $name<E, P>
+        where
+            E: FlowExtractor,
+            E::Key: std::hash::Hash + Eq + Clone + Send + 'static,
+            P: $parser + Clone,
+        {
+            /// Replace the config (flow table and reassembly limits).
+            pub fn with_config(mut self, config: FlowTrackerConfig) -> Self {
+                self.replay.sweep_interval = config.sweep_interval;
+                self.driver.set_config(config);
+                self
+            }
+
+            /// Emit [`SessionEvent::FlowAnomaly`] /
+            /// [`SessionEvent::TrackerAnomaly`]. Default: off.
+            pub fn with_emit_anomalies(mut self, enable: bool) -> Self {
+                self.driver.set_emit_anomalies(enable);
+                self
+            }
+
+            /// Override the per-flow idle timeout via a key predicate.
+            pub fn with_idle_timeout_fn<G>(mut self, f: G) -> Self
+            where
+                G: Fn(&E::Key, Option<flowscope::L4Proto>) -> Option<Duration>
+                    + Send
+                    + Sync
+                    + 'static,
+            {
+                self.driver.set_idle_timeout_fn(f);
+                self
+            }
+
+            replay_builders!();
+
+            /// Borrow the flow table.
+            pub fn tracker(&self) -> &FlowTracker<E, ()> {
+                self.driver.tracker()
+            }
+
+            /// Borrow the underlying flowscope driver.
+            pub fn driver(&self) -> &$driver<E, TemplateFactory<P>> {
+                &self.driver
+            }
+
+            /// Live `(key, stats)` for every tracked flow, reassembly
+            /// diagnostics included.
+            pub fn snapshot_flow_stats(&self) -> impl Iterator<Item = (E::Key, FlowStats)> + '_ {
+                self.driver.snapshot_flow_stats()
+            }
+
+            /// Cumulative tracker counters.
+            pub fn tracker_stats(&self) -> &flowscope::FlowTrackerStats {
+                self.driver.tracker().stats()
+            }
+
+            /// Count of live flow entries.
+            pub fn active_flows(&self) -> usize {
+                self.driver.tracker().flow_count()
+            }
+        }
+
+        impl<E, P> Stream for $name<E, P>
+        where
+            E: FlowExtractor + Unpin,
+            E::Key: std::hash::Hash + Eq + Clone + Send + Unpin + 'static,
+            P: $parser + Clone + Unpin,
+            <P as $parser>::Message: Unpin,
+        {
+            type Item = Result<SessionEvent<E::Key, <P as $parser>::Message>, Error>;
+
+            fn poll_next(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
+                let this = self.get_mut();
+                loop {
+                    if let Some(ev) = this.pending.pop_front() {
+                        return Poll::Ready(Some(Ok(ev)));
+                    }
+                    if this.replay.finished {
+                        return Poll::Ready(None);
+                    }
+                    match this.replay.poll_step(cx) {
+                        Step::Packet(pkt, ts, sweep) => {
+                            if let Some(now) = sweep {
+                                this.driver.sweep_into(now, &mut this.scratch);
                             }
-                            reassemblers
-                                .entry((key.clone(), side))
-                                .or_insert_with(|| reassembler_factory.new_reassembler(key, side))
-                                .segment(seq, payload, view_ts);
-                        });
-                    for ev in evts {
-                        process_session_event::<E::Key, CloneSeed<P>>(
-                            ev,
-                            parsers,
-                            parser_factory,
-                            reassemblers,
-                            pending,
-                        );
-                    }
-                }
-                Poll::Ready(Some(Err(e))) => return Poll::Ready(Some(Err(e))),
-                Poll::Ready(None) => {
-                    // End-of-input flush: drive `on_tick` once at
-                    // `Timestamp::MAX`, then sweep so every still-open
-                    // flow emits its terminal `Closed`.
-                    let now = Timestamp::MAX;
-                    let sweep_events: Vec<_> = this.tracker.sweep(now).into_iter().collect();
-                    let mut scratch = Vec::new();
-                    for (key, parser) in this.parsers.iter_mut() {
-                        let parser_kind = parser.parser_kind();
-                        let orientation = this
-                            .tracker
-                            .get(key)
-                            .map(|e| e.initiator_orientation())
-                            .unwrap_or_default();
-                        scratch.clear();
-                        parser.on_tick(now, &mut scratch);
-                        for m in scratch.drain(..) {
-                            this.pending.push_back(SessionEvent::Application {
-                                key: key.clone(),
-                                side: FlowSide::Initiator,
-                                orientation,
-                                message: m,
-                                ts: now,
-                                parser_kind,
-                            });
+                            this.driver
+                                .track_into(PacketView::new(&pkt.data, ts), &mut this.scratch);
                         }
+                        Step::Eof => {
+                            // End-of-input flush: final `on_tick`, then every
+                            // still-open flow closes (`sweep(Timestamp::MAX)`).
+                            this.driver.finish_into(&mut this.scratch);
+                            this.replay.finished = true;
+                        }
+                        Step::Err(e) => return Poll::Ready(Some(Err(e))),
+                        Step::Pending => return Poll::Pending,
                     }
-                    for ev in sweep_events {
-                        process_session_event::<E::Key, CloneSeed<P>>(
-                            ev,
-                            &mut this.parsers,
-                            &mut this.parser_factory,
-                            &mut this.reassemblers,
-                            &mut this.pending,
-                        );
-                    }
-                    this.finished = true;
+                    this.pending.extend(this.scratch.drain(..));
                 }
-                Poll::Pending => return Poll::Pending,
             }
         }
-    }
+    };
 }
 
-// ── PcapDatagramStream ────────────────────────────────────────
-
-/// Async stream of netring [`SessionEvent`]s produced by feeding an
-/// offline pcap source through a flowscope [`FlowTracker`] +
-/// per-flow [`DatagramParser`]. The UDP mirror of
-/// [`PcapSessionStream`]; reuses the live `DatagramStream`'s
-/// `convert_event` translation and UDP payload-feed.
-pub struct PcapDatagramStream<E, P>
-where
-    E: FlowExtractor,
-    E::Key: std::hash::Hash + Eq + Clone + Send + 'static,
-    P: DatagramParser + Clone + Send + Sync,
-{
-    source: AsyncPcapSource,
-    tracker: FlowTracker<E, ()>,
-    factory: P,
-    parsers: HashMap<E::Key, P, RandomState>,
-    pending: VecDeque<SessionEvent<E::Key, <P as DatagramParser>::Message>>,
-    finished: bool,
-}
-
-impl<E, P> PcapDatagramStream<E, P>
-where
-    E: FlowExtractor,
-    E::Key: std::hash::Hash + Eq + Clone + Send + 'static,
-    P: DatagramParser + Clone + Send + Sync,
-{
-    pub(crate) fn new(source: AsyncPcapSource, tracker: FlowTracker<E, ()>, parser: P) -> Self {
-        Self {
-            source,
-            tracker,
-            factory: parser,
-            parsers: HashMap::with_hasher(RandomState::new()),
-            pending: VecDeque::new(),
-            finished: false,
-        }
-    }
-
-    /// Borrow the inner [`FlowTracker`].
-    pub fn tracker(&self) -> &FlowTracker<E, ()> {
-        &self.tracker
-    }
-
-    /// Cumulative tracker counters.
-    pub fn tracker_stats(&self) -> &flowscope::FlowTrackerStats {
-        self.tracker.stats()
-    }
-
-    /// Count of live flow entries. O(n) walk.
-    pub fn active_flows(&self) -> usize {
-        self.tracker.flows().count()
-    }
-
-    /// Number of packets the upstream source has yielded so far.
-    pub fn packets_read(&self) -> u64 {
-        self.source.packets_yielded()
-    }
-}
-
-impl<E, P> Stream for PcapDatagramStream<E, P>
-where
-    E: FlowExtractor + Unpin,
-    E::Key: std::hash::Hash + Eq + Clone + Send + Unpin + 'static,
-    P: DatagramParser + Clone + Send + Sync + Unpin,
-    <P as DatagramParser>::Message: Unpin,
-{
-    type Item = Result<SessionEvent<E::Key, <P as DatagramParser>::Message>, Error>;
-
-    fn poll_next(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
-        let this = self.get_mut();
-        loop {
-            if let Some(ev) = this.pending.pop_front() {
-                return Poll::Ready(Some(Ok(ev)));
-            }
-            if this.finished {
-                return Poll::Ready(None);
-            }
-            match Pin::new(&mut this.source).poll_next(cx) {
-                Poll::Ready(Some(Ok(owned))) => {
-                    let view = PacketView::new(&owned.data, owned.timestamp);
-                    let view_ts = view.timestamp;
-                    let frame: &[u8] = &owned.data;
-                    let extracted = this.tracker.extractor().extract(view);
-                    for ev in this.tracker.track(view) {
-                        convert_event(ev, &mut this.parsers, &mut this.pending);
-                    }
-                    // For UDP packets, feed the per-flow parser.
-                    if let Some(extracted) = extracted
-                        && extracted.l4 == Some(L4Proto::Udp)
-                        && let Some(payload) = peek_udp_payload(frame)
-                    {
-                        let key = &extracted.key;
-                        let side = match extracted.orientation {
-                            Orientation::Forward => FlowSide::Initiator,
-                            Orientation::Reverse => FlowSide::Responder,
-                        };
-                        let parser = this
-                            .parsers
-                            .entry(key.clone())
-                            .or_insert_with(|| this.factory.clone());
-                        let parser_kind = parser.parser_kind();
-                        let mut messages = Vec::new();
-                        parser.parse(payload, side, view_ts, &mut messages);
-                        for message in messages {
-                            this.pending.push_back(SessionEvent::Application {
-                                key: key.clone(),
-                                side,
-                                orientation: extracted.orientation,
-                                message,
-                                ts: view_ts,
-                                parser_kind,
-                            });
-                        }
-                    }
-                }
-                Poll::Ready(Some(Err(e))) => return Poll::Ready(Some(Err(e))),
-                Poll::Ready(None) => {
-                    // End-of-input flush: drive `on_tick` once at
-                    // `Timestamp::MAX`, then sweep to close flows.
-                    let now = Timestamp::MAX;
-                    let sweep_events: Vec<_> = this.tracker.sweep(now).into_iter().collect();
-                    let mut scratch = Vec::new();
-                    for (key, parser) in this.parsers.iter_mut() {
-                        let parser_kind = parser.parser_kind();
-                        let orientation = this
-                            .tracker
-                            .get(key)
-                            .map(|e| e.initiator_orientation())
-                            .unwrap_or_default();
-                        scratch.clear();
-                        parser.on_tick(now, &mut scratch);
-                        for m in scratch.drain(..) {
-                            this.pending.push_back(SessionEvent::Application {
-                                key: key.clone(),
-                                side: FlowSide::Initiator,
-                                orientation,
-                                message: m,
-                                ts: now,
-                                parser_kind,
-                            });
-                        }
-                    }
-                    for ev in sweep_events {
-                        convert_event(ev, &mut this.parsers, &mut this.pending);
-                    }
-                    this.finished = true;
-                }
-                Poll::Pending => return Poll::Pending,
-            }
-        }
-    }
-}
+pcap_l7_stream!(
+    PcapSessionStream,
+    SessionDriver,
+    SessionParser,
+    "TCP, reassembled"
+);
+pcap_l7_stream!(
+    PcapDatagramStream,
+    DatagramDriver,
+    DatagramParser,
+    "UDP / ICMP payloads"
+);

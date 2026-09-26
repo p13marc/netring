@@ -88,7 +88,7 @@ pub(crate) mod syscall;
 // Promote the most common types to the crate root so users can write
 // `use netring::Capture;` rather than `use netring::afpacket::rx::Capture;`.
 
-pub use afpacket::rx::{Capture, CaptureBuilder, Packets};
+pub use afpacket::rx::{Capture, CaptureBuilder, Packets, StopHandle};
 pub use afpacket::tx::{Injector, InjectorBuilder, TxSlot};
 pub use bridge::{
     Bridge, BridgeAction, BridgeBuilder, BridgeDirection, BridgeHandles, BridgeStats,
@@ -190,27 +190,34 @@ pub mod flow {
         Reassembler, ReassemblerFactory,
     };
 
-    // netring 0.20-adoption: flowscope retired its public `SessionEvent`
-    // (flowscope #100) and deleted `Flow{Session,Datagram}Driver`
-    // (#99). netring now owns its session-stream event type.
-    #[cfg(all(feature = "tokio", feature = "flow"))]
-    pub use crate::async_adapters::session_event::SessionEvent;
+    // flowscope 0.25: the single-parser engines (`SessionDriver` /
+    // `DatagramDriver`) and their ordered `SessionEvent` are public
+    // again; netring's session / datagram streams are async fronts for
+    // them and yield flowscope's event type unchanged.
+    #[cfg(feature = "flow")]
+    pub use flowscope::{
+        DatagramDriver, GapResponse, ReassemblyStop, SessionDriver, SessionEvent, StreamChunks,
+    };
 
     /// Async reassembly types for tokio integration.
     /// Available under `flow + tokio`.
     #[cfg(all(feature = "tokio", feature = "flow"))]
     pub use crate::async_adapters::async_reassembler::{
         AsyncReassembler, AsyncReassemblerFactory, ChannelFactory, ChannelReassembler,
-        channel_factory,
+        ConsumerFuture, ReassembledChunk, ReassemblyStream, channel_factory,
     };
 }
 
 #[cfg(all(feature = "tokio", feature = "flow"))]
+pub use async_adapters::async_reassembler::ReassemblyStream;
+#[cfg(all(feature = "tokio", feature = "flow"))]
 pub use async_adapters::conversation::{Conversation, ConversationChunk, ConversationStream};
+#[cfg(all(feature = "tokio", feature = "flow"))]
+pub use async_adapters::datagram_stream::DatagramStream;
 #[cfg(all(feature = "tokio", feature = "flow"))]
 pub use async_adapters::flow_broadcast::{BroadcastRecvError, FlowBroadcast, FlowSubscriber};
 #[cfg(all(feature = "tokio", feature = "flow"))]
-pub use async_adapters::flow_stream::{AsyncReassemblerSlot, FlowStream, NoReassembler};
+pub use async_adapters::flow_stream::FlowStream;
 #[cfg(all(feature = "tokio", feature = "flow"))]
 pub use async_adapters::multi_capture::AsyncMultiCapture;
 #[cfg(all(
@@ -235,6 +242,8 @@ pub use async_adapters::multi_streams::{
 pub use async_adapters::multi_streams::{
     XdpMultiDatagramStream, XdpMultiFlowStream, XdpMultiSessionStream,
 };
+#[cfg(all(feature = "tokio", feature = "flow"))]
+pub use async_adapters::session_stream::SessionStream;
 #[cfg(feature = "tokio")]
 pub use async_adapters::stream_capture::{StreamCapture, StreamSetFilter};
 #[cfg(all(feature = "pcap", feature = "tokio", feature = "flow"))]

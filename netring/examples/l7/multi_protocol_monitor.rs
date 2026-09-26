@@ -70,7 +70,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                     b = key.b,
                     p = stats.packets_initiator + stats.packets_responder,
                 );
-                if matches!(reason, EndReason::Rst | EndReason::BufferOverflow) {
+                if matches!(reason, EndReason::Rst | EndReason::Evicted) {
                     eprintln!("  (note: aborted flow — {reason:?})");
                 }
                 bump_ended(l4, &mut stats_icmp, &mut stats_tcp, &mut stats_udp);

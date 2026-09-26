@@ -37,7 +37,7 @@
 //! drive a flowscope [`FlowTracker`](flowscope::FlowTracker) directly.
 
 use std::fs::File;
-use std::io::{BufReader, Read};
+use std::io::Read;
 use std::path::{Path, PathBuf};
 use std::pin::Pin;
 use std::sync::Arc;
@@ -46,8 +46,6 @@ use std::task::{Context, Poll};
 use std::time::{Duration, Instant};
 
 use futures_core::Stream;
-use pcap_file::pcap::PcapReader;
-use pcap_file::pcapng::PcapNgReader;
 use tokio::sync::mpsc;
 
 use crate::error::Error;
@@ -123,7 +121,7 @@ impl AsyncPcapSource {
         let task_yielded = packets_yielded.clone();
 
         let task = tokio::task::spawn_blocking(move || {
-            if let Err(e) = run_reader(&path, format, config, tx, task_yielded) {
+            if let Err(e) = run_reader(&path, config, tx, task_yielded) {
                 tracing::warn!(
                     target: "netring::pcap_source",
                     error = ?e,
@@ -189,111 +187,85 @@ fn sniff_format(path: &Path) -> Result<PcapFormat, Error> {
 
 // ── background reader ────────────────────────────────────────────
 
+/// Read the capture through flowscope's [`CaptureReader`]: pcap and
+/// pcapng (per-interface timestamp resolution), every link type
+/// flowscope can turn into Ethernet (Linux cooked `tcpdump -i any`
+/// captures, raw IP, BSD loopback), and the recorded direction.
+///
+/// Stops for good when the receiver is gone or the file is corrupt —
+/// it never reopens after either. With `loop_at_eof`, each pass is
+/// shifted by the capture's span (plus a microsecond) so packet time
+/// keeps advancing: idle timeouts and sweeps keep working on a looping
+/// replay. An empty file is not looped.
+///
+/// [`CaptureReader`]: flowscope::pcap::CaptureReader
 fn run_reader(
     path: &Path,
-    format: PcapFormat,
     config: AsyncPcapConfig,
     tx: mpsc::Sender<Result<OwnedPacket, Error>>,
     packets_yielded: Arc<AtomicU64>,
 ) -> Result<(), Error> {
+    let mut shift = Duration::ZERO;
+    let mut unsupported = 0u64;
     loop {
-        match format {
-            PcapFormat::LegacyPcap => read_legacy(path, &config, &tx, &packets_yielded)?,
-            PcapFormat::Pcapng => read_pcapng(path, &config, &tx, &packets_yielded)?,
-        }
-        if !config.loop_at_eof {
-            break;
-        }
-    }
-    Ok(())
-}
-
-fn read_legacy(
-    path: &Path,
-    config: &AsyncPcapConfig,
-    tx: &mpsc::Sender<Result<OwnedPacket, Error>>,
-    packets_yielded: &Arc<AtomicU64>,
-) -> Result<(), Error> {
-    let file = File::open(path).map_err(Error::Io)?;
-    let mut reader = PcapReader::new(BufReader::new(file))
-        .map_err(|e| Error::Config(format!("PcapReader::new failed: {e}")))?;
-
-    let mut start_wall: Option<Instant> = None;
-    let mut first_ts: Option<Timestamp> = None;
-
-    while let Some(pkt) = reader.next_packet() {
-        let pkt = match pkt {
-            Ok(p) => p,
-            Err(e) => {
-                let _ = tx.blocking_send(Err(Error::Config(format!("pcap read: {e}"))));
+        let reader = flowscope::pcap::CaptureReader::open(path)
+            .map_err(|e| Error::Config(format!("{path:?}: {e}")))?;
+        let mut span: Option<(Duration, Duration)> = None;
+        let mut start_wall: Option<Instant> = None;
+        let mut first_ts: Option<Timestamp> = None;
+        for packet in reader {
+            let p = match packet {
+                Ok(p) => p,
+                Err(e) => {
+                    let _ = tx.blocking_send(Err(Error::Config(format!("{path:?}: {e}"))));
+                    return Ok(());
+                }
+            };
+            let raw = p.timestamp;
+            span = Some(match span {
+                None => (raw, raw),
+                Some((lo, hi)) => (lo.min(raw), hi.max(raw)),
+            });
+            let ts = duration_to_timestamp(raw + shift);
+            let orig_len = p.original_len;
+            let direction = match p.direction {
+                Some(flowscope::pcap::CaptureDirection::Outbound) => PacketDirection::Outgoing,
+                // Inbound, or not recorded: the benign default.
+                _ => PacketDirection::Host,
+            };
+            let frame = match p.into_ethernet() {
+                Ok(frame) => frame,
+                Err(datalink) => {
+                    if unsupported == 0 {
+                        tracing::warn!(
+                            target: "netring::pcap_source",
+                            ?datalink,
+                            "skipping packets of an unsupported link type"
+                        );
+                    }
+                    unsupported += 1;
+                    continue;
+                }
+            };
+            if config.replay_speed > 0.0 {
+                pace(ts, &mut start_wall, &mut first_ts, config.replay_speed);
+            }
+            let owned = owned_packet(frame, orig_len, ts, direction);
+            if tx.blocking_send(Ok(owned)).is_err() {
+                // Receiver dropped: nobody is reading any more.
                 return Ok(());
             }
-        };
-
-        let ts = duration_to_timestamp(pkt.timestamp);
-        if config.replay_speed > 0.0 {
-            pace(ts, &mut start_wall, &mut first_ts, config.replay_speed);
+            packets_yielded.fetch_add(1, Ordering::Relaxed);
         }
-
-        let owned = pcap_packet_to_owned(&pkt.data, pkt.orig_len, ts);
-        if tx.blocking_send(Ok(owned)).is_err() {
-            // Receiver dropped.
+        let Some((lo, hi)) = span else {
+            // Nothing read: looping would spin on an empty file.
+            return Ok(());
+        };
+        if !config.loop_at_eof || tx.is_closed() {
             return Ok(());
         }
-        packets_yielded.fetch_add(1, Ordering::Relaxed);
+        shift += hi - lo + Duration::from_micros(1);
     }
-    Ok(())
-}
-
-fn read_pcapng(
-    path: &Path,
-    config: &AsyncPcapConfig,
-    tx: &mpsc::Sender<Result<OwnedPacket, Error>>,
-    packets_yielded: &Arc<AtomicU64>,
-) -> Result<(), Error> {
-    use pcap_file::pcapng::Block;
-
-    let file = File::open(path).map_err(Error::Io)?;
-    let mut reader = PcapNgReader::new(BufReader::new(file))
-        .map_err(|e| Error::Config(format!("PcapNgReader::new failed: {e}")))?;
-
-    let mut start_wall: Option<Instant> = None;
-    let mut first_ts: Option<Timestamp> = None;
-
-    while let Some(block) = reader.next_block() {
-        let block = match block {
-            Ok(b) => b,
-            Err(e) => {
-                let _ = tx.blocking_send(Err(Error::Config(format!("pcapng read: {e}"))));
-                return Ok(());
-            }
-        };
-
-        // Extract (timestamp, data, orig_len) from EPB or SimplePacket.
-        let (ts, data, orig_len) = match block {
-            Block::EnhancedPacket(epb) => {
-                let ts = duration_to_timestamp(epb.timestamp);
-                (ts, epb.data.into_owned(), epb.original_len)
-            }
-            Block::SimplePacket(sp) => {
-                // SimplePacket has no timestamp — use zero.
-                (Timestamp::new(0, 0), sp.data.into_owned(), sp.original_len)
-            }
-            // IDB, SHB, NRB, ISB, etc.: skip silently.
-            _ => continue,
-        };
-
-        if config.replay_speed > 0.0 {
-            pace(ts, &mut start_wall, &mut first_ts, config.replay_speed);
-        }
-
-        let owned = pcap_packet_to_owned(&data, orig_len, ts);
-        if tx.blocking_send(Ok(owned)).is_err() {
-            return Ok(());
-        }
-        packets_yielded.fetch_add(1, Ordering::Relaxed);
-    }
-    Ok(())
 }
 
 /// Wall-clock pacing: sleep so the wall delta matches the pcap
@@ -326,17 +298,22 @@ fn duration_to_timestamp(d: Duration) -> Timestamp {
     Timestamp::new(d.as_secs() as u32, d.subsec_nanos())
 }
 
-fn pcap_packet_to_owned(data: &[u8], orig_len: u32, timestamp: Timestamp) -> OwnedPacket {
+fn owned_packet(
+    data: Vec<u8>,
+    orig_len: u32,
+    timestamp: Timestamp,
+    direction: PacketDirection,
+) -> OwnedPacket {
     OwnedPacket {
-        data: data.to_vec(),
+        data,
         timestamp,
         // Pcap files carry a timestamp but not its clock source.
         timestamp_clock: crate::packet::TimestampClock::None,
         original_len: orig_len as usize,
         status: PacketStatus::default(),
-        // Pcap files don't record direction — use Host as the
-        // benign default (extractor doesn't care).
-        direction: PacketDirection::Host,
+        // From the pcapng EPB flags or a cooked header; `Host` when
+        // the capture did not record it.
+        direction,
         rxhash: 0,
         vlan_tci: 0,
         vlan_tpid: 0,
@@ -437,6 +414,57 @@ mod tests {
     /// detection branch and the `Block::*` matching are smoke-tested
     /// by the integration test against committed fixtures (if any).
     /// Format-only sanity:
+    /// pcapng timestamps are ticks of the interface's `if_tsresol`
+    /// (default µs); pcap-file hands them back as nanoseconds, so a
+    /// µs capture used to replay 1000× too early.
+    #[tokio::test]
+    async fn pcapng_timestamps_honour_the_interface_resolution() {
+        use futures::StreamExt;
+        use pcap_file::DataLink;
+        use pcap_file::pcapng::PcapNgWriter;
+        use pcap_file::pcapng::blocks::enhanced_packet::EnhancedPacketBlock;
+        use pcap_file::pcapng::blocks::interface_description::{
+            InterfaceDescriptionBlock, InterfaceDescriptionOption,
+        };
+
+        let mut f = NamedTempFile::new().expect("tempfile");
+        {
+            let mut w = PcapNgWriter::new(&mut f).expect("writer");
+            for options in [vec![], vec![InterfaceDescriptionOption::IfTsResol(9)]] {
+                w.write_pcapng_block(InterfaceDescriptionBlock {
+                    linktype: DataLink::ETHERNET,
+                    snaplen: 65535,
+                    options,
+                })
+                .expect("idb");
+            }
+            // Interface 0 (µs): 1_700_000_000.25 s.
+            w.write_pcapng_block(EnhancedPacketBlock {
+                interface_id: 0,
+                timestamp: Duration::from_nanos(1_700_000_000_250_000),
+                original_len: 1,
+                data: std::borrow::Cow::Borrowed(&[1u8]),
+                options: vec![],
+            })
+            .expect("epb");
+            // Interface 1 (ns): 1_700_000_000 s + 7 ns.
+            w.write_pcapng_block(EnhancedPacketBlock {
+                interface_id: 1,
+                timestamp: Duration::from_nanos(1_700_000_000_000_000_007),
+                original_len: 1,
+                data: std::borrow::Cow::Borrowed(&[2u8]),
+                options: vec![],
+            })
+            .expect("epb");
+        }
+        let mut source = AsyncPcapSource::open(f.path()).await.expect("open");
+        assert_eq!(source.format(), PcapFormat::Pcapng);
+        let p1 = source.next().await.unwrap().expect("p1");
+        assert_eq!(p1.timestamp, Timestamp::new(1_700_000_000, 250_000_000));
+        let p2 = source.next().await.unwrap().expect("p2");
+        assert_eq!(p2.timestamp, Timestamp::new(1_700_000_000, 7));
+    }
+
     #[test]
     fn pcapng_magic_recognized() {
         // PCAPNG Section Header Block magic in little-endian.
@@ -445,5 +473,100 @@ mod tests {
         f.write_all(&bytes).expect("write");
         let fmt = sniff_format(f.path()).expect("sniff");
         assert_eq!(fmt, PcapFormat::Pcapng);
+    }
+
+    /// #159: a looping reader stops once nobody reads (it used to
+    /// reopen the file in a tight loop forever).
+    #[tokio::test]
+    async fn loop_at_eof_stops_when_the_receiver_is_dropped() {
+        let f = write_legacy_pcap(&[(Timestamp::new(1, 0), vec![0xaa; 60])]);
+        let cfg = AsyncPcapConfig {
+            loop_at_eof: true,
+            queue_depth: 1,
+            ..Default::default()
+        };
+        let AsyncPcapSource {
+            receiver, _task, ..
+        } = AsyncPcapSource::open_with_config(f.path(), cfg)
+            .await
+            .unwrap();
+        drop(receiver);
+        tokio::time::timeout(Duration::from_secs(5), _task)
+            .await
+            .expect("the reader task ends")
+            .unwrap();
+    }
+
+    /// #159: an empty file is not looped.
+    #[tokio::test]
+    async fn loop_at_eof_on_an_empty_file_terminates() {
+        use futures::StreamExt;
+        let f = write_legacy_pcap(&[]);
+        let cfg = AsyncPcapConfig {
+            loop_at_eof: true,
+            ..Default::default()
+        };
+        let mut src = AsyncPcapSource::open_with_config(f.path(), cfg)
+            .await
+            .unwrap();
+        let next = tokio::time::timeout(Duration::from_secs(5), src.next())
+            .await
+            .expect("stream ends");
+        assert!(next.is_none());
+    }
+
+    /// #168: each pass of a looping replay continues the clock.
+    #[tokio::test]
+    async fn looped_packet_time_keeps_advancing() {
+        use futures::StreamExt;
+        let f = write_legacy_pcap(&[
+            (Timestamp::new(10, 0), vec![0xaa; 60]),
+            (Timestamp::new(11, 0), vec![0xbb; 60]),
+        ]);
+        let cfg = AsyncPcapConfig {
+            loop_at_eof: true,
+            ..Default::default()
+        };
+        let mut src = AsyncPcapSource::open_with_config(f.path(), cfg)
+            .await
+            .unwrap();
+        let mut ts = Vec::new();
+        for _ in 0..6 {
+            ts.push(src.next().await.unwrap().unwrap().timestamp);
+        }
+        assert!(ts.windows(2).all(|w| w[0] < w[1]), "{ts:?}");
+        // The second pass starts a microsecond after the first ended.
+        assert_eq!(ts[2], Timestamp::new(11, 1_000));
+    }
+
+    /// #167: a Linux cooked capture (`tcpdump -i any`) arrives as
+    /// Ethernet, with the recorded direction.
+    #[tokio::test]
+    async fn linux_cooked_capture_is_normalised() {
+        use futures::StreamExt;
+        use pcap_file::pcap::{PcapHeader, PcapPacket, PcapWriter};
+        let ip = [
+            0x45u8, 0, 0, 20, 0, 0, 0, 0, 64, 17, 0, 0, 10, 0, 0, 1, 10, 0, 0, 2,
+        ];
+        let mut sll = vec![0, 4, 0, 1, 0, 6, 1, 2, 3, 4, 5, 6, 0, 0, 0x08, 0x00];
+        sll.extend_from_slice(&ip);
+        let file = NamedTempFile::new().unwrap();
+        let header = PcapHeader {
+            datalink: pcap_file::DataLink::LINUX_SLL,
+            ..Default::default()
+        };
+        let mut w = PcapWriter::with_header(file.reopen().unwrap(), header).unwrap();
+        w.write_packet(&PcapPacket::new(
+            Duration::from_secs(1),
+            sll.len() as u32,
+            &sll,
+        ))
+        .unwrap();
+        drop(w);
+        let mut src = AsyncPcapSource::open(file.path()).await.unwrap();
+        let p = src.next().await.unwrap().unwrap();
+        assert_eq!(&p.data[12..14], &[0x08, 0x00]);
+        assert_eq!(&p.data[14..], &ip);
+        assert_eq!(p.direction, PacketDirection::Outgoing);
     }
 }

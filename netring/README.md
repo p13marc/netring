@@ -30,8 +30,11 @@ loop {
 
 ## Why netring
 
-- **Zero-copy, zero-alloc hot path.** Borrowed batches; the Monitor run loop
-  does **0 allocations per packet** (enforced by a dhat regression bench).
+- **Zero-copy, zero-alloc hot path.** Borrowed batches; tracking, reassembly,
+  parsing and Monitor dispatch add **0 allocations per packet** in steady state
+  (measured end to end over pcap replay by `tests/alloc_gate.rs`; the replay
+  source's own per-packet buffer is the only one — live capture borrows the
+  ring).
 - **Two backends, one API.** AF_PACKET everywhere; AF_XDP for kernel-bypass
   line rate — same shapes, no native C deps (pure `libc`/`aya`).
 - **Async-first.** tokio adapters with a `Send + 'static` run loop you can

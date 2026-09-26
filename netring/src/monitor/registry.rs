@@ -358,7 +358,7 @@ pub trait ProtocolSlot: Send + Sync {
         &self,
         _dispatcher: &mut Dispatcher,
         _ctx: &mut Ctx<'_>,
-        _event: &ParserEvent,
+        _event: &ParserEvent<'_>,
     ) -> Result<()> {
         Ok(())
     }
@@ -367,16 +367,18 @@ pub trait ProtocolSlot: Send + Sync {
     fn dispatch_parser_event_async<'a>(
         &'a self,
         _dispatcher: &'a mut Dispatcher,
-        _event: ParserEvent,
+        _event: ParserEvent<'a>,
     ) -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<()>> + Send + 'a>> {
         Box::pin(async { Ok(()) })
     }
 }
 
 /// A parser close or side stop, as the run loop routes it to the
-/// parser's protocol slot.
-#[derive(Debug, Clone)]
-pub struct ParserEvent {
+/// parser's protocol slot. Borrows the event's detail: the typed
+/// `ParserClosed<P>` / `ParserSideStopped<P>` (and its `String`) is
+/// only built when a handler is registered for it.
+#[derive(Debug, Clone, Copy)]
+pub struct ParserEvent<'a> {
     /// Flow key.
     pub key: flowscope::extract::FiveTupleKey,
     /// The parser's kind.
@@ -386,7 +388,7 @@ pub struct ParserEvent {
     /// Why.
     pub reason: flowscope::EndReason,
     /// Detail (poison reason, gap size, stop reason).
-    pub detail: Option<String>,
+    pub detail: Option<&'a str>,
     /// When.
     pub ts: flowscope::Timestamp,
 }
@@ -407,29 +409,27 @@ fn is_transport_marker<P: 'static>() -> bool {
 fn dispatch_typed_parser_event<P: Protocol>(
     dispatcher: &mut Dispatcher,
     ctx: &mut Ctx<'_>,
-    e: &ParserEvent,
+    e: &ParserEvent<'_>,
 ) -> Result<()> {
     use crate::protocol::event_typed::{ParserClosed, ParserSideStopped};
-    if is_transport_marker::<P>() {
+    let handled = match e.side {
+        None => dispatcher.handles::<ParserClosed<P>>(),
+        Some(_) => dispatcher.handles::<ParserSideStopped<P>>(),
+    };
+    if !handled || is_transport_marker::<P>() {
         return Ok(());
     }
+    let detail = e.detail.map(str::to_owned);
     let (flow, ts) = (ctx.flow, ctx.ts);
     ctx.flow = Some(e.key);
     ctx.ts = e.ts;
     let r = match e.side {
         None => dispatcher.dispatch::<ParserClosed<P>>(
-            &ParserClosed::<P>::new(e.key, e.parser_kind, e.reason, e.detail.clone(), e.ts),
+            &ParserClosed::<P>::new(e.key, e.parser_kind, e.reason, detail, e.ts),
             ctx,
         ),
         Some(side) => dispatcher.dispatch::<ParserSideStopped<P>>(
-            &ParserSideStopped::<P>::new(
-                e.key,
-                e.parser_kind,
-                side,
-                e.reason,
-                e.detail.clone(),
-                e.ts,
-            ),
+            &ParserSideStopped::<P>::new(e.key, e.parser_kind, side, e.reason, detail, e.ts),
             ctx,
         ),
     };
@@ -440,13 +440,18 @@ fn dispatch_typed_parser_event<P: Protocol>(
 
 fn dispatch_typed_parser_event_async<'a, P: Protocol>(
     dispatcher: &'a mut Dispatcher,
-    e: ParserEvent,
+    e: ParserEvent<'a>,
 ) -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<()>> + Send + 'a>> {
     use crate::protocol::event_typed::{ParserClosed, ParserSideStopped};
     Box::pin(async move {
-        if is_transport_marker::<P>() {
+        let handled = match e.side {
+            None => dispatcher.handles_async::<ParserClosed<P>>(),
+            Some(_) => dispatcher.handles_async::<ParserSideStopped<P>>(),
+        };
+        if !handled || is_transport_marker::<P>() {
             return Ok(());
         }
+        let detail = e.detail.map(str::to_owned);
         match e.side {
             None => {
                 dispatcher
@@ -454,7 +459,7 @@ fn dispatch_typed_parser_event_async<'a, P: Protocol>(
                         e.key,
                         e.parser_kind,
                         e.reason,
-                        e.detail,
+                        detail,
                         e.ts,
                     ))
                     .await
@@ -466,7 +471,7 @@ fn dispatch_typed_parser_event_async<'a, P: Protocol>(
                         e.parser_kind,
                         side,
                         e.reason,
-                        e.detail,
+                        detail,
                         e.ts,
                     ))
                     .await
@@ -555,7 +560,7 @@ impl<P: Protocol> ProtocolSlot for TypedProtocolSlot<P> {
         &self,
         dispatcher: &mut Dispatcher,
         ctx: &mut Ctx<'_>,
-        event: &ParserEvent,
+        event: &ParserEvent<'_>,
     ) -> Result<()> {
         dispatch_typed_parser_event::<P>(dispatcher, ctx, event)
     }
@@ -563,7 +568,7 @@ impl<P: Protocol> ProtocolSlot for TypedProtocolSlot<P> {
     fn dispatch_parser_event_async<'a>(
         &'a self,
         dispatcher: &'a mut Dispatcher,
-        event: ParserEvent,
+        event: ParserEvent<'a>,
     ) -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<()>> + Send + 'a>> {
         dispatch_typed_parser_event_async::<P>(dispatcher, event)
     }
@@ -708,7 +713,7 @@ where
         &self,
         dispatcher: &mut Dispatcher,
         ctx: &mut Ctx<'_>,
-        event: &ParserEvent,
+        event: &ParserEvent<'_>,
     ) -> Result<()> {
         dispatch_typed_parser_event::<P>(dispatcher, ctx, event)
     }
@@ -716,7 +721,7 @@ where
     fn dispatch_parser_event_async<'a>(
         &'a self,
         dispatcher: &'a mut Dispatcher,
-        event: ParserEvent,
+        event: ParserEvent<'a>,
     ) -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<()>> + Send + 'a>> {
         dispatch_typed_parser_event_async::<P>(dispatcher, event)
     }

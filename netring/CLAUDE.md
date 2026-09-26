@@ -483,9 +483,10 @@ the existing 0.19 `ProtocolMonitor` / `AnomalyMonitor` surface
   `split_state_sink_counter::<T, K>()` — disjoint-field
   projection via audited `unsafe` (one `// SAFETY:` block per helper).
 - `benches/zero_alloc.rs` (`feature = "bench-zero-alloc"`) —
-  dhat profiler over 100k synthetic dispatches asserts
-  `Δ heap < 512 bytes / Δ blocks < 100`. Measured: **Δ 0 / 0**.
+  dhat profiler over 100k synthetic dispatches; since 0.31 it asserts
+  **0 allocations** (`total_blocks`), not just net growth.
   Run: `cargo bench --features bench-zero-alloc --bench zero_alloc`.
+  The full pipeline is gated by `tests/alloc_gate.rs` (0.31).
 
 **Phase D — Async escape hatch + 5 middleware layers:**
 - `src/monitor/async_handler.rs` — `AsyncHandler<E>` trait,

@@ -449,6 +449,21 @@ impl Dispatcher {
         }
     }
 
+    /// Whether a sync handler is registered for `P` — lets callers skip
+    /// building a payload nobody reads.
+    pub fn handles<P: 'static>(&self) -> bool {
+        self.slot_by_type
+            .get(TypeId::of::<P>())
+            .is_some_and(|i| !self.slots[i as usize].is_empty())
+    }
+
+    /// Whether an async handler is registered for `P`.
+    pub fn handles_async<P: 'static>(&self) -> bool {
+        self.slot_by_type
+            .get(TypeId::of::<P>())
+            .is_some_and(|i| !self.async_slots[i as usize].is_empty())
+    }
+
     /// Number of distinct event types registered. Useful for tests.
     pub fn type_count(&self) -> usize {
         self.slot_by_type.len()

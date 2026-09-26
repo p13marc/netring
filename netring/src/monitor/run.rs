@@ -1720,7 +1720,7 @@ async fn dispatch_tracked_event(
             *key,
             *parser_kind,
             *reason,
-            detail.clone(),
+            detail.as_deref(),
             *ts,
         )),
         FsEvent::ParserSideStopped {
@@ -1738,7 +1738,7 @@ async fn dispatch_tracked_event(
             *key,
             *parser_kind,
             *reason,
-            detail.clone(),
+            detail.as_deref(),
             *ts,
         )),
         _ => None,
@@ -1785,28 +1785,53 @@ async fn dispatch_tracked_event(
     // Sync handlers first, then async — but on the SAME event, so one error
     // is isolated per-event under `Isolate` (a malformed flow can't tear
     // down the pipeline).
-    let res = match dispatch_lifecycle(
-        dispatcher,
-        sink,
-        state_map,
-        counters,
-        evt.clone(),
-        source,
-        monitor_name,
-        flow_states,
-        label_table,
-        arp_table,
-    ) {
-        Ok(()) => match dispatch_lifecycle_async(dispatcher, evt.clone()).await {
-            // 0.25-B1: effect pass — gated so no-effect monitors skip
-            // the whole `Ctx`-rebuilding translation (zero added cost).
-            Ok(()) if dispatcher.effect_handler_count() > 0 => {
+    // Each pass runs only when it has handlers, and the event is
+    // cloned only for a pass that another one follows (a clone copies
+    // a `ParserClosed` detail string).
+    let (any_async, any_effect) = (
+        dispatcher.async_handler_count() > 0,
+        dispatcher.effect_handler_count() > 0,
+    );
+    let mut evt = Some(evt);
+    let mut take = |more: bool| {
+        if more { evt.clone() } else { evt.take() }
+    };
+    let res = match (dispatcher.handler_count() > 0)
+        .then(|| take(any_async || any_effect))
+        .flatten()
+    {
+        Some(e) => dispatch_lifecycle(
+            dispatcher,
+            sink,
+            state_map,
+            counters,
+            e,
+            source,
+            monitor_name,
+            flow_states,
+            label_table,
+            arp_table,
+        ),
+        None => Ok(()),
+    };
+    let res = match res {
+        Ok(()) if any_async => match take(any_effect) {
+            Some(e) => dispatch_lifecycle_async(dispatcher, e).await,
+            None => Ok(()),
+        },
+        other => other,
+    };
+    let res = match res {
+        // 0.25-B1: effect pass — gated so no-effect monitors skip
+        // the whole `Ctx`-rebuilding translation (zero added cost).
+        Ok(()) if any_effect => match take(false) {
+            Some(e) => {
                 dispatch_lifecycle_effects(
                     dispatcher,
                     sink,
                     state_map,
                     counters,
-                    evt,
+                    e,
                     source,
                     monitor_name,
                     flow_states,
@@ -1814,9 +1839,9 @@ async fn dispatch_tracked_event(
                 )
                 .await
             }
-            other => other,
+            None => Ok(()),
         },
-        Err(e) => Err(e),
+        other => other,
     };
     // The FlowEnded handlers have run: release the flow's per-flow
     // state (`ctx.flow_state_mut`), which otherwise lived forever.

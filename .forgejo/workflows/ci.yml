@@ -106,7 +106,10 @@ jobs:
       - run: >
           cargo test -p netring --features
           "tokio,channel,flow,parse,pcap,http,http2,dns,tls,ja4plus,icmp,arp,ndp,lldp,cdp,asset,p0f,ad-protocols,asset-protocols,ssh,quic,ocsf-sink,sigma,infra-protocols,ftp,smtp,modbus,dnp3,stun,wireguard,nprint,yara"
-          --lib
+          --lib --tests
+      # Allocation gates (#170): the replay pipeline adds 0 allocations per
+      # packet (tests/alloc_gate.rs, run above) and the dispatcher makes none.
+      - run: cargo bench -p netring --features bench-zero-alloc --bench zero_alloc
 
   msrv:
     runs-on: ubuntu-24.04

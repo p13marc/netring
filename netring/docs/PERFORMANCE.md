@@ -18,7 +18,8 @@ measurement rather than quietly omitting them.
 
 | Metric | Harness | Needs hardware? | Status |
 |---|---|---|---|
-| Allocations / packet | `benches/zero_alloc.rs` (dhat) | no | **Δ 0 / 0 — enforced gate** |
+| Allocations / packet, full pipeline | `tests/alloc_gate.rs` (counting allocator) | no | **engine + dispatch: 0 — enforced test** |
+| Allocations / dispatch | `benches/zero_alloc.rs` (dhat) | no | **0 — enforced bench** |
 | Userspace dispatch throughput | `benches/dispatch_throughput.rs` (criterion) | no | reproducible (below) |
 | Timestamp / status decode | `benches/throughput.rs` (criterion) | no | reproducible |
 | Kernel-side shedding (pushdown) | `tests/monitor_lo_kernel_pushdown.rs` | root, loopback | validated (CI) |
@@ -26,13 +27,33 @@ measurement rather than quietly omitting them.
 
 ### Zero-allocation invariant (enforced)
 
-`cargo bench --features bench-zero-alloc --bench zero_alloc` profiles 100k
-synthetic dispatches with dhat and asserts **Δ heap < 512 bytes / Δ blocks <
-100**. Measured: **Δ 0 / 0** — the borrowed zero-copy run loop (0.24 Phase B)
-does no per-packet allocation, and the 0.25 subscription/effect paths preserve
-it (they're gated off when unused). This is the CI-enforced perf regression
-gate: a per-packet allocation regression fails the build. (A *pps* regression
-gate needs a real-NIC CI runner — see "Pending".)
+Two gates, both counting **every** allocation (alloc-then-free included — the
+pre-0.31 bench only looked at net heap growth, which hides churn):
+
+- **Full pipeline** — `cargo test --all-features --test alloc_gate` replays an
+  in-order TCP connection (N and 2N request/response pairs, so setup cost
+  cancels) through `AsyncPcapSource` → flowscope's engine → `Monitor`
+  handlers (`FlowStarted` / `FlowPacket` / `FlowEnded`), and through
+  `PcapSessionStream`. Measured marginal allocations per packet:
+
+  | pipeline | allocations / packet |
+  |---|---|
+  | `AsyncPcapSource` alone (owned packet buffer from the reader thread) | 1.000 |
+  | source → engine → `Monitor` handlers | 1.000 |
+  | source → `PcapSessionStream` (reassembly + a parser) | 1.000 |
+
+  The test fails if the engine and dispatch add more than 0.05 per packet
+  over the source. Live capture has no per-packet source buffer (the Monitor
+  borrows the mmap ring), so its steady state is the engine's: 0. Parsers
+  allocate for the messages they produce (an `HttpMessage` owns its strings);
+  that is output, not per-packet overhead.
+- **Dispatcher** — `cargo bench --features bench-zero-alloc --bench zero_alloc`
+  runs 100k synthetic dispatches (3 handlers: state, counter, sink) under dhat
+  and asserts **0 allocations**.
+
+Both run in CI's `test-monitor-lib` job (before 0.31 neither did: the job ran
+`--lib` only and nothing ran the bench). A *pps* regression gate needs a
+real-NIC CI runner — see "Pending".
 
 ### Userspace dispatch throughput (reproducible, cap-free)
 

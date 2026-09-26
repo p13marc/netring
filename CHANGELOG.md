@@ -2,9 +2,8 @@
 
 ## 0.31.0 — unreleased — flowscope 0.25: one session engine
 
-Depends on **flowscope 0.25** (session-engine redesign; developed
-against the local checkout via `[patch.crates-io]` until it is
-published). `netring-exporters` → **0.7.0** (dependency bump, no API
+Depends on **flowscope 0.25** (session-engine redesign, published
+2026-09-26). `netring-exporters` → **0.7.0** (dependency bump, no API
 change). Migration: `docs/MIGRATING_0.30_TO_0.31.md`. Breaking.
 
 Driven by a downstream report (des-capture, against 0.30.0) and the

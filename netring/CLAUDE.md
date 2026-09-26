@@ -22,8 +22,7 @@ built on AF_PACKET with TPACKET_V3 (block-based mmap ring buffers) and AF_XDP.
 
 **0.31.0 — unreleased** (breaking; `docs/MIGRATING_0.30_TO_0.31.md`).
 "flowscope 0.25: one session engine". Depends on **flowscope 0.25**
-(developed against the local checkout via `[patch.crates-io]` in the
-workspace `Cargo.toml` — remove once flowscope 0.25.0 is published).
+(published to crates.io 2026-09-26; no `[patch.crates-io]`).
 Driven by a downstream report (des-capture) against 0.30.0.
 
 Milestone "0.31" on Forgejo, epic #173 (issues #144, #146–#174); the
@@ -1218,12 +1217,11 @@ Cargo features unique to 0.21:
 
 ## Pre-publish checklist
 
-For the `0.31.0` `cargo publish`. **flowscope 0.25.0 must be published
-first** (netring develops against it through `[patch.crates-io]`).
+For the `0.31.0` `cargo publish`. flowscope 0.25.0 is already on crates.io
+(published 2026-09-26) and the workspace resolves it from the registry — no
+upstream-first step or `[patch.crates-io]` to remove.
 
-1. Publish flowscope 0.25.0; then in the workspace `Cargo.toml` remove the
-   `[patch.crates-io] flowscope = { path = "../flowscope" }` block and set the
-   dependency to `flowscope = "0.25"`. `cargo update -p flowscope`.
+1. Merge the 0.31 PR (#175) once CI is green.
 2. Confirm `netring/Cargo.toml` is `version = "0.31.0"` and
    `netring-exporters` is `0.7.0` depending on `netring = "0.31"`; date the
    `## 0.31.0` CHANGELOG banner and flip "Implementation Status" above to

@@ -30,8 +30,3 @@ metrics = "0.24"
 ahash = { version = "0.8", default-features = false }
 bytes = "1"
 xxhash-rust = { version = "0.8", default-features = false, features = ["xxh3"] }
-
-# Development against the unreleased flowscope 0.25 (session-engine
-# redesign). Remove once flowscope 0.25.0 is on crates.io.
-[patch.crates-io]
-flowscope = { path = "../flowscope" }

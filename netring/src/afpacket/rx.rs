@@ -869,6 +869,11 @@ impl CaptureBuilder {
     /// Tells the kernel to prefer the busy-polling path over softirq for
     /// this socket. Has no effect without [`busy_poll_us`](Self::busy_poll_us)
     /// also set.
+    ///
+    /// Enabling it needs `CAP_NET_ADMIN` in the **initial** user namespace
+    /// (the kernel uses `capable()`, not `ns_capable()`): a rootless
+    /// container's `--cap-add NET_ADMIN` is not enough, and `build()` fails
+    /// with [`Error::SockOpt`] (`EPERM`).
     pub fn prefer_busy_poll(mut self, enable: bool) -> Self {
         self.prefer_busy_poll = Some(enable);
         self
@@ -879,7 +884,8 @@ impl CaptureBuilder {
     /// Default kernel budget is 8 in 6.x; 64 is a common production value
     /// for AF_PACKET / AF_XDP. Values above
     /// `/proc/sys/net/core/busy_poll_budget_max` (typically 64) require
-    /// `CAP_NET_ADMIN`; otherwise the kernel returns `EPERM`.
+    /// `CAP_NET_ADMIN` in the initial user namespace; otherwise the kernel
+    /// returns `EPERM`.
     pub fn busy_poll_budget(mut self, budget: u16) -> Self {
         self.busy_poll_budget = Some(budget);
         self

@@ -135,14 +135,25 @@ fn pcap_tap_snaplen_truncates_recorded_bytes() {
 
 #[test]
 fn capture_busy_poll_config_reflects_builder() {
-    let cap = CaptureBuilder::default()
+    let built = CaptureBuilder::default()
         .interface(helpers::LOOPBACK)
         .busy_poll_us(50)
         .prefer_busy_poll(true)
         .busy_poll_budget(64)
         .block_timeout_ms(10)
-        .build()
-        .expect("build rx");
+        .build();
+    // The busy-poll options need CAP_NET_ADMIN in the *initial* user
+    // namespace (kernel `capable()`); a rootless container's NET_ADMIN —
+    // the privileged CI runner — gets EPERM. Skip on that outcome.
+    let cap = match built {
+        Err(netring::Error::SockOpt { source, .. })
+            if source.raw_os_error() == Some(libc::EPERM) =>
+        {
+            eprintln!("skip: busy-poll sockopts need init-namespace CAP_NET_ADMIN");
+            return;
+        }
+        other => other.expect("build rx"),
+    };
 
     let cfg = cap.busy_poll_config();
     assert_eq!(cfg.busy_poll_us, Some(50));

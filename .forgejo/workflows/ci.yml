@@ -66,7 +66,7 @@ jobs:
           - "--features tokio,http2 --all-targets"
           # The integration lane's exact set. Compiled nowhere else, so a plain
           # compile error under it could surface only as a red test-integration.
-          - "--features integration-tests,tokio,channel,af-xdp --all-targets"
+          - "--features integration-tests,tokio,channel,af-xdp,flow,parse,pcap,http,icmp --all-targets"
     steps:
       - uses: https://data.forgejo.org/actions/checkout@v7
       - uses: https://github.com/dtolnay/rust-toolchain@stable

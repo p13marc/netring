@@ -65,6 +65,15 @@ fn next_packet_timeout_returns_on_an_idle_interface() {
         .expect("build rx");
     let start = Instant::now();
     let mut pkts = cap.packets();
-    assert!(pkts.next_packet_timeout().expect("no error").is_none());
+    // Frames that reached the socket before its filter was attached
+    // may come first; after them, an idle poll hands control back.
+    let mut idle = false;
+    for _ in 0..10_000 {
+        if pkts.next_packet_timeout().expect("no error").is_none() {
+            idle = true;
+            break;
+        }
+    }
+    assert!(idle, "a poll timeout returned None");
     assert!(start.elapsed() < Duration::from_secs(5));
 }

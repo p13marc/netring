@@ -1556,7 +1556,7 @@ impl MonitorBuilder {
     /// each shard its socket here. Counts as a capture source for `build()`.
     /// Not reopenable — the program/registration live outside the Monitor, so a
     /// backend error on an injected socket is terminal for that shard.
-    #[cfg(feature = "af-xdp")]
+    #[cfg(all(feature = "af-xdp", feature = "xdp-loader"))]
     pub(crate) fn inject_xdp_backend(mut self, socket: crate::AsyncXdpSocket) -> Self {
         self.injected_xdp.push(socket);
         self

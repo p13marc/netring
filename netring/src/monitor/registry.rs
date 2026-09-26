@@ -304,35 +304,80 @@ where
 /// `P: Protocol` parameter so the run loop can hold
 /// `Vec<Box<dyn ProtocolSlot>>`.
 ///
+/// Messages are fetched into the slot ([`Self::fetch`]) and then
+/// dispatched one at a time ([`Self::dispatch_next`]) so the run loop
+/// can interleave them with the lifecycle events in the order the
+/// engine produced them ([`Self::next_order`], flowscope's
+/// `SlotMessage::lifecycle_pos` / `seq`): a flow's last messages reach
+/// handlers before its `FlowEnded`.
+///
 /// 0.21 H.2: `Send` supertrait makes `Box<dyn ProtocolSlot>`
 /// `Send`, which in turn makes the parent `Monitor` `Send`
 /// (flowscope 0.13's `Driver<E>: Send + Sync` covered the rest).
-/// All shipped impls (`TypedProtocolSlot<P>`,
-/// `TypedBroadcastProtocolSlot<P>`) are `Send` structurally —
-/// flowscope's `SlotHandle`/`BroadcastSlotHandle` are `Send + Sync`
-/// and `P::Message: Send + Sync + 'static` per the `Protocol`
-/// trait bound.
 pub trait ProtocolSlot: Send {
-    /// Drain pending messages from the wrapped flowscope handle
-    /// and dispatch each one through the supplied dispatcher.
-    fn drain_and_dispatch(&mut self, dispatcher: &mut Dispatcher, ctx: &mut Ctx<'_>) -> Result<()>;
+    /// Move messages the parser produced since the last call into
+    /// this slot's pending buffer.
+    fn fetch(&mut self);
+
+    /// `(lifecycle_pos, seq)` of the next pending message, if any.
+    fn next_order(&self) -> Option<(u64, u64)>;
+
+    /// Dispatch the next pending message. `ctx.flow` / `ctx.ts` (and
+    /// the message side) are set for the call and restored after.
+    fn dispatch_next(&mut self, dispatcher: &mut Dispatcher, ctx: &mut Ctx<'_>) -> Result<()>;
+
+    /// Fetch and dispatch everything pending, in order.
+    fn drain_and_dispatch(&mut self, dispatcher: &mut Dispatcher, ctx: &mut Ctx<'_>) -> Result<()> {
+        self.fetch();
+        while self.next_order().is_some() {
+            self.dispatch_next(dispatcher, ctx)?;
+        }
+        Ok(())
+    }
+}
+
+type Pending<M> = std::collections::VecDeque<SlotMessage<M, flowscope::extract::FiveTupleKey>>;
+
+fn order_of<M>(pending: &Pending<M>) -> Option<(u64, u64)> {
+    pending.front().map(|m| (m.lifecycle_pos, m.seq))
+}
+
+/// Run `f` with `ctx` stamped for one message, restoring it after.
+fn with_message_ctx<M, R>(
+    ctx: &mut Ctx<'_>,
+    msg: &SlotMessage<M, flowscope::extract::FiveTupleKey>,
+    f: impl FnOnce(&mut Ctx<'_>) -> R,
+) -> R {
+    let (flow, ts, side, orientation) = (ctx.flow, ctx.ts, ctx.side, ctx.orientation);
+    // `FiveTupleKey` is `Copy` — stamp it on the ctx by value.
+    ctx.flow = Some(msg.key);
+    ctx.ts = msg.ts;
+    ctx.side = Some(msg.side);
+    ctx.orientation = Some(msg.orientation);
+    let r = f(ctx);
+    ctx.flow = flow;
+    ctx.ts = ts;
+    ctx.side = side;
+    ctx.orientation = orientation;
+    r
 }
 
 /// Generic, concrete impl: holds the flowscope `SlotHandle` for a
-/// `Protocol` `P` plus a reusable scratch buffer for drained
-/// messages.
+/// `Protocol` `P` plus the messages fetched but not yet dispatched.
 pub struct TypedProtocolSlot<P: Protocol> {
     handle: SlotHandle<P::Message, flowscope::extract::FiveTupleKey>,
     scratch: Vec<SlotMessage<P::Message, flowscope::extract::FiveTupleKey>>,
+    pending: Pending<P::Message>,
     _marker: PhantomData<fn() -> P>,
 }
 
 impl<P: Protocol> TypedProtocolSlot<P> {
-    /// Wrap a flowscope handle. Scratch capacity grows on demand.
+    /// Wrap a flowscope handle. Buffers grow on demand.
     pub fn new(handle: SlotHandle<P::Message, flowscope::extract::FiveTupleKey>) -> Self {
         Self {
             handle,
             scratch: Vec::new(),
+            pending: Pending::new(),
             _marker: PhantomData,
         }
     }
@@ -344,31 +389,23 @@ impl<P: Protocol> TypedProtocolSlot<P> {
 }
 
 impl<P: Protocol> ProtocolSlot for TypedProtocolSlot<P> {
-    fn drain_and_dispatch(&mut self, dispatcher: &mut Dispatcher, ctx: &mut Ctx<'_>) -> Result<()> {
-        self.scratch.clear();
-        let n = self.handle.drain(&mut self.scratch);
-        if n == 0 {
+    fn fetch(&mut self) {
+        if self.handle.drain(&mut self.scratch) > 0 {
+            self.pending.extend(self.scratch.drain(..));
+        }
+    }
+
+    fn next_order(&self) -> Option<(u64, u64)> {
+        order_of(&self.pending)
+    }
+
+    fn dispatch_next(&mut self, dispatcher: &mut Dispatcher, ctx: &mut Ctx<'_>) -> Result<()> {
+        let Some(msg) = self.pending.pop_front() else {
             return Ok(());
-        }
-
-        // Per-message flow + ts override for the dispatch call;
-        // restored after each message so a partial drain doesn't
-        // leak state into the lifecycle dispatch path.
-        let saved_flow = ctx.flow;
-        let saved_ts = ctx.ts;
-
-        for slot_msg in self.scratch.drain(..) {
-            // `FiveTupleKey` is `Copy` — stamp it on the ctx by
-            // value so the borrow checker doesn't have to reason
-            // about a borrow that aliases the drained message.
-            ctx.flow = Some(slot_msg.key);
-            ctx.ts = slot_msg.ts;
-            dispatcher.dispatch::<P::Message>(&slot_msg.message, ctx)?;
-        }
-
-        ctx.flow = saved_flow;
-        ctx.ts = saved_ts;
-        Ok(())
+        };
+        with_message_ctx(ctx, &msg, |ctx| {
+            dispatcher.dispatch::<P::Message>(&msg.message, ctx)
+        })
     }
 }
 
@@ -384,6 +421,7 @@ impl<P: Protocol> ProtocolSlot for TypedProtocolSlot<P> {
 pub struct IcmpSlot {
     handle: SlotHandle<flowscope::icmp::IcmpMessage, flowscope::extract::FiveTupleKey>,
     scratch: Vec<SlotMessage<flowscope::icmp::IcmpMessage, flowscope::extract::FiveTupleKey>>,
+    pending: Pending<flowscope::icmp::IcmpMessage>,
 }
 
 #[cfg(feature = "icmp")]
@@ -395,27 +433,30 @@ impl IcmpSlot {
         Self {
             handle,
             scratch: Vec::new(),
+            pending: Pending::new(),
         }
     }
 }
 
 #[cfg(feature = "icmp")]
 impl ProtocolSlot for IcmpSlot {
-    fn drain_and_dispatch(&mut self, dispatcher: &mut Dispatcher, ctx: &mut Ctx<'_>) -> Result<()> {
+    fn fetch(&mut self) {
+        if self.handle.drain(&mut self.scratch) > 0 {
+            self.pending.extend(self.scratch.drain(..));
+        }
+    }
+
+    fn next_order(&self) -> Option<(u64, u64)> {
+        order_of(&self.pending)
+    }
+
+    fn dispatch_next(&mut self, dispatcher: &mut Dispatcher, ctx: &mut Ctx<'_>) -> Result<()> {
         use crate::protocol::event_typed::{IcmpError, classify_icmp_error};
 
-        self.scratch.clear();
-        let n = self.handle.drain(&mut self.scratch);
-        if n == 0 {
+        let Some(slot_msg) = self.pending.pop_front() else {
             return Ok(());
-        }
-        let saved_flow = ctx.flow;
-        let saved_ts = ctx.ts;
-
-        for slot_msg in self.scratch.drain(..) {
-            ctx.flow = Some(slot_msg.key);
-            ctx.ts = slot_msg.ts;
-
+        };
+        with_message_ctx(ctx, &slot_msg, |ctx| {
             // (1) raw message → `on::<Icmp>` handlers.
             dispatcher.dispatch::<flowscope::icmp::IcmpMessage>(&slot_msg.message, ctx)?;
 
@@ -436,11 +477,8 @@ impl ProtocolSlot for IcmpSlot {
                 };
                 dispatcher.dispatch::<IcmpError>(&err, ctx)?;
             }
-        }
-
-        ctx.flow = saved_flow;
-        ctx.ts = saved_ts;
-        Ok(())
+            Ok(())
+        })
     }
 }
 
@@ -448,14 +486,14 @@ impl ProtocolSlot for IcmpSlot {
 /// clone of the [`BroadcastSlotHandle`] returned by
 /// [`crate::protocol::Protocol::register_broadcast`]; user
 /// subscribers via [`crate::monitor::Monitor::subscribe`] clone
-/// independently. Drains the dispatcher's queue per packet batch
-/// the same way the regular slot does.
+/// independently.
 pub struct TypedBroadcastProtocolSlot<P: Protocol>
 where
     P::Message: Send + Sync + Clone + 'static,
 {
     handle: BroadcastSlotHandle<P::Message, flowscope::extract::FiveTupleKey>,
     scratch: Vec<SlotMessage<P::Message, flowscope::extract::FiveTupleKey>>,
+    pending: Pending<P::Message>,
     _marker: PhantomData<fn() -> P>,
 }
 
@@ -470,6 +508,7 @@ where
         Self {
             handle,
             scratch: Vec::new(),
+            pending: Pending::new(),
             _marker: PhantomData,
         }
     }
@@ -479,25 +518,23 @@ impl<P: Protocol> ProtocolSlot for TypedBroadcastProtocolSlot<P>
 where
     P::Message: Send + Sync + Clone + 'static,
 {
-    fn drain_and_dispatch(&mut self, dispatcher: &mut Dispatcher, ctx: &mut Ctx<'_>) -> Result<()> {
-        self.scratch.clear();
-        let n = self.handle.drain(&mut self.scratch);
-        if n == 0 {
+    fn fetch(&mut self) {
+        if self.handle.drain(&mut self.scratch) > 0 {
+            self.pending.extend(self.scratch.drain(..));
+        }
+    }
+
+    fn next_order(&self) -> Option<(u64, u64)> {
+        order_of(&self.pending)
+    }
+
+    fn dispatch_next(&mut self, dispatcher: &mut Dispatcher, ctx: &mut Ctx<'_>) -> Result<()> {
+        let Some(msg) = self.pending.pop_front() else {
             return Ok(());
-        }
-
-        let saved_flow = ctx.flow;
-        let saved_ts = ctx.ts;
-
-        for slot_msg in self.scratch.drain(..) {
-            ctx.flow = Some(slot_msg.key);
-            ctx.ts = slot_msg.ts;
-            dispatcher.dispatch::<P::Message>(&slot_msg.message, ctx)?;
-        }
-
-        ctx.flow = saved_flow;
-        ctx.ts = saved_ts;
-        Ok(())
+        };
+        with_message_ctx(ctx, &msg, |ctx| {
+            dispatcher.dispatch::<P::Message>(&msg.message, ctx)
+        })
     }
 }
 
@@ -530,6 +567,8 @@ mod tests {
             label_table: crate::ctx::default_label_table(),
             tracker: None,
             arp_table: None,
+            side: None,
+            orientation: None,
         }
     }
 

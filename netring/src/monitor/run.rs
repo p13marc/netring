@@ -315,6 +315,20 @@ pub(crate) async fn run_loop(monitor: Monitor, stop: StopCondition) -> Result<()
 
     let mut events: Vec<FsEvent<FlowKey>> = Vec::with_capacity(64);
     let mut shutdown = ShutdownSignal::new(stop);
+    // Periodic sweep: idle flows end (FlowEnded), parsers' `on_tick`
+    // runs, out-of-order holes expire, per-flow state is released.
+    // Driven by wall time, stamped in packet time (see PacketClock).
+    let mut sweep_timer = {
+        let period = driver
+            .tracker()
+            .config()
+            .sweep_interval
+            .max(Duration::from_millis(10));
+        let mut int = tokio::time::interval_at(tokio::time::Instant::now() + period, period);
+        int.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+        int
+    };
+    let mut packet_clock = PacketClock::default();
     let mut rr_anchor: usize = 0;
     // 0.24 Phase B: consecutive backend-error count for the SkipSource circuit
     // breaker. Reset on every successful readable wake.
@@ -375,387 +389,417 @@ pub(crate) async fn run_loop(monitor: Monitor, stop: StopCondition) -> Result<()
     let mut last_active_export: std::collections::HashMap<FlowKey, flowscope::Timestamp> =
         std::collections::HashMap::new();
 
-    loop {
-        // tokio::select! waits on shutdown, the next packet, OR
-        // the next tick. The `if !tick_intervals.is_empty()`
-        // gate keeps the tick branch from being polled when no
-        // handlers are registered (saves one cx wake per loop).
-        let ready = tokio::select! {
-            biased;
-            _ = shutdown.recv(last_event_at) => break,
-            idx = ready_capture(&mut caps, &mut rr_anchor) => idx,
-            tick_idx = next_tick(&mut tick_intervals), if !tick_intervals.is_empty() => {
-                // Reset idle timer on every tick — periodic
-                // tick fires are intended user activity, not
-                // dead air. Without this, a 1s idle timeout +
-                // 500ms tick handler would never resolve.
-                last_event_at = Instant::now();
-                fire_tick(
-                    tick_idx,
-                    &mut tick_handlers,
-                    &mut dispatcher,
-                    sink.as_mut(),
-                    &mut state_map,
-                    &mut counters,
-                    monitor_name_borrow,
-                    &mut flow_states,
-                    &label_table,
-                )
+    // Every exit — stop condition, EOF, or an error — reaches the
+    // output flush below.
+    let run: Result<()> = async {
+        loop {
+            // tokio::select! waits on shutdown, the next packet, OR
+            // the next tick. The `if !tick_intervals.is_empty()`
+            // gate keeps the tick branch from being polled when no
+            // handlers are registered (saves one cx wake per loop).
+            let ready = tokio::select! {
+                biased;
+                _ = shutdown.recv(last_event_at) => break,
+                idx = ready_capture(&mut caps, &mut rr_anchor) => idx,
+                // Housekeeping, like telemetry: does not reset the idle timer.
+                _ = sweep_timer.tick() => {
+                    if let Some(now) = packet_clock.now() {
+                        events.clear();
+                        driver.sweep_into(now, &mut events);
+                        flow_states.sweep(now);
+                        #[cfg(feature = "arp")]
+                        let arp_table_ref: ArpTableRef<'_> = arp_watch.as_ref().map(|w| &w.table);
+                        #[cfg(not(feature = "arp"))]
+                        let arp_table_ref: ArpTableRef<'_> = None;
+                        dispatch_batch(
+                            &mut dispatcher,
+                            &mut protocol_slots,
+                            &driver,
+                            sink.as_mut(),
+                            &mut state_map,
+                            &mut counters,
+                            &mut events,
+                            SourceIdx(0),
+                            monitor_name_borrow,
+                            &mut flow_states,
+                            &label_table,
+                            handler_error_policy,
+                            &mut flow_exporters,
+                            &mut ml_feature_handlers,
+                            &mut byte_accumulators,
+                            &health,
+                            arp_table_ref,
+                            None,
+                        )
+                        .await?;
+                    }
+                    continue;
+                }
+                tick_idx = next_tick(&mut tick_intervals), if !tick_intervals.is_empty() => {
+                    // Reset idle timer on every tick — periodic
+                    // tick fires are intended user activity, not
+                    // dead air. Without this, a 1s idle timeout +
+                    // 500ms tick handler would never resolve.
+                    last_event_at = Instant::now();
+                    fire_tick(
+                        tick_idx,
+                        &mut tick_handlers,
+                        &mut dispatcher,
+                        sink.as_mut(),
+                        &mut state_map,
+                        &mut counters,
+                        monitor_name_borrow,
+                        &mut flow_states,
+                        &label_table,
+                    )
+                    .await?;
+                    // 0.24 Phase C4: a tick is progress too — keeps liveness
+                    // alive on a quiet link with a registered heartbeat tick.
+                    health.record_event(driver.tracker().flow_count());
+                    continue;
+                }
+                // 0.22 §5.1: cross-shard merge probe. Gated so non-merged
+                // monitors never poll it (zero cost, like the tick branch).
+                // Out-of-band — doesn't touch the idle timer.
+                req = recv_merge(&mut merge_rx), if merge_rx.is_some() => {
+                    if let Some(req) = req {
+                        let taken = state_map.take_dyn(req.type_id);
+                        let _ = req.reply.send(taken);
+                    }
+                    continue;
+                }
+                // 0.24 Phase C: capture-telemetry sample. Gated on the
+                // `on_capture_stats` registration so monitors without it
+                // never poll the interval. Out-of-band like the merge probe:
+                // sampling is observability, not traffic, so it must NOT reset
+                // the idle timer (else `on_capture_stats` + `run_until_idle`
+                // would never idle-stop). The sampling itself runs in the
+                // branch body — after the `select!` drops the other branch
+                // futures, so the `&caps` read here can't alias the
+                // `ready_capture` branch's `&mut caps`.
+                _ = next_telemetry_sample(&mut telemetry_interval),
+                    if telemetry_interval.is_some() =>
+                {
+                    if let Some(reg) = capture_stats.as_mut() {
+                        sample_and_fire_capture_stats(
+                            &caps,
+                            &mut telemetry_sampler,
+                            reg,
+                            sink.as_mut(),
+                            &mut state_map,
+                            &mut counters,
+                            monitor_name_borrow,
+                            &mut flow_states,
+                            &label_table,
+                            &health,
+                        )?;
+                    }
+                    continue;
+                }
+                // 0.25 W1c: active-timeout flow export. Out-of-band like telemetry —
+                // emitting interim flow records is observability, not traffic, so it
+                // must NOT reset the idle timer.
+                _ = next_active_export(&mut active_export), if active_export.is_some() => {
+                    if let Some((_, period)) = active_export.as_ref() {
+                        emit_active_flow_records(
+                            &driver,
+                            &mut flow_exporters,
+                            &mut last_active_export,
+                            *period,
+                        );
+                    }
+                    continue;
+                }
+            };
+            let i = match ready {
+                Some((i, Ok(()))) => i,
+                Some((i, Err(e))) => match backend_error_policy {
+                    BackendErrorPolicy::FailFast => return Err(e),
+                    BackendErrorPolicy::SkipSource => {
+                        backend_errors += 1;
+                        health.record_backend_error();
+                        tracing::warn!(error = %e, count = backend_errors, "capture backend error (SkipSource)");
+                        // Circuit breaker: a persistently-failing fd would otherwise
+                        // spin the readiness select. Back off, and after many
+                        // consecutive failures give up rather than burn a core.
+                        if backend_errors > 64 {
+                            return Err(e);
+                        }
+                        tokio::time::sleep(Duration::from_millis(50)).await;
+                        continue;
+                    }
+                    // 0.25 W1e: try to rebuild the failed source in place from its
+                    // recorded spec. A failed re-open leaves the (still-broken)
+                    // backend as-is so the next error retries it; same circuit
+                    // breaker as SkipSource bounds a hard-down source.
+                    BackendErrorPolicy::Reopen => {
+                        backend_errors += 1;
+                        health.record_backend_error();
+                        match open_backend(&specs[i], fanout, &kernel_prefilter, promiscuous) {
+                            Ok(b) => {
+                                caps[i] = b;
+                                tracing::warn!(error = %e, idx = i, count = backend_errors, "capture backend error (Reopen) — source reopened");
+                            }
+                            Err(e2) => {
+                                tracing::warn!(error = %e, reopen_error = %e2, idx = i, count = backend_errors, "capture backend error (Reopen) — reopen failed, will retry");
+                            }
+                        }
+                        if backend_errors > 64 {
+                            return Err(e);
+                        }
+                        tokio::time::sleep(Duration::from_millis(50)).await;
+                        continue;
+                    }
+                },
+                None => break, // all captures exhausted (AF_PACKET never reports this)
+            };
+            backend_errors = 0; // a successful wake clears the circuit breaker
+            let source = SourceIdx(i as u8);
+            // Reset idle timer on every readable wake.
+            last_event_at = Instant::now();
+
+            // IN-BORROW: drain every retired block now ready on this capture and
+            // feed each packet's zero-copy view to the tracker. `track_into` copies
+            // only the metadata it needs into the owned `events` buffer (and feeds
+            // the L7 parsers, which buffer owned messages) — no packet-data copy.
+            events.clear();
+            // IN-BORROW: drain the ready batches on this backend, feeding each
+            // packet's zero-copy view to the tracker. `drain_batch` holds the
+            // ring/UMEM borrow only across this synchronous callback loop and
+            // drops it before returning — no borrow crosses the dispatch
+            // `.await` below, which is what keeps the run loop's future `Send`.
+            // `track_into` copies only the metadata it needs into `events`; no
+            // packet-data copy.
+            // 0.25 A1: when packet-tier subs exist, dispatch them per frame
+            // *inside* the synchronous drain (before `track_into`), so a borrowed
+            // `PacketView` reaches the handler with no copy. The dispatch is
+            // synchronous — its borrows drop before the `.await` below, preserving
+            // `Send`. A `Propagate` error is stashed and surfaced after the drain.
+            let mut packet_err: Option<crate::error::Error> = None;
+            let last_ts = caps[i]
+                .drain_batch(|view| {
+                    if !packet_subs.is_empty()
+                        && packet_err.is_none()
+                        && let Err(e) = dispatch_packet_subs(
+                            &packet_subs,
+                            view,
+                            &pkt_extractor,
+                            sink.as_mut(),
+                            &mut state_map,
+                            &mut counters,
+                            &mut flow_states,
+                            &label_table,
+                            source,
+                            monitor_name_borrow,
+                            handler_error_policy,
+                            &health,
+                        )
+                    {
+                        packet_err = Some(e);
+                    }
+                    // Issue #12: parse the L2 frame for ARP and drive the detector,
+                    // in-borrow like the packet subs (synchronous — its borrows
+                    // drop before the `.await`, preserving `Send`).
+                    #[cfg(feature = "arp")]
+                    if let Some(watch) = arp_watch.as_mut()
+                        && packet_err.is_none()
+                        && let Err(e) = dispatch_arp(
+                            watch,
+                            view,
+                            sink.as_mut(),
+                            &mut state_map,
+                            &mut counters,
+                            &mut flow_states,
+                            &label_table,
+                            source,
+                            monitor_name_borrow,
+                            handler_error_policy,
+                            &health,
+                        )
+                    {
+                        packet_err = Some(e);
+                    }
+                    // Issue #24: NDP — walk the frame to ICMPv6 and drive the
+                    // detector, same in-borrow synchronous shape as ARP.
+                    #[cfg(feature = "ndp")]
+                    if let Some(watch) = ndp_watch.as_mut()
+                        && packet_err.is_none()
+                        && let Err(e) = dispatch_ndp(
+                            watch,
+                            view,
+                            sink.as_mut(),
+                            &mut state_map,
+                            &mut counters,
+                            &mut flow_states,
+                            &label_table,
+                            source,
+                            monitor_name_borrow,
+                            handler_error_policy,
+                            &health,
+                        )
+                    {
+                        packet_err = Some(e);
+                    }
+                    // Issue #28: LLDP — L2 neighbor discovery, parsed per-frame
+                    // like ARP, same in-borrow synchronous shape.
+                    #[cfg(feature = "lldp")]
+                    if let Some(watch) = lldp_watch.as_mut()
+                        && packet_err.is_none()
+                        && let Err(e) = dispatch_lldp(
+                            watch,
+                            view,
+                            sink.as_mut(),
+                            &mut state_map,
+                            &mut counters,
+                            &mut flow_states,
+                            &label_table,
+                            source,
+                            monitor_name_borrow,
+                            handler_error_policy,
+                            &health,
+                        )
+                    {
+                        packet_err = Some(e);
+                    }
+                    // Issue #28: CDP — Cisco L2 discovery (802.3 LLC/SNAP).
+                    #[cfg(feature = "cdp")]
+                    if let Some(watch) = cdp_watch.as_mut()
+                        && packet_err.is_none()
+                        && let Err(e) = dispatch_cdp(
+                            watch,
+                            view,
+                            sink.as_mut(),
+                            &mut state_map,
+                            &mut counters,
+                            &mut flow_states,
+                            &label_table,
+                            source,
+                            monitor_name_borrow,
+                            handler_error_policy,
+                            &health,
+                        )
+                    {
+                        packet_err = Some(e);
+                    }
+                    // Issue #28: feed the asset inventory from this frame's L2/L3
+                    // discovery protocols (independent of the on_arp/on_ndp hooks).
+                    #[cfg(feature = "asset")]
+                    if let Some(aw) = asset_watch.as_mut()
+                        && packet_err.is_none()
+                        && let Err(e) = absorb_frame_assets(
+                            aw,
+                            view,
+                            sink.as_mut(),
+                            &mut state_map,
+                            &mut counters,
+                            &mut flow_states,
+                            &label_table,
+                            source,
+                            monitor_name_borrow,
+                            handler_error_policy,
+                            &health,
+                        )
+                    {
+                        packet_err = Some(e);
+                    }
+                    // Issue #31: p0f — extract the TCP/OS fingerprint from a
+                    // SYN / SYN-ACK, same in-borrow synchronous shape as ARP.
+                    #[cfg(feature = "p0f")]
+                    if let Some(watch) = p0f_watch.as_mut()
+                        && packet_err.is_none()
+                        && let Err(e) = dispatch_p0f(
+                            watch,
+                            view,
+                            sink.as_mut(),
+                            &mut state_map,
+                            &mut counters,
+                            &mut flow_states,
+                            &label_table,
+                            source,
+                            monitor_name_borrow,
+                            handler_error_policy,
+                            &health,
+                        )
+                    {
+                        packet_err = Some(e);
+                    }
+                    // Issue #72: append this frame's nPrint row to its flow's
+                    // matrix (keyed canonically, matching FlowEnded). Synchronous,
+                    // in-borrow — the borrow drops before the dispatch `.await`.
+                    for acc in byte_accumulators.iter_mut() {
+                        acc.feed(&view);
+                    }
+                    // Issue #134: reassemble IPv4 fragments before the tracker sees
+                    // them (taps/accumulators above already saw the raw fragment).
+                    match ip_reassembly.as_mut() {
+                        None => driver.track_into(view, &mut events),
+                        Some(r) => match r.intercept(&view) {
+                            crate::monitor::ip_frag::FragAction::PassThrough => {
+                                driver.track_into(view, &mut events)
+                            }
+                            crate::monitor::ip_frag::FragAction::Buffered => {}
+                            crate::monitor::ip_frag::FragAction::Reassembled(frame) => {
+                                let rv = flowscope::PacketView::new(&frame, view.timestamp)
+                                    .with_rx_metadata(view.rx_metadata);
+                                driver.track_into(rv, &mut events);
+                            }
+                        },
+                    }
+                })
                 .await?;
-                // 0.24 Phase C4: a tick is progress too — keeps liveness
-                // alive on a quiet link with a registered heartbeat tick.
-                health.record_event(driver.tracker().flow_count());
-                continue;
+            if let Some(e) = packet_err {
+                return Err(e);
             }
-            // 0.22 §5.1: cross-shard merge probe. Gated so non-merged
-            // monitors never poll it (zero cost, like the tick branch).
-            // Out-of-band — doesn't touch the idle timer.
-            req = recv_merge(&mut merge_rx), if merge_rx.is_some() => {
-                if let Some(req) = req {
-                    let taken = state_map.take_dyn(req.type_id);
-                    let _ = req.reply.send(taken);
-                }
-                continue;
-            }
-            // 0.24 Phase C: capture-telemetry sample. Gated on the
-            // `on_capture_stats` registration so monitors without it
-            // never poll the interval. Out-of-band like the merge probe:
-            // sampling is observability, not traffic, so it must NOT reset
-            // the idle timer (else `on_capture_stats` + `run_until_idle`
-            // would never idle-stop). The sampling itself runs in the
-            // branch body — after the `select!` drops the other branch
-            // futures, so the `&caps` read here can't alias the
-            // `ready_capture` branch's `&mut caps`.
-            _ = next_telemetry_sample(&mut telemetry_interval),
-                if telemetry_interval.is_some() =>
-            {
-                if let Some(reg) = capture_stats.as_mut() {
-                    sample_and_fire_capture_stats(
-                        &caps,
-                        &mut telemetry_sampler,
-                        reg,
-                        sink.as_mut(),
-                        &mut state_map,
-                        &mut counters,
-                        monitor_name_borrow,
-                        &mut flow_states,
-                        &label_table,
-                        &health,
-                    )?;
-                }
-                continue;
-            }
-            // 0.25 W1c: active-timeout flow export. Out-of-band like telemetry —
-            // emitting interim flow records is observability, not traffic, so it
-            // must NOT reset the idle timer.
-            _ = next_active_export(&mut active_export), if active_export.is_some() => {
-                if let Some((_, period)) = active_export.as_ref() {
-                    emit_active_flow_records(
-                        &driver,
-                        &mut flow_exporters,
-                        &mut last_active_export,
-                        *period,
-                    );
-                }
-                continue;
-            }
-        };
-        let i = match ready {
-            Some((i, Ok(()))) => i,
-            Some((i, Err(e))) => match backend_error_policy {
-                BackendErrorPolicy::FailFast => return Err(e),
-                BackendErrorPolicy::SkipSource => {
-                    backend_errors += 1;
-                    health.record_backend_error();
-                    tracing::warn!(error = %e, count = backend_errors, "capture backend error (SkipSource)");
-                    // Circuit breaker: a persistently-failing fd would otherwise
-                    // spin the readiness select. Back off, and after many
-                    // consecutive failures give up rather than burn a core.
-                    if backend_errors > 64 {
-                        return Err(e);
-                    }
-                    tokio::time::sleep(Duration::from_millis(50)).await;
-                    continue;
-                }
-                // 0.25 W1e: try to rebuild the failed source in place from its
-                // recorded spec. A failed re-open leaves the (still-broken)
-                // backend as-is so the next error retries it; same circuit
-                // breaker as SkipSource bounds a hard-down source.
-                BackendErrorPolicy::Reopen => {
-                    backend_errors += 1;
-                    health.record_backend_error();
-                    match open_backend(&specs[i], fanout, &kernel_prefilter, promiscuous) {
-                        Ok(b) => {
-                            caps[i] = b;
-                            tracing::warn!(error = %e, idx = i, count = backend_errors, "capture backend error (Reopen) — source reopened");
-                        }
-                        Err(e2) => {
-                            tracing::warn!(error = %e, reopen_error = %e2, idx = i, count = backend_errors, "capture backend error (Reopen) — reopen failed, will retry");
-                        }
-                    }
-                    if backend_errors > 64 {
-                        return Err(e);
-                    }
-                    tokio::time::sleep(Duration::from_millis(50)).await;
-                    continue;
-                }
-            },
-            None => break, // all captures exhausted (AF_PACKET never reports this)
-        };
-        backend_errors = 0; // a successful wake clears the circuit breaker
-        let source = SourceIdx(i as u8);
-        // Reset idle timer on every readable wake.
-        last_event_at = Instant::now();
 
-        // IN-BORROW: drain every retired block now ready on this capture and
-        // feed each packet's zero-copy view to the tracker. `track_into` copies
-        // only the metadata it needs into the owned `events` buffer (and feeds
-        // the L7 parsers, which buffer owned messages) — no packet-data copy.
-        events.clear();
-        // IN-BORROW: drain the ready batches on this backend, feeding each
-        // packet's zero-copy view to the tracker. `drain_batch` holds the
-        // ring/UMEM borrow only across this synchronous callback loop and
-        // drops it before returning — no borrow crosses the dispatch
-        // `.await` below, which is what keeps the run loop's future `Send`.
-        // `track_into` copies only the metadata it needs into `events`; no
-        // packet-data copy.
-        // 0.25 A1: when packet-tier subs exist, dispatch them per frame
-        // *inside* the synchronous drain (before `track_into`), so a borrowed
-        // `PacketView` reaches the handler with no copy. The dispatch is
-        // synchronous — its borrows drop before the `.await` below, preserving
-        // `Send`. A `Propagate` error is stashed and surfaced after the drain.
-        let mut packet_err: Option<crate::error::Error> = None;
-        let last_ts = caps[i]
-            .drain_batch(|view| {
-                if !packet_subs.is_empty()
-                    && packet_err.is_none()
-                    && let Err(e) = dispatch_packet_subs(
-                        &packet_subs,
-                        view,
-                        &pkt_extractor,
-                        sink.as_mut(),
-                        &mut state_map,
-                        &mut counters,
-                        &mut flow_states,
-                        &label_table,
-                        source,
-                        monitor_name_borrow,
-                        handler_error_policy,
-                        &health,
-                    )
-                {
-                    packet_err = Some(e);
-                }
-                // Issue #12: parse the L2 frame for ARP and drive the detector,
-                // in-borrow like the packet subs (synchronous — its borrows
-                // drop before the `.await`, preserving `Send`).
-                #[cfg(feature = "arp")]
-                if let Some(watch) = arp_watch.as_mut()
-                    && packet_err.is_none()
-                    && let Err(e) = dispatch_arp(
-                        watch,
-                        view,
-                        sink.as_mut(),
-                        &mut state_map,
-                        &mut counters,
-                        &mut flow_states,
-                        &label_table,
-                        source,
-                        monitor_name_borrow,
-                        handler_error_policy,
-                        &health,
-                    )
-                {
-                    packet_err = Some(e);
-                }
-                // Issue #24: NDP — walk the frame to ICMPv6 and drive the
-                // detector, same in-borrow synchronous shape as ARP.
-                #[cfg(feature = "ndp")]
-                if let Some(watch) = ndp_watch.as_mut()
-                    && packet_err.is_none()
-                    && let Err(e) = dispatch_ndp(
-                        watch,
-                        view,
-                        sink.as_mut(),
-                        &mut state_map,
-                        &mut counters,
-                        &mut flow_states,
-                        &label_table,
-                        source,
-                        monitor_name_borrow,
-                        handler_error_policy,
-                        &health,
-                    )
-                {
-                    packet_err = Some(e);
-                }
-                // Issue #28: LLDP — L2 neighbor discovery, parsed per-frame
-                // like ARP, same in-borrow synchronous shape.
-                #[cfg(feature = "lldp")]
-                if let Some(watch) = lldp_watch.as_mut()
-                    && packet_err.is_none()
-                    && let Err(e) = dispatch_lldp(
-                        watch,
-                        view,
-                        sink.as_mut(),
-                        &mut state_map,
-                        &mut counters,
-                        &mut flow_states,
-                        &label_table,
-                        source,
-                        monitor_name_borrow,
-                        handler_error_policy,
-                        &health,
-                    )
-                {
-                    packet_err = Some(e);
-                }
-                // Issue #28: CDP — Cisco L2 discovery (802.3 LLC/SNAP).
-                #[cfg(feature = "cdp")]
-                if let Some(watch) = cdp_watch.as_mut()
-                    && packet_err.is_none()
-                    && let Err(e) = dispatch_cdp(
-                        watch,
-                        view,
-                        sink.as_mut(),
-                        &mut state_map,
-                        &mut counters,
-                        &mut flow_states,
-                        &label_table,
-                        source,
-                        monitor_name_borrow,
-                        handler_error_policy,
-                        &health,
-                    )
-                {
-                    packet_err = Some(e);
-                }
-                // Issue #28: feed the asset inventory from this frame's L2/L3
-                // discovery protocols (independent of the on_arp/on_ndp hooks).
-                #[cfg(feature = "asset")]
-                if let Some(aw) = asset_watch.as_mut()
-                    && packet_err.is_none()
-                    && let Err(e) = absorb_frame_assets(
-                        aw,
-                        view,
-                        sink.as_mut(),
-                        &mut state_map,
-                        &mut counters,
-                        &mut flow_states,
-                        &label_table,
-                        source,
-                        monitor_name_borrow,
-                        handler_error_policy,
-                        &health,
-                    )
-                {
-                    packet_err = Some(e);
-                }
-                // Issue #31: p0f — extract the TCP/OS fingerprint from a
-                // SYN / SYN-ACK, same in-borrow synchronous shape as ARP.
-                #[cfg(feature = "p0f")]
-                if let Some(watch) = p0f_watch.as_mut()
-                    && packet_err.is_none()
-                    && let Err(e) = dispatch_p0f(
-                        watch,
-                        view,
-                        sink.as_mut(),
-                        &mut state_map,
-                        &mut counters,
-                        &mut flow_states,
-                        &label_table,
-                        source,
-                        monitor_name_borrow,
-                        handler_error_policy,
-                        &health,
-                    )
-                {
-                    packet_err = Some(e);
-                }
-                // Issue #72: append this frame's nPrint row to its flow's
-                // matrix (keyed canonically, matching FlowEnded). Synchronous,
-                // in-borrow — the borrow drops before the dispatch `.await`.
-                for acc in byte_accumulators.iter_mut() {
-                    acc.feed(&view);
-                }
-                // Issue #134: reassemble IPv4 fragments before the tracker sees
-                // them (taps/accumulators above already saw the raw fragment).
-                match ip_reassembly.as_mut() {
-                    None => driver.track_into(view, &mut events),
-                    Some(r) => match r.intercept(&view) {
-                        crate::monitor::ip_frag::FragAction::PassThrough => {
-                            driver.track_into(view, &mut events)
-                        }
-                        crate::monitor::ip_frag::FragAction::Buffered => {}
-                        crate::monitor::ip_frag::FragAction::Reassembled(frame) => {
-                            let rv = flowscope::PacketView::new(&frame, view.timestamp)
-                                .with_rx_metadata(view.rx_metadata);
-                            driver.track_into(rv, &mut events);
-                        }
-                    },
-                }
-            })
+            // A spurious wake (no retired block) leaves `last_ts == None`.
+            let Some(ts) = last_ts else { continue };
+            // Issue #134: age out fragment datagrams that never completed.
+            if let Some(r) = ip_reassembly.as_mut() {
+                r.evict(ts);
+            }
+
+            // Issue #23: borrow the learned ARP table (the drain's `&mut` borrow was
+            // released above) so flow/session/lifecycle handlers can resolve IP→MAC
+            // via `ctx.arp_table()`. Recomputed each iteration; dropped before the
+            // next drain re-borrows `arp_watch` mutably.
+            #[cfg(feature = "arp")]
+            let arp_table_ref: ArpTableRef<'_> = arp_watch.as_ref().map(|w| &w.table);
+            #[cfg(not(feature = "arp"))]
+            let arp_table_ref: ArpTableRef<'_> = None;
+
+            // AFTER BORROW: dispatch on owned data (sync + async, Send-safe),
+            // lifecycle events and parser messages in engine order.
+            dispatch_batch(
+                &mut dispatcher,
+                &mut protocol_slots,
+                &driver,
+                sink.as_mut(),
+                &mut state_map,
+                &mut counters,
+                &mut events,
+                source,
+                monitor_name_borrow,
+                &mut flow_states,
+                &label_table,
+                handler_error_policy,
+                &mut flow_exporters,
+                &mut ml_feature_handlers,
+                &mut byte_accumulators,
+                &health,
+                arp_table_ref,
+                None,
+            )
             .await?;
-        if let Some(e) = packet_err {
-            return Err(e);
+            packet_clock.observe(ts);
+
+            // 0.24 Phase C4: record progress for the health handle — a packet
+            // batch was processed; snapshot the tracker's active-flow count.
+            health.record_event(driver.tracker().flow_count());
         }
-
-        // A spurious wake (no retired block) leaves `last_ts == None`.
-        let Some(ts) = last_ts else { continue };
-        // Issue #134: age out fragment datagrams that never completed.
-        if let Some(r) = ip_reassembly.as_mut() {
-            r.evict(ts);
-        }
-
-        // Issue #23: borrow the learned ARP table (the drain's `&mut` borrow was
-        // released above) so flow/session/lifecycle handlers can resolve IP→MAC
-        // via `ctx.arp_table()`. Recomputed each iteration; dropped before the
-        // next drain re-borrows `arp_watch` mutably.
-        #[cfg(feature = "arp")]
-        let arp_table_ref: ArpTableRef<'_> = arp_watch.as_ref().map(|w| &w.table);
-        #[cfg(not(feature = "arp"))]
-        let arp_table_ref: ArpTableRef<'_> = None;
-
-        // AFTER BORROW: dispatch on owned data (sync + async, Send-safe).
-        dispatch_tracked_events(
-            &mut dispatcher,
-            sink.as_mut(),
-            &mut state_map,
-            &mut counters,
-            &mut events,
-            source,
-            monitor_name_borrow,
-            &mut flow_states,
-            &label_table,
-            handler_error_policy,
-            &mut flow_exporters,
-            &mut ml_feature_handlers,
-            &mut byte_accumulators,
-            &health,
-            arp_table_ref,
-        )
-        .await?;
-        drain_protocol_slots(
-            &mut dispatcher,
-            &mut protocol_slots,
-            &driver,
-            sink.as_mut(),
-            &mut state_map,
-            &mut counters,
-            &mut flow_states,
-            ts,
-            source,
-            monitor_name_borrow,
-            &label_table,
-            handler_error_policy,
-            &health,
-            arp_table_ref,
-        )?;
-
-        // 0.24 Phase C4: record progress for the health handle — a packet
-        // batch was processed; snapshot the tracker's active-flow count.
-        health.record_event(driver.tracker().flow_count());
+        #[allow(unreachable_code)]
+        Ok(())
     }
+    .await;
 
     // 0.21 D.2: graceful drain phase. After the stop condition
     // fires, flush in-flight flows out of the central tracker,
@@ -763,9 +807,14 @@ pub(crate) async fn run_loop(monitor: Monitor, stop: StopCondition) -> Result<()
     // sink. Skipped entirely when `drain_timeout` is zero — useful
     // for fail-fast smoke tests that don't care about residual
     // events.
+    if let Err(e) = run {
+        let _ = flush_outputs(sink.as_mut(), &mut flow_exporters);
+        return Err(e);
+    }
+    let mut drained = Ok(());
     if !drain_timeout.is_zero() {
         let deadline = Instant::now() + drain_timeout;
-        drain_phase(
+        drained = drain_phase(
             &mut driver,
             &mut dispatcher,
             sink.as_mut(),
@@ -782,15 +831,12 @@ pub(crate) async fn run_loop(monitor: Monitor, stop: StopCondition) -> Result<()
             &mut byte_accumulators,
             &health,
         )
-        .await?;
+        .await;
     }
 
-    // 0.24 Phase D: flush exporters (NDJSON/IPFIX writers may buffer).
-    for exporter in flow_exporters.iter_mut() {
-        let _ = exporter.flush();
-    }
-
-    Ok(())
+    // Flush even when the drain failed; the drain's error wins.
+    let flushed = flush_outputs(sink.as_mut(), &mut flow_exporters);
+    drained.and(flushed)
 }
 
 /// 0.21 E.1: drive a monitor from an offline pcap file.
@@ -879,6 +925,9 @@ pub(crate) async fn replay_loop(
 
     let mut source = crate::pcap_source::AsyncPcapSource::open_with_config(&path, config).await?;
     let mut events: Vec<FsEvent<FlowKey>> = Vec::with_capacity(64);
+    // Replay sweeps on packet time, every `sweep_interval` of it.
+    let sweep_interval = driver.tracker().config().sweep_interval;
+    let mut last_sweep: Option<flowscope::Timestamp> = None;
     // 0.25 A1: packet-tier dispatch also runs on offline replay.
     let pkt_extractor = packet_field_extractor();
 
@@ -887,212 +936,242 @@ pub(crate) async fn replay_loop(
     health.mark_started();
     health.mark_sockets_open();
 
-    loop {
-        // Pin the stream + poll the next packet. The source's
-        // `Stream` impl drives the underlying spawn_blocking
-        // reader task; `None` = EOF.
-        let next = std::future::poll_fn(|cx| Pin::new(&mut source).poll_next(cx)).await;
-        let pkt = match next {
-            Some(Ok(p)) => p,
-            Some(Err(e)) => return Err(e),
-            None => break,
-        };
+    // Every exit — stop condition, EOF, or an error — reaches the
+    // output flush below.
+    let run: Result<()> = async {
+        loop {
+            // Pin the stream + poll the next packet. The source's
+            // `Stream` impl drives the underlying spawn_blocking
+            // reader task; `None` = EOF.
+            let next = std::future::poll_fn(|cx| Pin::new(&mut source).poll_next(cx)).await;
+            let pkt = match next {
+                Some(Ok(p)) => p,
+                Some(Err(e)) => return Err(e),
+                None => break,
+            };
 
-        let view = flowscope::PacketView::new(&pkt.data, pkt.timestamp);
+            // Sweep on packet time, before this packet: idle flows end
+            // mid-replay (in time order), parsers' `on_tick` runs,
+            // out-of-order holes expire — as live.
+            let now = pkt.timestamp;
+            if last_sweep.is_none_or(|t| now.saturating_sub(t) >= sweep_interval) {
+                last_sweep = Some(now);
+                events.clear();
+                driver.sweep_into(now, &mut events);
+                flow_states.sweep(now);
+                dispatch_batch(
+                    &mut dispatcher,
+                    &mut protocol_slots,
+                    &driver,
+                    sink.as_mut(),
+                    &mut state_map,
+                    &mut counters,
+                    &mut events,
+                    SourceIdx(0),
+                    monitor_name_borrow,
+                    &mut flow_states,
+                    &label_table,
+                    handler_error_policy,
+                    &mut flow_exporters,
+                    &mut ml_feature_handlers,
+                    &mut byte_accumulators,
+                    &health,
+                    None,
+                    None,
+                )
+                .await?;
+            }
 
-        // 0.25 A1: packet-tier subs fire before tracking, as on the live path.
-        if !packet_subs.is_empty() {
-            dispatch_packet_subs(
-                &packet_subs,
-                view,
-                &pkt_extractor,
+            let view = flowscope::PacketView::new(&pkt.data, pkt.timestamp);
+
+            // 0.25 A1: packet-tier subs fire before tracking, as on the live path.
+            if !packet_subs.is_empty() {
+                dispatch_packet_subs(
+                    &packet_subs,
+                    view,
+                    &pkt_extractor,
+                    sink.as_mut(),
+                    &mut state_map,
+                    &mut counters,
+                    &mut flow_states,
+                    &label_table,
+                    SourceIdx(0),
+                    monitor_name_borrow,
+                    handler_error_policy,
+                    &health,
+                )?;
+            }
+
+            // Issue #12: ARP detection on offline replay, mirroring the live path.
+            #[cfg(feature = "arp")]
+            if let Some(watch) = arp_watch.as_mut() {
+                dispatch_arp(
+                    watch,
+                    view,
+                    sink.as_mut(),
+                    &mut state_map,
+                    &mut counters,
+                    &mut flow_states,
+                    &label_table,
+                    SourceIdx(0),
+                    monitor_name_borrow,
+                    handler_error_policy,
+                    &health,
+                )?;
+            }
+            // Issue #24: NDP detection on offline replay.
+            #[cfg(feature = "ndp")]
+            if let Some(watch) = ndp_watch.as_mut() {
+                dispatch_ndp(
+                    watch,
+                    view,
+                    sink.as_mut(),
+                    &mut state_map,
+                    &mut counters,
+                    &mut flow_states,
+                    &label_table,
+                    SourceIdx(0),
+                    monitor_name_borrow,
+                    handler_error_policy,
+                    &health,
+                )?;
+            }
+            // Issue #28: LLDP/CDP L2 discovery on offline replay.
+            #[cfg(feature = "lldp")]
+            if let Some(watch) = lldp_watch.as_mut() {
+                dispatch_lldp(
+                    watch,
+                    view,
+                    sink.as_mut(),
+                    &mut state_map,
+                    &mut counters,
+                    &mut flow_states,
+                    &label_table,
+                    SourceIdx(0),
+                    monitor_name_borrow,
+                    handler_error_policy,
+                    &health,
+                )?;
+            }
+            #[cfg(feature = "cdp")]
+            if let Some(watch) = cdp_watch.as_mut() {
+                dispatch_cdp(
+                    watch,
+                    view,
+                    sink.as_mut(),
+                    &mut state_map,
+                    &mut counters,
+                    &mut flow_states,
+                    &label_table,
+                    SourceIdx(0),
+                    monitor_name_borrow,
+                    handler_error_policy,
+                    &health,
+                )?;
+            }
+            // Issue #28: asset inventory on offline replay.
+            #[cfg(feature = "asset")]
+            if let Some(aw) = asset_watch.as_mut() {
+                absorb_frame_assets(
+                    aw,
+                    view,
+                    sink.as_mut(),
+                    &mut state_map,
+                    &mut counters,
+                    &mut flow_states,
+                    &label_table,
+                    SourceIdx(0),
+                    monitor_name_borrow,
+                    handler_error_policy,
+                    &health,
+                )?;
+            }
+            // Issue #31: p0f fingerprinting on offline replay.
+            #[cfg(feature = "p0f")]
+            if let Some(watch) = p0f_watch.as_mut() {
+                dispatch_p0f(
+                    watch,
+                    view,
+                    sink.as_mut(),
+                    &mut state_map,
+                    &mut counters,
+                    &mut flow_states,
+                    &label_table,
+                    SourceIdx(0),
+                    monitor_name_borrow,
+                    handler_error_policy,
+                    &health,
+                )?;
+            }
+
+            // Issue #23: expose the ARP table to flow/session/lifecycle handlers on
+            // offline replay too (the ARP block's `&mut` borrow above is released).
+            #[cfg(feature = "arp")]
+            let arp_table_ref: ArpTableRef<'_> = arp_watch.as_ref().map(|w| &w.table);
+            #[cfg(not(feature = "arp"))]
+            let arp_table_ref: ArpTableRef<'_> = None;
+
+            events.clear();
+            // Issue #72: append this frame's nPrint row before the tracker keys it.
+            for acc in byte_accumulators.iter_mut() {
+                acc.feed(&view);
+            }
+            // Issue #134: reassemble IPv4 fragments for the tracker (offline replay).
+            match ip_reassembly.as_mut() {
+                None => driver.track_into(view, &mut events),
+                Some(r) => match r.intercept(&view) {
+                    crate::monitor::ip_frag::FragAction::PassThrough => {
+                        driver.track_into(view, &mut events)
+                    }
+                    crate::monitor::ip_frag::FragAction::Buffered => {}
+                    crate::monitor::ip_frag::FragAction::Reassembled(frame) => {
+                        let rv = flowscope::PacketView::new(&frame, view.timestamp)
+                            .with_rx_metadata(view.rx_metadata);
+                        driver.track_into(rv, &mut events);
+                    }
+                },
+            }
+            dispatch_batch(
+                &mut dispatcher,
+                &mut protocol_slots,
+                &driver,
                 sink.as_mut(),
                 &mut state_map,
                 &mut counters,
-                &mut flow_states,
-                &label_table,
+                &mut events,
                 SourceIdx(0),
                 monitor_name_borrow,
+                &mut flow_states,
+                &label_table,
                 handler_error_policy,
+                &mut flow_exporters,
+                &mut ml_feature_handlers,
+                &mut byte_accumulators,
                 &health,
-            )?;
-        }
+                arp_table_ref,
+                None,
+            )
+            .await?;
 
-        // Issue #12: ARP detection on offline replay, mirroring the live path.
-        #[cfg(feature = "arp")]
-        if let Some(watch) = arp_watch.as_mut() {
-            dispatch_arp(
-                watch,
-                view,
-                sink.as_mut(),
-                &mut state_map,
-                &mut counters,
-                &mut flow_states,
-                &label_table,
-                SourceIdx(0),
-                monitor_name_borrow,
-                handler_error_policy,
-                &health,
-            )?;
+            // 0.24 Phase C4: record replay progress for the health handle.
+            health.record_event(driver.tracker().flow_count());
         }
-        // Issue #24: NDP detection on offline replay.
-        #[cfg(feature = "ndp")]
-        if let Some(watch) = ndp_watch.as_mut() {
-            dispatch_ndp(
-                watch,
-                view,
-                sink.as_mut(),
-                &mut state_map,
-                &mut counters,
-                &mut flow_states,
-                &label_table,
-                SourceIdx(0),
-                monitor_name_borrow,
-                handler_error_policy,
-                &health,
-            )?;
-        }
-        // Issue #28: LLDP/CDP L2 discovery on offline replay.
-        #[cfg(feature = "lldp")]
-        if let Some(watch) = lldp_watch.as_mut() {
-            dispatch_lldp(
-                watch,
-                view,
-                sink.as_mut(),
-                &mut state_map,
-                &mut counters,
-                &mut flow_states,
-                &label_table,
-                SourceIdx(0),
-                monitor_name_borrow,
-                handler_error_policy,
-                &health,
-            )?;
-        }
-        #[cfg(feature = "cdp")]
-        if let Some(watch) = cdp_watch.as_mut() {
-            dispatch_cdp(
-                watch,
-                view,
-                sink.as_mut(),
-                &mut state_map,
-                &mut counters,
-                &mut flow_states,
-                &label_table,
-                SourceIdx(0),
-                monitor_name_borrow,
-                handler_error_policy,
-                &health,
-            )?;
-        }
-        // Issue #28: asset inventory on offline replay.
-        #[cfg(feature = "asset")]
-        if let Some(aw) = asset_watch.as_mut() {
-            absorb_frame_assets(
-                aw,
-                view,
-                sink.as_mut(),
-                &mut state_map,
-                &mut counters,
-                &mut flow_states,
-                &label_table,
-                SourceIdx(0),
-                monitor_name_borrow,
-                handler_error_policy,
-                &health,
-            )?;
-        }
-        // Issue #31: p0f fingerprinting on offline replay.
-        #[cfg(feature = "p0f")]
-        if let Some(watch) = p0f_watch.as_mut() {
-            dispatch_p0f(
-                watch,
-                view,
-                sink.as_mut(),
-                &mut state_map,
-                &mut counters,
-                &mut flow_states,
-                &label_table,
-                SourceIdx(0),
-                monitor_name_borrow,
-                handler_error_policy,
-                &health,
-            )?;
-        }
-
-        // Issue #23: expose the ARP table to flow/session/lifecycle handlers on
-        // offline replay too (the ARP block's `&mut` borrow above is released).
-        #[cfg(feature = "arp")]
-        let arp_table_ref: ArpTableRef<'_> = arp_watch.as_ref().map(|w| &w.table);
-        #[cfg(not(feature = "arp"))]
-        let arp_table_ref: ArpTableRef<'_> = None;
-
-        events.clear();
-        // Issue #72: append this frame's nPrint row before the tracker keys it.
-        for acc in byte_accumulators.iter_mut() {
-            acc.feed(&view);
-        }
-        // Issue #134: reassemble IPv4 fragments for the tracker (offline replay).
-        match ip_reassembly.as_mut() {
-            None => driver.track_into(view, &mut events),
-            Some(r) => match r.intercept(&view) {
-                crate::monitor::ip_frag::FragAction::PassThrough => {
-                    driver.track_into(view, &mut events)
-                }
-                crate::monitor::ip_frag::FragAction::Buffered => {}
-                crate::monitor::ip_frag::FragAction::Reassembled(frame) => {
-                    let rv = flowscope::PacketView::new(&frame, view.timestamp)
-                        .with_rx_metadata(view.rx_metadata);
-                    driver.track_into(rv, &mut events);
-                }
-            },
-        }
-        dispatch_tracked_events(
-            &mut dispatcher,
-            sink.as_mut(),
-            &mut state_map,
-            &mut counters,
-            &mut events,
-            SourceIdx(0),
-            monitor_name_borrow,
-            &mut flow_states,
-            &label_table,
-            handler_error_policy,
-            &mut flow_exporters,
-            &mut ml_feature_handlers,
-            &mut byte_accumulators,
-            &health,
-            arp_table_ref,
-        )
-        .await?;
-
-        drain_protocol_slots(
-            &mut dispatcher,
-            &mut protocol_slots,
-            &driver,
-            sink.as_mut(),
-            &mut state_map,
-            &mut counters,
-            &mut flow_states,
-            pkt.timestamp,
-            SourceIdx(0),
-            monitor_name_borrow,
-            &label_table,
-            handler_error_policy,
-            &health,
-            arp_table_ref,
-        )?;
-
-        // 0.24 Phase C4: record replay progress for the health handle.
-        health.record_event(driver.tracker().flow_count());
+        #[allow(unreachable_code)]
+        Ok(())
     }
+    .await;
 
     // EOF reached. Run the drain phase to land any trailing
     // events (flowscope's `finish()` synthesises FlowEnded
     // events for in-flight flows).
+    if let Err(e) = run {
+        let _ = flush_outputs(sink.as_mut(), &mut flow_exporters);
+        return Err(e);
+    }
+    let mut drained = Ok(());
     if !drain_timeout.is_zero() {
         let deadline = Instant::now() + drain_timeout;
-        drain_phase(
+        drained = drain_phase(
             &mut driver,
             &mut dispatcher,
             sink.as_mut(),
@@ -1109,35 +1188,25 @@ pub(crate) async fn replay_loop(
             &mut byte_accumulators,
             &health,
         )
-        .await?;
+        .await;
     }
 
-    // 0.24 Phase D: flush exporters after replay drain.
-    for exporter in flow_exporters.iter_mut() {
-        let _ = exporter.flush();
-    }
-
-    Ok(())
+    // Flush even when the drain failed; the drain's error wins.
+    let flushed = flush_outputs(sink.as_mut(), &mut flow_exporters);
+    drained.and(flushed)
 }
 
 /// 0.21 D.2: drain residual events after the run loop's stop
 /// condition fires.
 ///
-/// Steps, each guarded by the `deadline`:
+/// `driver.finish()` ends every in-flight flow; its events and the
+/// parsers' last messages go through the same ordered dispatch as the
+/// run loop ([`dispatch_batch`]), so handlers see end-of-stream events
+/// the way they see live ones.
 ///
-/// 1. `driver.finish()` — flush in-flight flows out of the central
-///    tracker (synthesizes `FlowEnded` events for anything still
-///    alive). Dispatches each through the same lifecycle path the
-///    run loop uses, so handlers see end-of-stream events the
-///    same way they see live ones.
-/// 2. For each protocol slot, drain queued typed messages.
-/// 3. `sink.flush()` — give a chance for buffered writes (eve-sink,
-///    json sink, etc.) to land on disk.
-///
-/// Best-effort: a slow handler can push past `deadline`. The
-/// deadline check sits between steps, not inside them. If
-/// step 1 already overran, steps 2 and 3 are skipped to bound
-/// total shutdown time.
+/// Best-effort: dispatch stops at `deadline` (checked between
+/// events). Sinks and exporters are flushed by the caller afterwards
+/// whatever happened here ([`flush_outputs`]).
 #[allow(clippy::too_many_arguments)]
 async fn drain_phase(
     driver: &mut flowscope::driver::Driver<FiveTuple>,
@@ -1156,133 +1225,50 @@ async fn drain_phase(
     byte_accumulators: &mut [Box<dyn crate::monitor::nprint::FlowByteAccumulator>],
     health: &crate::monitor::health::HealthState,
 ) -> Result<()> {
-    // Step 1: drain the central tracker.
     let mut leftover: Vec<FsEvent<FlowKey>> = Vec::new();
     driver.finish_into(&mut leftover);
-    for evt in leftover.drain(..) {
-        if Instant::now() >= deadline {
-            return Ok(());
-        }
-        // 0.24 Phase D: export the flows finalized by `finish_into` (flows
-        // still open at shutdown get a synthesized FlowEnded here).
-        if !flow_exporters.is_empty()
-            && let FsEvent::Ended {
-                key, stats, reason, ..
-            } = &evt
-        {
-            let record = crate::export::FlowRecord::from_ended(key, stats, *reason);
-            for exporter in flow_exporters.iter_mut() {
-                exporter.export(&record);
-            }
-        }
-        // Issue #32: ML-feature delivery for flows drained at shutdown.
-        if !ml_feature_handlers.is_empty()
-            && let FsEvent::Ended {
-                key, stats, reason, ..
-            } = &evt
-        {
-            for handler in ml_feature_handlers.iter_mut() {
-                handler(key, stats, *reason);
-            }
-        }
-        // Issue #72: nPrint flush for flows drained at shutdown.
-        if let FsEvent::Ended { key, .. } = &evt {
-            for acc in byte_accumulators.iter_mut() {
-                acc.flush(key);
-            }
-        }
-        let res = match dispatch_lifecycle(
-            dispatcher,
-            sink,
-            state_map,
-            counters,
-            evt.clone(),
-            SourceIdx(0),
-            monitor_name,
-            flow_states,
-            label_table,
-            // Issue #23: the graceful-drain flush runs after the main loop; the
-            // ARP table isn't threaded into shutdown (no IP→MAC lookups matter
-            // while flushing trailing FlowEnded events).
-            None,
-        ) {
-            Ok(()) => match dispatch_lifecycle_async(dispatcher, evt.clone()).await {
-                // 0.25-B1: effect pass (drain) — same gating as the live path.
-                Ok(()) if dispatcher.effect_handler_count() > 0 => {
-                    dispatch_lifecycle_effects(
-                        dispatcher,
-                        sink,
-                        state_map,
-                        counters,
-                        evt,
-                        SourceIdx(0),
-                        monitor_name,
-                        flow_states,
-                        label_table,
-                    )
-                    .await
-                }
-                other => other,
-            },
-            Err(e) => Err(e),
-        };
-        if let Err(e) = res {
-            match policy {
-                HandlerErrorPolicy::Propagate => return Err(e),
-                HandlerErrorPolicy::Isolate => {
-                    health.record_handler_error();
-                    tracing::warn!(error = %e, "handler error isolated (drain)")
-                }
-            }
+    dispatch_batch(
+        dispatcher,
+        protocol_slots,
+        driver,
+        sink,
+        state_map,
+        counters,
+        &mut leftover,
+        SourceIdx(0),
+        monitor_name,
+        flow_states,
+        label_table,
+        policy,
+        flow_exporters,
+        ml_feature_handlers,
+        byte_accumulators,
+        health,
+        // Issue #23: the graceful-drain flush runs after the main loop; the
+        // ARP table isn't threaded into shutdown.
+        None,
+        Some(deadline),
+    )
+    .await
+}
+
+/// Flush every buffered output at loop exit — the anomaly sink (EVE /
+/// JSON / syslog writers buffer) and the flow exporters — whatever the
+/// drain phase did (a zero `drain_timeout`, a missed deadline, an
+/// error). An exporter's flush error is logged; the sink's is
+/// returned.
+fn flush_outputs(
+    sink: &mut dyn AnomalySink,
+    flow_exporters: &mut [Box<dyn crate::export::FlowExporter>],
+) -> Result<()> {
+    for exporter in flow_exporters.iter_mut() {
+        if let Err(e) = exporter.flush() {
+            tracing::warn!(error = %e, "flow exporter flush failed");
         }
     }
-
-    if Instant::now() >= deadline {
-        return Ok(());
-    }
-
-    // Step 2: drain each protocol slot's typed messages.
-    let ts = flowscope::Timestamp::from_system_time(SystemTime::now());
-    for slot in protocol_slots.iter_mut() {
-        if Instant::now() >= deadline {
-            return Ok(());
-        }
-        let mut ctx = Ctx::new(
-            None,
-            ts,
-            SourceIdx(0),
-            state_map,
-            sink,
-            counters,
-            flow_states,
-        );
-        ctx.monitor_name = monitor_name;
-        ctx.label_table = label_table;
-        ctx.tracker = Some(driver.tracker());
-        if let Err(e) = slot.drain_and_dispatch(dispatcher, &mut ctx) {
-            match policy {
-                HandlerErrorPolicy::Propagate => return Err(e),
-                HandlerErrorPolicy::Isolate => {
-                    health.record_handler_error();
-                    tracing::warn!(error = %e, "handler error isolated (drain slot)")
-                }
-            }
-        }
-    }
-
-    if Instant::now() >= deadline {
-        return Ok(());
-    }
-
-    // Step 3: flush the sink. The `AnomalySink::flush` default is
-    // `Ok(())`; impls that buffer (eve-sink, json sink) actually
-    // do work here. Errors propagate as `io::Error`; the cast
-    // through netring's `Error` wraps them.
     sink.flush().map_err(|e| {
         crate::error::Error::Io(std::io::Error::new(e.kind(), format!("sink flush: {e}")))
-    })?;
-
-    Ok(())
+    })
 }
 
 /// Round-robin readiness poll across the N captures. Returns
@@ -1491,9 +1477,20 @@ fn sample_and_fire_capture_stats(
 /// Shared by the live run loop and the pcap replay loop so the dispatch
 /// semantics stay identical (and are exercised by the cap-free
 /// `monitor_replay` tests).
+/// Dispatch one batch of driver output: the lifecycle events in
+/// `events` and the protocol slots' messages, **interleaved in the
+/// order the engine produced them** (flowscope's
+/// `SlotMessage::lifecycle_pos` / `seq`). A flow's last messages —
+/// including what a parser flushes at FIN — reach handlers before its
+/// `FlowEnded` / `ParserClosed`.
+///
+/// `events` must hold exactly the events of the driver calls since it
+/// was last cleared (the batch). `deadline` bounds shutdown drains.
 #[allow(clippy::too_many_arguments)]
-async fn dispatch_tracked_events(
+async fn dispatch_batch(
     dispatcher: &mut Dispatcher,
+    protocol_slots: &mut [Box<dyn crate::monitor::ProtocolSlot>],
+    driver: &flowscope::driver::Driver<FiveTuple>,
     sink: &mut dyn AnomalySink,
     state_map: &mut StateMap,
     counters: &mut CounterRegistry,
@@ -1508,108 +1505,76 @@ async fn dispatch_tracked_events(
     byte_accumulators: &mut [Box<dyn crate::monitor::nprint::FlowByteAccumulator>],
     health: &crate::monitor::health::HealthState,
     arp_table: ArpTableRef<'_>,
+    deadline: Option<Instant>,
 ) -> Result<()> {
-    for evt in events.drain(..) {
-        // Issue #127: drive the detector registry from the raw tracked event
-        // BEFORE lifecycle dispatch, so detector anomalies and user handlers see
-        // the same flow. Present only when detectors are armed (an unarmed
-        // monitor never allocates the cell → this `get_mut` returns `None`).
-        if let Some(cell) = state_map.get_mut::<crate::monitor::detectors::DetectorCell>() {
-            cell.registry.observe_event(&evt, &mut cell.out);
-            if !cell.out.is_empty() {
-                for owned in cell.out.drain(..) {
-                    crate::anomaly::sink::publish_owned(sink, &owned);
-                }
-            }
+    let base = driver.lifecycle_seq().saturating_sub(events.len() as u64);
+    for slot in protocol_slots.iter_mut() {
+        slot.fetch();
+    }
+    let mut batch = std::mem::take(events);
+    for (i, evt) in batch.drain(..).enumerate() {
+        if deadline.is_some_and(|d| Instant::now() >= d) {
+            return Ok(());
         }
-        // 0.24 Phase D: a flow just ended → build a FlowRecord and fan it
-        // out to every registered exporter. Cheap no-op when none are
-        // registered. Done before dispatch so exporters see the flow even
-        // if a downstream handler errors under `Propagate`.
-        if !flow_exporters.is_empty()
-            && let FsEvent::Ended {
-                key, stats, reason, ..
-            } = &evt
-        {
-            let record = crate::export::FlowRecord::from_ended(key, stats, *reason);
-            for exporter in flow_exporters.iter_mut() {
-                exporter.export(&record);
-            }
-        }
-        // Issue #32: deliver the CICFlowMeter feature vector for the ended
-        // flow, built from the live `stats` (so the IAT / active-idle block
-        // survives, unlike the summary record). Empty handler list = no cost.
-        if !ml_feature_handlers.is_empty()
-            && let FsEvent::Ended {
-                key, stats, reason, ..
-            } = &evt
-        {
-            for handler in ml_feature_handlers.iter_mut() {
-                handler(key, stats, *reason);
-            }
-        }
-        // Issue #72: hand the completed flow's nPrint matrix to the on_nprint
-        // handlers, then drop it. `None` (no `nprint(..)`) is zero cost.
-        if let FsEvent::Ended { key, .. } = &evt {
-            for acc in byte_accumulators.iter_mut() {
-                acc.flush(key);
-            }
-        }
-        // Sync handlers first, then async — but on the SAME event, so one error
-        // is isolated per-event under `Isolate` (a malformed flow can't tear
-        // down the pipeline).
-        let res = match dispatch_lifecycle(
+        dispatch_slot_messages(
+            dispatcher,
+            protocol_slots,
+            driver,
+            sink,
+            state_map,
+            counters,
+            flow_states,
+            source,
+            monitor_name,
+            label_table,
+            policy,
+            health,
+            arp_table,
+            base + i as u64,
+        )?;
+        dispatch_tracked_event(
             dispatcher,
             sink,
             state_map,
             counters,
-            evt.clone(),
+            evt,
             source,
             monitor_name,
             flow_states,
             label_table,
+            policy,
+            flow_exporters,
+            ml_feature_handlers,
+            byte_accumulators,
+            health,
             arp_table,
-        ) {
-            Ok(()) => match dispatch_lifecycle_async(dispatcher, evt.clone()).await {
-                // 0.25-B1: effect pass — gated so no-effect monitors skip
-                // the whole `Ctx`-rebuilding translation (zero added cost).
-                Ok(()) if dispatcher.effect_handler_count() > 0 => {
-                    dispatch_lifecycle_effects(
-                        dispatcher,
-                        sink,
-                        state_map,
-                        counters,
-                        evt,
-                        source,
-                        monitor_name,
-                        flow_states,
-                        label_table,
-                    )
-                    .await
-                }
-                other => other,
-            },
-            Err(e) => Err(e),
-        };
-        if let Err(e) = res {
-            match policy {
-                HandlerErrorPolicy::Propagate => return Err(e),
-                HandlerErrorPolicy::Isolate => {
-                    health.record_handler_error();
-                    tracing::warn!(error = %e, "handler error isolated (per-event)")
-                }
-            }
-        }
+        )
+        .await?;
     }
-    Ok(())
+    *events = batch;
+    // Messages after the last event (or of a batch without events).
+    dispatch_slot_messages(
+        dispatcher,
+        protocol_slots,
+        driver,
+        sink,
+        state_map,
+        counters,
+        flow_states,
+        source,
+        monitor_name,
+        label_table,
+        policy,
+        health,
+        arp_table,
+        u64::MAX,
+    )
 }
 
-/// Drain each protocol slot's queued typed messages (e.g. parsed HTTP/DNS/TLS)
-/// and dispatch them. The parsers were already fed by `driver.track_into`
-/// (in-borrow); the messages they produced are owned, so this needs only a
-/// shared `&driver` for the flow-tracker join — no capture-ring borrow.
+/// Dispatch the protocol slots' pending messages positioned at or
+/// before lifecycle event `upto`, across slots in engine order.
 #[allow(clippy::too_many_arguments)]
-fn drain_protocol_slots(
+fn dispatch_slot_messages(
     dispatcher: &mut Dispatcher,
     protocol_slots: &mut [Box<dyn crate::monitor::ProtocolSlot>],
     driver: &flowscope::driver::Driver<FiveTuple>,
@@ -1617,28 +1582,171 @@ fn drain_protocol_slots(
     state_map: &mut StateMap,
     counters: &mut CounterRegistry,
     flow_states: &mut crate::ctx::FlowStateRegistry,
-    ts: flowscope::Timestamp,
     source: SourceIdx,
     monitor_name: Option<&str>,
     label_table: &flowscope::well_known::LabelTable,
     policy: HandlerErrorPolicy,
     health: &crate::monitor::health::HealthState,
     arp_table: ArpTableRef<'_>,
+    upto: u64,
 ) -> Result<()> {
-    for slot in protocol_slots.iter_mut() {
-        let mut ctx = Ctx::new(None, ts, source, state_map, sink, counters, flow_states);
+    loop {
+        let mut next: Option<(usize, u64)> = None;
+        for (i, slot) in protocol_slots.iter().enumerate() {
+            if let Some((pos, seq)) = slot.next_order()
+                && pos <= upto
+                && next.is_none_or(|(_, best)| seq < best)
+            {
+                next = Some((i, seq));
+            }
+        }
+        let Some((i, _)) = next else {
+            return Ok(());
+        };
+        let mut ctx = Ctx::new(
+            None,
+            flowscope::Timestamp::default(),
+            source,
+            state_map,
+            sink,
+            counters,
+            flow_states,
+        );
         ctx.monitor_name = monitor_name;
         ctx.label_table = label_table;
         ctx.tracker = Some(driver.tracker());
         // Issue #23: cross-protocol IP→MAC lookup for L7 (TLS/HTTP/DNS) handlers.
         ctx.arp_table = arp_table;
-        if let Err(e) = slot.drain_and_dispatch(dispatcher, &mut ctx) {
+        if let Err(e) = protocol_slots[i].dispatch_next(dispatcher, &mut ctx) {
             match policy {
                 HandlerErrorPolicy::Propagate => return Err(e),
                 HandlerErrorPolicy::Isolate => {
                     health.record_handler_error();
-                    tracing::warn!(error = %e, "handler error isolated (per-slot)")
+                    tracing::warn!(error = %e, "handler error isolated (per-message)")
                 }
+            }
+        }
+    }
+}
+
+/// Dispatch one tracked lifecycle event: detectors, exporters, ML
+/// features, nPrint, then the lifecycle handlers (sync, async,
+/// effects). A flow's per-flow state (`ctx.flow_state_mut`) is
+/// released after its `FlowEnded` handlers ran.
+#[allow(clippy::too_many_arguments)]
+async fn dispatch_tracked_event(
+    dispatcher: &mut Dispatcher,
+    sink: &mut dyn AnomalySink,
+    state_map: &mut StateMap,
+    counters: &mut CounterRegistry,
+    evt: FsEvent<FlowKey>,
+    source: SourceIdx,
+    monitor_name: Option<&str>,
+    flow_states: &mut crate::ctx::FlowStateRegistry,
+    label_table: &flowscope::well_known::LabelTable,
+    policy: HandlerErrorPolicy,
+    flow_exporters: &mut [Box<dyn crate::export::FlowExporter>],
+    ml_feature_handlers: &mut [crate::monitor::ml_features::FlowEndHandler],
+    byte_accumulators: &mut [Box<dyn crate::monitor::nprint::FlowByteAccumulator>],
+    health: &crate::monitor::health::HealthState,
+    arp_table: ArpTableRef<'_>,
+) -> Result<()> {
+    // Issue #127: drive the detector registry from the raw tracked event
+    // BEFORE lifecycle dispatch, so detector anomalies and user handlers see
+    // the same flow. Present only when detectors are armed (an unarmed
+    // monitor never allocates the cell → this `get_mut` returns `None`).
+    if let Some(cell) = state_map.get_mut::<crate::monitor::detectors::DetectorCell>() {
+        cell.registry.observe_event(&evt, &mut cell.out);
+        if !cell.out.is_empty() {
+            for owned in cell.out.drain(..) {
+                crate::anomaly::sink::publish_owned(sink, &owned);
+            }
+        }
+    }
+    // 0.24 Phase D: a flow just ended → build a FlowRecord and fan it
+    // out to every registered exporter. Cheap no-op when none are
+    // registered. Done before dispatch so exporters see the flow even
+    // if a downstream handler errors under `Propagate`.
+    if !flow_exporters.is_empty()
+        && let FsEvent::Ended {
+            key, stats, reason, ..
+        } = &evt
+    {
+        let record = crate::export::FlowRecord::from_ended(key, stats, *reason);
+        for exporter in flow_exporters.iter_mut() {
+            exporter.export(&record);
+        }
+    }
+    // Issue #32: deliver the CICFlowMeter feature vector for the ended
+    // flow, built from the live `stats` (so the IAT / active-idle block
+    // survives, unlike the summary record). Empty handler list = no cost.
+    if !ml_feature_handlers.is_empty()
+        && let FsEvent::Ended {
+            key, stats, reason, ..
+        } = &evt
+    {
+        for handler in ml_feature_handlers.iter_mut() {
+            handler(key, stats, *reason);
+        }
+    }
+    // Issue #72: hand the completed flow's nPrint matrix to the on_nprint
+    // handlers, then drop it. `None` (no `nprint(..)`) is zero cost.
+    let ended = match &evt {
+        FsEvent::Ended { key, .. } => {
+            for acc in byte_accumulators.iter_mut() {
+                acc.flush(key);
+            }
+            Some(*key)
+        }
+        _ => None,
+    };
+    // Sync handlers first, then async — but on the SAME event, so one error
+    // is isolated per-event under `Isolate` (a malformed flow can't tear
+    // down the pipeline).
+    let res = match dispatch_lifecycle(
+        dispatcher,
+        sink,
+        state_map,
+        counters,
+        evt.clone(),
+        source,
+        monitor_name,
+        flow_states,
+        label_table,
+        arp_table,
+    ) {
+        Ok(()) => match dispatch_lifecycle_async(dispatcher, evt.clone()).await {
+            // 0.25-B1: effect pass — gated so no-effect monitors skip
+            // the whole `Ctx`-rebuilding translation (zero added cost).
+            Ok(()) if dispatcher.effect_handler_count() > 0 => {
+                dispatch_lifecycle_effects(
+                    dispatcher,
+                    sink,
+                    state_map,
+                    counters,
+                    evt,
+                    source,
+                    monitor_name,
+                    flow_states,
+                    label_table,
+                )
+                .await
+            }
+            other => other,
+        },
+        Err(e) => Err(e),
+    };
+    // The FlowEnded handlers have run: release the flow's per-flow
+    // state (`ctx.flow_state_mut`), which otherwise lived forever.
+    if let Some(key) = ended {
+        flow_states.flow_ended(&key);
+    }
+    if let Err(e) = res {
+        match policy {
+            HandlerErrorPolicy::Propagate => return Err(e),
+            HandlerErrorPolicy::Isolate => {
+                health.record_handler_error();
+                tracing::warn!(error = %e, "handler error isolated (per-event)")
             }
         }
     }
@@ -1704,6 +1812,31 @@ async fn fire_tick(
     }
     dispatcher.dispatch_async::<Tick>(&tick).await?;
     Ok(())
+}
+
+/// Packet time, extrapolated by wall time since the last packet: what
+/// a live sweep's `now` is. Sweeping on the packets' own clock keeps
+/// idle timeouts right even when packet timestamps come from another
+/// clock (hardware / PHC) than the host's.
+#[derive(Default)]
+struct PacketClock {
+    last: Option<(flowscope::Timestamp, Instant)>,
+}
+
+impl PacketClock {
+    fn observe(&mut self, ts: flowscope::Timestamp) {
+        let ts = self.last.map_or(ts, |(prev, _)| prev.max(ts));
+        self.last = Some((ts, Instant::now()));
+    }
+
+    fn now(&self) -> Option<flowscope::Timestamp> {
+        let (ts, at) = self.last?;
+        let d = ts.to_duration() + at.elapsed();
+        Some(flowscope::Timestamp::new(
+            d.as_secs() as u32,
+            d.subsec_nanos(),
+        ))
+    }
 }
 
 /// Tracks both a packet-batch deadline and an OS shutdown signal.
@@ -1998,6 +2131,8 @@ fn dispatch_packet_subs(
         label_table,
         tracker: None,
         arp_table: None,
+        side: None,
+        orientation: None,
     };
     for sub in subs {
         if sub.predicate.load().eval(&fields)
@@ -2062,6 +2197,8 @@ fn dispatch_arp(
         // this shared borrow exposes the table *including* the current frame
         // to `Ctx::arp_table()` in the handlers below.
         arp_table: Some(&watch.table),
+        side: None,
+        orientation: None,
     };
 
     // Helper: apply the error policy uniformly to one handler result.
@@ -2134,6 +2271,8 @@ fn dispatch_ndp(
         label_table,
         tracker: None,
         arp_table: None, // the ARP (IPv4) table; NDP's IPv6 table isn't exposed on Ctx.
+        side: None,
+        orientation: None,
     };
 
     macro_rules! guard {
@@ -2198,6 +2337,8 @@ fn dispatch_lldp(
         label_table,
         tracker: None,
         arp_table: None,
+        side: None,
+        orientation: None,
     };
 
     macro_rules! guard {
@@ -2255,6 +2396,8 @@ fn dispatch_cdp(
         label_table,
         tracker: None,
         arp_table: None,
+        side: None,
+        orientation: None,
     };
 
     macro_rules! guard {
@@ -2310,6 +2453,8 @@ fn absorb_frame_assets(
         label_table,
         tracker: None,
         arp_table: None,
+        side: None,
+        orientation: None,
     };
 
     macro_rules! guard {
@@ -2455,6 +2600,8 @@ fn dispatch_p0f(
         label_table,
         tracker: None,
         arp_table: None,
+        side: None,
+        orientation: None,
     };
 
     macro_rules! guard {
@@ -2509,6 +2656,8 @@ fn dispatch_lifecycle(
                 tracker: None,
                 // Issue #23: cross-protocol IP→MAC lookup for lifecycle handlers.
                 arp_table,
+                side: None,
+                orientation: None,
             };
             dispatcher.dispatch::<$ty>(&$payload, &mut ctx)?;
         }};
@@ -2756,6 +2905,8 @@ async fn dispatch_lifecycle_effects(
                 label_table,
                 tracker: None,
                 arp_table: None,
+                side: None,
+                orientation: None,
             };
             dispatcher
                 .dispatch_effects::<$ty>(&$payload, &mut ctx)

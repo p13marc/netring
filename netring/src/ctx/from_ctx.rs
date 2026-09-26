@@ -115,7 +115,33 @@ impl StateMap {
 /// on first access.
 #[derive(Default)]
 pub struct FlowStateRegistry {
-    by_type: FxHashMap<TypeId, Box<dyn Any + Send>>,
+    by_type: FxHashMap<TypeId, Box<dyn ErasedFlowState>>,
+}
+
+/// A `FlowStateMap<T>` of any `T`: lets the registry release every
+/// map's state for a flow without knowing the types.
+trait ErasedFlowState: Send {
+    fn as_any_mut(&mut self) -> &mut dyn Any;
+    fn feed(&mut self, event: &flowscope::FlowEvent<flowscope::extract::FiveTupleKey>);
+    fn sweep(&mut self, now: flowscope::Timestamp);
+    fn len(&self) -> usize;
+}
+
+impl<T: Default + Send + 'static> ErasedFlowState
+    for flowscope::correlate::FlowStateMap<T, flowscope::extract::FiveTupleKey>
+{
+    fn as_any_mut(&mut self) -> &mut dyn Any {
+        self
+    }
+    fn feed(&mut self, event: &flowscope::FlowEvent<flowscope::extract::FiveTupleKey>) {
+        flowscope::correlate::FlowStateMap::feed(self, event);
+    }
+    fn sweep(&mut self, now: flowscope::Timestamp) {
+        flowscope::correlate::FlowStateMap::sweep(self, now);
+    }
+    fn len(&self) -> usize {
+        flowscope::correlate::FlowStateMap::len(self)
+    }
 }
 
 impl FlowStateRegistry {
@@ -141,12 +167,44 @@ impl FlowStateRegistry {
     {
         self.by_type
             .get_mut(&TypeId::of::<T>())
-            .and_then(|b| b.downcast_mut())
+            .and_then(|b| b.as_any_mut().downcast_mut())
     }
 
     /// `true` when any flow-state slot is registered.
     pub fn is_empty(&self) -> bool {
         self.by_type.is_empty()
+    }
+
+    /// A flow ended: drop its state in every registered map. The run
+    /// loop calls this after the `FlowEnded` handlers ran (they can
+    /// still read the state). New in 0.31.0.
+    pub fn flow_ended(&mut self, key: &flowscope::extract::FiveTupleKey) {
+        if self.by_type.is_empty() {
+            return;
+        }
+        let ended = flowscope::FlowEvent::Ended {
+            key: *key,
+            reason: flowscope::EndReason::ForceClosed,
+            stats: flowscope::FlowStats::default(),
+            history: flowscope::HistoryString::default(),
+            l4: None,
+        };
+        for map in self.by_type.values_mut() {
+            map.feed(&ended);
+        }
+    }
+
+    /// Drop state idle for longer than each map's idle timeout.
+    /// Called on every sweep. New in 0.31.0.
+    pub fn sweep(&mut self, now: flowscope::Timestamp) {
+        for map in self.by_type.values_mut() {
+            map.sweep(now);
+        }
+    }
+
+    /// Flows with state, summed over every registered map.
+    pub fn len(&self) -> usize {
+        self.by_type.values().map(|m| m.len()).sum()
     }
 }
 

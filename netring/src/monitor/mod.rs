@@ -563,10 +563,12 @@ impl Monitor {
     ///
     /// The run loop resets a deadline each time a packet batch
     /// arrives (or a tick fires); if the deadline expires before
-    /// the next event, the loop exits. Useful for:
+    /// the next event, the loop exits. The periodic flow sweep
+    /// (idle `FlowEnded`, parser ticks) is housekeeping and does not
+    /// reset it. Useful for:
     ///
-    /// - **pcap replay** — auto-stop after EOF + a small grace
-    ///   window so trailing periodic-sweep events still land.
+    /// - **live captures that go quiet** — stop once the source is
+    ///   silent; flows still open are ended by the drain phase.
     /// - **one-shot scans** — record traffic until the upstream
     ///   source stops cleanly.
     /// - **test fixtures** — exit deterministically once the

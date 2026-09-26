@@ -20,6 +20,31 @@ built on AF_PACKET with TPACKET_V3 (block-based mmap ring buffers) and AF_XDP.
 
 ## Implementation Status
 
+**0.31.0 — unreleased** (breaking; `docs/MIGRATING_0.30_TO_0.31.md`).
+"flowscope 0.25: one session engine". Depends on **flowscope 0.25**
+(developed against the local checkout via `[patch.crates-io]` in the
+workspace `Cargo.toml` — remove once flowscope 0.25.0 is published).
+Driven by a downstream report (des-capture) against 0.30.0.
+
+- **Session / datagram streams run flowscope's engine.**
+  `SessionStream` / `DatagramStream` / `PcapSessionStream` /
+  `PcapDatagramStream` wrap `flowscope::SessionDriver` /
+  `DatagramDriver`; `process_session_event`, the copied reassembler
+  factory, `convert_event` / `peek_udp_payload` and netring's own
+  `SessionEvent` are gone (`netring::flow::SessionEvent` =
+  flowscope's). Fixes: parser poison / done honoured (`ParserClosed`),
+  `DropFlow` no longer wedges silently, gaps reported, reassembly stats
+  in `FlowStats`, datagram `side` relative to the initiator (was address
+  order), Monitor reassembly config reaches L7 parsers.
+- **pcap replay:** packet-time sweeps every `sweep_interval` (idle
+  timeouts fire mid-file), `with_dedup` / `with_monotonic_timestamps`
+  on all three pcap streams, pcapng `if_tsresol` honoured in
+  `AsyncPcapSource` (µs pcapng used to replay 1000× too early).
+- `Multi{Flow,Session,Datagram}Stream::from_streams` for per-source
+  configuration; root re-exports `SessionStream` / `DatagramStream`.
+- Regression tests: `tests/session_engine_replay.rs`,
+  `tests/monitor_reassembly_config_replay.rs`.
+
 **0.30.0 — RELEASED 2026-09-02** (published to crates.io, tag `0.30.0`,
 alongside **`netring-exporters` 0.6.0**).
 "flowscope 0.24, HTTP/2 marker, netns capture & the dependency refresh".

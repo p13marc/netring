@@ -300,7 +300,7 @@ Organized by topic under [`examples/`](examples/README.md) — `basic/`,
   [Tuning](docs/TUNING_GUIDE.md) · [Troubleshooting](docs/TROUBLESHOOTING.md)
 - [Writing detectors](docs/WRITING_DETECTORS.md) ·
   [Fingerprints](docs/FINGERPRINTS.md) · [Metrics](docs/METRICS.md)
-- **Migrating:** [0.29 → 0.30](docs/MIGRATING_0.29_TO_0.30.md) ·
+- **Migrating:** [0.30 → 0.31](docs/MIGRATING_0.30_TO_0.31.md) · [0.29 → 0.30](docs/MIGRATING_0.29_TO_0.30.md) ·
   [0.28 → 0.29](docs/MIGRATING_0.28_TO_0.29.md) ·
   [0.27 → 0.28](docs/MIGRATING_0.27_TO_0.28.md) ·
   [earlier guides](docs/INDEX.md#migration-guides)

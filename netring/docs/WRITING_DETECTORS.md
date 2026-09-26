@@ -448,7 +448,7 @@ fn my_rule_fires_on_realistic_dns_burst() {
 
     let mut alerts = 0;
     while let Some(evt) = stream.next().await {
-        if let SessionEvent::Application { key, side, message, ts, parser_kind } = evt.unwrap() {
+        if let SessionEvent::Application { key, side, message, ts, parser_kind, .. } = evt.unwrap() {
             let pe = ProtocolEvent::Message {
                 key, side, parser_kind,
                 message: ProtocolMessage::Dns(message), ts

@@ -1,5 +1,87 @@
 # Changelog
 
+## 0.31.0 — unreleased — flowscope 0.25: one session engine
+
+Depends on **flowscope 0.25** (session-engine redesign). Migration:
+`docs/MIGRATING_0.30_TO_0.31.md`. Breaking. Driven by a downstream
+report (des-capture) against 0.30.0 and the audit that followed; the
+root cause of most findings was that netring's session streams
+re-implemented flowscope's engine (tracker + reassembler map + parser
+dispatch) and the copy had drifted.
+
+### Fixed
+
+- **`SessionStream` / `PcapSessionStream` ignored
+  `SessionParser::is_poisoned` / `is_done`** — a parser that gave up
+  kept being fed, no close or anomaly was ever emitted. It is now
+  closed (`SessionEvent::ParserClosed` with the poison reason in
+  `detail`, plus `SessionParseError` with anomalies on) and never fed
+  again for the flow.
+- **`OverflowPolicy::DropFlow` silently wedged the flow**: the
+  reassembler poisoned, nothing read it, every later byte of the side
+  was discarded and the flow still ended as a clean `Fin`. The stop now
+  closes the parser (`EndReason::BufferOverflow`), raises a
+  `BufferOverflow` anomaly, and is recorded in
+  `Closed.stats.reassembly_stop_*`.
+- **One lost packet silently truncated a direction** — the reassembler
+  dropped every segment after the first hole. Holes are now healed when
+  the bytes arrive late, or skipped and reported
+  (`SessionParser::on_gap`, `StreamGap` anomaly, `reassembly_gap_*`
+  stats).
+- **Reassembly statistics never reached `FlowStats`** on session
+  streams (`Closed.stats`, `snapshot_flow_stats()`); they now carry
+  gaps, retransmits, peak buffer, oversize drops and the stop reason.
+  `reassembler_high_watermark_pct` and `reassembly_memcap` are honoured.
+- **`DatagramStream` / `PcapDatagramStream` mislabelled `side`**: it
+  was derived from address order, so every message of a flow whose
+  client had the higher address was attributed to the wrong side.
+  Datagram parser poison / done were ignored too.
+- **The Monitor's reassembly settings never reached L7 parsers**:
+  protocols were registered on flowscope's driver builder before
+  `build()` applied `tracker_config`, and flowscope 0.24 slots
+  snapshotted their config at registration (`reassembly_memcap`,
+  `infer_tcp_initiator`, … were inert for parsing). Fixed by flowscope
+  0.25's single engine.
+- **pcapng timestamps were wrong by the interface resolution**:
+  `pcap-file` returns raw EPB ticks as nanoseconds, so a µs-resolution
+  pcapng (the common default) replayed 1000× too early.
+  `AsyncPcapSource` now applies `if_tsresol` / `if_tsoffset`.
+- **Offline replay never idled flows out mid-file** (the pcap streams
+  swept only at EOF). They now sweep on packet time every
+  `sweep_interval`, like the live streams do on wall time.
+
+### Changed (breaking)
+
+- `SessionStream` / `DatagramStream` / `PcapSessionStream` /
+  `PcapDatagramStream` are async fronts for flowscope's
+  `SessionDriver` / `DatagramDriver`; `netring::flow::SessionEvent` is
+  now **flowscope's** `SessionEvent` (new `ParserClosed` / `Tick`
+  variants; `Started` gains `l4`, `Closed` gains `ts`). The module
+  `netring::async_adapters::session_event` is gone.
+- `snapshot_flow_stats()` on the session / datagram streams yields
+  owned `(K, FlowStats)` (with live reassembly diagnostics) instead of
+  borrowed pairs.
+- `ParserClosed<P>` (Monitor typed event) gains `detail` —
+  `ParserClosed::new` takes it.
+- Parser closes no longer end the flow: `Closed.reason` is the
+  transport reason; see the migration guide.
+
+### Added
+
+- `with_emit_anomalies(bool)` and `driver()` on the session / datagram
+  streams (live and pcap).
+- `PcapFlowStream` / `PcapSessionStream` / `PcapDatagramStream`:
+  `with_dedup`, `with_monotonic_timestamps`, and (session / datagram)
+  `with_config`, `with_idle_timeout_fn`, `snapshot_flow_stats`.
+- `MultiFlowStream` / `MultiSessionStream` / `MultiDatagramStream`
+  `::from_streams(..)` — fan in per-source streams you configured
+  yourself (per-interface BPF filter, pcap tap, dedup, config) and keep
+  `TaggedEvent` + the per-source stats accessors.
+- Crate-root re-exports `netring::SessionStream` /
+  `netring::DatagramStream`; `netring::flow` re-exports
+  `SessionDriver`, `DatagramDriver`, `GapResponse`, `ReassemblyStop`,
+  `StreamChunks`.
+
 ## 0.30.0 — 2026-09-02 — flowscope 0.24, HTTP/2 marker, netns capture
 
 Depends on **flowscope 0.24** (the inline-proxy / sans-IO L7 cycle). Migration:

@@ -2,85 +2,154 @@
 
 ## 0.31.0 — unreleased — flowscope 0.25: one session engine
 
-Depends on **flowscope 0.25** (session-engine redesign). Migration:
-`docs/MIGRATING_0.30_TO_0.31.md`. Breaking. Driven by a downstream
-report (des-capture) against 0.30.0 and the audit that followed; the
-root cause of most findings was that netring's session streams
-re-implemented flowscope's engine (tracker + reassembler map + parser
-dispatch) and the copy had drifted.
+Depends on **flowscope 0.25** (session-engine redesign; developed
+against the local checkout via `[patch.crates-io]` until it is
+published). `netring-exporters` → **0.7.0** (dependency bump, no API
+change). Migration: `docs/MIGRATING_0.30_TO_0.31.md`. Breaking.
 
-### Fixed
+Driven by a downstream report (des-capture, against 0.30.0) and the
+audits that followed. The root cause of most findings: netring's
+session streams re-implemented flowscope's engine (tracker +
+reassembler map + parser dispatch) and the copy had drifted, while the
+Monitor never swept, mis-routed parser events and delivered messages
+out of order. Tracked in the "0.31" milestone (epic #173).
 
-- **`SessionStream` / `PcapSessionStream` ignored
-  `SessionParser::is_poisoned` / `is_done`** — a parser that gave up
-  kept being fed, no close or anomaly was ever emitted. It is now
-  closed (`SessionEvent::ParserClosed` with the poison reason in
-  `detail`, plus `SessionParseError` with anomalies on) and never fed
-  again for the flow.
-- **`OverflowPolicy::DropFlow` silently wedged the flow**: the
-  reassembler poisoned, nothing read it, every later byte of the side
-  was discarded and the flow still ended as a clean `Fin`. The stop now
-  closes the parser (`EndReason::BufferOverflow`), raises a
-  `BufferOverflow` anomaly, and is recorded in
-  `Closed.stats.reassembly_stop_*`.
-- **One lost packet silently truncated a direction** — the reassembler
-  dropped every segment after the first hole. Holes are now healed when
-  the bytes arrive late, or skipped and reported
-  (`SessionParser::on_gap`, `StreamGap` anomaly, `reassembly_gap_*`
-  stats).
-- **Reassembly statistics never reached `FlowStats`** on session
-  streams (`Closed.stats`, `snapshot_flow_stats()`); they now carry
-  gaps, retransmits, peak buffer, oversize drops and the stop reason.
-  `reassembler_high_watermark_pct` and `reassembly_memcap` are honoured.
-- **`DatagramStream` / `PcapDatagramStream` mislabelled `side`**: it
-  was derived from address order, so every message of a flow whose
-  client had the higher address was attributed to the wrong side.
-  Datagram parser poison / done were ignored too.
-- **The Monitor's reassembly settings never reached L7 parsers**:
-  protocols were registered on flowscope's driver builder before
-  `build()` applied `tracker_config`, and flowscope 0.24 slots
-  snapshotted their config at registration (`reassembly_memcap`,
-  `infer_tcp_initiator`, … were inert for parsing). Fixed by flowscope
-  0.25's single engine.
-- **pcapng timestamps were wrong by the interface resolution**:
-  `pcap-file` returns raw EPB ticks as nanoseconds, so a µs-resolution
-  pcapng (the common default) replayed 1000× too early.
-  `AsyncPcapSource` now applies `if_tsresol` / `if_tsoffset`.
-- **Offline replay never idled flows out mid-file** (the pcap streams
-  swept only at EOF). They now sweep on packet time every
-  `sweep_interval`, like the live streams do on wall time.
+### Fixed — session / datagram streams
+
+- **Parser poison / done ignored** (#147): a parser that gave up kept
+  being fed. It is now closed (`SessionEvent::ParserClosed` with the
+  reason in `detail`) and never fed again for the flow.
+- **`OverflowPolicy::DropFlow` silently wedged the flow** (#148); the
+  stop is now reported (`ParserSideStopped { BufferOverflow }` for the
+  side, anomaly, `Closed.stats.reassembly_stop_*`).
+- **One lost packet truncated a direction silently**: holes heal when
+  the bytes arrive late or are skipped and reported
+  (`SessionParser::on_gap`, `StreamGap`, `reassembly_gap_*`); a gap
+  stops only that side of the parser (`ParserSideStopped`) — the other
+  side keeps being parsed.
+- **Reassembly statistics never reached `FlowStats`** (#149).
+- **Datagram `side` derived from address order** (#152).
+- **Monitor reassembly settings never reached L7 parsers** (#153).
+- **Datagram parsers saw the wrong transport** (#157, #158):
+  `.protocol::<Icmp>()` ran the ICMP parser on every UDP payload (fake
+  `IcmpMessage` / `IcmpError` events); datagram streams now hand a UDP
+  parser UDP only (flowscope's `DatagramParser::transports()`).
+- **Encapsulated TCP (VXLAN / GRE / GTP-U / MPLS) was reassembled from
+  the wrong payload offset** (flowscope 0.25 fix, inherited).
+
+### Fixed — Monitor
+
+- **Never swept** (#156): no idle `FlowEnded`, no parser `on_tick`, no
+  out-of-order expiry — everything keyed on flow end (exporters, ML
+  features, nPrint, RED) stalled until eviction or shutdown. Live, a
+  `sweep_interval` timer sweeps on the packet clock; `replay()` sweeps
+  on packet time, so idle flows end mid-file in time order.
+- **Messages after their flow's end** (#163): what a parser flushed at
+  FIN reached handlers after `FlowEnded`. Messages and lifecycle events
+  are merged in engine order (`SlotMessage::lifecycle_pos` / `seq`).
+- **`ParserClosed<P>` routed by transport** (#164):
+  `ParserClosed<Http>` compiled, validated, and never fired. Parser
+  events now reach the parser's own protocol; transport markers still
+  get every parser event of their transport.
+- **Per-flow state leaked forever** (#162): `ctx.flow_state_mut` slots
+  are released after the flow's `FlowEnded` handlers and on sweep.
+- **Sink / exporter flush skipped on some exits** (#169).
+- **Tick handlers never ran on replay** (#174); live ticks were stamped
+  with wall-clock time while events carry packet time.
+- **`EventStream` never woke its task** (#161).
+
+### Fixed — capture and replay
+
+- **Stopping a blocked capture was impossible on an idle interface**
+  (#146): `next_packet` / `for_each` retried poll timeouts forever.
+- **`ChannelCapture` deadlocked on drop / `stop_and_drain` with a full
+  channel** (#160).
+- **pcap link types**: SLL / SLL2 / raw-IP / BSD-loopback captures were
+  read as Ethernet and silently unmatched (#167); the recorded packet
+  direction is now kept (pcapng EPB flags, cooked packet type), so
+  `Dedup::loopback` works on such captures.
+- **pcapng timestamps off by the interface resolution** (µs files
+  replayed 1000× early, #154).
+- **`loop_at_eof`** spun forever after the consumer left or on an empty
+  / broken file (#159), and rewound packet time each pass so sweeps
+  stopped (#168).
+- **pcap streams never swept on packet time** (#155).
+- **`with_async_reassembler` / `Conversation` did not reassemble**
+  (#166): arrival-order segments (retransmissions twice, reordering,
+  silent loss), idle timeouts reported as FIN, one leaked map entry per
+  flow, and a doc example that deadlocked.
 
 ### Changed (breaking)
 
 - `SessionStream` / `DatagramStream` / `PcapSessionStream` /
   `PcapDatagramStream` are async fronts for flowscope's
   `SessionDriver` / `DatagramDriver`; `netring::flow::SessionEvent` is
-  now **flowscope's** `SessionEvent` (new `ParserClosed` / `Tick`
-  variants; `Started` gains `l4`, `Closed` gains `ts`). The module
+  flowscope's (new `ParserClosed`, `ParserSideStopped`, `Tick`;
+  `Started` gains `l4`, `Closed` gains `ts`). The module
   `netring::async_adapters::session_event` is gone.
-- `snapshot_flow_stats()` on the session / datagram streams yields
-  owned `(K, FlowStats)` (with live reassembly diagnostics) instead of
-  borrowed pairs.
-- `ParserClosed<P>` (Monitor typed event) gains `detail` —
-  `ParserClosed::new` takes it.
-- Parser closes no longer end the flow: `Closed.reason` is the
-  transport reason; see the migration guide.
+- Parser closes and side stops never end the flow: `Closed.reason` /
+  `FlowEnded.reason` is always a transport reason.
+- `with_async_reassembler(factory)` returns a `ReassemblyStream`; the
+  `AsyncReassembler` trait is `data(Bytes)` / `gap(u64)` /
+  `close(EndReason)` (was `segment(seq, Bytes)` / `fin` / `rst`);
+  `channel_factory` senders carry `ReassembledChunk::{Data, Gap}`.
+  `ConversationChunk` gains `Gap` and `SideStopped`;
+  `ConversationStream<C, E>` is generic over the source.
+- `FlowStream` loses its `R` type parameter; `NoReassembler` /
+  `AsyncReassemblerSlot` are gone.
+- `snapshot_flow_stats()` yields owned `(K, FlowStats)` on every stream.
+- Monitor: `ParserClosed<P>` gains `detail`; new `ParserSideStopped<P>`;
+  `ProtocolSlot` is `Send + Sync` with `fetch` / `next_order` /
+  `dispatch_next` / `slot_id` / `dispatch_parser_event(_async)`;
+  `ParserEvent` borrows its detail (`ParserEvent<'a>`).
+- `pcap` feature pulls flowscope's `pcap-reader`.
 
 ### Added
 
-- `with_emit_anomalies(bool)` and `driver()` on the session / datagram
-  streams (live and pcap).
-- `PcapFlowStream` / `PcapSessionStream` / `PcapDatagramStream`:
-  `with_dedup`, `with_monotonic_timestamps`, and (session / datagram)
-  `with_config`, `with_idle_timeout_fn`, `snapshot_flow_stats`.
-- `MultiFlowStream` / `MultiSessionStream` / `MultiDatagramStream`
-  `::from_streams(..)` — fan in per-source streams you configured
-  yourself (per-interface BPF filter, pcap tap, dedup, config) and keep
-  `TaggedEvent` + the per-source stats accessors.
-- Crate-root re-exports `netring::SessionStream` /
-  `netring::DatagramStream`; `netring::flow` re-exports
-  `SessionDriver`, `DatagramDriver`, `GapResponse`, `ReassemblyStop`,
-  `StreamChunks`.
+- `Capture::stop_handle()` → `StopHandle` (eventfd, wakes a blocked
+  reader at once), `Capture::stop_requested` / `clear_stop`,
+  `Packets::next_packet_timeout()` (#146).
+- Monitor: `emit_anomalies(bool)` (on automatically with an
+  `AnyFlowAnomaly` handler), `emit_packet_details(bool)`,
+  `ctx.side()` / `ctx.orientation()` for L7 messages (#165).
+- `ReassemblyStream` (`with_emit_anomalies`, `snapshot_flow_stats`,
+  `buffered_bytes`), `AsyncReassemblerFactory::flow_ended` (#166).
+- `with_emit_anomalies` / `driver()` on the session / datagram streams;
+  `with_dedup` / `with_monotonic_timestamps` / `dedup_mut` on the pcap
+  streams; `PcapFlowStream::snapshot_flow_stats` (#150, #171).
+- `Multi{Flow,Session,Datagram}Stream::from_streams` and the AF_XDP
+  `XdpMulti*` equivalents; `AsyncXdpMultiCapture::{session,datagram}_stream_with`;
+  `MultiStreamConfig::with_emit_anomalies` (#151, #171).
+- Stream conversions keep already-queued events; the monotonic clamp
+  keeps the whole RX metadata (#171).
+- Crate-root `SessionStream` / `DatagramStream` / `ReassemblyStream` /
+  `StopHandle`; `netring::flow` re-exports `SessionDriver`,
+  `DatagramDriver`, `GapResponse`, `ReassemblyStop`, `StreamChunks`,
+  `ReassembledChunk`.
+- `Dispatcher::handles` / `handles_async`.
+
+### Performance
+
+- Measured allocation gates (#170): `tests/alloc_gate.rs` replays an
+  in-order TCP connection through `AsyncPcapSource` → engine → Monitor
+  handlers and through `PcapSessionStream`: **1.000 allocation per
+  packet, all of it the replay source's own packet buffer** — the
+  engine and dispatch add 0 (fails above 0.05). `benches/zero_alloc.rs`
+  now asserts 0 *total* allocations (it compared net heap size, which
+  hides churn). Parser-close details are no longer cloned up front.
+- flowscope 0.25 vs 0.24.1 (its compat harness): 5–10× fewer
+  allocations and 1.4–2.5× faster on the engine scenarios; adversarial
+  1-byte out-of-order input is linear and bounded by the 256 KiB
+  per-side budget (was quadratic).
+
+### CI
+
+- The integration lane compiled 12 of its 29 privileged test files out
+  (every live Monitor / flow / multi-capture test); it now builds them
+  (`flow,parse,pcap,http,icmp`) and three broken tests are fixed (#144).
+  Verified locally: 807 passed with capabilities, 730 as real root.
+- The monitor test job runs the integration tests and the allocation
+  bench (neither ran anywhere before).
 
 ## 0.30.0 — 2026-09-02 — flowscope 0.24, HTTP/2 marker, netns capture
 

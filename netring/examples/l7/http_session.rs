@@ -31,7 +31,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     use netring::flow::SessionEvent;
     use netring::flow::extract::FiveTuple;
     use netring::{AsyncCapture, BpfFilter};
-    use std::time::{Duration, Instant};
+    use std::time::Duration;
 
     let iface = std::env::args().nth(1).unwrap_or_else(|| "lo".into());
     let seconds: u64 = std::env::args()
@@ -53,16 +53,17 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let cap = AsyncCapture::open_with_filter(&iface, filter)?;
     let mut stream = cap
         .flow_stream(FiveTuple::bidirectional())
-        .session_stream(HttpParser::default());
+        .session_stream(HttpParser::default())
+        // Gaps, overflow, retransmit inconsistencies, eviction pressure.
+        .with_emit_anomalies(true);
 
-    let deadline = Instant::now() + Duration::from_secs(seconds);
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(seconds);
     let mut req_count = 0u64;
     let mut resp_count = 0u64;
     let mut flow_count = 0u64;
 
-    while Instant::now() < deadline
-        && let Some(evt) = stream.next().await
-    {
+    // `timeout_at`: the deadline holds on a quiet interface too.
+    while let Ok(Some(evt)) = tokio::time::timeout_at(deadline, stream.next()).await {
         match evt? {
             SessionEvent::Started { key, .. } => {
                 flow_count += 1;
@@ -92,6 +93,30 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             },
             SessionEvent::Closed { key, reason, .. } => {
                 println!("- flow {a} <-> {b}  {reason:?}", a = key.a, b = key.b);
+            }
+            // The parser gave up on a flow (malformed HTTP, or a gap it
+            // can't resync past); the flow itself keeps going.
+            SessionEvent::ParserClosed {
+                key,
+                reason,
+                detail,
+                ..
+            } => {
+                eprintln!(
+                    "! parser closed on {a} <-> {b}: {reason:?} {detail:?}",
+                    a = key.a,
+                    b = key.b
+                );
+            }
+            // One direction stopped being parsed (capture loss, buffer
+            // cap); the other continues.
+            SessionEvent::ParserSideStopped {
+                side,
+                reason,
+                detail,
+                ..
+            } => {
+                eprintln!("! {side:?} side no longer parsed: {reason:?} {detail:?}");
             }
             SessionEvent::FlowAnomaly { kind, .. } => {
                 eprintln!("! flow anomaly: {kind:?}");

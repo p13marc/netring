@@ -1,626 +1,404 @@
 # Writing your own anomaly detector
 
-> ⚠️ **0.22 API note.** The `AnomalyRule` trait + `AnomalyMonitor`
-> harness this guide is written around were **removed in 0.22**.
-> Detectors now live on the declarative `Monitor::builder()` API —
-> `on_ctx::<E>` handlers, the `detector!` / `pattern_detector!` macros,
-> and `ctx.emit(kind, severity)`. See `docs/discoverability.md`,
-> `docs/MIGRATING_0.21_TO_0.22.md`, and `examples/monitor/`
-> (`port_scan`, `beacon_detector`, `dga_query`, `net_diagnostic`). The
-> **concepts** below (state primitives, `observe` vs periodic ticks,
-> cross-protocol correlation, MITRE mapping) carry over unchanged; only
-> the trait/harness wrapper differs.
-
-A practical guide to detector design — how to compose a new detector,
-what the state primitives are good for, and how to debug one that
+A practical guide to detector design on the declarative
+[`Monitor`](../src/monitor/mod.rs) API: how a detector is wired, what
+the state primitives are good for, which engine events are worth
+handling, how to test a detector offline, and how to debug one that
 doesn't fire when you expect it to.
 
-Companion to:
+Working code for every pattern here lives in `examples/monitor/`
+(`port_scan`, `beacon_detector`, `dga_query`, `lateral_movement`,
+`net_diagnostic`, `detector_macro`, …) and `examples/anomaly/`.
 
-- The 7 reference detectors under `examples/anomaly/` — working
-  examples for every pattern this guide describes.
-- The crate-level API reference (`cargo doc -p netring --open`).
-- The CHANGELOG (`CHANGELOG.md`) for the architecture rationale behind the
-  anomaly / correlation harness.
-
-## Migration notes (netring 0.18)
-
-The 0.18 release flattened the `ProtocolEvent` variant layout:
-
-| Old (≤0.17)                                      | New (0.18+)                          |
-| ------------------------------------------------ | ------------------------------------ |
-| `ProtocolEvent::Flow(FlowEvent::Started { … })`  | `ProtocolEvent::FlowStarted { … }`   |
-| `ProtocolEvent::Flow(FlowEvent::Ended { … })`    | `ProtocolEvent::FlowEnded { … }`     |
-| `ProtocolEvent::Flow(FlowEvent::FlowAnomaly { … })` | `ProtocolEvent::FlowAnomaly { … }` |
-| `ProtocolEvent::Message { kind: "dns-udp", … }`  | `ProtocolEvent::Message { parser_kind: "dns-udp", … }` |
-
-`ProtocolEvent<K>` is now a type alias for flowscope's
-`Event<K, ProtocolMessage>`; you can pattern-match on either
-qualifier.
+> Before 0.22 detectors were `AnomalyRule` impls driven by an
+> `AnomalyMonitor` over `ProtocolEvent`s. That harness is gone; see
+> `docs/MIGRATING_0.21_TO_0.22.md` if you are porting one.
 
 ---
 
-## 1. The anatomy of an `AnomalyRule`
+## 1. Anatomy
 
-A detector is a struct + an `impl AnomalyRule<K>`. The trait has
-two required methods and one optional, all small:
-
-```rust
-use flowscope::Timestamp;
-use netring::anomaly::{Anomaly, AnomalyRule};
-use netring::protocol::ProtocolEvent;
-
-struct MyRule {
-    /* whatever state you need */
-}
-
-impl<K> AnomalyRule<K> for MyRule {
-    /// Stable detector identifier — also the default kind slug
-    /// on emitted Anomalies. Use a short PascalCase name.
-    fn name(&self) -> &'static str { "MyDetector" }
-
-    /// Inspect each event, push any findings into `emit`.
-    fn observe(&mut self, evt: &ProtocolEvent<K>, emit: &mut Vec<Anomaly<K>>) {
-        /* the per-event hot path */
-    }
-
-    /// Optional: sweep-driven detection. Called from
-    /// `AnomalyMonitor::on_tick(now)` once per sweep tick.
-    /// Default: no-op.
-    fn on_tick(&mut self, _now: Timestamp, _emit: &mut Vec<Anomaly<K>>) {}
-}
-```
-
-Wire it into a monitor:
-
-```rust
-use netring::anomaly::AnomalyMonitor;
-use netring::flow::extract::FiveTupleKey;
-
-let mut rules = AnomalyMonitor::<FiveTupleKey>::new()
-    .with_rule(MyRule { /* ... */ });
-
-// Each event:
-for anomaly in rules.observe(&evt) { /* emit */ }
-
-// On a periodic sweep (e.g. every 1s):
-for anomaly in rules.on_tick(now) { /* emit */ }
-```
-
-That's the whole API. Most rules are 30–80 LoC of state + match.
-
----
-
-## 2. State primitives — `KeyIndexed` vs `TimeBucketedCounter`
-
-`netring::correlate` ships two primitives. The choice between
-them is the most consequential design decision in a detector.
-
-### `TimeBucketedCounter<K>` — "is this rate too high?"
-
-Per-key counter with a sliding window of fixed-width buckets.
-O(1) bump + O(buckets) count.
-
-Use when the question is **how often** something happens:
-
-- DNS queries per source IP per 10s
-- Failed-login attempts per username per minute
-- HTTP errors per backend per 5s
-- Bytes per flow per second (with a smoothed window)
+A detector is one or more **handlers** registered on a
+`MonitorBuilder`. A handler receives a typed event — an L7 message
+(`Http`, `Dns`, `Tls`, …) or a lifecycle event (`FlowStarted<Tcp>`,
+`FlowEnded<Udp>`, `AnyFlowAnomaly`, `ParserClosed<Http>`, …) — and,
+with `on_ctx`, a `&mut Ctx` for state and emission:
 
 ```rust
 use std::time::Duration;
-use netring::correlate::TimeBucketedCounter;
+use netring::prelude::*;
 
-let mut rate: TimeBucketedCounter<IpAddr> =
-    TimeBucketedCounter::new(Duration::from_secs(10), Duration::from_secs(1));
-
-rate.bump(src_ip, ts);
-if rate.count(&src_ip, ts) > threshold { /* fire */ }
+Monitor::builder()
+    .interface("eth0")
+    .protocol::<Tcp>()
+    .protocol::<Http>()
+    .on_ctx::<Http>(|msg: &flowscope::http::HttpMessage, ctx: &mut Ctx<'_>| {
+        if let flowscope::http::HttpMessage::Request(req) = msg
+            && req.path.starts_with(b"/.env")
+        {
+            ctx.emit("HttpSecretProbe", Severity::Warning)
+                .with("path", String::from_utf8_lossy(&req.path).into_owned())
+                .emit();
+        }
+        Ok(())
+    })
+    .sink(StdoutSink::default())
+    .build()?
+    .run_for(Duration::from_secs(60))
+    .await?;
 ```
 
-See `examples/anomaly/dns_query_burst.rs` for the canonical use.
+- `.on::<E>(|payload| …)` — payload only; `.on_ctx::<E>(|payload, ctx| …)`
+  — with context. Registering a handler for a protocol you did not
+  `.protocol::<P>()` is a `build()` error.
+- `ctx.emit(kind, severity)` starts an anomaly stamped with the event's
+  timestamp; `.with(label, value)` / `.with_metric(label, f64)` /
+  `.with_key(&key)` add fields; `.emit()` writes it to the sink chain.
+  The writer is stack-only — no allocation for up to 8 observations and
+  8 metrics.
+- `ctx.flow` is the event's flow key; for L7 messages `ctx.side()` /
+  `ctx.orientation()` say which peer sent it (0.31).
+- `netring::detector!` (match + emit on one event) and
+  `netring::pattern_detector!` (feed a `DetectorScore`, emit on a
+  verdict) are sugar for the common shapes — see
+  `examples/monitor/detector_macro.rs` and `dga_query.rs`.
 
-### `KeyIndexed<K, V>` — "did X happen recently?"
+Handlers run on the capture task, in event order, and must not block.
+For I/O, use `on_async` / `on_effect` (see `docs/ASYNC_GUIDE.md`).
 
-TTL'd key-value cache. Entries expire after the TTL. The
-`drain_expired(now)` method is the killer feature for
-"expected B-after-A didn't happen" detectors.
+---
 
-Use when the question is **whether/when** something happened:
+## 2. State primitives
 
-- Was this destination IP recently DNS-resolved? (presence check)
-- Which IP did this DNS query resolve to? (value lookup)
-- Did the ClientHello finish handshaking? (drain-on-expiry)
+| Need | Register | Use in a handler |
+|---|---|---|
+| Detector-wide state | `.state::<T>()` / `.state_init(|| T::new(..))` | `ctx.state_mut::<T>()` |
+| "Is this rate too high?" | `.counter::<K>(window, bucket)` | `ctx.counter_mut::<K>().bump(k, ctx.ts)` / `.count(&k, ctx.ts)` |
+| Per-flow state, freed with the flow | `.flow_state::<T>(idle_timeout)` | `ctx.flow_state_mut::<T>()` |
+| "Did X happen recently?" | a `KeyIndexed<K, V>` inside your `.state` | `insert(k, v, ts)` / `get(&k, ts)` / `drain_expired(now)` |
+
+### `TimeBucketedCounter<K>` — rates
+
+Bucketed sliding window: `bump` is O(1), `count` sums the buckets
+inside the window. Pick `bucket` ≈ window / 10 — finer buckets cost
+memory, coarser ones make the window edge fuzzy.
 
 ```rust
-use netring::correlate::KeyIndexed;
-
-let mut cache: KeyIndexed<IpAddr, String> =
-    KeyIndexed::new(Duration::from_secs(30));
-
-cache.insert(ip, hostname, ts);
-if cache.contains_fresh(&ip, now) { /* fine */ }
-
-// Or — drain anything that aged out without being explicitly removed:
-for (ip, hostname) in cache.drain_expired(now) {
-    // these are anomalies: B never followed A within the TTL
-}
+.counter::<std::net::IpAddr>(Duration::from_secs(10), Duration::from_secs(1))
+.on_ctx::<Dns>(|msg: &flowscope::dns::DnsMessage, ctx: &mut Ctx<'_>| {
+    let (Some(key), flowscope::dns::DnsMessage::Query(_)) = (ctx.flow, msg) else {
+        return Ok(());
+    };
+    let src = key.a.ip(); // pick the client side for your topology
+    let now = ctx.ts;
+    let counter = ctx.counter_mut::<std::net::IpAddr>();
+    counter.bump(src, now);
+    if counter.count(&src, now) == 51 {
+        ctx.emit("DnsQueryBurst", Severity::Warning)
+            .with("src", src.to_string())
+            .emit();
+    }
+    Ok(())
+})
 ```
 
-See `examples/anomaly/dns_resolved_no_connection.rs` for the
-drain pattern, `examples/anomaly/tls_to_unresolved_ip.rs` for
-the presence-check pattern.
+(Emitting on `== threshold + 1` fires once per burst without an
+"already alerted" set.)
+
+### `KeyIndexed<K, V>` — correlation with a TTL
+
+A map whose entries expire `ttl` after insertion. Use it for "A, then
+B within T": insert on A, look up on B; and for "A, and **no** B
+within T": insert on A, remove on B, and `drain_expired(now)` from a
+tick — what's left expired without its B.
+
+### Per-flow state
+
+`ctx.flow_state_mut::<T>()` lazily creates `T::default()` for the
+event's flow. Since 0.31 the slot is freed when the flow ends (after
+its `FlowEnded` handlers ran) and on the monitor's sweep; before, it
+lived for the whole run.
 
 ### Decision rule
 
-| Question shape | Primitive |
-|---|---|
-| "More than N events in T?" | `TimeBucketedCounter` |
-| "Was X seen recently?" | `KeyIndexed::contains_fresh` |
-| "What value did we cache for X?" | `KeyIndexed::get` |
-| "Which expected events didn't happen?" | `KeyIndexed::drain_expired` |
-| "Fan-out: distinct keys seen per source?" | `HashMap<Src, KeyIndexed<Dst, ()>>` (see `lateral_movement.rs`) |
+- Counting occurrences per key → `TimeBucketedCounter`.
+- Remembering a fact about a key for a while → `KeyIndexed`.
+- Accumulating over one flow → `flow_state`.
+- Anything global (a scorer, a model, a baseline) → `state`.
 
 ---
 
-## 3. Severity tiers — `Info` / `Warning` / `Error` / `Critical`
+## 3. Severity
 
-Pick a tier per anomaly. The harness is policy-neutral; the
-tier informs the *consumer* (your logging / paging / dashboard
-layer) what to do. Conventions:
-
-| Tier | What it means | Example detector |
+| Severity | Meaning | Typical routing |
 |---|---|---|
-| `Info` | Pattern of interest, no immediate action. High-volume; log-only. | `IcmpExplainedDrop` (explained arm — normal network behaviour) |
-| `Warning` | Worth surfacing in dashboards. Cumulative trends matter. | `DnsQueryBurst`, `SlowTlsHandshake`, `TlsToUnresolvedIp` (default tier for most detectors) |
-| `Error` | Indicates a real problem. Operator should investigate. | `DnsResolvedNoConnection` (consistently elevated indicates DNS / firewall issues) |
-| `Critical` | Page someone. Reserved for high-confidence, high-impact signals. | `LateralMovement` (one host hitting many internal peers fast) |
+| `Info` | Observation worth recording (new SNI, first-seen host) | logs only |
+| `Warning` | Suspicious, needs context (scan, burst, DGA-like name) | dashboard |
+| `Error` | Likely malicious or broken (DCSync bind, cert mismatch) | alerting |
+| `Critical` | Act now (known-bad IOC hit, credential dump) | paging |
 
-Match flowscope's `AnomalyKind::severity()` mapping for
-consistency when your rule lifts a flowscope-side anomaly — the
-`From<flowscope::event::Severity> for netring::anomaly::Severity`
-impl already does this 1:1, so just pipe it through.
+Keep `kind` stable across versions — it is the join key downstream
+(Prometheus labels, SIEM rules, dedupe).
 
 ---
 
-## 4. The `observe` / `on_tick` split
+## 4. Events, flow ends and ticks
 
-Two hooks, two roles. Get this wrong and your detector either
-misses anomalies or fires spuriously.
+- **Per event** — L7 message and lifecycle handlers. This is where
+  most detection happens.
+- **At flow end** — `FlowEnded<P>` carries the reason (`Fin`, `Rst`,
+  `IdleTimeout`, `Evicted`, `ForceClosed`) and the final `FlowStats`.
+  Flows end for **transport** reasons only; a parser giving up does
+  not end the flow (see §5).
+- **Periodically** — `.tick_ctx(period, |ctx| …)` (or `.tick` /
+  `.on::<Tick>`). Use it for "absence" detectors (`drain_expired`),
+  baselines, and periodic summaries. `ctx.ts` in a tick is packet
+  time: live, the last packet's time plus the wall time since; on
+  replay, ticks are scheduled on capture time (0.31 — they never ran
+  on replay before).
 
-### `observe(&mut self, evt, emit)` — synchronous
+The monitor sweeps its flow table on `sweep_interval`: idle flows end
+(`FlowEnded { reason: IdleTimeout }`), parsers get `on_tick`, and
+out-of-order reassembly holes expire. Live, that runs on a timer; on
+`replay()` it runs on **packet time**, so an idle flow ends where it
+went idle in the capture, not at the end of the file (0.31 — before,
+the Monitor never swept).
 
-Called for every event. Fast path. State updates + immediate
-decisions belong here.
-
-What you do here:
-- Bump counters / caches based on the event content.
-- Check thresholds that are crossable on a single event
-  (rate-class anomalies).
-- Emit anomalies that are tied to a specific input event.
-
-What you don't do here:
-- Long sweeps over collected state.
-- Wall-clock-driven checks (use the event's `ts` instead).
-
-### `on_tick(&mut self, now, emit)` — sweep-driven
-
-Called once per `AnomalyMonitor::on_tick(now)` invocation —
-typically from a `tokio::time::interval` in the consumer's event
-loop. Default no-op; opt in by overriding.
-
-What belongs here:
-- `KeyIndexed::drain_expired(now)` — surface entries that didn't
-  get their expected follow-up event.
-- Memory trimming: evict aged-out entries from caches that
-  observers don't actively drain.
-- Periodic summary anomalies (e.g. "5-minute rollup: top 10
-  noisiest sources").
-
-The sweep cadence is the consumer's choice — typically 1–5
-seconds. Don't depend on a specific cadence in your rule;
-write it to work with any.
-
-### Example: drain-on-expiry pattern
-
-`SlowTlsHandshakeRule` (`slow_tls_handshake.rs`) shows the
-pattern at its purest:
-
-```rust
-fn observe(&mut self, evt, _emit) {
-    if let ProtocolEvent::Message { /* ClientHello */, key, ts, .. } = evt {
-        self.pending.insert(*key, *ts, *ts);  // → cache for `threshold` TTL
-    }
-    if let ProtocolEvent::Message { /* ServerHello */, key, .. } = evt {
-        self.pending.remove(key);  // matched: fast handshake, no anomaly
-    }
-}
-
-fn on_tick(&mut self, now, emit) {
-    for (key, client_ts) in self.pending.drain_expired(now) {
-        // ClientHellos that didn't get a ServerHello within TTL
-        emit.push(Anomaly::new(self.name(), Severity::Warning, now)
-            .with_key(key));
-    }
-}
-```
-
-The TTL itself is the threshold. No explicit timeout check.
+Delivery order is the engine's: a flow's messages come before its
+`FlowEnded`, including the ones a parser flushes when the connection
+closes.
 
 ---
 
-## 5. Cross-protocol detectors
+## 5. Engine events worth handling
 
-The harness's central promise is "writing a multi-protocol
-correlator is easy." The canonical pattern joins ≥2 protocols
-in a single rule via state shared between observe arms.
+The session engine reports what it could not do. A detector that
+ignores these is blind in exactly the places an attacker (or a lossy
+tap) makes interesting.
 
-### Two-protocol: DNS → TCP/UDP flow
+| Event | When | What it means for your detector |
+|---|---|---|
+| `AnyFlowAnomaly` | reassembly gaps, retransmissions with different bytes, out-of-window segments, buffer / memcap limits, eviction pressure | registering a handler turns anomaly reporting on (`MonitorBuilder::emit_anomalies` to force it either way) |
+| `ParserClosed<P>` | `P`'s parser stopped for a flow: malformed input (`ParseError`), finished (`ParserDone`), a gap it can't bridge (`StreamGap`) | no more `P` messages from this flow; the flow continues |
+| `ParserSideStopped<P>` | `P`'s parser stopped reading **one side** (a gap, or that side's buffer cap) | the other side is still parsed |
 
-`DnsResolvedNoConnectionRule` (in `anomaly_monitor_demo.rs`):
+`ParserClosed<Http>` reaches the HTTP parser's protocol (0.31 — it
+used to be routed by transport only, so it never fired for `Http`);
+`ParserClosed<Tcp>` still fires for every TCP parser. Evasion-minded
+detectors should treat `TcpRexmitInconsistency` anomalies (a
+retransmission carrying different bytes) as a signal of their own.
 
-```rust
-fn observe(&mut self, evt, _emit) {
-    match evt {
-        // DNS Response: cache the resolution
-        ProtocolEvent::Message { parser_kind: "dns-udp",
-            message: ProtocolMessage::Dns(DnsMessage::Response(r)), ts, .. } => {
-            for ans in &r.answers {
-                if let DnsRdata::A(v4) = &ans.data {
-                    self.pending.insert(IpAddr::V4(*v4), (qname, *ts), *ts);
-                }
-            }
-        }
-        // Any flow Started: check if dst was just resolved
-        ProtocolEvent::FlowStarted { key, .. } => {
-            self.pending.remove(&key.b.ip());  // resolved + connected: OK
-        }
-        _ => {}
-    }
-}
+---
 
-fn on_tick(&mut self, now, emit) {
-    for (ip, (qname, _)) in self.pending.drain_expired(now) {
-        // Resolved but no connection followed within TTL — anomalous
-        emit.push(...);
-    }
-}
-```
+## 6. Cross-protocol detectors
 
-### Three-protocol: Flow + DNS + TLS
-
-`TlsToUnresolvedIpRule` (`tls_to_unresolved_ip.rs`) joins three
-protocols to catch hardcoded-IP TLS (MITRE T1571 / T1090):
+Register every protocol the detector reads and keep the correlation
+state in `.state`:
 
 ```rust
-fn observe(&mut self, evt, emit) {
-    match evt {
-        // DNS Response → per-host resolution cache
-        ProtocolEvent::Message { parser_kind: "dns-udp",
-            message: ProtocolMessage::Dns(DnsMessage::Response(r)), key, ts, .. } => {
-            let host = key.b.ip();
-            let cache = self.resolved_by_host.entry(host)
-                .or_insert_with(|| KeyIndexed::new(self.ttl));
-            for ans in &r.answers {
-                if let DnsRdata::A(v4) = &ans.data {
-                    cache.insert(IpAddr::V4(*v4), (), *ts);
-                }
-            }
-        }
-        // TLS ClientHello → look up dst in source's cache
-        ProtocolEvent::Message { parser_kind: "tls",
-            message: ProtocolMessage::Tls(TlsMessage::ClientHello(ch)), key, ts, .. } => {
-            let resolved = self.resolved_by_host.get(&key.a.ip())
-                .map(|c| c.contains_fresh(&key.b.ip(), *ts))
-                .unwrap_or(false);
-            if !resolved {
-                emit.push(Anomaly::new(self.name(), Severity::Warning, *ts)
-                    .with_key(*key)
-                    .with_observation("sni", ch.sni.as_deref().unwrap_or("")));
-            }
-        }
-        _ => {}
-    }
-}
-```
+#[derive(Default)]
+struct Resolved(netring::correlate::KeyIndexed<std::net::IpAddr, String>);
 
-Notice the pattern: each protocol contributes a different role
-(DNS = source of truth, TLS = trigger, Flow = scope). State is
-per-source-IP because we're asking a per-host question.
-
-Build the monitor matching the rule's protocol set:
-
-```rust
-let mut monitor = ProtocolMonitorBuilder::new()
+Monitor::builder()
     .interface("eth0")
-    .flow()      // even if you don't read FlowEvent — it scopes the tracker
-    .dns()       // for the resolution cache
-    .tls()       // for the trigger
-    .build(FiveTuple::bidirectional())?;
+    .protocol::<Udp>()
+    .protocol::<Tcp>()
+    .protocol::<Dns>()
+    .state_init(|| Resolved(netring::correlate::KeyIndexed::new(Duration::from_secs(300))))
+    .on_ctx::<Dns>(|msg: &flowscope::dns::DnsMessage, ctx: &mut Ctx<'_>| {
+        if let flowscope::dns::DnsMessage::Response(r) = msg {
+            let ts = ctx.ts;
+            let qname = r.questions.first().map(|q| q.name.to_string()).unwrap_or_default();
+            for ip in r.answers.iter().filter_map(|a| a.ip()) {
+                ctx.state_mut::<Resolved>().0.insert(ip, qname.clone(), ts);
+            }
+        }
+        Ok(())
+    })
+    .on_ctx::<FlowStarted<Tcp>>(|evt: &FlowStarted<Tcp>, ctx: &mut Ctx<'_>| {
+        let ts = ctx.ts;
+        let dst = evt.key.b.ip(); // pick the server side for your topology
+        if ctx.state_mut::<Resolved>().0.get(&dst, ts).is_none() {
+            ctx.emit("TcpToUnresolvedIp", Severity::Info)
+                .with("dst", dst.to_string())
+                .emit();
+        }
+        Ok(())
+    })
 ```
 
-### Port-agnostic routing (heuristic dispatch)
-
-Port-based slot registration (`.http()`, `.dns()`, `.tls()`)
-covers the common case. For traffic that hides on
-non-standard ports — proxies, debug endpoints, C2 channels,
-random-port HTTP — netring 0.18 exposes flowscope's heuristic
-routing via two builder shortcuts:
-
-```rust
-let mut monitor = ProtocolMonitorBuilder::new()
-    .interface("eth0")
-    .flow()
-    .http_on_ports([80, 8080])     // fast path
-    .http_heuristic()              // catches HTTP on any other port
-    .tls_handshake_on_ports([443, 8443])
-    .tls_handshake_heuristic()     // catches TLS ClientHello on any other port
-    .build(FiveTuple::bidirectional())?;
-```
-
-Heuristic slots inspect the first few payload bytes of each
-session (default budget: 4 packets) via a curated signature
-function. After a match, the flow is **pinned** to that parser
-and every subsequent packet dispatches in O(1) just like a
-port-routed slot. Flows that don't match within the probe
-budget are marked `GaveUp` and skipped.
-
-Trade-off: the signature evaluator costs a few cycles per
-new flow. Negligible in absolute terms but worth knowing when
-you stack many heuristic slots on a high-PPS link.
-
----
-
-## 6. Composing with `FlowAnomalyRule`
-
-flowscope's own anomalies (TCP out-of-order, reassembler
-watermark, eviction pressure, parser poison) are first-class.
-The shipped `FlowAnomalyRule` lifts them through the same
-pipeline as your detectors:
-
-```rust
-use netring::anomaly::{AnomalyMonitor, FlowAnomalyRule, Severity};
-
-let mut rules = AnomalyMonitor::<FiveTupleKey>::new()
-    // Lift every FlowEvent::FlowAnomaly / TrackerAnomaly:
-    .with_rule(FlowAnomalyRule::default())
-    // Your own detectors:
-    .with_rule(MyDnsBurstRule { ... })
-    .with_rule(MyLateralMovementRule { ... });
-```
-
-Severity comes from `AnomalyKind::severity()` (flowscope side).
-Filter floor: `FlowAnomalyRule::with_min_severity(Severity::Warning)`
-suppresses `Info`-tier flowscope anomalies (out-of-order
-segments are routine on lossy networks; you probably don't want
-those in your alert stream).
-
-The `From<flowscope::event::Severity> for Severity` impl means
-threshold filters port across the boundary unchanged.
+(`a.ip()` stands for however your DNS answer type exposes an
+address.) For protocols on non-standard ports, markers with
+`Dispatch::Signature` (e.g. `Http2`) probe every TCP flow — mind the
+cost described on the marker.
 
 ---
 
 ## 7. Testing a detector
 
-Two pragmatic tools:
-
-### Smoke test against synthesized events
-
-Construct `ProtocolEvent`s by hand (the variants are public
-structs) and drive your rule directly:
+Test against **frames**, through the real engine, with pcap replay —
+no privileges needed, and the Monitor runs exactly as it would live
+(sweeps on packet time, same ordering, same parser events).
 
 ```rust
-#[test]
-fn my_rule_fires_above_threshold() {
-    let mut monitor = AnomalyMonitor::<FiveTupleKey>::new()
-        .with_rule(MyRule::new(threshold: 10));
+use std::sync::{Arc, Mutex};
+use std::time::Duration;
 
-    // Synthesize 11 events; expect 1 anomaly
-    let key = FiveTupleKey { /* ... */ };
-    for _ in 0..11 {
-        let evt = ProtocolEvent::Message { /* ... */ };
-        let _ = monitor.observe(&evt);
+use flowscope::extract::parse::test_frames::{ipv4_tcp, ipv4_udp};
+use netring::anomaly::sink::AnomalySink;
+use netring::prelude::*;
+
+/// Collects the kinds a detector emits.
+struct Kinds(Arc<Mutex<Vec<&'static str>>>);
+
+impl AnomalySink for Kinds {
+    fn write(
+        &mut self,
+        kind: &'static str,
+        _: Severity,
+        _: flowscope::Timestamp,
+        _: Option<&dyn netring::anomaly::Key>,
+        _: &[(&'static str, std::borrow::Cow<'_, str>)],
+        _: &[(&'static str, f64)],
+    ) {
+        self.0.lock().unwrap().push(kind);
     }
-    // Or: collect alerts inline:
-    let alerts: Vec<_> = (0..11).flat_map(|_| monitor.observe(&evt)).collect();
-    assert_eq!(alerts.len(), 1);
+}
+
+fn pcap(frames: &[(Duration, Vec<u8>)]) -> tempfile::NamedTempFile {
+    use pcap_file::pcap::{PcapHeader, PcapPacket, PcapWriter};
+    let file = tempfile::NamedTempFile::new().unwrap();
+    let header = PcapHeader {
+        datalink: pcap_file::DataLink::ETHERNET,
+        ts_resolution: pcap_file::TsResolution::NanoSecond,
+        ..Default::default()
+    };
+    let mut w = PcapWriter::with_header(file.reopen().unwrap(), header).unwrap();
+    for (ts, f) in frames {
+        w.write_packet(&PcapPacket::new_owned(*ts, f.len() as u32, f.clone())).unwrap();
+    }
+    file
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn fires_on_a_dns_burst() {
+    let frames: Vec<_> = (0..60)
+        .map(|i| (
+            Duration::from_millis(1_000 + i * 10),
+            ipv4_udp([10, 0, 0, 1], [10, 0, 0, 53], 40_000 + i as u16, 53, &dns_query("x.test")),
+        ))
+        .collect();
+    let file = pcap(&frames);
+    let kinds = Arc::new(Mutex::new(Vec::new()));
+    Monitor::builder()
+        .pcap_source(file.path())
+        .protocol::<Udp>()
+        .protocol::<Dns>()
+        // … the detector's registrations …
+        .sink(Kinds(Arc::clone(&kinds)))
+        .build()
+        .unwrap()
+        .replay()
+        .await
+        .unwrap();
+    assert_eq!(*kinds.lock().unwrap(), ["DnsQueryBurst"]);
 }
 ```
 
-See `tests/anomaly_monitor_smoke.rs` for the canonical pattern.
+(`dns_query` builds a DNS query payload; `test_frames` needs flowscope's
+`test-helpers` feature in `[dev-dependencies]`.) Working examples of
+this pattern: `tests/monitor_parser_routing.rs` (parser events, side,
+anomalies), `tests/monitor_lifecycle_replay.rs` (idle ends on packet
+time, per-flow state release, message-before-end ordering, sink
+flush), `tests/transport_routing_replay.rs`.
 
-### Pcap-replay against real traffic
+To test the gap / loss paths, drop or reorder frames — the engine
+reports exactly what a lossy tap would produce.
 
-For protocol-shape coverage, write a pcap and replay it:
+### Debug a detector that doesn't fire
 
-```rust
-#[test]
-fn my_rule_fires_on_realistic_dns_burst() {
-    let frames = build_dns_burst_pcap(60);  // 60 DNS queries
-    let pcap = write_pcap(&frames);
-
-    let mut rules = AnomalyMonitor::<FiveTupleKey>::new()
-        .with_rule(MyRule::new(...));
-
-    let source = AsyncPcapSource::open(pcap.path()).await.unwrap();
-    let mut stream = source.datagrams(FiveTuple::bidirectional(), DnsUdpParser::with_correlation());
-
-    let mut alerts = 0;
-    while let Some(evt) = stream.next().await {
-        if let SessionEvent::Application { key, side, message, ts, parser_kind, .. } = evt.unwrap() {
-            let pe = ProtocolEvent::Message {
-                key, side, parser_kind,
-                message: ProtocolMessage::Dns(message), ts
-            };
-            alerts += rules.observe(&pe).len();
-        }
-    }
-    assert!(alerts > 0);
-}
-```
-
-See `tests/anomaly_pcap_replay.rs` for the working pair.
-
-### Debug a rule that doesn't fire
-
-Three usual suspects:
-
-1. **`kind` mismatch.** Your `let ProtocolEvent::Message { parser_kind: "dns-udp", … }` only matches events with that exact kind. Run with extra logging: `eprintln!("kind={kind}")` inside `observe` to see what's actually flowing.
-2. **Timestamp clock skew.** `TimeBucketedCounter::count(&k, now)` checks "now vs bucket start." If `now` is earlier than the event timestamps, you're querying a future bucket. Use `evt.timestamp()` consistently.
-3. **`alerted` set sticking.** Many examples use a `HashSet` to alert-once-per-source. Forgetting to re-arm (`alerted.remove(&src)`) means the rule fires once and never again — easy to mis-attribute as "rule broken."
+1. **Not registered.** A handler for `Http` does nothing without
+   `.protocol::<Http>()`, and `build()` tells you. A handler for
+   `FlowStarted<Tcp>` needs `.protocol::<Tcp>()`.
+2. **The parser gave up.** Add a `ParserClosed<P>` /
+   `ParserSideStopped<P>` handler and an `AnyFlowAnomaly` handler:
+   malformed input, a gap, or a buffer cap stops the messages you are
+   waiting for.
+3. **Time.** Counters and `KeyIndexed` take the *event* timestamp
+   (`ctx.ts`); mixing in wall-clock time breaks replay. Ticks carry
+   packet time too (live: the packet clock; replay: scheduled on
+   capture time), so `ctx.ts` is the one clock to use everywhere.
+4. **Alert-once state that never re-arms** — a `HashSet` of alerted
+   keys with no expiry fires once per process lifetime.
 
 ---
 
 ## 8. Production deployment
 
-### Output format
-
-Two built-in renderers on `Anomaly<K>`:
-
-```rust
-// Human-readable, one line, greppable:
-println!("{a}");
-// [warning] DnsBurst ts=1234.567 key=FiveTupleKey { ... } src_ip=10.0.0.1 count=42.00
-
-// One-line JSON, pipe into Vector / Fluentd / Loki / jq:
-println!("{}", a.to_json_line());
-// {"severity":"warning","kind":"DnsBurst","ts_secs":1234,"ts_nanos":567000000,"key":"...","observations":{"src_ip":"10.0.0.1"},"metrics":{"count":42.0}}
-```
-
-`Anomaly::to_json_line()` is RFC 8259-compliant (escapes
-quotes, backslashes, the C0 control set; NaN/±Inf → null).
-No `serde` dependency.
-
-Reference example: `anomaly_monitor_demo.rs` reads
-`NETRING_JSON=1` to switch between the two:
-
-```bash
-# 0.22: pipe any monitor with a StdoutJsonSink through jq, e.g.
-cargo run --example monitor_dga_query \
-    --features "monitor-quickstart" -- eth0 60 | jq .
-```
-
-### Pipeline integration
-
-A typical production wiring:
-
-```
-netring detector → stdout (JSON) → Vector → Loki + Prometheus + alertmanager
-```
-
-- `Vector` ingests the JSON lines (`source.type = "stdin"`,
-  `decode_format = "json"`).
-- `severity` field drives routing: `info` → Loki only,
-  `warning` → Loki + Grafana dashboard, `error/critical` →
-  alertmanager.
-- `kind` field drives label cardinality in Prometheus — keep
-  it stable across detector versions.
-
-### Tracing integration
-
-If your service already uses [`tracing`](https://docs.rs/tracing/),
-`Anomaly::emit_tracing()` routes anomalies through the standard
-subscriber instead of stdout:
-
-```rust
-for a in rules.observe(&evt)? {
-    a.emit_tracing();
-}
-```
-
-| `Severity` | tracing `Level` | Extra field |
-|---|---|---|
-| `Info` | `INFO` | — |
-| `Warning` | `WARN` | — |
-| `Error` | `ERROR` | — |
-| `Critical` | `ERROR` | `critical = true` |
-
-Target: `"netring.anomaly"` — filter independently of the rest of
-your logs (`RUST_LOG=netring.anomaly=warn`).
-
-Fields on every event: `kind`, `severity`, `ts_secs`, `ts_nanos`,
-`key` (Debug-formatted), plus `payload` carrying the full JSON
-line (same shape as `to_json_line()`). Subscribers that want the
-dynamic observations / metrics parse the `payload`; subscribers
-that just want kind + severity routing read the fixed fields
-directly.
-
-### Backpressure
-
-`AnomalyMonitor::observe` returns a `Vec<Anomaly<K>>` per call
-— freshly allocated, no scratch sharing across calls. If you
-emit at a rate faster than your sink can drain, the bottleneck
-is your `println!` / mpsc send, not the harness. The harness
-itself is non-blocking.
-
-If your sink is genuinely slow (network alert, DB insert),
-buffer into a bounded channel and drop on full with a metric
-("anomalies_dropped_total"). Don't block the event loop.
+- **Sinks.** `StdoutSink` (human), `StdoutJsonSink` (`serde`, one JSON
+  object per line for Vector / Fluentd / Loki), `EveSink`
+  (`eve-sink`, Suricata EVE), `TracingSink`, `ChannelSink` (hand
+  `OwnedAnomaly` values to your own task), `MetricsSink` (`metrics`),
+  and OTLP / Kafka in `netring-exporters`. `.sink(...)` sets one;
+  `Tee` fans out.
+- **Layers** wrap the sink chain; the first `.layer(..)` is
+  outermost: `MinSeverity`, `DedupeAnomalies::within(..)`,
+  `RateLimitAnomalies`, `Sample`.
+- **Backpressure.** Sinks are called inline. A slow destination
+  (network, database) belongs behind `ChannelSink` + a bounded consumer
+  that drops with a counter — never block the capture task.
+- **Shutdown.** Sinks and exporters are flushed when the run ends, on
+  every exit path (0.31).
 
 ---
 
 ## 9. Common false-positive patterns
 
-Every detector has a "looks anomalous, isn't" case. Document
-yours; allow-list when appropriate.
+Every detector has a "looks anomalous, isn't" case. Document yours;
+allow-list when appropriate.
 
 | Detector | Common FP |
 |---|---|
-| `DnsQueryBurst` | Multicast DNS / mDNS clients legitimately query at high rates on subnet broadcast |
-| `DnsResolvedNoConnection` | DNS prefetch (browser look-ahead resolution) — resolved-but-never-connected is normal |
-| `SlowTlsHandshake` | Captive portals / probe traffic — the ClientHello goes nowhere by design |
-| `LateralMovement` | k8s leader-election, file-share / SMB browsing, broadcast services (mDNS, SSDP) |
-| `IcmpExplainedDrop` (unexplained arm) | Peer-side RSTs are normal at the end of long-lived flows; alert only on sustained patterns |
-| `TlsToUnresolvedIp` | Hostsfile / `/etc/hosts` entries bypass DNS-over-the-wire entirely — pre-populate the cache from config |
+| DNS query burst | mDNS / DNS-SD clients legitimately query at high rates |
+| Resolved-but-no-connection | browser DNS prefetch |
+| Slow / truncated TLS handshake | captive portals, probe traffic |
+| Lateral movement | k8s leader election, SMB browsing, broadcast services |
+| Unexplained RST after ICMP | peer-side RSTs at the end of long-lived flows |
+| TCP / TLS to an unresolved IP | `/etc/hosts` entries, hard-coded service IPs |
+| Reassembly-gap anomalies | a lossy tap or SPAN port, not an attacker — check `CaptureStats` drops first |
 
-The pattern: surface the anomaly, but pair it with operator-side
-allowlists (CIDR exclusions, hostname patterns, known-internal
-service registries). The detector raises signal; the operator
-decides what's actionable.
+Surface the anomaly, and pair it with operator-side allow-lists (CIDR
+exclusions, hostname patterns, known service registries).
 
 ---
 
 ## 10. Mapping to MITRE ATT&CK
 
-For SOC / detection-engineering teams, label each detector
-with the technique(s) it covers. The shipped detectors map as
-follows:
-
-| Detector | MITRE technique |
-|---|---|
-| `DnsQueryBurst` | T1071.004 (Application Layer Protocol: DNS), T1568.002 (Dynamic Resolution: Domain Generation Algorithms — at high cardinality) |
-| `DnsResolvedNoConnection` | T1041 (Exfiltration Over C2 Channel — possible exfil via DNS tunneling), T1071.004 |
-| `SlowTlsHandshake` | T1573.002 (Encrypted Channel: Asymmetric Cryptography — possible MITM / DPI) |
-| `LateralMovement` | T1021 (Remote Services), T1018 (Remote System Discovery) |
-| `IcmpExplainedDrop` | T1571 (Non-Standard Port — explained arm baselines normal RST patterns; unexplained arm flags candidates) |
-| `TlsToUnresolvedIp` | T1571 (Non-Standard Port), T1090 (Proxy) — hardcoded-IP C2 |
-
-Add the technique ID as an observation on every anomaly so it
-flows through to SIEMs:
+Label each detector with the technique(s) it covers — the detector
+registry does it for registered detectors (`DetectorKind` carries the
+ATT&CK ids), or add it yourself as an observation so it reaches the
+SIEM:
 
 ```rust
-emit.push(Anomaly::new(self.name(), Severity::Warning, *ts)
-    .with_key(*key)
-    .with_observation("mitre", "T1071.004"));
+ctx.emit("DnsQueryBurst", Severity::Warning)
+    .with("mitre", "T1071.004")
+    .emit();
 ```
 
-This makes SOC-side automation (auto-creating tickets, mapping
-to playbooks) much easier than after-the-fact tagging.
+| Detector | Technique |
+|---|---|
+| DNS query burst | T1071.004 (DNS), T1568.002 (DGA, at high cardinality) |
+| Resolved-but-no-connection | T1071.004, possible DNS tunnelling |
+| Slow TLS handshake | T1573.002 (possible MITM / DPI) |
+| Lateral movement | T1021 (Remote Services), T1018 (Remote System Discovery) |
+| TCP / TLS to an unresolved IP | T1571 (Non-Standard Port), T1090 (Proxy) |
 
 ---
 
 ## Further reading
 
-- **The 7 reference detectors** under `netring/examples/anomaly/`
-  — every pattern in this guide is implemented in working code.
-- **The CHANGELOG** (`CHANGELOG.md`) documents the design rationale; the
-  bonus items (`Display`/`to_json_line`/`FlowAnomalyRule`) are documented
-  alongside.
-- **flowscope**'s docs — the `SessionEvent` /
-  `DatagramParser` types this layer composes over.
-- **`docs/ASYNC_GUIDE.md`** for the runtime-side patterns
-  underneath (`AsyncCapture`, `Stream`, backpressure).
-
-If you write a detector that surfaces a useful pattern, please
-contribute it back — `examples/anomaly/` is the canonical place.
+- `examples/monitor/` and `examples/anomaly/` — working detectors.
+- `docs/discoverability.md` — which builder method / event to reach for.
+- `docs/ASYNC_GUIDE.md` — async handlers and effects.
+- flowscope's docs — the parsers' message types and the engine's
+  gap / close semantics.

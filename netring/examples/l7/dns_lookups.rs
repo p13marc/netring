@@ -31,7 +31,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     use netring::flow::SessionEvent;
     use netring::flow::extract::FiveTuple;
     use netring::{AsyncCapture, BpfFilter};
-    use std::time::{Duration, Instant};
+    use std::time::Duration;
 
     let iface = std::env::args().nth(1).unwrap_or_else(|| "lo".into());
     let seconds: u64 = std::env::args()
@@ -51,16 +51,16 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let cap = AsyncCapture::open_with_filter(&iface, filter)?;
     let mut stream = cap
         .flow_stream(FiveTuple::bidirectional())
-        .datagram_stream(DnsUdpParser::with_correlation());
+        .datagram_stream(DnsUdpParser::with_correlation())
+        .with_emit_anomalies(true);
 
-    let deadline = Instant::now() + Duration::from_secs(seconds);
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(seconds);
     let mut queries = 0u64;
     let mut responses = 0u64;
     let mut unanswered = 0u64;
 
-    while Instant::now() < deadline
-        && let Some(evt) = stream.next().await
-    {
+    // `timeout_at`: the deadline holds on a quiet interface too.
+    while let Ok(Some(evt)) = tokio::time::timeout_at(deadline, stream.next()).await {
         match evt? {
             SessionEvent::Application { message, .. } => match message {
                 DnsMessage::Query(q) => {
@@ -94,6 +94,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 }
                 _ => {}
             },
+            // A malformed datagram poisoned the parser for this flow.
+            SessionEvent::ParserClosed { reason, detail, .. } => {
+                eprintln!("! parser closed: {reason:?} {detail:?}");
+            }
             SessionEvent::FlowAnomaly { kind, .. } => {
                 eprintln!("! flow anomaly: {kind:?}");
             }

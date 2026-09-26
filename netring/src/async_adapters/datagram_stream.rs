@@ -3,9 +3,12 @@
 //!
 //! An async front for flowscope's [`flowscope::DatagramDriver`]:
 //! packets go through netring's optional dedup / pcap tap / timestamp
-//! clamp, then into the driver, which tracks flows and feeds each UDP
-//! payload (or ICMP message) to a per-flow [`DatagramParser`] with the
-//! side of the flow that sent it. Same engine as
+//! clamp, then into the driver, which tracks flows and feeds each
+//! datagram of the parser's transports
+//! ([`DatagramParser::transports`](flowscope::DatagramParser::transports):
+//! UDP payloads by default, whole ICMP messages for ICMP parsers) to a
+//! per-flow [`DatagramParser`] with the side of the flow that sent it.
+//! A UDP parser never sees ICMP and vice versa. Same engine as
 //! [`PcapDatagramStream`](crate::PcapDatagramStream) and the typed
 //! `flowscope::driver::Driver`:
 //!

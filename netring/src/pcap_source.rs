@@ -259,6 +259,9 @@ fn read_pcapng(
 
     let mut start_wall: Option<Instant> = None;
     let mut first_ts: Option<Timestamp> = None;
+    // Per-interface timestamp resolution of the current section
+    // (units per second, `if_tsoffset` seconds).
+    let mut interfaces: Vec<(u64, i64)> = Vec::new();
 
     while let Some(block) = reader.next_block() {
         let block = match block {
@@ -271,8 +274,27 @@ fn read_pcapng(
 
         // Extract (timestamp, data, orig_len) from EPB or SimplePacket.
         let (ts, data, orig_len) = match block {
+            Block::SectionHeader(_) => {
+                interfaces.clear();
+                continue;
+            }
+            Block::InterfaceDescription(idb) => {
+                interfaces.push(pcapng_resolution(&idb.options));
+                continue;
+            }
             Block::EnhancedPacket(epb) => {
-                let ts = duration_to_timestamp(epb.timestamp);
+                // pcap-file returns the raw 64-bit tick count as if it
+                // were nanoseconds; rescale it with the interface's
+                // `if_tsresol` (default: microseconds).
+                let (units, offset) = interfaces
+                    .get(epb.interface_id as usize)
+                    .copied()
+                    .unwrap_or((1_000_000, 0));
+                let ts = duration_to_timestamp(pcapng_ticks_to_duration(
+                    epb.timestamp.as_nanos() as u64,
+                    units,
+                    offset,
+                ));
                 (ts, epb.data.into_owned(), epb.original_len)
             }
             Block::SimplePacket(sp) => {
@@ -320,6 +342,35 @@ fn timestamp_delta(later: Timestamp, earlier: Timestamp) -> Duration {
     let earlier_ns = (earlier.sec as u64) * 1_000_000_000 + earlier.nsec as u64;
     let delta_ns = later_ns.saturating_sub(earlier_ns);
     Duration::from_nanos(delta_ns)
+}
+
+/// `(units per second, offset seconds)` of a pcapng interface, from
+/// its `if_tsresol` / `if_tsoffset` options (defaults: µs, 0).
+fn pcapng_resolution(
+    options: &[pcap_file::pcapng::blocks::interface_description::InterfaceDescriptionOption<'_>],
+) -> (u64, i64) {
+    use pcap_file::pcapng::blocks::interface_description::InterfaceDescriptionOption as O;
+    let mut units = 1_000_000u64;
+    let mut offset = 0i64;
+    for opt in options {
+        match opt {
+            O::IfTsResol(v) if v & 0x80 == 0 => {
+                units = 10u64.checked_pow(u32::from(*v)).unwrap_or(u64::MAX);
+            }
+            O::IfTsResol(v) => units = 1u64.checked_shl(u32::from(v & 0x7f)).unwrap_or(u64::MAX),
+            O::IfTsOffset(o) => offset = *o as i64,
+            _ => {}
+        }
+    }
+    (units, offset)
+}
+
+/// Convert a pcapng tick count to a duration since the epoch.
+fn pcapng_ticks_to_duration(raw: u64, units_per_sec: u64, offset_secs: i64) -> Duration {
+    let units = units_per_sec.max(1);
+    let secs = (raw / units) as i64 + offset_secs;
+    let nanos = (u128::from(raw % units) * 1_000_000_000 / u128::from(units)) as u32;
+    Duration::new(secs.max(0) as u64, nanos)
 }
 
 fn duration_to_timestamp(d: Duration) -> Timestamp {
@@ -437,6 +488,57 @@ mod tests {
     /// detection branch and the `Block::*` matching are smoke-tested
     /// by the integration test against committed fixtures (if any).
     /// Format-only sanity:
+    /// pcapng timestamps are ticks of the interface's `if_tsresol`
+    /// (default µs); pcap-file hands them back as nanoseconds, so a
+    /// µs capture used to replay 1000× too early.
+    #[tokio::test]
+    async fn pcapng_timestamps_honour_the_interface_resolution() {
+        use futures::StreamExt;
+        use pcap_file::DataLink;
+        use pcap_file::pcapng::PcapNgWriter;
+        use pcap_file::pcapng::blocks::enhanced_packet::EnhancedPacketBlock;
+        use pcap_file::pcapng::blocks::interface_description::{
+            InterfaceDescriptionBlock, InterfaceDescriptionOption,
+        };
+
+        let mut f = NamedTempFile::new().expect("tempfile");
+        {
+            let mut w = PcapNgWriter::new(&mut f).expect("writer");
+            for options in [vec![], vec![InterfaceDescriptionOption::IfTsResol(9)]] {
+                w.write_pcapng_block(InterfaceDescriptionBlock {
+                    linktype: DataLink::ETHERNET,
+                    snaplen: 65535,
+                    options,
+                })
+                .expect("idb");
+            }
+            // Interface 0 (µs): 1_700_000_000.25 s.
+            w.write_pcapng_block(EnhancedPacketBlock {
+                interface_id: 0,
+                timestamp: Duration::from_nanos(1_700_000_000_250_000),
+                original_len: 1,
+                data: std::borrow::Cow::Borrowed(&[1u8]),
+                options: vec![],
+            })
+            .expect("epb");
+            // Interface 1 (ns): 1_700_000_000 s + 7 ns.
+            w.write_pcapng_block(EnhancedPacketBlock {
+                interface_id: 1,
+                timestamp: Duration::from_nanos(1_700_000_000_000_000_007),
+                original_len: 1,
+                data: std::borrow::Cow::Borrowed(&[2u8]),
+                options: vec![],
+            })
+            .expect("epb");
+        }
+        let mut source = AsyncPcapSource::open(f.path()).await.expect("open");
+        assert_eq!(source.format(), PcapFormat::Pcapng);
+        let p1 = source.next().await.unwrap().expect("p1");
+        assert_eq!(p1.timestamp, Timestamp::new(1_700_000_000, 250_000_000));
+        let p2 = source.next().await.unwrap().expect("p2");
+        assert_eq!(p2.timestamp, Timestamp::new(1_700_000_000, 7));
+    }
+
     #[test]
     fn pcapng_magic_recognized() {
         // PCAPNG Section Header Block magic in little-endian.

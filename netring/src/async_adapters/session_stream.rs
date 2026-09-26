@@ -1,19 +1,35 @@
 //! [`SessionStream`] — async stream of typed L7 messages.
 //!
-//! Wraps an [`AsyncCapture`] + [`FlowTracker`] + a per-(flow, side)
-//! [`BufferedReassembler`] + a per-flow [`SessionParser`]. On every TCP
-//! segment, the reassembler accumulates in-order bytes (dropping out-of-
-//! order segments per [`flowscope::OverflowPolicy`]); on the corresponding
-//! [`FlowEvent::Packet`] the reassembler is drained and bytes are fed to
-//! the parser via `feed_initiator` / `feed_responder`. Parser-emitted
-//! messages surface as [`SessionEvent::Application`]; flow lifecycle
-//! surfaces as [`SessionEvent::Started`] / [`SessionEvent::Closed`].
+//! An async front for flowscope's [`flowscope::SessionDriver`]: packets
+//! from an [`AsyncCapture`] (or an AF_XDP capture) go through
+//! netring's optional dedup / pcap tap / timestamp clamp, then into the
+//! driver, which tracks flows, reassembles TCP (out-of-order hole fill,
+//! explicit gaps, size limits) and runs a per-flow [`SessionParser`].
+//! The stream yields the driver's [`SessionEvent`]s in order.
 //!
-//! Honours [`FlowTrackerConfig::max_reassembler_buffer`] +
-//! [`FlowTrackerConfig::overflow_policy`]: under
-//! [`flowscope::OverflowPolicy::DropFlow`] a per-side cap breach poisons the
-//! reassembler, the tracker emits an `Ended { reason: BufferOverflow }`
-//! event, and consumers see a `SessionEvent::Closed` with that reason.
+//! Because it *is* flowscope's engine, the stream behaves exactly like
+//! [`PcapSessionStream`](crate::PcapSessionStream) and the typed
+//! `flowscope::driver::Driver` (and so netring's `Monitor`):
+//!
+//! - A parser that reports `is_poisoned()` / `is_done()` is closed —
+//!   [`SessionEvent::ParserClosed`] with [`EndReason::ParseError`](flowscope::EndReason::ParseError) /
+//!   [`EndReason::ParserDone`](flowscope::EndReason::ParserDone) and its reason in `detail` — and never
+//!   fed again for that flow. The flow stays tracked and ends later
+//!   with [`SessionEvent::Closed`].
+//! - Bytes that never arrived are reported to the parser through
+//!   [`SessionParser::on_gap`]; the default answer closes it with
+//!   [`EndReason::StreamGap`](flowscope::EndReason::StreamGap).
+//! - Under [`FlowTrackerConfig::max_reassembler_buffer`] +
+//!   [`OverflowPolicy::DropFlow`](flowscope::OverflowPolicy::DropFlow),
+//!   a side that exceeds the cap stops being reassembled and the parser
+//!   is closed with [`EndReason::BufferOverflow`](flowscope::EndReason::BufferOverflow). The flow is **not**
+//!   ended (its later packets would otherwise start a new flow
+//!   mid-stream); its final `Closed.stats` records
+//!   `reassembly_stop_{initiator,responder}`.
+//! - `Closed.stats` and [`SessionStream::snapshot_flow_stats`] include
+//!   the reassembly diagnostics (gaps, retransmits, peak buffer, …).
+//! - [`SessionStream::with_emit_anomalies`] adds
+//!   [`SessionEvent::FlowAnomaly`] / [`SessionEvent::TrackerAnomaly`].
 //!
 //! ```no_run
 //! # use futures::StreamExt;
@@ -36,35 +52,33 @@
 //! while let Some(evt) = s.next().await {
 //!     match evt? {
 //!         SessionEvent::Application { message, .. } => { let _ = message; }
+//!         SessionEvent::ParserClosed { reason, detail, .. } => { let _ = (reason, detail); }
 //!         _ => {}
 //!     }
 //! }
 //! # Ok(()) }
 //! ```
 
-use std::collections::{HashMap, VecDeque};
+use std::collections::VecDeque;
 use std::pin::Pin;
 use std::task::{Context, Poll};
-use std::time::Duration;
 
-use ahash::RandomState;
 use flowscope::{
-    BufferedReassembler, BufferedReassemblerFactory, EndReason, FlowEvent, FlowExtractor, FlowSide,
-    FlowTracker, FlowTrackerConfig, Reassembler, ReassemblerFactory, SessionParser,
-    SessionParserFactory, Timestamp,
+    FlowExtractor, FlowStats, FlowTracker, FlowTrackerConfig, SessionDriver, SessionEvent,
+    SessionParser, SessionParserFactory, Timestamp,
 };
 use futures_core::Stream;
 
 use crate::async_adapters::flow_source::{AsyncFlowSource, DrainOutcome, SourcePacket};
-use crate::async_adapters::session_event::SessionEvent;
+use crate::async_adapters::flow_stream::{clamp_now, clamp_view, current_timestamp};
 use crate::async_adapters::tokio_adapter::AsyncCapture;
 use crate::dedup::Dedup;
 use crate::error::Error;
 use crate::traits::PacketSource;
 
-/// Async stream of [`SessionEvent`]s produced by reassembling TCP
-/// byte streams and feeding them through a per-flow
-/// [`SessionParser`].
+/// Async stream of [`SessionEvent`]s from a per-flow
+/// [`SessionParser`] over reassembled TCP. See the
+/// [module docs](self).
 ///
 /// Generic over the packet source `C` (issue #104): an [`AsyncCapture`]
 /// (AF_PACKET) or an [`AsyncXdpCapture`](crate::AsyncXdpCapture) (AF_XDP),
@@ -76,18 +90,15 @@ where
     F: SessionParserFactory<E::Key>,
 {
     cap: C,
-    tracker: FlowTracker<E, ()>,
-    parser_factory: F,
-    parsers: HashMap<E::Key, F::Parser, RandomState>,
-    reassembler_factory: BufferedReassemblerFactory,
-    reassemblers: HashMap<(E::Key, FlowSide), BufferedReassembler, RandomState>,
+    driver: SessionDriver<E, F>,
     pending: VecDeque<SessionEvent<E::Key, <F::Parser as SessionParser>::Message>>,
+    scratch: Vec<SessionEvent<E::Key, <F::Parser as SessionParser>::Message>>,
     sweep: tokio::time::Interval,
     dedup: Option<Dedup>,
-    /// Plan 19: monotonic-timestamp clamp state (`None` = off).
+    /// Monotonic-timestamp clamp state (`None` = off).
     monotonic_ts: Option<Timestamp>,
-    /// Plan 20: optional pcap tap (records each packet to disk
-    /// before reassembler + parser process it).
+    /// Optional pcap tap (records each packet to disk before
+    /// reassembly + parsing).
     #[cfg(feature = "pcap")]
     tap: Option<crate::pcap_tap::PcapTap>,
 }
@@ -98,8 +109,8 @@ where
     E::Key: Eq + std::hash::Hash + Clone + Send + 'static,
     F: SessionParserFactory<E::Key>,
 {
-    /// Plan 19: move an existing [`FlowTracker`] into a `SessionStream`
-    /// without rebuilding it. Preserves `idle_timeout_fn` and any
+    /// Move an existing [`FlowTracker`] into a `SessionStream` without
+    /// rebuilding it. Preserves `idle_timeout_fn`, config and any
     /// in-flight flow state from the source `FlowStream`.
     pub(crate) fn from_tracker(
         cap: C,
@@ -109,16 +120,12 @@ where
         monotonic_ts: Option<Timestamp>,
         #[cfg(feature = "pcap")] tap: Option<crate::pcap_tap::PcapTap>,
     ) -> Self {
-        let reassembler_factory = build_reassembler_factory(tracker.config());
         let sweep = tokio::time::interval(tracker.config().sweep_interval);
         Self {
             cap,
-            tracker,
-            parser_factory,
-            parsers: HashMap::with_hasher(RandomState::new()),
-            reassembler_factory,
-            reassemblers: HashMap::with_hasher(RandomState::new()),
+            driver: SessionDriver::from_tracker(tracker, parser_factory),
             pending: VecDeque::new(),
+            scratch: Vec::new(),
             sweep,
             dedup,
             monotonic_ts,
@@ -127,19 +134,23 @@ where
         }
     }
 
-    /// Replace the inner [`FlowTracker`]'s config in place.
+    /// Replace the config (flow table and reassembly limits) in place.
     ///
-    /// Mirrors [`FlowStream::with_config`](super::flow_stream::FlowStream::with_config).
-    /// Use this to set the per-side reassembler buffer cap and overflow
-    /// policy for the session path. Re-arms the sweep timer if
-    /// `sweep_interval` changed; rebuilds the reassembler factory so
-    /// future flows pick up the new caps. Existing in-flight
-    /// reassemblers keep their original caps.
+    /// Re-arms the sweep timer if `sweep_interval` changed. New flows
+    /// pick up the new reassembly limits; live ones keep theirs.
     pub fn with_config(mut self, config: FlowTrackerConfig) -> Self {
-        let new_interval = config.sweep_interval;
-        self.reassembler_factory = build_reassembler_factory(&config);
-        self.tracker.set_config(config);
-        self.sweep = tokio::time::interval(new_interval);
+        self.sweep = tokio::time::interval(config.sweep_interval);
+        self.driver.set_config(config);
+        self
+    }
+
+    /// Emit [`SessionEvent::FlowAnomaly`] / [`SessionEvent::TrackerAnomaly`]:
+    /// reassembly gaps, buffer overflows, retransmits, overlap
+    /// inconsistencies, parser poison
+    /// ([`flowscope::AnomalyKind::SessionParseError`]), eviction and
+    /// memcap pressure. Default: off.
+    pub fn with_emit_anomalies(mut self, enable: bool) -> Self {
+        self.driver.set_emit_anomalies(enable);
         self
     }
 
@@ -166,13 +177,20 @@ where
         self.dedup.as_mut()
     }
 
-    /// Borrow the inner tracker (stats / introspection).
+    /// Borrow the flow table (stats / introspection).
     pub fn tracker(&self) -> &FlowTracker<E, ()> {
-        &self.tracker
+        self.driver.tracker()
+    }
+
+    /// Borrow the underlying flowscope driver.
+    pub fn driver(&self) -> &SessionDriver<E, F> {
+        &self.driver
     }
 
     /// Override the per-flow idle timeout via a key predicate. See
     /// [`FlowStream::with_idle_timeout_fn`](super::flow_stream::FlowStream::with_idle_timeout_fn).
+    /// Parser state lives exactly as long as its flow, so this also
+    /// decides when a parser is reset.
     pub fn with_idle_timeout_fn<G>(mut self, f: G) -> Self
     where
         G: Fn(&E::Key, Option<flowscope::L4Proto>) -> Option<std::time::Duration>
@@ -180,7 +198,7 @@ where
             + Sync
             + 'static,
     {
-        self.tracker.set_idle_timeout_fn(f);
+        self.driver.tracker_mut().set_idle_timeout_fn(f);
         self
     }
 
@@ -188,36 +206,30 @@ where
     /// stream is strictly non-decreasing in time. See
     /// [`FlowStream::with_monotonic_timestamps`](super::flow_stream::FlowStream::with_monotonic_timestamps).
     pub fn with_monotonic_timestamps(mut self, enable: bool) -> Self {
-        self.monotonic_ts = if enable {
-            Some(Timestamp::default())
-        } else {
-            None
-        };
+        self.monotonic_ts = enable.then(Timestamp::default);
         self
     }
 
-    /// Borrow-iterator over live `(K, FlowStats)` pairs.
-    /// Built on [`flowscope::FlowTracker::iter_active`].
-    pub fn snapshot_flow_stats(
-        &self,
-    ) -> impl Iterator<Item = (&E::Key, &flowscope::FlowStats)> + '_ {
-        self.tracker.iter_active().map(|af| (af.key, af.stats))
+    /// Live `(key, stats)` for every tracked flow, **including the
+    /// reassembly diagnostics** (gaps, retransmits, peak buffer,
+    /// oversize drops, stop).
+    pub fn snapshot_flow_stats(&self) -> impl Iterator<Item = (E::Key, FlowStats)> + '_ {
+        self.driver.snapshot_flow_stats()
     }
 
     /// Cumulative tracker counters: `flows_created`, `flows_ended`,
     /// `flows_evicted`, `packets_unmatched`.
     pub fn tracker_stats(&self) -> &flowscope::FlowTrackerStats {
-        self.tracker.stats()
+        self.driver.tracker().stats()
     }
 
-    /// Count of live flow entries. O(n) walk; call from a metrics
-    /// tick, not every poll.
+    /// Count of live flow entries.
     pub fn active_flows(&self) -> usize {
-        self.tracker.flows().count()
+        self.driver.tracker().flow_count()
     }
 
-    /// Plan 20: tap every captured packet into `writer` before
-    /// reassembly + parsing. Default error policy:
+    /// Tap every captured packet into `writer` before reassembly +
+    /// parsing. Default error policy:
     /// [`TapErrorPolicy::Continue`](crate::pcap_tap::TapErrorPolicy::Continue).
     #[cfg(feature = "pcap")]
     pub fn with_pcap_tap<W>(self, writer: crate::pcap::CaptureWriter<W>) -> Self
@@ -227,8 +239,8 @@ where
         self.with_pcap_tap_policy(writer, crate::pcap_tap::TapErrorPolicy::default())
     }
 
-    /// Plan 20: variant of [`with_pcap_tap`](Self::with_pcap_tap)
-    /// with an explicit [`TapErrorPolicy`](crate::pcap_tap::TapErrorPolicy).
+    /// Variant of [`with_pcap_tap`](Self::with_pcap_tap) with an
+    /// explicit [`TapErrorPolicy`](crate::pcap_tap::TapErrorPolicy).
     #[cfg(feature = "pcap")]
     pub fn with_pcap_tap_policy<W>(
         mut self,
@@ -242,7 +254,7 @@ where
         self
     }
 
-    /// Plan 24: cap the recorded frame size on the pcap tap. See
+    /// Cap the recorded frame size on the pcap tap. See
     /// [`FlowStream::with_pcap_tap_snaplen`](super::flow_stream::FlowStream::with_pcap_tap_snaplen).
     #[cfg(feature = "pcap")]
     pub fn with_pcap_tap_snaplen(mut self, snaplen: u32) -> Self {
@@ -293,77 +305,19 @@ where
             }
 
             if this.sweep.poll_tick(cx).is_ready() {
-                let now = crate::async_adapters::flow_stream::clamp_now(
-                    current_timestamp(),
-                    &mut this.monotonic_ts,
-                );
-                let parsers = &mut this.parsers;
-                let parser_factory = &mut this.parser_factory;
-                let reassemblers = &mut this.reassemblers;
-                let pending = &mut this.pending;
-
-                // Collect sweep events first; we want to fire `on_tick`
-                // on every still-live parser (including ones about to be
-                // closed by this sweep) *before* the Closed events land.
-                let sweep_events: Vec<_> = this.tracker.sweep(now).into_iter().collect();
-
-                // flowscope 0.11 `SessionParser::on_tick` —
-                // periodic time-driven hook. Default impl is a
-                // no-op; parsers that override it can emit
-                // timeout / unanswered-request messages attributed
-                // to the initiator side. flowscope 0.11 plan 119
-                // changed the signature from `Vec<M>`-returning to
-                // scratch-buffer; we reuse the scratch buf across
-                // parsers within a single sweep.
-                // `on_tick` messages are attributed to the initiator
-                // side; the canonical orientation of the initiator is
-                // the flow's `initiator_orientation` (flowscope 0.20
-                // #118), looked up from the live tracker entry.
-                let tracker = &this.tracker;
-                let mut scratch = Vec::new();
-                for (key, parser) in parsers.iter_mut() {
-                    let parser_kind = parser.parser_kind();
-                    let orientation = tracker
-                        .get(key)
-                        .map(|e| e.initiator_orientation())
-                        .unwrap_or_default();
-                    scratch.clear();
-                    parser.on_tick(now, &mut scratch);
-                    for m in scratch.drain(..) {
-                        pending.push_back(SessionEvent::Application {
-                            key: key.clone(),
-                            side: FlowSide::Initiator,
-                            orientation,
-                            message: m,
-                            ts: now,
-                            parser_kind,
-                        });
-                    }
-                }
-
-                for ev in sweep_events {
-                    process_session_event::<E::Key, F>(
-                        ev,
-                        parsers,
-                        parser_factory,
-                        reassemblers,
-                        pending,
-                    );
-                }
+                let now = clamp_now(current_timestamp(), &mut this.monotonic_ts);
+                this.driver.sweep_into(now, &mut this.scratch);
+                this.pending.extend(this.scratch.drain(..));
                 if !this.pending.is_empty() {
                     continue;
                 }
             }
 
             // Disjoint field borrows so the sink closure can feed the
-            // tracker + reassemblers while `cap` is borrowed by `poll_drain`.
+            // driver while `cap` is borrowed by `poll_drain`.
             let cap = &mut this.cap;
-            let tracker = &mut this.tracker;
-            let parsers = &mut this.parsers;
-            let parser_factory = &mut this.parser_factory;
-            let reassemblers = &mut this.reassemblers;
-            let reassembler_factory = &mut this.reassembler_factory;
-            let pending = &mut this.pending;
+            let driver = &mut this.driver;
+            let scratch = &mut this.scratch;
             let dedup = &mut this.dedup;
             let monotonic_ts = &mut this.monotonic_ts;
             #[cfg(feature = "pcap")]
@@ -372,14 +326,13 @@ where
             let mut tap_error: Option<Error> = None;
 
             let outcome = cap.poll_drain(cx, &mut |sp: SourcePacket<'_>| {
-                // Plan 17: optional pre-tracking dedup (on the unclamped ts).
+                // Optional pre-tracking dedup (on the unclamped ts).
                 if let Some(d) = dedup.as_mut()
                     && !d.keep_raw(sp.data, sp.direction, sp.view.timestamp)
                 {
                     return;
                 }
 
-                // Plan 20: pcap tap.
                 #[cfg(feature = "pcap")]
                 if let Some(t) = tap.as_mut() {
                     if tap_error.is_some() {
@@ -393,38 +346,17 @@ where
                     }
                 }
 
-                let view = crate::async_adapters::flow_stream::clamp_view(sp.view, monotonic_ts);
-                let view_ts = view.timestamp;
-
-                // Per-segment: route into the per-(flow, side) reassembler.
-                // `segment` takes the carrying packet's timestamp
-                // (flowscope 0.5+) so the reassembler can classify
-                // retransmits with timing.
-                let evts = tracker.track_with_payload(view, |key, side, seq, payload| {
-                    if payload.is_empty() {
-                        return;
-                    }
-                    reassemblers
-                        .entry((key.clone(), side))
-                        .or_insert_with(|| reassembler_factory.new_reassembler(key, side))
-                        .segment(seq, payload, view_ts);
-                });
-
-                // Per-event: drain reassembler on Packet, drain+fin on Ended,
-                // pass Started/Anomaly through.
-                for ev in evts {
-                    process_session_event::<E::Key, F>(
-                        ev,
-                        parsers,
-                        parser_factory,
-                        reassemblers,
-                        pending,
-                    );
-                }
+                driver.track_into(clamp_view(sp.view, monotonic_ts), scratch);
             });
+            this.pending.extend(this.scratch.drain(..));
 
             match outcome {
-                Poll::Pending => return Poll::Pending,
+                Poll::Pending => {
+                    if !this.pending.is_empty() {
+                        continue;
+                    }
+                    return Poll::Pending;
+                }
                 Poll::Ready(Err(e)) => return Poll::Ready(Some(Err(Error::Io(e)))),
                 Poll::Ready(Ok(DrainOutcome::Drained)) =>
                 {
@@ -437,209 +369,6 @@ where
             }
         }
     }
-}
-
-/// Build a [`BufferedReassemblerFactory`] honouring the cap + policy
-/// fields on [`FlowTrackerConfig`].
-pub(crate) fn build_reassembler_factory(config: &FlowTrackerConfig) -> BufferedReassemblerFactory {
-    let mut factory = BufferedReassemblerFactory::default();
-    if let Some(cap) = config.max_reassembler_buffer {
-        factory = factory.with_max_buffer(cap);
-    }
-    factory.with_overflow_policy(config.overflow_policy)
-}
-
-/// Translate one flow event into zero or more [`SessionEvent`]s,
-/// driving reassembler drain + parser feed in lockstep.
-///
-/// Generic over the parser factory `F` (rather than the parser `P`)
-/// so we can lazily mint a fresh parser when a flow's first byte
-/// arrives — matching the lazy-creation pattern on `parsers` /
-/// `reassemblers` everywhere else.
-pub(crate) fn process_session_event<K, F>(
-    ev: FlowEvent<K>,
-    parsers: &mut HashMap<K, F::Parser, RandomState>,
-    parser_factory: &mut F,
-    reassemblers: &mut HashMap<(K, FlowSide), BufferedReassembler, RandomState>,
-    pending: &mut VecDeque<SessionEvent<K, <F::Parser as SessionParser>::Message>>,
-) where
-    K: Eq + std::hash::Hash + Clone,
-    F: SessionParserFactory<K>,
-{
-    match ev {
-        FlowEvent::Started {
-            key,
-            side,
-            orientation,
-            ts,
-            ..
-        } => {
-            pending.push_back(SessionEvent::Started {
-                key,
-                side,
-                orientation,
-                ts,
-            });
-        }
-        FlowEvent::Packet {
-            key,
-            side,
-            orientation,
-            ts,
-            ..
-        } => {
-            // Drain the just-arrived in-order bytes (if any) and feed
-            // the parser. Reassembler-poison + cap-enforce already
-            // applied inside `BufferedReassembler::segment`.
-            let drained = match reassemblers.get_mut(&(key.clone(), side)) {
-                Some(r) => r.take(),
-                None => return,
-            };
-            if drained.is_empty() {
-                return;
-            }
-            let parser = parsers
-                .entry(key.clone())
-                .or_insert_with(|| parser_factory.new_parser(&key));
-            let parser_kind = parser.parser_kind();
-            let mut messages = Vec::new();
-            match side {
-                FlowSide::Initiator => parser.feed_initiator(&drained, ts, &mut messages),
-                FlowSide::Responder => parser.feed_responder(&drained, ts, &mut messages),
-            }
-            for m in messages {
-                pending.push_back(SessionEvent::Application {
-                    key: key.clone(),
-                    side,
-                    orientation,
-                    message: m,
-                    ts,
-                    parser_kind,
-                });
-            }
-        }
-        FlowEvent::Ended {
-            key,
-            reason,
-            stats,
-            l4,
-            ..
-        } => {
-            // For graceful close paths, drain any residual bytes
-            // before calling fin_*. For abort paths, drop the
-            // reassemblers without feeding (data is suspect).
-            let graceful = matches!(reason, EndReason::Fin | EndReason::IdleTimeout);
-            for side in [FlowSide::Initiator, FlowSide::Responder] {
-                let r = reassemblers.remove(&(key.clone(), side));
-                if !graceful {
-                    drop(r);
-                    continue;
-                }
-                if let Some(mut r) = r {
-                    let drained = r.take();
-                    if !drained.is_empty() {
-                        let parser = parsers
-                            .entry(key.clone())
-                            .or_insert_with(|| parser_factory.new_parser(&key));
-                        let parser_kind = parser.parser_kind();
-                        let mut messages = Vec::new();
-                        match side {
-                            FlowSide::Initiator => {
-                                parser.feed_initiator(&drained, stats.last_seen, &mut messages)
-                            }
-                            FlowSide::Responder => {
-                                parser.feed_responder(&drained, stats.last_seen, &mut messages)
-                            }
-                        }
-                        for m in messages {
-                            pending.push_back(SessionEvent::Application {
-                                key: key.clone(),
-                                side,
-                                // Close-drain has no per-packet event;
-                                // derive the canonical direction from
-                                // the finished flow's deterministic
-                                // bridge (flowscope 0.20 #118).
-                                orientation: stats.orientation_for(side),
-                                message: m,
-                                ts: stats.last_seen,
-                                parser_kind,
-                            });
-                        }
-                    }
-                }
-            }
-
-            if let Some(mut parser) = parsers.remove(&key) {
-                let parser_kind = parser.parser_kind();
-                match reason {
-                    EndReason::Fin | EndReason::IdleTimeout => {
-                        let mut fin_msgs = Vec::new();
-                        parser.fin_initiator(&mut fin_msgs);
-                        for m in fin_msgs.drain(..) {
-                            pending.push_back(SessionEvent::Application {
-                                key: key.clone(),
-                                side: FlowSide::Initiator,
-                                orientation: stats.orientation_for(FlowSide::Initiator),
-                                message: m,
-                                ts: stats.last_seen,
-                                parser_kind,
-                            });
-                        }
-                        parser.fin_responder(&mut fin_msgs);
-                        for m in fin_msgs.drain(..) {
-                            pending.push_back(SessionEvent::Application {
-                                key: key.clone(),
-                                side: FlowSide::Responder,
-                                orientation: stats.orientation_for(FlowSide::Responder),
-                                message: m,
-                                ts: stats.last_seen,
-                                parser_kind,
-                            });
-                        }
-                    }
-                    EndReason::Rst
-                    | EndReason::Evicted
-                    | EndReason::BufferOverflow
-                    | EndReason::ParseError => {
-                        parser.rst_initiator();
-                        parser.rst_responder();
-                    }
-                    _ => {
-                        parser.rst_initiator();
-                        parser.rst_responder();
-                    }
-                }
-            }
-            pending.push_back(SessionEvent::Closed {
-                key,
-                reason,
-                stats,
-                l4,
-            });
-        }
-        FlowEvent::FlowAnomaly { key, kind, ts } => {
-            // flowscope 0.6: per-flow anomaly. The `Closed` event still
-            // carries `EndReason::BufferOverflow` / `ParseError` when
-            // applicable, but the live anomaly is first-class on the
-            // typed surface.
-            pending.push_back(SessionEvent::FlowAnomaly { key, kind, ts });
-        }
-        FlowEvent::TrackerAnomaly { kind, ts } => {
-            // flowscope 0.6: tracker-global anomaly (e.g. eviction
-            // pressure). Carries no flow key.
-            pending.push_back(SessionEvent::TrackerAnomaly { kind, ts });
-        }
-        // Established / StateChange / Tick are not surfaced —
-        // SessionStream's contract is "messages and lifecycle endpoints".
-        _ => {}
-    }
-}
-
-fn current_timestamp() -> Timestamp {
-    let now = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .unwrap_or(Duration::ZERO);
-    Timestamp::new(now.as_secs() as u32, now.subsec_nanos())
 }
 
 // ── StreamCapture trait impl ───────────────────────────────────────
@@ -676,275 +405,5 @@ where
 
     fn dedup_mut(&mut self) -> Option<&mut crate::dedup::Dedup> {
         self.dedup.as_mut()
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use flowscope::{AnomalyKind, FlowStats, HistoryString, OverflowPolicy};
-
-    /// Stub parser: each `feed_*` call produces one message that
-    /// echoes the bytes. Lets us confirm reassembler→parser dispatch
-    /// without mocking framing.
-    #[derive(Default, Clone)]
-    struct EchoParser;
-
-    impl SessionParser for EchoParser {
-        type Message = (FlowSide, Vec<u8>);
-        fn feed_initiator(&mut self, b: &[u8], _ts: Timestamp, out: &mut Vec<(FlowSide, Vec<u8>)>) {
-            out.push((FlowSide::Initiator, b.to_vec()));
-        }
-        fn feed_responder(&mut self, b: &[u8], _ts: Timestamp, out: &mut Vec<(FlowSide, Vec<u8>)>) {
-            out.push((FlowSide::Responder, b.to_vec()));
-        }
-    }
-
-    fn ts() -> Timestamp {
-        Timestamp::new(0, 0)
-    }
-
-    type TestState = (
-        HashMap<u32, EchoParser, RandomState>,
-        EchoParser,
-        HashMap<(u32, FlowSide), BufferedReassembler, RandomState>,
-        VecDeque<SessionEvent<u32, (FlowSide, Vec<u8>)>>,
-    );
-
-    fn empty_state() -> TestState {
-        (
-            HashMap::with_hasher(RandomState::new()),
-            EchoParser,
-            HashMap::with_hasher(RandomState::new()),
-            VecDeque::new(),
-        )
-    }
-
-    #[test]
-    fn started_event_pushes_session_started() {
-        let (mut parsers, mut factory, mut reassemblers, mut pending) = empty_state();
-        process_session_event::<u32, EchoParser>(
-            FlowEvent::Started {
-                key: 7,
-                side: FlowSide::Initiator,
-                orientation: flowscope::Orientation::Forward,
-                ts: ts(),
-                l4: None,
-            },
-            &mut parsers,
-            &mut factory,
-            &mut reassemblers,
-            &mut pending,
-        );
-        assert!(matches!(
-            pending.pop_front(),
-            Some(SessionEvent::Started { key: 7, .. })
-        ));
-    }
-
-    #[test]
-    fn packet_event_drains_reassembler_into_parser() {
-        let (mut parsers, mut factory, mut reassemblers, mut pending) = empty_state();
-        // Pre-load the reassembler with bytes (simulating prior segment dispatch).
-        let mut r = BufferedReassembler::new();
-        r.segment(0, b"hello", ts());
-        reassemblers.insert((7u32, FlowSide::Initiator), r);
-
-        process_session_event::<u32, EchoParser>(
-            flowscope::test_helpers::events::packet_side(7, FlowSide::Initiator, 5, ts()),
-            &mut parsers,
-            &mut factory,
-            &mut reassemblers,
-            &mut pending,
-        );
-
-        match pending.pop_front() {
-            Some(SessionEvent::Application {
-                key, side, message, ..
-            }) => {
-                assert_eq!(key, 7);
-                assert_eq!(side, FlowSide::Initiator);
-                assert_eq!(message, (FlowSide::Initiator, b"hello".to_vec()));
-            }
-            other => panic!("expected Application, got {other:?}"),
-        }
-        // Reassembler now empty.
-        assert!(
-            reassemblers
-                .get(&(7, FlowSide::Initiator))
-                .map(|r| r.buffered_len())
-                == Some(0)
-        );
-    }
-
-    #[test]
-    fn packet_event_with_no_reassembler_is_silent() {
-        let (mut parsers, mut factory, mut reassemblers, mut pending) = empty_state();
-        process_session_event::<u32, EchoParser>(
-            flowscope::test_helpers::events::packet_side(7, FlowSide::Initiator, 0, ts()),
-            &mut parsers,
-            &mut factory,
-            &mut reassemblers,
-            &mut pending,
-        );
-        assert!(pending.is_empty());
-    }
-
-    #[test]
-    fn ended_fin_drains_reassembler_then_calls_fin() {
-        let (mut parsers, mut factory, mut reassemblers, mut pending) = empty_state();
-        // Residual bytes left in the initiator reassembler when FIN arrives.
-        let mut r = BufferedReassembler::new();
-        r.segment(0, b"residual", ts());
-        reassemblers.insert((7u32, FlowSide::Initiator), r);
-
-        process_session_event::<u32, EchoParser>(
-            FlowEvent::Ended {
-                key: 7,
-                reason: EndReason::Fin,
-                stats: FlowStats::default(),
-                history: HistoryString::default(),
-                l4: None,
-            },
-            &mut parsers,
-            &mut factory,
-            &mut reassemblers,
-            &mut pending,
-        );
-
-        // Drained residual should appear before Closed.
-        match pending.pop_front() {
-            Some(SessionEvent::Application { message, .. }) => {
-                assert_eq!(message, (FlowSide::Initiator, b"residual".to_vec()));
-            }
-            other => panic!("expected residual Application, got {other:?}"),
-        }
-        match pending.pop_front() {
-            Some(SessionEvent::Closed { reason, key, .. }) => {
-                assert_eq!(key, 7);
-                assert!(matches!(reason, EndReason::Fin));
-            }
-            other => panic!("expected Closed, got {other:?}"),
-        }
-        // Reassemblers cleaned up.
-        assert!(reassemblers.is_empty());
-    }
-
-    #[test]
-    fn ended_buffer_overflow_drops_reassembler_without_drain() {
-        let (mut parsers, mut factory, mut reassemblers, mut pending) = empty_state();
-        let mut r = BufferedReassembler::new();
-        r.segment(0, b"suspect-data-from-poisoned-flow", ts());
-        reassemblers.insert((7u32, FlowSide::Initiator), r);
-
-        process_session_event::<u32, EchoParser>(
-            FlowEvent::Ended {
-                key: 7,
-                reason: EndReason::BufferOverflow,
-                stats: FlowStats::default(),
-                history: HistoryString::default(),
-                l4: None,
-            },
-            &mut parsers,
-            &mut factory,
-            &mut reassemblers,
-            &mut pending,
-        );
-
-        // No Application event — bytes are suspect, dropped.
-        assert_eq!(pending.len(), 1);
-        match pending.pop_front() {
-            Some(SessionEvent::Closed { reason, key, .. }) => {
-                assert_eq!(key, 7);
-                assert!(matches!(reason, EndReason::BufferOverflow));
-            }
-            other => panic!("expected Closed, got {other:?}"),
-        }
-        assert!(reassemblers.is_empty());
-    }
-
-    #[test]
-    fn ended_rst_drops_reassembler_without_drain() {
-        let (mut parsers, mut factory, mut reassemblers, mut pending) = empty_state();
-        // Pre-create a parser so we can confirm rst_* is called by checking removal.
-        parsers.insert(7u32, EchoParser);
-
-        let mut r = BufferedReassembler::new();
-        r.segment(0, b"abc", ts());
-        reassemblers.insert((7u32, FlowSide::Responder), r);
-
-        process_session_event::<u32, EchoParser>(
-            FlowEvent::Ended {
-                key: 7,
-                reason: EndReason::Rst,
-                stats: FlowStats::default(),
-                history: HistoryString::default(),
-                l4: None,
-            },
-            &mut parsers,
-            &mut factory,
-            &mut reassemblers,
-            &mut pending,
-        );
-        assert!(reassemblers.is_empty());
-        assert!(!parsers.contains_key(&7));
-        assert_eq!(pending.len(), 1);
-        match pending.pop_front() {
-            Some(SessionEvent::Closed { reason, .. }) => {
-                assert!(matches!(reason, EndReason::Rst));
-            }
-            other => panic!("expected Closed, got {other:?}"),
-        }
-    }
-
-    #[test]
-    fn anomaly_event_forwards_as_session_anomaly() {
-        let (mut parsers, mut factory, mut reassemblers, mut pending) = empty_state();
-        process_session_event::<u32, EchoParser>(
-            FlowEvent::FlowAnomaly {
-                key: 42,
-                kind: AnomalyKind::OutOfOrderSegment {
-                    side: FlowSide::Initiator,
-                    count: 3,
-                },
-                ts: ts(),
-            },
-            &mut parsers,
-            &mut factory,
-            &mut reassemblers,
-            &mut pending,
-        );
-        assert_eq!(pending.len(), 1);
-        match pending.pop_front().unwrap() {
-            SessionEvent::FlowAnomaly { key, kind, .. } => {
-                assert_eq!(key, 42);
-                assert!(matches!(kind, AnomalyKind::OutOfOrderSegment { .. }));
-            }
-            other => panic!("expected FlowAnomaly, got {other:?}"),
-        }
-    }
-
-    #[test]
-    fn build_factory_picks_up_cap_and_policy() {
-        let mut cfg = FlowTrackerConfig::default();
-        cfg.max_reassembler_buffer = Some(64);
-        cfg.overflow_policy = OverflowPolicy::DropFlow;
-        let mut factory = build_reassembler_factory(&cfg);
-        let mut r: BufferedReassembler = factory.new_reassembler(&7u32, FlowSide::Initiator);
-        // Push enough bytes to trigger the cap; with DropFlow, reassembler
-        // poisons (this is the flowscope contract; we just check we get a
-        // poisoned flag).
-        r.segment(0, &[0u8; 128], ts());
-        assert!(r.is_poisoned());
-    }
-
-    #[test]
-    fn build_factory_unbounded_when_cap_unset() {
-        let cfg = FlowTrackerConfig::default();
-        let mut factory = build_reassembler_factory(&cfg);
-        let mut r: BufferedReassembler = factory.new_reassembler(&7u32, FlowSide::Initiator);
-        r.segment(0, &vec![0u8; 4096], ts());
-        assert!(!r.is_poisoned());
-        assert_eq!(r.buffered_len(), 4096);
     }
 }

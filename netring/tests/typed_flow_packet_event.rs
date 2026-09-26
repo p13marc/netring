@@ -148,6 +148,7 @@ fn parser_closed_handler_observes_kind_and_reason() {
         key(L4Proto::Tcp),
         flowscope::ParserKind::Other("http"),
         EndReason::Fin,
+        None,
         Timestamp::new(0, 0),
     );
     disp.dispatch::<ParserClosed<Tcp>>(&evt, &mut ctx).unwrap();

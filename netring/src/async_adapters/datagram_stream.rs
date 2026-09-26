@@ -1,10 +1,19 @@
 //! [`DatagramStream`] — async stream of typed L7 messages from
-//! packet-oriented protocols (DNS-over-UDP, syslog, NTP).
+//! packet-oriented protocols (DNS-over-UDP, syslog, NTP, ICMP).
 //!
-//! Wraps an [`AsyncCapture`] + [`FlowTracker`] + a per-flow
-//! [`DatagramParser`]. Packets are fed individually (no
-//! reassembly); the parser receives the L4 payload and the
-//! direction relative to the flow's initiator.
+//! An async front for flowscope's [`flowscope::DatagramDriver`]:
+//! packets go through netring's optional dedup / pcap tap / timestamp
+//! clamp, then into the driver, which tracks flows and feeds each UDP
+//! payload (or ICMP message) to a per-flow [`DatagramParser`] with the
+//! side of the flow that sent it. Same engine as
+//! [`PcapDatagramStream`](crate::PcapDatagramStream) and the typed
+//! `flowscope::driver::Driver`:
+//!
+//! - `side` is relative to the flow's initiator (the first packet's
+//!   sender), whatever the address order.
+//! - A parser that reports `is_poisoned()` / `is_done()` is closed
+//!   ([`SessionEvent::ParserClosed`]) and never fed again for that
+//!   flow; the flow ends later with [`SessionEvent::Closed`].
 //!
 //! ```no_run
 //! # use futures::StreamExt;
@@ -26,38 +35,30 @@
 //! # Ok(()) }
 //! ```
 
-use std::collections::{HashMap, VecDeque};
+use std::collections::VecDeque;
 use std::pin::Pin;
 use std::task::{Context, Poll};
-use std::time::Duration;
 
-use ahash::RandomState;
 use flowscope::{
-    DatagramParser, DatagramParserFactory, FlowEvent, FlowExtractor, FlowTracker,
-    FlowTrackerConfig, L4Proto, Orientation, Timestamp,
+    DatagramDriver, DatagramParser, DatagramParserFactory, FlowExtractor, FlowStats, FlowTracker,
+    FlowTrackerConfig, SessionEvent, Timestamp,
 };
 use futures_core::Stream;
 
 use crate::async_adapters::flow_source::{AsyncFlowSource, DrainOutcome, SourcePacket};
-use crate::async_adapters::session_event::SessionEvent;
+use crate::async_adapters::flow_stream::{clamp_now, clamp_view, current_timestamp};
 use crate::async_adapters::tokio_adapter::AsyncCapture;
 use crate::dedup::Dedup;
 use crate::error::Error;
 use crate::traits::PacketSource;
 
-/// Async stream of [`SessionEvent`]s produced by feeding UDP
-/// payloads through a per-flow [`DatagramParser`].
-///
-/// UDP datagrams are atomic — there is no concept of out-of-order
-/// segments or partial frames. The
-/// [`FlowTrackerConfig::max_reassembler_buffer`] /
-/// [`overflow_policy`](FlowTrackerConfig::overflow_policy) fields are
-/// ignored on this stream (they apply to TCP reassembly under
-/// [`SessionStream`](super::session_stream::SessionStream) only). The
-/// per-flow LRU eviction (`max_flows`) and idle timeouts still apply.
+/// Async stream of [`SessionEvent`]s from a per-flow
+/// [`DatagramParser`] over UDP (and ICMP) payloads. See the
+/// [module docs](self).
 ///
 /// Generic over the packet source `C` (issue #104): an [`AsyncCapture`]
-/// (AF_PACKET) or an [`AsyncXdpCapture`](crate::AsyncXdpCapture) (AF_XDP).
+/// (AF_PACKET) or an [`AsyncXdpCapture`](crate::AsyncXdpCapture) (AF_XDP),
+/// driven through the shared `AsyncFlowSource` drain.
 pub struct DatagramStream<C, E, F>
 where
     E: FlowExtractor,
@@ -65,15 +66,14 @@ where
     F: DatagramParserFactory<E::Key>,
 {
     cap: C,
-    tracker: FlowTracker<E, ()>,
-    factory: F,
-    parsers: HashMap<E::Key, F::Parser, RandomState>,
+    driver: DatagramDriver<E, F>,
     pending: VecDeque<SessionEvent<E::Key, <F::Parser as DatagramParser>::Message>>,
+    scratch: Vec<SessionEvent<E::Key, <F::Parser as DatagramParser>::Message>>,
     sweep: tokio::time::Interval,
     dedup: Option<Dedup>,
-    /// Plan 19: monotonic-timestamp clamp state (`None` = off).
+    /// Monotonic-timestamp clamp state (`None` = off).
     monotonic_ts: Option<Timestamp>,
-    /// Plan 20: optional pcap tap.
+    /// Optional pcap tap (records each packet to disk before parsing).
     #[cfg(feature = "pcap")]
     tap: Option<crate::pcap_tap::PcapTap>,
 }
@@ -84,13 +84,13 @@ where
     E::Key: Eq + std::hash::Hash + Clone + Send + 'static,
     F: DatagramParserFactory<E::Key>,
 {
-    /// Plan 19: move an existing [`FlowTracker`] into a `DatagramStream`
-    /// without rebuilding it. Preserves `idle_timeout_fn` and any
+    /// Move an existing [`FlowTracker`] into a `DatagramStream` without
+    /// rebuilding it. Preserves `idle_timeout_fn`, config and any
     /// in-flight flow state from the source `FlowStream`.
     pub(crate) fn from_tracker(
         cap: C,
         tracker: FlowTracker<E, ()>,
-        factory: F,
+        parser_factory: F,
         dedup: Option<Dedup>,
         monotonic_ts: Option<Timestamp>,
         #[cfg(feature = "pcap")] tap: Option<crate::pcap_tap::PcapTap>,
@@ -98,10 +98,9 @@ where
         let sweep = tokio::time::interval(tracker.config().sweep_interval);
         Self {
             cap,
-            tracker,
-            factory,
-            parsers: HashMap::with_hasher(RandomState::new()),
+            driver: DatagramDriver::from_tracker(tracker, parser_factory),
             pending: VecDeque::new(),
+            scratch: Vec::new(),
             sweep,
             dedup,
             monotonic_ts,
@@ -110,23 +109,28 @@ where
         }
     }
 
-    /// Replace the inner [`FlowTracker`]'s config in place.
-    ///
-    /// Mirrors [`FlowStream::with_config`](super::flow_stream::FlowStream::with_config).
-    /// Re-arms the sweep timer if `sweep_interval` changed. UDP
-    /// datagrams don't use `max_reassembler_buffer` /
-    /// `overflow_policy` — those fields are ignored on this stream.
+    /// Replace the flow-table config in place. Re-arms the sweep timer
+    /// if `sweep_interval` changed. (Reassembly limits don't apply to
+    /// datagrams.)
     pub fn with_config(mut self, config: FlowTrackerConfig) -> Self {
-        let new_interval = config.sweep_interval;
-        self.tracker.set_config(config);
-        self.sweep = tokio::time::interval(new_interval);
+        self.sweep = tokio::time::interval(config.sweep_interval);
+        self.driver.set_config(config);
+        self
+    }
+
+    /// Emit [`SessionEvent::FlowAnomaly`] / [`SessionEvent::TrackerAnomaly`]:
+    /// parser poison ([`flowscope::AnomalyKind::SessionParseError`]) and
+    /// eviction pressure. Default: off.
+    pub fn with_emit_anomalies(mut self, enable: bool) -> Self {
+        self.driver.set_emit_anomalies(enable);
         self
     }
 
     /// Apply per-packet deduplication before flow tracking. Useful for
     /// capturing on `lo` where each packet appears twice
     /// ([`PACKET_OUTGOING`](crate::PacketDirection::Outgoing) +
-    /// [`PACKET_HOST`](crate::PacketDirection::Host)).
+    /// [`PACKET_HOST`](crate::PacketDirection::Host)); pair with
+    /// [`Dedup::loopback`](crate::Dedup::loopback).
     ///
     /// Replaces any previously-set dedup; counters reset.
     pub fn with_dedup(mut self, dedup: Dedup) -> Self {
@@ -139,18 +143,26 @@ where
         self.dedup.as_ref()
     }
 
-    /// Borrow the embedded dedup mutably.
+    /// Borrow the embedded dedup mutably (e.g. to inspect counters
+    /// `dropped()` / `seen()`).
     pub fn dedup_mut(&mut self) -> Option<&mut Dedup> {
         self.dedup.as_mut()
     }
 
-    /// Borrow the inner tracker (stats / introspection).
+    /// Borrow the flow table (stats / introspection).
     pub fn tracker(&self) -> &FlowTracker<E, ()> {
-        &self.tracker
+        self.driver.tracker()
+    }
+
+    /// Borrow the underlying flowscope driver.
+    pub fn driver(&self) -> &DatagramDriver<E, F> {
+        &self.driver
     }
 
     /// Override the per-flow idle timeout via a key predicate. See
     /// [`FlowStream::with_idle_timeout_fn`](super::flow_stream::FlowStream::with_idle_timeout_fn).
+    /// Parser state lives exactly as long as its flow, so this also
+    /// decides when a parser is reset.
     pub fn with_idle_timeout_fn<G>(mut self, f: G) -> Self
     where
         G: Fn(&E::Key, Option<flowscope::L4Proto>) -> Option<std::time::Duration>
@@ -158,7 +170,7 @@ where
             + Sync
             + 'static,
     {
-        self.tracker.set_idle_timeout_fn(f);
+        self.driver.tracker_mut().set_idle_timeout_fn(f);
         self
     }
 
@@ -166,36 +178,27 @@ where
     /// stream is strictly non-decreasing in time. See
     /// [`FlowStream::with_monotonic_timestamps`](super::flow_stream::FlowStream::with_monotonic_timestamps).
     pub fn with_monotonic_timestamps(mut self, enable: bool) -> Self {
-        self.monotonic_ts = if enable {
-            Some(Timestamp::default())
-        } else {
-            None
-        };
+        self.monotonic_ts = enable.then(Timestamp::default);
         self
     }
 
-    /// Borrow-iterator over live `(K, FlowStats)` pairs.
-    /// Built on [`flowscope::FlowTracker::iter_active`].
-    pub fn snapshot_flow_stats(
-        &self,
-    ) -> impl Iterator<Item = (&E::Key, &flowscope::FlowStats)> + '_ {
-        self.tracker.iter_active().map(|af| (af.key, af.stats))
+    /// Live `(key, stats)` for every tracked flow.
+    pub fn snapshot_flow_stats(&self) -> impl Iterator<Item = (E::Key, FlowStats)> + '_ {
+        self.driver.snapshot_flow_stats()
     }
 
     /// Cumulative tracker counters: `flows_created`, `flows_ended`,
     /// `flows_evicted`, `packets_unmatched`.
     pub fn tracker_stats(&self) -> &flowscope::FlowTrackerStats {
-        self.tracker.stats()
+        self.driver.tracker().stats()
     }
 
-    /// Count of live flow entries. O(n) walk; call from a metrics
-    /// tick, not every poll.
+    /// Count of live flow entries.
     pub fn active_flows(&self) -> usize {
-        self.tracker.flows().count()
+        self.driver.tracker().flow_count()
     }
 
-    /// Plan 20: tap every captured packet into `writer` before
-    /// datagram parsing. Default error policy:
+    /// Tap every captured packet into `writer` before parsing. Default error policy:
     /// [`TapErrorPolicy::Continue`](crate::pcap_tap::TapErrorPolicy::Continue).
     #[cfg(feature = "pcap")]
     pub fn with_pcap_tap<W>(self, writer: crate::pcap::CaptureWriter<W>) -> Self
@@ -205,8 +208,8 @@ where
         self.with_pcap_tap_policy(writer, crate::pcap_tap::TapErrorPolicy::default())
     }
 
-    /// Plan 20: variant of [`with_pcap_tap`](Self::with_pcap_tap)
-    /// with an explicit [`TapErrorPolicy`](crate::pcap_tap::TapErrorPolicy).
+    /// Variant of [`with_pcap_tap`](Self::with_pcap_tap) with an
+    /// explicit [`TapErrorPolicy`](crate::pcap_tap::TapErrorPolicy).
     #[cfg(feature = "pcap")]
     pub fn with_pcap_tap_policy<W>(
         mut self,
@@ -220,7 +223,7 @@ where
         self
     }
 
-    /// Plan 24: cap the recorded frame size on the pcap tap. See
+    /// Cap the recorded frame size on the pcap tap. See
     /// [`FlowStream::with_pcap_tap_snaplen`](super::flow_stream::FlowStream::with_pcap_tap_snaplen).
     #[cfg(feature = "pcap")]
     pub fn with_pcap_tap_snaplen(mut self, snaplen: u32) -> Self {
@@ -231,7 +234,8 @@ where
     }
 }
 
-/// AF_XDP-source accessors (issue #104).
+/// AF_XDP-source accessors (issue #104) — the analogues of the AF_PACKET
+/// `StreamCapture` accessors, which the AF_XDP source can't satisfy.
 #[cfg(all(feature = "af-xdp", feature = "xdp-loader"))]
 impl<E, F> DatagramStream<crate::AsyncXdpCapture, E, F>
 where
@@ -270,57 +274,19 @@ where
             }
 
             if this.sweep.poll_tick(cx).is_ready() {
-                let now = crate::async_adapters::flow_stream::clamp_now(
-                    current_timestamp(),
-                    &mut this.monotonic_ts,
-                );
-                let sweep_events: Vec<_> = this.tracker.sweep(now).into_iter().collect();
-
-                // flowscope 0.11 `DatagramParser::on_tick`.
-                // Default impl is a no-op; DNS parsers (e.g.) emit
-                // `DnsMessage::Unanswered` events from this hook.
-                // 0.11 plan 119 changed the signature to take a
-                // `&mut Vec<M>` scratch buffer; reused per parser.
-                let mut tick_scratch = Vec::new();
-                for (key, parser) in this.parsers.iter_mut() {
-                    let parser_kind = parser.parser_kind();
-                    // `on_tick` messages are initiator-attributed; the
-                    // initiator's canonical orientation is the flow's
-                    // `initiator_orientation` (flowscope 0.20 #118).
-                    let orientation = this
-                        .tracker
-                        .get(key)
-                        .map(|e| e.initiator_orientation())
-                        .unwrap_or_default();
-                    tick_scratch.clear();
-                    parser.on_tick(now, &mut tick_scratch);
-                    for m in tick_scratch.drain(..) {
-                        this.pending.push_back(SessionEvent::Application {
-                            key: key.clone(),
-                            side: flowscope::FlowSide::Initiator,
-                            orientation,
-                            message: m,
-                            ts: now,
-                            parser_kind,
-                        });
-                    }
-                }
-
-                for ev in sweep_events {
-                    convert_event(ev, &mut this.parsers, &mut this.pending);
-                }
+                let now = clamp_now(current_timestamp(), &mut this.monotonic_ts);
+                this.driver.sweep_into(now, &mut this.scratch);
+                this.pending.extend(this.scratch.drain(..));
                 if !this.pending.is_empty() {
                     continue;
                 }
             }
 
-            // Disjoint field borrows so the sink closure can feed the tracker
-            // + parsers while `cap` is borrowed by `poll_drain`.
+            // Disjoint field borrows so the sink closure can feed the
+            // driver while `cap` is borrowed by `poll_drain`.
             let cap = &mut this.cap;
-            let tracker = &mut this.tracker;
-            let parsers = &mut this.parsers;
-            let factory = &mut this.factory;
-            let pending = &mut this.pending;
+            let driver = &mut this.driver;
+            let scratch = &mut this.scratch;
             let dedup = &mut this.dedup;
             let monotonic_ts = &mut this.monotonic_ts;
             #[cfg(feature = "pcap")]
@@ -329,14 +295,13 @@ where
             let mut tap_error: Option<Error> = None;
 
             let outcome = cap.poll_drain(cx, &mut |sp: SourcePacket<'_>| {
-                // Plan 17: optional pre-tracking dedup (on the unclamped ts).
+                // Optional pre-tracking dedup (on the unclamped ts).
                 if let Some(d) = dedup.as_mut()
                     && !d.keep_raw(sp.data, sp.direction, sp.view.timestamp)
                 {
                     return;
                 }
 
-                // Plan 20: pcap tap.
                 #[cfg(feature = "pcap")]
                 if let Some(t) = tap.as_mut() {
                     if tap_error.is_some() {
@@ -350,50 +315,17 @@ where
                     }
                 }
 
-                let view = crate::async_adapters::flow_stream::clamp_view(sp.view, monotonic_ts);
-                let view_ts = view.timestamp;
-                let frame = view.frame;
-                // Extract before track() so we have orientation
-                // (FlowExtractor::extract is cheap; `PacketView` is `Copy`).
-                let extracted = tracker.extractor().extract(view);
-                let evts = tracker.track(view);
-                for ev in evts {
-                    convert_event(ev, parsers, pending);
-                }
-
-                // For UDP packets, look for an L4 payload and feed the parser.
-                if let Some(extracted) = extracted
-                    && extracted.l4 == Some(L4Proto::Udp)
-                    && let Some(payload) = peek_udp_payload(frame)
-                {
-                    let key = &extracted.key;
-                    // Initiator if same orientation as the recorded flow's
-                    // first direction, else Responder.
-                    let side = match extracted.orientation {
-                        Orientation::Forward => flowscope::FlowSide::Initiator,
-                        Orientation::Reverse => flowscope::FlowSide::Responder,
-                    };
-                    let parser = parsers
-                        .entry(key.clone())
-                        .or_insert_with(|| factory.new_parser(key));
-                    let parser_kind = parser.parser_kind();
-                    let mut messages = Vec::new();
-                    parser.parse(payload, side, view_ts, &mut messages);
-                    for message in messages {
-                        pending.push_back(SessionEvent::Application {
-                            key: key.clone(),
-                            side,
-                            orientation: extracted.orientation,
-                            message,
-                            ts: view_ts,
-                            parser_kind,
-                        });
-                    }
-                }
+                driver.track_into(clamp_view(sp.view, monotonic_ts), scratch);
             });
+            this.pending.extend(this.scratch.drain(..));
 
             match outcome {
-                Poll::Pending => return Poll::Pending,
+                Poll::Pending => {
+                    if !this.pending.is_empty() {
+                        continue;
+                    }
+                    return Poll::Pending;
+                }
                 Poll::Ready(Err(e)) => return Poll::Ready(Some(Err(Error::Io(e)))),
                 Poll::Ready(Ok(DrainOutcome::Drained)) =>
                 {
@@ -408,128 +340,12 @@ where
     }
 }
 
-pub(crate) fn convert_event<K, P>(
-    ev: FlowEvent<K>,
-    parsers: &mut HashMap<K, P, RandomState>,
-    pending: &mut VecDeque<SessionEvent<K, P::Message>>,
-) where
-    K: Eq + std::hash::Hash + Clone,
-    P: DatagramParser,
-{
-    match ev {
-        FlowEvent::Started {
-            key,
-            side,
-            orientation,
-            ts,
-            ..
-        } => {
-            pending.push_back(SessionEvent::Started {
-                key,
-                side,
-                orientation,
-                ts,
-            });
-        }
-        FlowEvent::Ended {
-            key,
-            reason,
-            stats,
-            l4,
-            ..
-        } => {
-            // Datagram parsers have no fin/rst; just drop.
-            parsers.remove(&key);
-            pending.push_back(SessionEvent::Closed {
-                key,
-                reason,
-                stats,
-                l4,
-            });
-        }
-        FlowEvent::FlowAnomaly { key, kind, ts } => {
-            // flowscope 0.6: per-flow anomaly.
-            pending.push_back(SessionEvent::FlowAnomaly { key, kind, ts });
-        }
-        FlowEvent::TrackerAnomaly { kind, ts } => {
-            // flowscope 0.6: tracker-global anomaly.
-            pending.push_back(SessionEvent::TrackerAnomaly { kind, ts });
-        }
-        _ => {}
-    }
-}
-
-fn current_timestamp() -> Timestamp {
-    let now = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .unwrap_or(Duration::ZERO);
-    Timestamp::new(now.as_secs() as u32, now.subsec_nanos())
-}
-
-/// Walk Eth → optional VLAN×2 → IPv4/IPv6 → UDP and return the UDP
-/// payload. Skips IP fragments and IPv6 extension headers.
-pub(crate) fn peek_udp_payload(frame: &[u8]) -> Option<&[u8]> {
-    let mut offset = 14usize;
-    if frame.len() < offset {
-        return None;
-    }
-    let mut ethertype = u16::from_be_bytes([frame[12], frame[13]]);
-    for _ in 0..2 {
-        if ethertype != 0x8100 && ethertype != 0x88a8 {
-            break;
-        }
-        if frame.len() < offset + 4 {
-            return None;
-        }
-        ethertype = u16::from_be_bytes([frame[offset + 2], frame[offset + 3]]);
-        offset += 4;
-    }
-
-    let (proto, l4_offset) = match ethertype {
-        0x0800 => {
-            if frame.len() < offset + 20 {
-                return None;
-            }
-            let ihl = (frame[offset] & 0x0f) as usize * 4;
-            if ihl < 20 || frame.len() < offset + ihl {
-                return None;
-            }
-            let proto = frame[offset + 9];
-            let frag = u16::from_be_bytes([frame[offset + 6], frame[offset + 7]]);
-            let frag_off = frag & 0x1FFF;
-            let mf = (frag & 0x2000) != 0;
-            if frag_off != 0 || mf {
-                return None;
-            }
-            (proto, offset + ihl)
-        }
-        0x86dd => {
-            if frame.len() < offset + 40 {
-                return None;
-            }
-            (frame[offset + 6], offset + 40)
-        }
-        _ => return None,
-    };
-
-    if proto != 17 {
-        return None;
-    }
-    if frame.len() < l4_offset + 8 {
-        return None;
-    }
-    let udp_len = u16::from_be_bytes([frame[l4_offset + 4], frame[l4_offset + 5]]) as usize;
-    if udp_len < 8 || frame.len() < l4_offset + udp_len {
-        return None;
-    }
-    Some(&frame[l4_offset + 8..l4_offset + udp_len])
-}
-
 // ── StreamCapture trait impl ───────────────────────────────────────
 
 use crate::async_adapters::stream_capture::{Sealed, StreamCapture};
 
-// `StreamCapture` is AF_PACKET-only; the AF_XDP source has no `AsyncCapture`.
+// `StreamCapture` (and `capture()` → `&AsyncCapture<S>`) is AF_PACKET-only;
+// the AF_XDP source has no `AsyncCapture` to lend.
 impl<S, E, F> Sealed for DatagramStream<AsyncCapture<S>, E, F>
 where
     S: PacketSource + std::os::unix::io::AsRawFd,

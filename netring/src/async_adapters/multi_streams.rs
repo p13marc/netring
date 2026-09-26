@@ -16,7 +16,7 @@ use flowscope::{
 };
 use futures_core::Stream;
 
-use crate::async_adapters::session_event::SessionEvent;
+use flowscope::SessionEvent;
 
 use crate::Capture;
 use crate::async_adapters::datagram_stream::DatagramStream;
@@ -125,6 +125,42 @@ where
         >,
     >,
     labels: Vec<String>,
+}
+
+impl<E> MultiFlowStream<E>
+where
+    E: FlowExtractor,
+{
+    /// Assemble from per-source streams you built yourself, in
+    /// `source_idx` order, each with its label.
+    ///
+    /// This is the escape hatch for per-source configuration the
+    /// `*_stream_with` constructors apply uniformly: a BPF filter per
+    /// interface ([`AsyncCapture::open_with_filter`](crate::AsyncCapture::open_with_filter)),
+    /// a pcap tap per interface (`with_pcap_tap`), dedup only on `lo`,
+    /// a different tracker config per source… The result keeps the
+    /// fair round-robin fan-in, [`TaggedEvent`] and the per-source
+    /// stats accessors.
+    pub fn from_streams<I>(sources: I) -> Self
+    where
+        I: IntoIterator<
+            Item = (
+                String,
+                FlowStream<
+                    crate::async_adapters::tokio_adapter::AsyncCapture<Capture>,
+                    E,
+                    (),
+                    NoReassembler,
+                >,
+            ),
+        >,
+    {
+        let (labels, streams): (Vec<_>, Vec<_>) = sources.into_iter().unzip();
+        Self {
+            select: SelectState::new(streams),
+            labels,
+        }
+    }
 }
 
 impl<E> MultiFlowStream<E>
@@ -956,6 +992,39 @@ where
 
 impl<E, F> MultiSessionStream<E, F>
 where
+    E: FlowExtractor,
+    E::Key: Eq + std::hash::Hash + Clone + Send + 'static,
+    F: SessionParserFactory<E::Key>,
+{
+    /// Assemble from per-source streams you built yourself, in
+    /// `source_idx` order, each with its label.
+    ///
+    /// This is the escape hatch for per-source configuration the
+    /// `*_stream_with` constructors apply uniformly: a BPF filter per
+    /// interface ([`AsyncCapture::open_with_filter`](crate::AsyncCapture::open_with_filter)),
+    /// a pcap tap per interface (`with_pcap_tap`), dedup only on `lo`,
+    /// a different tracker config per source… The result keeps the
+    /// fair round-robin fan-in, [`TaggedEvent`] and the per-source
+    /// stats accessors.
+    pub fn from_streams<I>(sources: I) -> Self
+    where
+        I: IntoIterator<
+            Item = (
+                String,
+                SessionStream<crate::async_adapters::tokio_adapter::AsyncCapture<Capture>, E, F>,
+            ),
+        >,
+    {
+        let (labels, streams): (Vec<_>, Vec<_>) = sources.into_iter().unzip();
+        Self {
+            select: SelectState::new(streams),
+            labels,
+        }
+    }
+}
+
+impl<E, F> MultiSessionStream<E, F>
+where
     E: FlowExtractor + Clone + Unpin + Send + 'static,
     E::Key: Eq + std::hash::Hash + Clone + Unpin + Send + 'static,
     F: SessionParserFactory<E::Key> + Clone + Unpin + Send + 'static,
@@ -1117,6 +1186,39 @@ where
         DatagramStream<crate::async_adapters::tokio_adapter::AsyncCapture<Capture>, E, F>,
     >,
     labels: Vec<String>,
+}
+
+impl<E, F> MultiDatagramStream<E, F>
+where
+    E: FlowExtractor,
+    E::Key: Eq + std::hash::Hash + Clone + Send + 'static,
+    F: DatagramParserFactory<E::Key>,
+{
+    /// Assemble from per-source streams you built yourself, in
+    /// `source_idx` order, each with its label.
+    ///
+    /// This is the escape hatch for per-source configuration the
+    /// `*_stream_with` constructors apply uniformly: a BPF filter per
+    /// interface ([`AsyncCapture::open_with_filter`](crate::AsyncCapture::open_with_filter)),
+    /// a pcap tap per interface (`with_pcap_tap`), dedup only on `lo`,
+    /// a different tracker config per source… The result keeps the
+    /// fair round-robin fan-in, [`TaggedEvent`] and the per-source
+    /// stats accessors.
+    pub fn from_streams<I>(sources: I) -> Self
+    where
+        I: IntoIterator<
+            Item = (
+                String,
+                DatagramStream<crate::async_adapters::tokio_adapter::AsyncCapture<Capture>, E, F>,
+            ),
+        >,
+    {
+        let (labels, streams): (Vec<_>, Vec<_>) = sources.into_iter().unzip();
+        Self {
+            select: SelectState::new(streams),
+            labels,
+        }
+    }
 }
 
 impl<E, F> MultiDatagramStream<E, F>

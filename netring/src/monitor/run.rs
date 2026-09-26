@@ -1908,22 +1908,42 @@ async fn dispatch_lifecycle_async(
             key,
             parser_kind,
             reason,
+            detail,
             ts,
+            ..
         } => match key.proto {
             L4Proto::Tcp => {
                 dispatcher
-                    .dispatch_async(&ParserClosed::<Tcp>::new(key, parser_kind, reason, ts))
+                    .dispatch_async(&ParserClosed::<Tcp>::new(
+                        key,
+                        parser_kind,
+                        reason,
+                        detail,
+                        ts,
+                    ))
                     .await?;
             }
             L4Proto::Udp => {
                 dispatcher
-                    .dispatch_async(&ParserClosed::<Udp>::new(key, parser_kind, reason, ts))
+                    .dispatch_async(&ParserClosed::<Udp>::new(
+                        key,
+                        parser_kind,
+                        reason,
+                        detail,
+                        ts,
+                    ))
                     .await?;
             }
             #[cfg(feature = "icmp")]
             L4Proto::Icmp | L4Proto::IcmpV6 => {
                 dispatcher
-                    .dispatch_async(&ParserClosed::<Icmp>::new(key, parser_kind, reason, ts))
+                    .dispatch_async(&ParserClosed::<Icmp>::new(
+                        key,
+                        parser_kind,
+                        reason,
+                        detail,
+                        ts,
+                    ))
                     .await?;
             }
             _ => {}
@@ -2657,12 +2677,14 @@ fn dispatch_lifecycle(
             key,
             parser_kind,
             reason,
+            detail,
             ts,
+            ..
         } => match key.proto {
             L4Proto::Tcp => {
                 dispatch_one!(
                     ParserClosed<Tcp>,
-                    ParserClosed::<Tcp>::new(key, parser_kind, reason, ts),
+                    ParserClosed::<Tcp>::new(key, parser_kind, reason, detail, ts),
                     Some(key),
                     ts
                 );
@@ -2670,7 +2692,7 @@ fn dispatch_lifecycle(
             L4Proto::Udp => {
                 dispatch_one!(
                     ParserClosed<Udp>,
-                    ParserClosed::<Udp>::new(key, parser_kind, reason, ts),
+                    ParserClosed::<Udp>::new(key, parser_kind, reason, detail, ts),
                     Some(key),
                     ts
                 );
@@ -2679,7 +2701,7 @@ fn dispatch_lifecycle(
             L4Proto::Icmp | L4Proto::IcmpV6 => {
                 dispatch_one!(
                     ParserClosed<Icmp>,
-                    ParserClosed::<Icmp>::new(key, parser_kind, reason, ts),
+                    ParserClosed::<Icmp>::new(key, parser_kind, reason, detail, ts),
                     Some(key),
                     ts
                 );
@@ -2899,12 +2921,14 @@ async fn dispatch_lifecycle_effects(
             key,
             parser_kind,
             reason,
+            detail,
             ts,
+            ..
         } => match key.proto {
             L4Proto::Tcp => {
                 dispatch_one!(
                     ParserClosed<Tcp>,
-                    ParserClosed::<Tcp>::new(key, parser_kind, reason, ts),
+                    ParserClosed::<Tcp>::new(key, parser_kind, reason, detail, ts),
                     Some(key),
                     ts
                 );
@@ -2912,7 +2936,7 @@ async fn dispatch_lifecycle_effects(
             L4Proto::Udp => {
                 dispatch_one!(
                     ParserClosed<Udp>,
-                    ParserClosed::<Udp>::new(key, parser_kind, reason, ts),
+                    ParserClosed::<Udp>::new(key, parser_kind, reason, detail, ts),
                     Some(key),
                     ts
                 );
@@ -2921,7 +2945,7 @@ async fn dispatch_lifecycle_effects(
             L4Proto::Icmp | L4Proto::IcmpV6 => {
                 dispatch_one!(
                     ParserClosed<Icmp>,
-                    ParserClosed::<Icmp>::new(key, parser_kind, reason, ts),
+                    ParserClosed::<Icmp>::new(key, parser_kind, reason, detail, ts),
                     Some(key),
                     ts
                 );

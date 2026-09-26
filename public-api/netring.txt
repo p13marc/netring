@@ -959,11 +959,13 @@ impl<C, E, F> netring::async_adapters::datagram_stream::DatagramStream<C, E, F> 
 pub fn netring::async_adapters::datagram_stream::DatagramStream<C, E, F>::active_flows(&self) -> usize
 pub fn netring::async_adapters::datagram_stream::DatagramStream<C, E, F>::dedup(&self) -> core::option::Option<&netring::dedup::Dedup>
 pub fn netring::async_adapters::datagram_stream::DatagramStream<C, E, F>::dedup_mut(&mut self) -> core::option::Option<&mut netring::dedup::Dedup>
-pub fn netring::async_adapters::datagram_stream::DatagramStream<C, E, F>::snapshot_flow_stats(&self) -> impl core::iter::traits::iterator::Iterator<Item = (&<E as flowscope::extractor::FlowExtractor>::Key, &flowscope::event::FlowStats)> + '_
+pub fn netring::async_adapters::datagram_stream::DatagramStream<C, E, F>::driver(&self) -> &flowscope::session::driver::DatagramDriver<E, F>
+pub fn netring::async_adapters::datagram_stream::DatagramStream<C, E, F>::snapshot_flow_stats(&self) -> impl core::iter::traits::iterator::Iterator<Item = (<E as flowscope::extractor::FlowExtractor>::Key, flowscope::event::FlowStats)> + '_
 pub fn netring::async_adapters::datagram_stream::DatagramStream<C, E, F>::tracker(&self) -> &flowscope::tracker::FlowTracker<E, ()>
 pub fn netring::async_adapters::datagram_stream::DatagramStream<C, E, F>::tracker_stats(&self) -> &flowscope::tracker::FlowTrackerStats
 pub fn netring::async_adapters::datagram_stream::DatagramStream<C, E, F>::with_config(self, config: flowscope::tracker::FlowTrackerConfig) -> Self
 pub fn netring::async_adapters::datagram_stream::DatagramStream<C, E, F>::with_dedup(self, dedup: netring::dedup::Dedup) -> Self
+pub fn netring::async_adapters::datagram_stream::DatagramStream<C, E, F>::with_emit_anomalies(self, enable: bool) -> Self
 pub fn netring::async_adapters::datagram_stream::DatagramStream<C, E, F>::with_idle_timeout_fn<G>(self, f: G) -> Self where G: core::ops::function::Fn(&<E as flowscope::extractor::FlowExtractor>::Key, core::option::Option<flowscope::extractor::L4Proto>) -> core::option::Option<core::time::Duration> + core::marker::Send + core::marker::Sync + 'static
 pub fn netring::async_adapters::datagram_stream::DatagramStream<C, E, F>::with_monotonic_timestamps(self, enable: bool) -> Self
 pub fn netring::async_adapters::datagram_stream::DatagramStream<C, E, F>::with_pcap_tap<W>(self, writer: netring::pcap::CaptureWriter<W>) -> Self where W: core::io::write::Write + core::marker::Send + 'static
@@ -973,7 +975,7 @@ impl<E, F> netring::async_adapters::datagram_stream::DatagramStream<netring::asy
 pub fn netring::async_adapters::datagram_stream::DatagramStream<netring::async_adapters::tokio_xdp_capture::AsyncXdpCapture, E, F>::capture_stats(&self) -> core::result::Result<netring::stats::CaptureStats, netring::error::Error>
 pub fn netring::async_adapters::datagram_stream::DatagramStream<netring::async_adapters::tokio_xdp_capture::AsyncXdpCapture, E, F>::xdp_capture(&self) -> &netring::async_adapters::tokio_xdp_capture::AsyncXdpCapture
 impl<C, E, F> futures_core::stream::Stream for netring::async_adapters::datagram_stream::DatagramStream<C, E, F> where C: AsyncFlowSource + core::marker::Unpin, E: flowscope::extractor::FlowExtractor + core::marker::Unpin, <E as flowscope::extractor::FlowExtractor>::Key: core::cmp::Eq + core::hash::Hash + core::clone::Clone + core::marker::Send + 'static + core::marker::Unpin, F: flowscope::session::DatagramParserFactory<<E as flowscope::extractor::FlowExtractor>::Key> + core::marker::Unpin, <F as flowscope::session::DatagramParserFactory>::Parser: core::marker::Unpin, <<F as flowscope::session::DatagramParserFactory>::Parser as flowscope::session::DatagramParser>::Message: core::marker::Unpin
-pub type netring::async_adapters::datagram_stream::DatagramStream<C, E, F>::Item = core::result::Result<netring::async_adapters::session_event::SessionEvent<<E as flowscope::extractor::FlowExtractor>::Key, <<F as flowscope::session::DatagramParserFactory<<E as flowscope::extractor::FlowExtractor>::Key>>::Parser as flowscope::session::DatagramParser>::Message>, netring::error::Error>
+pub type netring::async_adapters::datagram_stream::DatagramStream<C, E, F>::Item = core::result::Result<flowscope::session::SessionEvent<<E as flowscope::extractor::FlowExtractor>::Key, <<F as flowscope::session::DatagramParserFactory<<E as flowscope::extractor::FlowExtractor>::Key>>::Parser as flowscope::session::DatagramParser>::Message>, netring::error::Error>
 pub fn netring::async_adapters::datagram_stream::DatagramStream<C, E, F>::poll_next(self: core::pin::Pin<&mut Self>, cx: &mut core::task::wake::Context<'_>) -> core::task::poll::Poll<core::option::Option<Self::Item>>
 impl<S, E, F> netring::async_adapters::stream_capture::StreamCapture for netring::async_adapters::datagram_stream::DatagramStream<netring::async_adapters::tokio_adapter::AsyncCapture<S>, E, F> where S: netring::traits::PacketSource + std::os::fd::raw::AsRawFd, E: flowscope::extractor::FlowExtractor, <E as flowscope::extractor::FlowExtractor>::Key: core::cmp::Eq + core::hash::Hash + core::clone::Clone + core::marker::Send + 'static, F: flowscope::session::DatagramParserFactory<<E as flowscope::extractor::FlowExtractor>::Key>
 pub type netring::async_adapters::datagram_stream::DatagramStream<netring::async_adapters::tokio_adapter::AsyncCapture<S>, E, F>::Source = S
@@ -1148,8 +1150,10 @@ pub fn netring::async_adapters::multi_streams::MultiDatagramStream<E, F>::label(
 pub fn netring::async_adapters::multi_streams::MultiDatagramStream<E, F>::per_source_capture_stats(&self) -> alloc::vec::Vec<(alloc::string::String, core::option::Option<core::result::Result<netring::stats::CaptureStats, netring::error::Error>>)>
 pub fn netring::async_adapters::multi_streams::MultiDatagramStream<E, F>::per_source_tracker_stats(&self) -> alloc::vec::Vec<(alloc::string::String, core::option::Option<&flowscope::tracker::FlowTrackerStats>)>
 pub fn netring::async_adapters::multi_streams::MultiDatagramStream<E, F>::total_active_flows(&self) -> usize
+impl<E, F> netring::async_adapters::multi_streams::MultiDatagramStream<E, F> where E: flowscope::extractor::FlowExtractor, <E as flowscope::extractor::FlowExtractor>::Key: core::cmp::Eq + core::hash::Hash + core::clone::Clone + core::marker::Send + 'static, F: flowscope::session::DatagramParserFactory<<E as flowscope::extractor::FlowExtractor>::Key>
+pub fn netring::async_adapters::multi_streams::MultiDatagramStream<E, F>::from_streams<I>(sources: I) -> Self where I: core::iter::traits::collect::IntoIterator<Item = (alloc::string::String, netring::async_adapters::datagram_stream::DatagramStream<netring::async_adapters::tokio_adapter::AsyncCapture<netring::afpacket::rx::Capture>, E, F>)>
 impl<E, F> futures_core::stream::Stream for netring::async_adapters::multi_streams::MultiDatagramStream<E, F> where E: flowscope::extractor::FlowExtractor + core::marker::Unpin, <E as flowscope::extractor::FlowExtractor>::Key: core::cmp::Eq + core::hash::Hash + core::clone::Clone + core::marker::Send + 'static + core::marker::Unpin, F: flowscope::session::DatagramParserFactory<<E as flowscope::extractor::FlowExtractor>::Key> + core::marker::Unpin, <F as flowscope::session::DatagramParserFactory>::Parser: core::marker::Unpin, <<F as flowscope::session::DatagramParserFactory>::Parser as flowscope::session::DatagramParser>::Message: core::marker::Unpin
-pub type netring::async_adapters::multi_streams::MultiDatagramStream<E, F>::Item = core::result::Result<netring::async_adapters::multi_streams::TaggedEvent<netring::async_adapters::session_event::SessionEvent<<E as flowscope::extractor::FlowExtractor>::Key, <<F as flowscope::session::DatagramParserFactory<<E as flowscope::extractor::FlowExtractor>::Key>>::Parser as flowscope::session::DatagramParser>::Message>>, netring::error::Error>
+pub type netring::async_adapters::multi_streams::MultiDatagramStream<E, F>::Item = core::result::Result<netring::async_adapters::multi_streams::TaggedEvent<flowscope::session::SessionEvent<<E as flowscope::extractor::FlowExtractor>::Key, <<F as flowscope::session::DatagramParserFactory<<E as flowscope::extractor::FlowExtractor>::Key>>::Parser as flowscope::session::DatagramParser>::Message>>, netring::error::Error>
 pub fn netring::async_adapters::multi_streams::MultiDatagramStream<E, F>::poll_next(self: core::pin::Pin<&mut Self>, cx: &mut core::task::wake::Context<'_>) -> core::task::poll::Poll<core::option::Option<Self::Item>>
 pub struct netring::async_adapters::multi_streams::MultiFlowStream<E> where E: flowscope::extractor::FlowExtractor
 impl<E> netring::async_adapters::multi_streams::MultiFlowStream<E> where E: flowscope::extractor::FlowExtractor + core::clone::Clone + core::marker::Unpin + core::marker::Send + 'static, <E as flowscope::extractor::FlowExtractor>::Key: core::clone::Clone + core::marker::Unpin + core::marker::Send + 'static
@@ -1159,6 +1163,8 @@ pub fn netring::async_adapters::multi_streams::MultiFlowStream<E>::label(&self, 
 pub fn netring::async_adapters::multi_streams::MultiFlowStream<E>::per_source_capture_stats(&self) -> alloc::vec::Vec<(alloc::string::String, core::option::Option<core::result::Result<netring::stats::CaptureStats, netring::error::Error>>)>
 pub fn netring::async_adapters::multi_streams::MultiFlowStream<E>::per_source_tracker_stats(&self) -> alloc::vec::Vec<(alloc::string::String, core::option::Option<&flowscope::tracker::FlowTrackerStats>)>
 pub fn netring::async_adapters::multi_streams::MultiFlowStream<E>::total_active_flows(&self) -> usize
+impl<E> netring::async_adapters::multi_streams::MultiFlowStream<E> where E: flowscope::extractor::FlowExtractor
+pub fn netring::async_adapters::multi_streams::MultiFlowStream<E>::from_streams<I>(sources: I) -> Self where I: core::iter::traits::collect::IntoIterator<Item = (alloc::string::String, netring::async_adapters::flow_stream::FlowStream<netring::async_adapters::tokio_adapter::AsyncCapture<netring::afpacket::rx::Capture>, E, (), netring::async_adapters::flow_stream::NoReassembler>)>
 impl<E> futures_core::stream::Stream for netring::async_adapters::multi_streams::MultiFlowStream<E> where E: flowscope::extractor::FlowExtractor + core::marker::Unpin, <E as flowscope::extractor::FlowExtractor>::Key: core::clone::Clone + core::marker::Unpin
 pub type netring::async_adapters::multi_streams::MultiFlowStream<E>::Item = core::result::Result<netring::async_adapters::multi_streams::TaggedEvent<flowscope::event::FlowEvent<<E as flowscope::extractor::FlowExtractor>::Key>>, netring::error::Error>
 pub fn netring::async_adapters::multi_streams::MultiFlowStream<E>::poll_next(self: core::pin::Pin<&mut Self>, cx: &mut core::task::wake::Context<'_>) -> core::task::poll::Poll<core::option::Option<Self::Item>>
@@ -1170,8 +1176,10 @@ pub fn netring::async_adapters::multi_streams::MultiSessionStream<E, F>::label(&
 pub fn netring::async_adapters::multi_streams::MultiSessionStream<E, F>::per_source_capture_stats(&self) -> alloc::vec::Vec<(alloc::string::String, core::option::Option<core::result::Result<netring::stats::CaptureStats, netring::error::Error>>)>
 pub fn netring::async_adapters::multi_streams::MultiSessionStream<E, F>::per_source_tracker_stats(&self) -> alloc::vec::Vec<(alloc::string::String, core::option::Option<&flowscope::tracker::FlowTrackerStats>)>
 pub fn netring::async_adapters::multi_streams::MultiSessionStream<E, F>::total_active_flows(&self) -> usize
+impl<E, F> netring::async_adapters::multi_streams::MultiSessionStream<E, F> where E: flowscope::extractor::FlowExtractor, <E as flowscope::extractor::FlowExtractor>::Key: core::cmp::Eq + core::hash::Hash + core::clone::Clone + core::marker::Send + 'static, F: flowscope::session::SessionParserFactory<<E as flowscope::extractor::FlowExtractor>::Key>
+pub fn netring::async_adapters::multi_streams::MultiSessionStream<E, F>::from_streams<I>(sources: I) -> Self where I: core::iter::traits::collect::IntoIterator<Item = (alloc::string::String, netring::async_adapters::session_stream::SessionStream<netring::async_adapters::tokio_adapter::AsyncCapture<netring::afpacket::rx::Capture>, E, F>)>
 impl<E, F> futures_core::stream::Stream for netring::async_adapters::multi_streams::MultiSessionStream<E, F> where E: flowscope::extractor::FlowExtractor + core::marker::Unpin, <E as flowscope::extractor::FlowExtractor>::Key: core::cmp::Eq + core::hash::Hash + core::clone::Clone + core::marker::Send + 'static + core::marker::Unpin, F: flowscope::session::SessionParserFactory<<E as flowscope::extractor::FlowExtractor>::Key> + core::marker::Unpin, <F as flowscope::session::SessionParserFactory>::Parser: core::marker::Unpin, <<F as flowscope::session::SessionParserFactory>::Parser as flowscope::session::SessionParser>::Message: core::marker::Unpin
-pub type netring::async_adapters::multi_streams::MultiSessionStream<E, F>::Item = core::result::Result<netring::async_adapters::multi_streams::TaggedEvent<netring::async_adapters::session_event::SessionEvent<<E as flowscope::extractor::FlowExtractor>::Key, <<F as flowscope::session::SessionParserFactory<<E as flowscope::extractor::FlowExtractor>::Key>>::Parser as flowscope::session::SessionParser>::Message>>, netring::error::Error>
+pub type netring::async_adapters::multi_streams::MultiSessionStream<E, F>::Item = core::result::Result<netring::async_adapters::multi_streams::TaggedEvent<flowscope::session::SessionEvent<<E as flowscope::extractor::FlowExtractor>::Key, <<F as flowscope::session::SessionParserFactory<<E as flowscope::extractor::FlowExtractor>::Key>>::Parser as flowscope::session::SessionParser>::Message>>, netring::error::Error>
 pub fn netring::async_adapters::multi_streams::MultiSessionStream<E, F>::poll_next(self: core::pin::Pin<&mut Self>, cx: &mut core::task::wake::Context<'_>) -> core::task::poll::Poll<core::option::Option<Self::Item>>
 pub struct netring::async_adapters::multi_streams::TaggedEvent<E>
 pub netring::async_adapters::multi_streams::TaggedEvent::event: E
@@ -1188,7 +1196,7 @@ pub fn netring::async_adapters::multi_streams::XdpMultiDatagramStream<E, F>::per
 pub fn netring::async_adapters::multi_streams::XdpMultiDatagramStream<E, F>::per_source_tracker_stats(&self) -> alloc::vec::Vec<(alloc::string::String, core::option::Option<&flowscope::tracker::FlowTrackerStats>)>
 pub fn netring::async_adapters::multi_streams::XdpMultiDatagramStream<E, F>::total_active_flows(&self) -> usize
 impl<E, F> futures_core::stream::Stream for netring::async_adapters::multi_streams::XdpMultiDatagramStream<E, F> where E: flowscope::extractor::FlowExtractor + core::marker::Unpin, <E as flowscope::extractor::FlowExtractor>::Key: core::cmp::Eq + core::hash::Hash + core::clone::Clone + core::marker::Send + 'static + core::marker::Unpin, F: flowscope::session::DatagramParserFactory<<E as flowscope::extractor::FlowExtractor>::Key> + core::marker::Unpin, <F as flowscope::session::DatagramParserFactory>::Parser: core::marker::Unpin, <<F as flowscope::session::DatagramParserFactory>::Parser as flowscope::session::DatagramParser>::Message: core::marker::Unpin
-pub type netring::async_adapters::multi_streams::XdpMultiDatagramStream<E, F>::Item = core::result::Result<netring::async_adapters::multi_streams::TaggedEvent<netring::async_adapters::session_event::SessionEvent<<E as flowscope::extractor::FlowExtractor>::Key, <<F as flowscope::session::DatagramParserFactory<<E as flowscope::extractor::FlowExtractor>::Key>>::Parser as flowscope::session::DatagramParser>::Message>>, netring::error::Error>
+pub type netring::async_adapters::multi_streams::XdpMultiDatagramStream<E, F>::Item = core::result::Result<netring::async_adapters::multi_streams::TaggedEvent<flowscope::session::SessionEvent<<E as flowscope::extractor::FlowExtractor>::Key, <<F as flowscope::session::DatagramParserFactory<<E as flowscope::extractor::FlowExtractor>::Key>>::Parser as flowscope::session::DatagramParser>::Message>>, netring::error::Error>
 pub fn netring::async_adapters::multi_streams::XdpMultiDatagramStream<E, F>::poll_next(self: core::pin::Pin<&mut Self>, cx: &mut core::task::wake::Context<'_>) -> core::task::poll::Poll<core::option::Option<Self::Item>>
 pub struct netring::async_adapters::multi_streams::XdpMultiFlowStream<E> where E: flowscope::extractor::FlowExtractor
 impl<E> netring::async_adapters::multi_streams::XdpMultiFlowStream<E> where E: flowscope::extractor::FlowExtractor + core::clone::Clone + core::marker::Unpin + core::marker::Send + 'static, <E as flowscope::extractor::FlowExtractor>::Key: core::clone::Clone + core::marker::Unpin + core::marker::Send + 'static
@@ -1209,47 +1217,21 @@ pub fn netring::async_adapters::multi_streams::XdpMultiSessionStream<E, F>::per_
 pub fn netring::async_adapters::multi_streams::XdpMultiSessionStream<E, F>::per_source_tracker_stats(&self) -> alloc::vec::Vec<(alloc::string::String, core::option::Option<&flowscope::tracker::FlowTrackerStats>)>
 pub fn netring::async_adapters::multi_streams::XdpMultiSessionStream<E, F>::total_active_flows(&self) -> usize
 impl<E, F> futures_core::stream::Stream for netring::async_adapters::multi_streams::XdpMultiSessionStream<E, F> where E: flowscope::extractor::FlowExtractor + core::marker::Unpin, <E as flowscope::extractor::FlowExtractor>::Key: core::cmp::Eq + core::hash::Hash + core::clone::Clone + core::marker::Send + 'static + core::marker::Unpin, F: flowscope::session::SessionParserFactory<<E as flowscope::extractor::FlowExtractor>::Key> + core::marker::Unpin, <F as flowscope::session::SessionParserFactory>::Parser: core::marker::Unpin, <<F as flowscope::session::SessionParserFactory>::Parser as flowscope::session::SessionParser>::Message: core::marker::Unpin
-pub type netring::async_adapters::multi_streams::XdpMultiSessionStream<E, F>::Item = core::result::Result<netring::async_adapters::multi_streams::TaggedEvent<netring::async_adapters::session_event::SessionEvent<<E as flowscope::extractor::FlowExtractor>::Key, <<F as flowscope::session::SessionParserFactory<<E as flowscope::extractor::FlowExtractor>::Key>>::Parser as flowscope::session::SessionParser>::Message>>, netring::error::Error>
+pub type netring::async_adapters::multi_streams::XdpMultiSessionStream<E, F>::Item = core::result::Result<netring::async_adapters::multi_streams::TaggedEvent<flowscope::session::SessionEvent<<E as flowscope::extractor::FlowExtractor>::Key, <<F as flowscope::session::SessionParserFactory<<E as flowscope::extractor::FlowExtractor>::Key>>::Parser as flowscope::session::SessionParser>::Message>>, netring::error::Error>
 pub fn netring::async_adapters::multi_streams::XdpMultiSessionStream<E, F>::poll_next(self: core::pin::Pin<&mut Self>, cx: &mut core::task::wake::Context<'_>) -> core::task::poll::Poll<core::option::Option<Self::Item>>
-pub mod netring::async_adapters::session_event
-#[non_exhaustive] pub enum netring::async_adapters::session_event::SessionEvent<K, M>
-pub netring::async_adapters::session_event::SessionEvent::Application
-pub netring::async_adapters::session_event::SessionEvent::Application::key: K
-pub netring::async_adapters::session_event::SessionEvent::Application::message: M
-pub netring::async_adapters::session_event::SessionEvent::Application::orientation: flowscope::extractor::Orientation
-pub netring::async_adapters::session_event::SessionEvent::Application::parser_kind: flowscope::parser_kind::ParserKind
-pub netring::async_adapters::session_event::SessionEvent::Application::side: flowscope::event::FlowSide
-pub netring::async_adapters::session_event::SessionEvent::Application::ts: flowscope::timestamp::Timestamp
-pub netring::async_adapters::session_event::SessionEvent::Closed
-pub netring::async_adapters::session_event::SessionEvent::Closed::key: K
-pub netring::async_adapters::session_event::SessionEvent::Closed::l4: core::option::Option<flowscope::extractor::L4Proto>
-pub netring::async_adapters::session_event::SessionEvent::Closed::reason: flowscope::event::EndReason
-pub netring::async_adapters::session_event::SessionEvent::Closed::stats: flowscope::event::FlowStats
-pub netring::async_adapters::session_event::SessionEvent::FlowAnomaly
-pub netring::async_adapters::session_event::SessionEvent::FlowAnomaly::key: K
-pub netring::async_adapters::session_event::SessionEvent::FlowAnomaly::kind: flowscope::event::AnomalyKind
-pub netring::async_adapters::session_event::SessionEvent::FlowAnomaly::ts: flowscope::timestamp::Timestamp
-pub netring::async_adapters::session_event::SessionEvent::Started
-pub netring::async_adapters::session_event::SessionEvent::Started::key: K
-pub netring::async_adapters::session_event::SessionEvent::Started::orientation: flowscope::extractor::Orientation
-pub netring::async_adapters::session_event::SessionEvent::Started::side: flowscope::event::FlowSide
-pub netring::async_adapters::session_event::SessionEvent::Started::ts: flowscope::timestamp::Timestamp
-pub netring::async_adapters::session_event::SessionEvent::TrackerAnomaly
-pub netring::async_adapters::session_event::SessionEvent::TrackerAnomaly::kind: flowscope::event::AnomalyKind
-pub netring::async_adapters::session_event::SessionEvent::TrackerAnomaly::ts: flowscope::timestamp::Timestamp
-impl<K: core::fmt::Debug, M: core::fmt::Debug> core::fmt::Debug for netring::async_adapters::session_event::SessionEvent<K, M>
-pub fn netring::async_adapters::session_event::SessionEvent<K, M>::fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result
 pub mod netring::async_adapters::session_stream
 pub struct netring::async_adapters::session_stream::SessionStream<C, E, F> where E: flowscope::extractor::FlowExtractor, <E as flowscope::extractor::FlowExtractor>::Key: core::cmp::Eq + core::hash::Hash + core::clone::Clone + core::marker::Send + 'static, F: flowscope::session::SessionParserFactory<<E as flowscope::extractor::FlowExtractor>::Key>
 impl<C, E, F> netring::async_adapters::session_stream::SessionStream<C, E, F> where E: flowscope::extractor::FlowExtractor, <E as flowscope::extractor::FlowExtractor>::Key: core::cmp::Eq + core::hash::Hash + core::clone::Clone + core::marker::Send + 'static, F: flowscope::session::SessionParserFactory<<E as flowscope::extractor::FlowExtractor>::Key>
 pub fn netring::async_adapters::session_stream::SessionStream<C, E, F>::active_flows(&self) -> usize
 pub fn netring::async_adapters::session_stream::SessionStream<C, E, F>::dedup(&self) -> core::option::Option<&netring::dedup::Dedup>
 pub fn netring::async_adapters::session_stream::SessionStream<C, E, F>::dedup_mut(&mut self) -> core::option::Option<&mut netring::dedup::Dedup>
-pub fn netring::async_adapters::session_stream::SessionStream<C, E, F>::snapshot_flow_stats(&self) -> impl core::iter::traits::iterator::Iterator<Item = (&<E as flowscope::extractor::FlowExtractor>::Key, &flowscope::event::FlowStats)> + '_
+pub fn netring::async_adapters::session_stream::SessionStream<C, E, F>::driver(&self) -> &flowscope::session::driver::SessionDriver<E, F>
+pub fn netring::async_adapters::session_stream::SessionStream<C, E, F>::snapshot_flow_stats(&self) -> impl core::iter::traits::iterator::Iterator<Item = (<E as flowscope::extractor::FlowExtractor>::Key, flowscope::event::FlowStats)> + '_
 pub fn netring::async_adapters::session_stream::SessionStream<C, E, F>::tracker(&self) -> &flowscope::tracker::FlowTracker<E, ()>
 pub fn netring::async_adapters::session_stream::SessionStream<C, E, F>::tracker_stats(&self) -> &flowscope::tracker::FlowTrackerStats
 pub fn netring::async_adapters::session_stream::SessionStream<C, E, F>::with_config(self, config: flowscope::tracker::FlowTrackerConfig) -> Self
 pub fn netring::async_adapters::session_stream::SessionStream<C, E, F>::with_dedup(self, dedup: netring::dedup::Dedup) -> Self
+pub fn netring::async_adapters::session_stream::SessionStream<C, E, F>::with_emit_anomalies(self, enable: bool) -> Self
 pub fn netring::async_adapters::session_stream::SessionStream<C, E, F>::with_idle_timeout_fn<G>(self, f: G) -> Self where G: core::ops::function::Fn(&<E as flowscope::extractor::FlowExtractor>::Key, core::option::Option<flowscope::extractor::L4Proto>) -> core::option::Option<core::time::Duration> + core::marker::Send + core::marker::Sync + 'static
 pub fn netring::async_adapters::session_stream::SessionStream<C, E, F>::with_monotonic_timestamps(self, enable: bool) -> Self
 pub fn netring::async_adapters::session_stream::SessionStream<C, E, F>::with_pcap_tap<W>(self, writer: netring::pcap::CaptureWriter<W>) -> Self where W: core::io::write::Write + core::marker::Send + 'static
@@ -1259,7 +1241,7 @@ impl<E, F> netring::async_adapters::session_stream::SessionStream<netring::async
 pub fn netring::async_adapters::session_stream::SessionStream<netring::async_adapters::tokio_xdp_capture::AsyncXdpCapture, E, F>::capture_stats(&self) -> core::result::Result<netring::stats::CaptureStats, netring::error::Error>
 pub fn netring::async_adapters::session_stream::SessionStream<netring::async_adapters::tokio_xdp_capture::AsyncXdpCapture, E, F>::xdp_capture(&self) -> &netring::async_adapters::tokio_xdp_capture::AsyncXdpCapture
 impl<C, E, F> futures_core::stream::Stream for netring::async_adapters::session_stream::SessionStream<C, E, F> where C: AsyncFlowSource + core::marker::Unpin, E: flowscope::extractor::FlowExtractor + core::marker::Unpin, <E as flowscope::extractor::FlowExtractor>::Key: core::cmp::Eq + core::hash::Hash + core::clone::Clone + core::marker::Send + 'static + core::marker::Unpin, F: flowscope::session::SessionParserFactory<<E as flowscope::extractor::FlowExtractor>::Key> + core::marker::Unpin, <F as flowscope::session::SessionParserFactory>::Parser: core::marker::Unpin, <<F as flowscope::session::SessionParserFactory>::Parser as flowscope::session::SessionParser>::Message: core::marker::Unpin
-pub type netring::async_adapters::session_stream::SessionStream<C, E, F>::Item = core::result::Result<netring::async_adapters::session_event::SessionEvent<<E as flowscope::extractor::FlowExtractor>::Key, <<F as flowscope::session::SessionParserFactory<<E as flowscope::extractor::FlowExtractor>::Key>>::Parser as flowscope::session::SessionParser>::Message>, netring::error::Error>
+pub type netring::async_adapters::session_stream::SessionStream<C, E, F>::Item = core::result::Result<flowscope::session::SessionEvent<<E as flowscope::extractor::FlowExtractor>::Key, <<F as flowscope::session::SessionParserFactory<<E as flowscope::extractor::FlowExtractor>::Key>>::Parser as flowscope::session::SessionParser>::Message>, netring::error::Error>
 pub fn netring::async_adapters::session_stream::SessionStream<C, E, F>::poll_next(self: core::pin::Pin<&mut Self>, cx: &mut core::task::wake::Context<'_>) -> core::task::poll::Poll<core::option::Option<Self::Item>>
 impl<S, E, F> netring::async_adapters::stream_capture::StreamCapture for netring::async_adapters::session_stream::SessionStream<netring::async_adapters::tokio_adapter::AsyncCapture<S>, E, F> where S: netring::traits::PacketSource + std::os::fd::raw::AsRawFd, E: flowscope::extractor::FlowExtractor, <E as flowscope::extractor::FlowExtractor>::Key: core::cmp::Eq + core::hash::Hash + core::clone::Clone + core::marker::Send + 'static, F: flowscope::session::SessionParserFactory<<E as flowscope::extractor::FlowExtractor>::Key>
 pub type netring::async_adapters::session_stream::SessionStream<netring::async_adapters::tokio_adapter::AsyncCapture<S>, E, F>::Source = S
@@ -2224,6 +2206,7 @@ pub use netring::flow::AnomalyKind
 pub use netring::flow::AppProtocol
 pub use netring::flow::BufferedReassembler
 pub use netring::flow::BufferedReassemblerFactory
+pub use netring::flow::DatagramDriver
 pub use netring::flow::EndReason
 pub use netring::flow::Extracted
 pub use netring::flow::FlowDriver
@@ -2237,6 +2220,7 @@ pub use netring::flow::FlowStats
 pub use netring::flow::FlowTracker
 pub use netring::flow::FlowTrackerConfig
 pub use netring::flow::FlowTrackerStats
+pub use netring::flow::GapResponse
 pub use netring::flow::HistoryString
 pub use netring::flow::IdleTimeoutFn
 pub use netring::flow::L4Proto
@@ -2246,38 +2230,15 @@ pub use netring::flow::PacketView
 pub use netring::flow::ParserKind
 pub use netring::flow::Reassembler
 pub use netring::flow::ReassemblerFactory
+pub use netring::flow::ReassemblyStop
+pub use netring::flow::SessionDriver
+pub use netring::flow::SessionEvent
+pub use netring::flow::StreamChunks
 pub use netring::flow::TcpFlags
 pub use netring::flow::TcpInfo
 pub use netring::flow::Transport
 pub use netring::flow::app_proto
 pub use netring::flow::extract
-#[non_exhaustive] pub enum netring::flow::SessionEvent<K, M>
-pub netring::flow::SessionEvent::Application
-pub netring::flow::SessionEvent::Application::key: K
-pub netring::flow::SessionEvent::Application::message: M
-pub netring::flow::SessionEvent::Application::orientation: flowscope::extractor::Orientation
-pub netring::flow::SessionEvent::Application::parser_kind: flowscope::parser_kind::ParserKind
-pub netring::flow::SessionEvent::Application::side: flowscope::event::FlowSide
-pub netring::flow::SessionEvent::Application::ts: flowscope::timestamp::Timestamp
-pub netring::flow::SessionEvent::Closed
-pub netring::flow::SessionEvent::Closed::key: K
-pub netring::flow::SessionEvent::Closed::l4: core::option::Option<flowscope::extractor::L4Proto>
-pub netring::flow::SessionEvent::Closed::reason: flowscope::event::EndReason
-pub netring::flow::SessionEvent::Closed::stats: flowscope::event::FlowStats
-pub netring::flow::SessionEvent::FlowAnomaly
-pub netring::flow::SessionEvent::FlowAnomaly::key: K
-pub netring::flow::SessionEvent::FlowAnomaly::kind: flowscope::event::AnomalyKind
-pub netring::flow::SessionEvent::FlowAnomaly::ts: flowscope::timestamp::Timestamp
-pub netring::flow::SessionEvent::Started
-pub netring::flow::SessionEvent::Started::key: K
-pub netring::flow::SessionEvent::Started::orientation: flowscope::extractor::Orientation
-pub netring::flow::SessionEvent::Started::side: flowscope::event::FlowSide
-pub netring::flow::SessionEvent::Started::ts: flowscope::timestamp::Timestamp
-pub netring::flow::SessionEvent::TrackerAnomaly
-pub netring::flow::SessionEvent::TrackerAnomaly::kind: flowscope::event::AnomalyKind
-pub netring::flow::SessionEvent::TrackerAnomaly::ts: flowscope::timestamp::Timestamp
-impl<K: core::fmt::Debug, M: core::fmt::Debug> core::fmt::Debug for netring::async_adapters::session_event::SessionEvent<K, M>
-pub fn netring::async_adapters::session_event::SessionEvent<K, M>::fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result
 pub struct netring::flow::ChannelFactory<K, F>
 impl<K, F> netring::async_adapters::async_reassembler::AsyncReassemblerFactory<K> for netring::async_adapters::async_reassembler::ChannelFactory<K, F> where F: core::ops::function::FnMut(&K, flowscope::event::FlowSide) -> tokio::sync::mpsc::bounded::Sender<bytes::bytes::Bytes> + core::marker::Send + 'static, K: core::clone::Clone + core::marker::Send + 'static
 pub type netring::async_adapters::async_reassembler::ChannelFactory<K, F>::Reassembler = netring::async_adapters::async_reassembler::ChannelReassembler
@@ -4348,37 +4309,56 @@ pub fn netring::pcap::CaptureWriterNg<W>::write_packet(&mut self, pkt: &netring:
 pub fn netring::pcap::CaptureWriterNg<W>::write_packet_truncated(&mut self, pkt: &netring::packet::Packet<'_>, caplen: usize) -> core::result::Result<(), pcap_file::errors::PcapError>
 pub fn netring::pcap::CaptureWriterNg<W>::write_raw(&mut self, data: &[u8], ts: flowscope::timestamp::Timestamp, original_len: usize, snaplen: core::option::Option<u32>) -> core::result::Result<(), pcap_file::errors::PcapError>
 pub mod netring::pcap_flow
-pub struct netring::pcap_flow::PcapDatagramStream<E, P> where E: flowscope::extractor::FlowExtractor, <E as flowscope::extractor::FlowExtractor>::Key: core::hash::Hash + core::cmp::Eq + core::clone::Clone + core::marker::Send + 'static, P: flowscope::session::DatagramParser + core::clone::Clone + core::marker::Send + core::marker::Sync
-impl<E, P> netring::pcap_flow::PcapDatagramStream<E, P> where E: flowscope::extractor::FlowExtractor, <E as flowscope::extractor::FlowExtractor>::Key: core::hash::Hash + core::cmp::Eq + core::clone::Clone + core::marker::Send + 'static, P: flowscope::session::DatagramParser + core::clone::Clone + core::marker::Send + core::marker::Sync
+pub struct netring::pcap_flow::PcapDatagramStream<E, P> where E: flowscope::extractor::FlowExtractor, <E as flowscope::extractor::FlowExtractor>::Key: core::hash::Hash + core::cmp::Eq + core::clone::Clone + core::marker::Send + 'static, P: flowscope::session::DatagramParser + core::clone::Clone
+impl<E, P> netring::pcap_flow::PcapDatagramStream<E, P> where E: flowscope::extractor::FlowExtractor, <E as flowscope::extractor::FlowExtractor>::Key: core::hash::Hash + core::cmp::Eq + core::clone::Clone + core::marker::Send + 'static, P: flowscope::session::DatagramParser + core::clone::Clone
 pub fn netring::pcap_flow::PcapDatagramStream<E, P>::active_flows(&self) -> usize
+pub fn netring::pcap_flow::PcapDatagramStream<E, P>::dedup(&self) -> core::option::Option<&netring::dedup::Dedup>
+pub fn netring::pcap_flow::PcapDatagramStream<E, P>::driver(&self) -> &flowscope::session::driver::DatagramDriver<E, flowscope::session::TemplateFactory<P>>
 pub fn netring::pcap_flow::PcapDatagramStream<E, P>::packets_read(&self) -> u64
+pub fn netring::pcap_flow::PcapDatagramStream<E, P>::snapshot_flow_stats(&self) -> impl core::iter::traits::iterator::Iterator<Item = (<E as flowscope::extractor::FlowExtractor>::Key, flowscope::event::FlowStats)> + '_
 pub fn netring::pcap_flow::PcapDatagramStream<E, P>::tracker(&self) -> &flowscope::tracker::FlowTracker<E, ()>
 pub fn netring::pcap_flow::PcapDatagramStream<E, P>::tracker_stats(&self) -> &flowscope::tracker::FlowTrackerStats
-impl<E, P> futures_core::stream::Stream for netring::pcap_flow::PcapDatagramStream<E, P> where E: flowscope::extractor::FlowExtractor + core::marker::Unpin, <E as flowscope::extractor::FlowExtractor>::Key: core::hash::Hash + core::cmp::Eq + core::clone::Clone + core::marker::Send + core::marker::Unpin + 'static, P: flowscope::session::DatagramParser + core::clone::Clone + core::marker::Send + core::marker::Sync + core::marker::Unpin, <P as flowscope::session::DatagramParser>::Message: core::marker::Unpin
-pub type netring::pcap_flow::PcapDatagramStream<E, P>::Item = core::result::Result<netring::async_adapters::session_event::SessionEvent<<E as flowscope::extractor::FlowExtractor>::Key, <P as flowscope::session::DatagramParser>::Message>, netring::error::Error>
+pub fn netring::pcap_flow::PcapDatagramStream<E, P>::with_config(self, config: flowscope::tracker::FlowTrackerConfig) -> Self
+pub fn netring::pcap_flow::PcapDatagramStream<E, P>::with_dedup(self, dedup: netring::dedup::Dedup) -> Self
+pub fn netring::pcap_flow::PcapDatagramStream<E, P>::with_emit_anomalies(self, enable: bool) -> Self
+pub fn netring::pcap_flow::PcapDatagramStream<E, P>::with_idle_timeout_fn<G>(self, f: G) -> Self where G: core::ops::function::Fn(&<E as flowscope::extractor::FlowExtractor>::Key, core::option::Option<flowscope::extractor::L4Proto>) -> core::option::Option<core::time::Duration> + core::marker::Send + core::marker::Sync + 'static
+pub fn netring::pcap_flow::PcapDatagramStream<E, P>::with_monotonic_timestamps(self, enable: bool) -> Self
+impl<E, P> futures_core::stream::Stream for netring::pcap_flow::PcapDatagramStream<E, P> where E: flowscope::extractor::FlowExtractor + core::marker::Unpin, <E as flowscope::extractor::FlowExtractor>::Key: core::hash::Hash + core::cmp::Eq + core::clone::Clone + core::marker::Send + core::marker::Unpin + 'static, P: flowscope::session::DatagramParser + core::clone::Clone + core::marker::Unpin, <P as flowscope::session::DatagramParser>::Message: core::marker::Unpin
+pub type netring::pcap_flow::PcapDatagramStream<E, P>::Item = core::result::Result<flowscope::session::SessionEvent<<E as flowscope::extractor::FlowExtractor>::Key, <P as flowscope::session::DatagramParser>::Message>, netring::error::Error>
 pub fn netring::pcap_flow::PcapDatagramStream<E, P>::poll_next(self: core::pin::Pin<&mut Self>, cx: &mut core::task::wake::Context<'_>) -> core::task::poll::Poll<core::option::Option<Self::Item>>
 pub struct netring::pcap_flow::PcapFlowStream<E> where E: flowscope::extractor::FlowExtractor
 impl<E> netring::pcap_flow::PcapFlowStream<E> where E: flowscope::extractor::FlowExtractor, <E as flowscope::extractor::FlowExtractor>::Key: core::clone::Clone + core::marker::Send + 'static
 pub fn netring::pcap_flow::PcapFlowStream<E>::active_flows(&self) -> usize
+pub fn netring::pcap_flow::PcapFlowStream<E>::dedup(&self) -> core::option::Option<&netring::dedup::Dedup>
 pub fn netring::pcap_flow::PcapFlowStream<E>::packets_read(&self) -> u64
 pub fn netring::pcap_flow::PcapFlowStream<E>::tracker(&self) -> &flowscope::tracker::FlowTracker<E, ()>
 pub fn netring::pcap_flow::PcapFlowStream<E>::tracker_stats(&self) -> &flowscope::tracker::FlowTrackerStats
 pub fn netring::pcap_flow::PcapFlowStream<E>::with_config(self, config: flowscope::tracker::FlowTrackerConfig) -> Self
+pub fn netring::pcap_flow::PcapFlowStream<E>::with_dedup(self, dedup: netring::dedup::Dedup) -> Self
 pub fn netring::pcap_flow::PcapFlowStream<E>::with_idle_timeout_fn<G>(self, f: G) -> Self where G: core::ops::function::Fn(&<E as flowscope::extractor::FlowExtractor>::Key, core::option::Option<flowscope::extractor::L4Proto>) -> core::option::Option<core::time::Duration> + core::marker::Send + core::marker::Sync + 'static
+pub fn netring::pcap_flow::PcapFlowStream<E>::with_monotonic_timestamps(self, enable: bool) -> Self
 impl<E> netring::pcap_flow::PcapFlowStream<E> where E: flowscope::extractor::FlowExtractor, <E as flowscope::extractor::FlowExtractor>::Key: core::hash::Hash + core::cmp::Eq + core::clone::Clone + core::marker::Send + 'static
-pub fn netring::pcap_flow::PcapFlowStream<E>::datagram_stream<P>(self, parser: P) -> netring::pcap_flow::PcapDatagramStream<E, P> where <E as flowscope::extractor::FlowExtractor>::Key: core::hash::Hash + core::cmp::Eq, P: flowscope::session::DatagramParser + core::clone::Clone + core::marker::Send + core::marker::Sync
-pub fn netring::pcap_flow::PcapFlowStream<E>::session_stream<P>(self, parser: P) -> netring::pcap_flow::PcapSessionStream<E, P> where <E as flowscope::extractor::FlowExtractor>::Key: core::hash::Hash + core::cmp::Eq, P: flowscope::session::SessionParser + core::clone::Clone + core::marker::Send + core::marker::Sync
+pub fn netring::pcap_flow::PcapFlowStream<E>::datagram_stream<P>(self, parser: P) -> netring::pcap_flow::PcapDatagramStream<E, P> where P: flowscope::session::DatagramParser + core::clone::Clone
+pub fn netring::pcap_flow::PcapFlowStream<E>::session_stream<P>(self, parser: P) -> netring::pcap_flow::PcapSessionStream<E, P> where P: flowscope::session::SessionParser + core::clone::Clone
 impl<E> futures_core::stream::Stream for netring::pcap_flow::PcapFlowStream<E> where E: flowscope::extractor::FlowExtractor + core::marker::Unpin, <E as flowscope::extractor::FlowExtractor>::Key: core::clone::Clone + core::marker::Unpin
 pub type netring::pcap_flow::PcapFlowStream<E>::Item = core::result::Result<flowscope::event::FlowEvent<<E as flowscope::extractor::FlowExtractor>::Key>, netring::error::Error>
 pub fn netring::pcap_flow::PcapFlowStream<E>::poll_next(self: core::pin::Pin<&mut Self>, cx: &mut core::task::wake::Context<'_>) -> core::task::poll::Poll<core::option::Option<Self::Item>>
-pub struct netring::pcap_flow::PcapSessionStream<E, P> where E: flowscope::extractor::FlowExtractor, <E as flowscope::extractor::FlowExtractor>::Key: core::hash::Hash + core::cmp::Eq + core::clone::Clone + core::marker::Send + 'static, P: flowscope::session::SessionParser + core::clone::Clone + core::marker::Send + core::marker::Sync
-impl<E, P> netring::pcap_flow::PcapSessionStream<E, P> where E: flowscope::extractor::FlowExtractor, <E as flowscope::extractor::FlowExtractor>::Key: core::hash::Hash + core::cmp::Eq + core::clone::Clone + core::marker::Send + 'static, P: flowscope::session::SessionParser + core::clone::Clone + core::marker::Send + core::marker::Sync
+pub struct netring::pcap_flow::PcapSessionStream<E, P> where E: flowscope::extractor::FlowExtractor, <E as flowscope::extractor::FlowExtractor>::Key: core::hash::Hash + core::cmp::Eq + core::clone::Clone + core::marker::Send + 'static, P: flowscope::session::SessionParser + core::clone::Clone
+impl<E, P> netring::pcap_flow::PcapSessionStream<E, P> where E: flowscope::extractor::FlowExtractor, <E as flowscope::extractor::FlowExtractor>::Key: core::hash::Hash + core::cmp::Eq + core::clone::Clone + core::marker::Send + 'static, P: flowscope::session::SessionParser + core::clone::Clone
 pub fn netring::pcap_flow::PcapSessionStream<E, P>::active_flows(&self) -> usize
+pub fn netring::pcap_flow::PcapSessionStream<E, P>::dedup(&self) -> core::option::Option<&netring::dedup::Dedup>
+pub fn netring::pcap_flow::PcapSessionStream<E, P>::driver(&self) -> &flowscope::session::driver::SessionDriver<E, flowscope::session::TemplateFactory<P>>
 pub fn netring::pcap_flow::PcapSessionStream<E, P>::packets_read(&self) -> u64
+pub fn netring::pcap_flow::PcapSessionStream<E, P>::snapshot_flow_stats(&self) -> impl core::iter::traits::iterator::Iterator<Item = (<E as flowscope::extractor::FlowExtractor>::Key, flowscope::event::FlowStats)> + '_
 pub fn netring::pcap_flow::PcapSessionStream<E, P>::tracker(&self) -> &flowscope::tracker::FlowTracker<E, ()>
 pub fn netring::pcap_flow::PcapSessionStream<E, P>::tracker_stats(&self) -> &flowscope::tracker::FlowTrackerStats
-impl<E, P> futures_core::stream::Stream for netring::pcap_flow::PcapSessionStream<E, P> where E: flowscope::extractor::FlowExtractor + core::marker::Unpin, <E as flowscope::extractor::FlowExtractor>::Key: core::hash::Hash + core::cmp::Eq + core::clone::Clone + core::marker::Send + core::marker::Unpin + 'static, P: flowscope::session::SessionParser + core::clone::Clone + core::marker::Send + core::marker::Sync + core::marker::Unpin, <P as flowscope::session::SessionParser>::Message: core::marker::Unpin
-pub type netring::pcap_flow::PcapSessionStream<E, P>::Item = core::result::Result<netring::async_adapters::session_event::SessionEvent<<E as flowscope::extractor::FlowExtractor>::Key, <P as flowscope::session::SessionParser>::Message>, netring::error::Error>
+pub fn netring::pcap_flow::PcapSessionStream<E, P>::with_config(self, config: flowscope::tracker::FlowTrackerConfig) -> Self
+pub fn netring::pcap_flow::PcapSessionStream<E, P>::with_dedup(self, dedup: netring::dedup::Dedup) -> Self
+pub fn netring::pcap_flow::PcapSessionStream<E, P>::with_emit_anomalies(self, enable: bool) -> Self
+pub fn netring::pcap_flow::PcapSessionStream<E, P>::with_idle_timeout_fn<G>(self, f: G) -> Self where G: core::ops::function::Fn(&<E as flowscope::extractor::FlowExtractor>::Key, core::option::Option<flowscope::extractor::L4Proto>) -> core::option::Option<core::time::Duration> + core::marker::Send + core::marker::Sync + 'static
+pub fn netring::pcap_flow::PcapSessionStream<E, P>::with_monotonic_timestamps(self, enable: bool) -> Self
+impl<E, P> futures_core::stream::Stream for netring::pcap_flow::PcapSessionStream<E, P> where E: flowscope::extractor::FlowExtractor + core::marker::Unpin, <E as flowscope::extractor::FlowExtractor>::Key: core::hash::Hash + core::cmp::Eq + core::clone::Clone + core::marker::Send + core::marker::Unpin + 'static, P: flowscope::session::SessionParser + core::clone::Clone + core::marker::Unpin, <P as flowscope::session::SessionParser>::Message: core::marker::Unpin
+pub type netring::pcap_flow::PcapSessionStream<E, P>::Item = core::result::Result<flowscope::session::SessionEvent<<E as flowscope::extractor::FlowExtractor>::Key, <P as flowscope::session::SessionParser>::Message>, netring::error::Error>
 pub fn netring::pcap_flow::PcapSessionStream<E, P>::poll_next(self: core::pin::Pin<&mut Self>, cx: &mut core::task::wake::Context<'_>) -> core::task::poll::Poll<core::option::Option<Self::Item>>
 pub mod netring::pcap_rotate
 pub enum netring::pcap_rotate::FileNaming
@@ -4464,9 +4444,9 @@ impl core::fmt::Debug for netring::pcap_source::AsyncPcapConfig
 pub fn netring::pcap_source::AsyncPcapConfig::fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result
 pub struct netring::pcap_source::AsyncPcapSource
 impl netring::pcap_source::AsyncPcapSource
-pub fn netring::pcap_source::AsyncPcapSource::datagrams<E, P>(self, extractor: E, parser: P) -> netring::pcap_flow::PcapDatagramStream<E, P> where E: flowscope::extractor::FlowExtractor, <E as flowscope::extractor::FlowExtractor>::Key: core::hash::Hash + core::cmp::Eq + core::clone::Clone + core::marker::Send + 'static, P: flowscope::session::DatagramParser + core::clone::Clone + core::marker::Send + core::marker::Sync
+pub fn netring::pcap_source::AsyncPcapSource::datagrams<E, P>(self, extractor: E, parser: P) -> netring::pcap_flow::PcapDatagramStream<E, P> where E: flowscope::extractor::FlowExtractor, <E as flowscope::extractor::FlowExtractor>::Key: core::hash::Hash + core::cmp::Eq + core::clone::Clone + core::marker::Send + 'static, P: flowscope::session::DatagramParser + core::clone::Clone
 pub fn netring::pcap_source::AsyncPcapSource::flow_events<E>(self, extractor: E) -> netring::pcap_flow::PcapFlowStream<E> where E: flowscope::extractor::FlowExtractor, <E as flowscope::extractor::FlowExtractor>::Key: core::clone::Clone + core::marker::Send + 'static
-pub fn netring::pcap_source::AsyncPcapSource::sessions<E, P>(self, extractor: E, parser: P) -> netring::pcap_flow::PcapSessionStream<E, P> where E: flowscope::extractor::FlowExtractor, <E as flowscope::extractor::FlowExtractor>::Key: core::hash::Hash + core::cmp::Eq + core::clone::Clone + core::marker::Send + 'static, P: flowscope::session::SessionParser + core::clone::Clone + core::marker::Send + core::marker::Sync
+pub fn netring::pcap_source::AsyncPcapSource::sessions<E, P>(self, extractor: E, parser: P) -> netring::pcap_flow::PcapSessionStream<E, P> where E: flowscope::extractor::FlowExtractor, <E as flowscope::extractor::FlowExtractor>::Key: core::hash::Hash + core::cmp::Eq + core::clone::Clone + core::marker::Send + 'static, P: flowscope::session::SessionParser + core::clone::Clone
 impl netring::pcap_source::AsyncPcapSource
 pub fn netring::pcap_source::AsyncPcapSource::format(&self) -> netring::pcap_source::PcapFormat
 pub async fn netring::pcap_source::AsyncPcapSource::open(path: impl core::convert::AsRef<std::path::Path>) -> core::result::Result<Self, netring::error::Error>
@@ -5279,6 +5259,7 @@ impl<W: core::io::write::Write + core::marker::Send> netring::anomaly::sink::Ano
 pub fn netring::anomaly::ocsf_sink::OcsfSink<W>::flush(&mut self) -> core::result::Result<(), core::io::error::Error>
 pub fn netring::anomaly::ocsf_sink::OcsfSink<W>::write(&mut self, kind: &'static str, severity: netring::Severity, ts: flowscope::timestamp::Timestamp, key: core::option::Option<&dyn netring::anomaly::key::Key>, observations: &[(&'static str, alloc::borrow::Cow<'_, str>)], metrics: &[(&'static str, f64)])
 #[non_exhaustive] pub struct netring::prelude::ParserClosed<P: netring::protocol::Protocol>
+pub netring::prelude::ParserClosed::detail: core::option::Option<alloc::string::String>
 pub netring::prelude::ParserClosed::key: netring::protocol::FlowKey
 pub netring::prelude::ParserClosed::parser_kind: flowscope::parser_kind::ParserKind
 pub netring::prelude::ParserClosed::reason: flowscope::event::EndReason
@@ -6486,6 +6467,7 @@ pub fn netring::protocol::event_typed::IcmpError::protocol_marker() -> core::opt
 pub fn netring::protocol::event_typed::IcmpError::protocol_name() -> &'static str
 pub fn netring::protocol::event_typed::IcmpError::traffic_class() -> netring::protocol::TrafficClass
 #[non_exhaustive] pub struct netring::protocol::event_typed::ParserClosed<P: netring::protocol::Protocol>
+pub netring::protocol::event_typed::ParserClosed::detail: core::option::Option<alloc::string::String>
 pub netring::protocol::event_typed::ParserClosed::key: netring::protocol::FlowKey
 pub netring::protocol::event_typed::ParserClosed::parser_kind: flowscope::parser_kind::ParserKind
 pub netring::protocol::event_typed::ParserClosed::reason: flowscope::event::EndReason
@@ -6880,6 +6862,7 @@ pub fn netring::prelude::Ntp::make_slot(handle: flowscope::driver::slot::SlotHan
 pub fn netring::prelude::Ntp::register(builder: &mut flowscope::driver::typed::DriverBuilder<flowscope::extract::five_tuple::FiveTuple>) -> core::result::Result<flowscope::driver::slot::SlotHandle<Self::Message, flowscope::extract::five_tuple::FiveTupleKey>, netring::protocol::ProtocolInitError>
 pub fn netring::prelude::Ntp::register_broadcast(_builder: &mut flowscope::driver::typed::DriverBuilder<flowscope::extract::five_tuple::FiveTuple>) -> core::result::Result<flowscope::driver::broadcast::BroadcastSlotHandle<Self::Message, flowscope::extract::five_tuple::FiveTupleKey>, netring::protocol::ProtocolInitError> where Self::Message: core::marker::Send + core::marker::Sync + core::clone::Clone + 'static
 #[non_exhaustive] pub struct netring::protocol::ParserClosed<P: netring::protocol::Protocol>
+pub netring::protocol::ParserClosed::detail: core::option::Option<alloc::string::String>
 pub netring::protocol::ParserClosed::key: netring::protocol::FlowKey
 pub netring::protocol::ParserClosed::parser_kind: flowscope::parser_kind::ParserKind
 pub netring::protocol::ParserClosed::reason: flowscope::event::EndReason
@@ -8197,9 +8180,9 @@ impl core::fmt::Debug for netring::pcap_source::AsyncPcapConfig
 pub fn netring::pcap_source::AsyncPcapConfig::fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result
 pub struct netring::AsyncPcapSource
 impl netring::pcap_source::AsyncPcapSource
-pub fn netring::pcap_source::AsyncPcapSource::datagrams<E, P>(self, extractor: E, parser: P) -> netring::pcap_flow::PcapDatagramStream<E, P> where E: flowscope::extractor::FlowExtractor, <E as flowscope::extractor::FlowExtractor>::Key: core::hash::Hash + core::cmp::Eq + core::clone::Clone + core::marker::Send + 'static, P: flowscope::session::DatagramParser + core::clone::Clone + core::marker::Send + core::marker::Sync
+pub fn netring::pcap_source::AsyncPcapSource::datagrams<E, P>(self, extractor: E, parser: P) -> netring::pcap_flow::PcapDatagramStream<E, P> where E: flowscope::extractor::FlowExtractor, <E as flowscope::extractor::FlowExtractor>::Key: core::hash::Hash + core::cmp::Eq + core::clone::Clone + core::marker::Send + 'static, P: flowscope::session::DatagramParser + core::clone::Clone
 pub fn netring::pcap_source::AsyncPcapSource::flow_events<E>(self, extractor: E) -> netring::pcap_flow::PcapFlowStream<E> where E: flowscope::extractor::FlowExtractor, <E as flowscope::extractor::FlowExtractor>::Key: core::clone::Clone + core::marker::Send + 'static
-pub fn netring::pcap_source::AsyncPcapSource::sessions<E, P>(self, extractor: E, parser: P) -> netring::pcap_flow::PcapSessionStream<E, P> where E: flowscope::extractor::FlowExtractor, <E as flowscope::extractor::FlowExtractor>::Key: core::hash::Hash + core::cmp::Eq + core::clone::Clone + core::marker::Send + 'static, P: flowscope::session::SessionParser + core::clone::Clone + core::marker::Send + core::marker::Sync
+pub fn netring::pcap_source::AsyncPcapSource::sessions<E, P>(self, extractor: E, parser: P) -> netring::pcap_flow::PcapSessionStream<E, P> where E: flowscope::extractor::FlowExtractor, <E as flowscope::extractor::FlowExtractor>::Key: core::hash::Hash + core::cmp::Eq + core::clone::Clone + core::marker::Send + 'static, P: flowscope::session::SessionParser + core::clone::Clone
 impl netring::pcap_source::AsyncPcapSource
 pub fn netring::pcap_source::AsyncPcapSource::format(&self) -> netring::pcap_source::PcapFormat
 pub async fn netring::pcap_source::AsyncPcapSource::open(path: impl core::convert::AsRef<std::path::Path>) -> core::result::Result<Self, netring::error::Error>
@@ -8516,6 +8499,36 @@ pub struct netring::ConversationStream<S, E> where S: netring::traits::PacketSou
 impl<S, E> futures_core::stream::Stream for netring::async_adapters::conversation::ConversationStream<S, E> where S: netring::traits::PacketSource + std::os::fd::raw::AsRawFd + core::marker::Unpin, E: flowscope::extractor::FlowExtractor + core::marker::Unpin, <E as flowscope::extractor::FlowExtractor>::Key: core::cmp::Eq + core::hash::Hash + core::clone::Clone + core::marker::Send + core::marker::Sync + core::marker::Unpin + 'static
 pub type netring::async_adapters::conversation::ConversationStream<S, E>::Item = core::result::Result<netring::async_adapters::conversation::Conversation<<E as flowscope::extractor::FlowExtractor>::Key>, netring::error::Error>
 pub fn netring::async_adapters::conversation::ConversationStream<S, E>::poll_next(self: core::pin::Pin<&mut Self>, cx: &mut core::task::wake::Context<'_>) -> core::task::poll::Poll<core::option::Option<Self::Item>>
+pub struct netring::DatagramStream<C, E, F> where E: flowscope::extractor::FlowExtractor, <E as flowscope::extractor::FlowExtractor>::Key: core::cmp::Eq + core::hash::Hash + core::clone::Clone + core::marker::Send + 'static, F: flowscope::session::DatagramParserFactory<<E as flowscope::extractor::FlowExtractor>::Key>
+impl<C, E, F> netring::async_adapters::datagram_stream::DatagramStream<C, E, F> where E: flowscope::extractor::FlowExtractor, <E as flowscope::extractor::FlowExtractor>::Key: core::cmp::Eq + core::hash::Hash + core::clone::Clone + core::marker::Send + 'static, F: flowscope::session::DatagramParserFactory<<E as flowscope::extractor::FlowExtractor>::Key>
+pub fn netring::async_adapters::datagram_stream::DatagramStream<C, E, F>::active_flows(&self) -> usize
+pub fn netring::async_adapters::datagram_stream::DatagramStream<C, E, F>::dedup(&self) -> core::option::Option<&netring::dedup::Dedup>
+pub fn netring::async_adapters::datagram_stream::DatagramStream<C, E, F>::dedup_mut(&mut self) -> core::option::Option<&mut netring::dedup::Dedup>
+pub fn netring::async_adapters::datagram_stream::DatagramStream<C, E, F>::driver(&self) -> &flowscope::session::driver::DatagramDriver<E, F>
+pub fn netring::async_adapters::datagram_stream::DatagramStream<C, E, F>::snapshot_flow_stats(&self) -> impl core::iter::traits::iterator::Iterator<Item = (<E as flowscope::extractor::FlowExtractor>::Key, flowscope::event::FlowStats)> + '_
+pub fn netring::async_adapters::datagram_stream::DatagramStream<C, E, F>::tracker(&self) -> &flowscope::tracker::FlowTracker<E, ()>
+pub fn netring::async_adapters::datagram_stream::DatagramStream<C, E, F>::tracker_stats(&self) -> &flowscope::tracker::FlowTrackerStats
+pub fn netring::async_adapters::datagram_stream::DatagramStream<C, E, F>::with_config(self, config: flowscope::tracker::FlowTrackerConfig) -> Self
+pub fn netring::async_adapters::datagram_stream::DatagramStream<C, E, F>::with_dedup(self, dedup: netring::dedup::Dedup) -> Self
+pub fn netring::async_adapters::datagram_stream::DatagramStream<C, E, F>::with_emit_anomalies(self, enable: bool) -> Self
+pub fn netring::async_adapters::datagram_stream::DatagramStream<C, E, F>::with_idle_timeout_fn<G>(self, f: G) -> Self where G: core::ops::function::Fn(&<E as flowscope::extractor::FlowExtractor>::Key, core::option::Option<flowscope::extractor::L4Proto>) -> core::option::Option<core::time::Duration> + core::marker::Send + core::marker::Sync + 'static
+pub fn netring::async_adapters::datagram_stream::DatagramStream<C, E, F>::with_monotonic_timestamps(self, enable: bool) -> Self
+pub fn netring::async_adapters::datagram_stream::DatagramStream<C, E, F>::with_pcap_tap<W>(self, writer: netring::pcap::CaptureWriter<W>) -> Self where W: core::io::write::Write + core::marker::Send + 'static
+pub fn netring::async_adapters::datagram_stream::DatagramStream<C, E, F>::with_pcap_tap_policy<W>(self, writer: netring::pcap::CaptureWriter<W>, policy: netring::pcap_tap::TapErrorPolicy) -> Self where W: core::io::write::Write + core::marker::Send + 'static
+pub fn netring::async_adapters::datagram_stream::DatagramStream<C, E, F>::with_pcap_tap_snaplen(self, snaplen: u32) -> Self
+impl<E, F> netring::async_adapters::datagram_stream::DatagramStream<netring::async_adapters::tokio_xdp_capture::AsyncXdpCapture, E, F> where E: flowscope::extractor::FlowExtractor, <E as flowscope::extractor::FlowExtractor>::Key: core::cmp::Eq + core::hash::Hash + core::clone::Clone + core::marker::Send + 'static, F: flowscope::session::DatagramParserFactory<<E as flowscope::extractor::FlowExtractor>::Key>
+pub fn netring::async_adapters::datagram_stream::DatagramStream<netring::async_adapters::tokio_xdp_capture::AsyncXdpCapture, E, F>::capture_stats(&self) -> core::result::Result<netring::stats::CaptureStats, netring::error::Error>
+pub fn netring::async_adapters::datagram_stream::DatagramStream<netring::async_adapters::tokio_xdp_capture::AsyncXdpCapture, E, F>::xdp_capture(&self) -> &netring::async_adapters::tokio_xdp_capture::AsyncXdpCapture
+impl<C, E, F> futures_core::stream::Stream for netring::async_adapters::datagram_stream::DatagramStream<C, E, F> where C: AsyncFlowSource + core::marker::Unpin, E: flowscope::extractor::FlowExtractor + core::marker::Unpin, <E as flowscope::extractor::FlowExtractor>::Key: core::cmp::Eq + core::hash::Hash + core::clone::Clone + core::marker::Send + 'static + core::marker::Unpin, F: flowscope::session::DatagramParserFactory<<E as flowscope::extractor::FlowExtractor>::Key> + core::marker::Unpin, <F as flowscope::session::DatagramParserFactory>::Parser: core::marker::Unpin, <<F as flowscope::session::DatagramParserFactory>::Parser as flowscope::session::DatagramParser>::Message: core::marker::Unpin
+pub type netring::async_adapters::datagram_stream::DatagramStream<C, E, F>::Item = core::result::Result<flowscope::session::SessionEvent<<E as flowscope::extractor::FlowExtractor>::Key, <<F as flowscope::session::DatagramParserFactory<<E as flowscope::extractor::FlowExtractor>::Key>>::Parser as flowscope::session::DatagramParser>::Message>, netring::error::Error>
+pub fn netring::async_adapters::datagram_stream::DatagramStream<C, E, F>::poll_next(self: core::pin::Pin<&mut Self>, cx: &mut core::task::wake::Context<'_>) -> core::task::poll::Poll<core::option::Option<Self::Item>>
+impl<S, E, F> netring::async_adapters::stream_capture::StreamCapture for netring::async_adapters::datagram_stream::DatagramStream<netring::async_adapters::tokio_adapter::AsyncCapture<S>, E, F> where S: netring::traits::PacketSource + std::os::fd::raw::AsRawFd, E: flowscope::extractor::FlowExtractor, <E as flowscope::extractor::FlowExtractor>::Key: core::cmp::Eq + core::hash::Hash + core::clone::Clone + core::marker::Send + 'static, F: flowscope::session::DatagramParserFactory<<E as flowscope::extractor::FlowExtractor>::Key>
+pub type netring::async_adapters::datagram_stream::DatagramStream<netring::async_adapters::tokio_adapter::AsyncCapture<S>, E, F>::Source = S
+pub fn netring::async_adapters::datagram_stream::DatagramStream<netring::async_adapters::tokio_adapter::AsyncCapture<S>, E, F>::capture(&self) -> &netring::async_adapters::tokio_adapter::AsyncCapture<S>
+pub fn netring::async_adapters::datagram_stream::DatagramStream<netring::async_adapters::tokio_adapter::AsyncCapture<S>, E, F>::capture_cumulative_stats(&self) -> core::result::Result<netring::stats::CaptureStats, netring::error::Error>
+pub fn netring::async_adapters::datagram_stream::DatagramStream<netring::async_adapters::tokio_adapter::AsyncCapture<S>, E, F>::capture_stats(&self) -> core::result::Result<netring::stats::CaptureStats, netring::error::Error>
+pub fn netring::async_adapters::datagram_stream::DatagramStream<netring::async_adapters::tokio_adapter::AsyncCapture<S>, E, F>::dedup(&self) -> core::option::Option<&netring::dedup::Dedup>
+pub fn netring::async_adapters::datagram_stream::DatagramStream<netring::async_adapters::tokio_adapter::AsyncCapture<S>, E, F>::dedup_mut(&mut self) -> core::option::Option<&mut netring::dedup::Dedup>
 pub struct netring::Dedup
 impl netring::dedup::Dedup
 pub fn netring::dedup::Dedup::content(window: core::time::Duration, ring_size: usize) -> Self
@@ -8794,8 +8807,10 @@ pub fn netring::async_adapters::multi_streams::MultiDatagramStream<E, F>::label(
 pub fn netring::async_adapters::multi_streams::MultiDatagramStream<E, F>::per_source_capture_stats(&self) -> alloc::vec::Vec<(alloc::string::String, core::option::Option<core::result::Result<netring::stats::CaptureStats, netring::error::Error>>)>
 pub fn netring::async_adapters::multi_streams::MultiDatagramStream<E, F>::per_source_tracker_stats(&self) -> alloc::vec::Vec<(alloc::string::String, core::option::Option<&flowscope::tracker::FlowTrackerStats>)>
 pub fn netring::async_adapters::multi_streams::MultiDatagramStream<E, F>::total_active_flows(&self) -> usize
+impl<E, F> netring::async_adapters::multi_streams::MultiDatagramStream<E, F> where E: flowscope::extractor::FlowExtractor, <E as flowscope::extractor::FlowExtractor>::Key: core::cmp::Eq + core::hash::Hash + core::clone::Clone + core::marker::Send + 'static, F: flowscope::session::DatagramParserFactory<<E as flowscope::extractor::FlowExtractor>::Key>
+pub fn netring::async_adapters::multi_streams::MultiDatagramStream<E, F>::from_streams<I>(sources: I) -> Self where I: core::iter::traits::collect::IntoIterator<Item = (alloc::string::String, netring::async_adapters::datagram_stream::DatagramStream<netring::async_adapters::tokio_adapter::AsyncCapture<netring::afpacket::rx::Capture>, E, F>)>
 impl<E, F> futures_core::stream::Stream for netring::async_adapters::multi_streams::MultiDatagramStream<E, F> where E: flowscope::extractor::FlowExtractor + core::marker::Unpin, <E as flowscope::extractor::FlowExtractor>::Key: core::cmp::Eq + core::hash::Hash + core::clone::Clone + core::marker::Send + 'static + core::marker::Unpin, F: flowscope::session::DatagramParserFactory<<E as flowscope::extractor::FlowExtractor>::Key> + core::marker::Unpin, <F as flowscope::session::DatagramParserFactory>::Parser: core::marker::Unpin, <<F as flowscope::session::DatagramParserFactory>::Parser as flowscope::session::DatagramParser>::Message: core::marker::Unpin
-pub type netring::async_adapters::multi_streams::MultiDatagramStream<E, F>::Item = core::result::Result<netring::async_adapters::multi_streams::TaggedEvent<netring::async_adapters::session_event::SessionEvent<<E as flowscope::extractor::FlowExtractor>::Key, <<F as flowscope::session::DatagramParserFactory<<E as flowscope::extractor::FlowExtractor>::Key>>::Parser as flowscope::session::DatagramParser>::Message>>, netring::error::Error>
+pub type netring::async_adapters::multi_streams::MultiDatagramStream<E, F>::Item = core::result::Result<netring::async_adapters::multi_streams::TaggedEvent<flowscope::session::SessionEvent<<E as flowscope::extractor::FlowExtractor>::Key, <<F as flowscope::session::DatagramParserFactory<<E as flowscope::extractor::FlowExtractor>::Key>>::Parser as flowscope::session::DatagramParser>::Message>>, netring::error::Error>
 pub fn netring::async_adapters::multi_streams::MultiDatagramStream<E, F>::poll_next(self: core::pin::Pin<&mut Self>, cx: &mut core::task::wake::Context<'_>) -> core::task::poll::Poll<core::option::Option<Self::Item>>
 pub struct netring::MultiFlowStream<E> where E: flowscope::extractor::FlowExtractor
 impl<E> netring::async_adapters::multi_streams::MultiFlowStream<E> where E: flowscope::extractor::FlowExtractor + core::clone::Clone + core::marker::Unpin + core::marker::Send + 'static, <E as flowscope::extractor::FlowExtractor>::Key: core::clone::Clone + core::marker::Unpin + core::marker::Send + 'static
@@ -8805,6 +8820,8 @@ pub fn netring::async_adapters::multi_streams::MultiFlowStream<E>::label(&self, 
 pub fn netring::async_adapters::multi_streams::MultiFlowStream<E>::per_source_capture_stats(&self) -> alloc::vec::Vec<(alloc::string::String, core::option::Option<core::result::Result<netring::stats::CaptureStats, netring::error::Error>>)>
 pub fn netring::async_adapters::multi_streams::MultiFlowStream<E>::per_source_tracker_stats(&self) -> alloc::vec::Vec<(alloc::string::String, core::option::Option<&flowscope::tracker::FlowTrackerStats>)>
 pub fn netring::async_adapters::multi_streams::MultiFlowStream<E>::total_active_flows(&self) -> usize
+impl<E> netring::async_adapters::multi_streams::MultiFlowStream<E> where E: flowscope::extractor::FlowExtractor
+pub fn netring::async_adapters::multi_streams::MultiFlowStream<E>::from_streams<I>(sources: I) -> Self where I: core::iter::traits::collect::IntoIterator<Item = (alloc::string::String, netring::async_adapters::flow_stream::FlowStream<netring::async_adapters::tokio_adapter::AsyncCapture<netring::afpacket::rx::Capture>, E, (), netring::async_adapters::flow_stream::NoReassembler>)>
 impl<E> futures_core::stream::Stream for netring::async_adapters::multi_streams::MultiFlowStream<E> where E: flowscope::extractor::FlowExtractor + core::marker::Unpin, <E as flowscope::extractor::FlowExtractor>::Key: core::clone::Clone + core::marker::Unpin
 pub type netring::async_adapters::multi_streams::MultiFlowStream<E>::Item = core::result::Result<netring::async_adapters::multi_streams::TaggedEvent<flowscope::event::FlowEvent<<E as flowscope::extractor::FlowExtractor>::Key>>, netring::error::Error>
 pub fn netring::async_adapters::multi_streams::MultiFlowStream<E>::poll_next(self: core::pin::Pin<&mut Self>, cx: &mut core::task::wake::Context<'_>) -> core::task::poll::Poll<core::option::Option<Self::Item>>
@@ -8816,8 +8833,10 @@ pub fn netring::async_adapters::multi_streams::MultiSessionStream<E, F>::label(&
 pub fn netring::async_adapters::multi_streams::MultiSessionStream<E, F>::per_source_capture_stats(&self) -> alloc::vec::Vec<(alloc::string::String, core::option::Option<core::result::Result<netring::stats::CaptureStats, netring::error::Error>>)>
 pub fn netring::async_adapters::multi_streams::MultiSessionStream<E, F>::per_source_tracker_stats(&self) -> alloc::vec::Vec<(alloc::string::String, core::option::Option<&flowscope::tracker::FlowTrackerStats>)>
 pub fn netring::async_adapters::multi_streams::MultiSessionStream<E, F>::total_active_flows(&self) -> usize
+impl<E, F> netring::async_adapters::multi_streams::MultiSessionStream<E, F> where E: flowscope::extractor::FlowExtractor, <E as flowscope::extractor::FlowExtractor>::Key: core::cmp::Eq + core::hash::Hash + core::clone::Clone + core::marker::Send + 'static, F: flowscope::session::SessionParserFactory<<E as flowscope::extractor::FlowExtractor>::Key>
+pub fn netring::async_adapters::multi_streams::MultiSessionStream<E, F>::from_streams<I>(sources: I) -> Self where I: core::iter::traits::collect::IntoIterator<Item = (alloc::string::String, netring::async_adapters::session_stream::SessionStream<netring::async_adapters::tokio_adapter::AsyncCapture<netring::afpacket::rx::Capture>, E, F>)>
 impl<E, F> futures_core::stream::Stream for netring::async_adapters::multi_streams::MultiSessionStream<E, F> where E: flowscope::extractor::FlowExtractor + core::marker::Unpin, <E as flowscope::extractor::FlowExtractor>::Key: core::cmp::Eq + core::hash::Hash + core::clone::Clone + core::marker::Send + 'static + core::marker::Unpin, F: flowscope::session::SessionParserFactory<<E as flowscope::extractor::FlowExtractor>::Key> + core::marker::Unpin, <F as flowscope::session::SessionParserFactory>::Parser: core::marker::Unpin, <<F as flowscope::session::SessionParserFactory>::Parser as flowscope::session::SessionParser>::Message: core::marker::Unpin
-pub type netring::async_adapters::multi_streams::MultiSessionStream<E, F>::Item = core::result::Result<netring::async_adapters::multi_streams::TaggedEvent<netring::async_adapters::session_event::SessionEvent<<E as flowscope::extractor::FlowExtractor>::Key, <<F as flowscope::session::SessionParserFactory<<E as flowscope::extractor::FlowExtractor>::Key>>::Parser as flowscope::session::SessionParser>::Message>>, netring::error::Error>
+pub type netring::async_adapters::multi_streams::MultiSessionStream<E, F>::Item = core::result::Result<netring::async_adapters::multi_streams::TaggedEvent<flowscope::session::SessionEvent<<E as flowscope::extractor::FlowExtractor>::Key, <<F as flowscope::session::SessionParserFactory<<E as flowscope::extractor::FlowExtractor>::Key>>::Parser as flowscope::session::SessionParser>::Message>>, netring::error::Error>
 pub fn netring::async_adapters::multi_streams::MultiSessionStream<E, F>::poll_next(self: core::pin::Pin<&mut Self>, cx: &mut core::task::wake::Context<'_>) -> core::task::poll::Poll<core::option::Option<Self::Item>>
 pub struct netring::MultiStreamConfig<K>
 pub netring::MultiStreamConfig::dedup: core::option::Option<netring::dedup::Dedup>
@@ -8930,37 +8949,56 @@ impl<'cap> netring::afpacket::rx::Packets<'cap>
 pub fn netring::afpacket::rx::Packets<'cap>::take_error(&mut self) -> core::option::Option<netring::error::Error>
 impl core::ops::drop::Drop for netring::afpacket::rx::Packets<'_>
 pub fn netring::afpacket::rx::Packets<'_>::drop(&mut self)
-pub struct netring::PcapDatagramStream<E, P> where E: flowscope::extractor::FlowExtractor, <E as flowscope::extractor::FlowExtractor>::Key: core::hash::Hash + core::cmp::Eq + core::clone::Clone + core::marker::Send + 'static, P: flowscope::session::DatagramParser + core::clone::Clone + core::marker::Send + core::marker::Sync
-impl<E, P> netring::pcap_flow::PcapDatagramStream<E, P> where E: flowscope::extractor::FlowExtractor, <E as flowscope::extractor::FlowExtractor>::Key: core::hash::Hash + core::cmp::Eq + core::clone::Clone + core::marker::Send + 'static, P: flowscope::session::DatagramParser + core::clone::Clone + core::marker::Send + core::marker::Sync
+pub struct netring::PcapDatagramStream<E, P> where E: flowscope::extractor::FlowExtractor, <E as flowscope::extractor::FlowExtractor>::Key: core::hash::Hash + core::cmp::Eq + core::clone::Clone + core::marker::Send + 'static, P: flowscope::session::DatagramParser + core::clone::Clone
+impl<E, P> netring::pcap_flow::PcapDatagramStream<E, P> where E: flowscope::extractor::FlowExtractor, <E as flowscope::extractor::FlowExtractor>::Key: core::hash::Hash + core::cmp::Eq + core::clone::Clone + core::marker::Send + 'static, P: flowscope::session::DatagramParser + core::clone::Clone
 pub fn netring::pcap_flow::PcapDatagramStream<E, P>::active_flows(&self) -> usize
+pub fn netring::pcap_flow::PcapDatagramStream<E, P>::dedup(&self) -> core::option::Option<&netring::dedup::Dedup>
+pub fn netring::pcap_flow::PcapDatagramStream<E, P>::driver(&self) -> &flowscope::session::driver::DatagramDriver<E, flowscope::session::TemplateFactory<P>>
 pub fn netring::pcap_flow::PcapDatagramStream<E, P>::packets_read(&self) -> u64
+pub fn netring::pcap_flow::PcapDatagramStream<E, P>::snapshot_flow_stats(&self) -> impl core::iter::traits::iterator::Iterator<Item = (<E as flowscope::extractor::FlowExtractor>::Key, flowscope::event::FlowStats)> + '_
 pub fn netring::pcap_flow::PcapDatagramStream<E, P>::tracker(&self) -> &flowscope::tracker::FlowTracker<E, ()>
 pub fn netring::pcap_flow::PcapDatagramStream<E, P>::tracker_stats(&self) -> &flowscope::tracker::FlowTrackerStats
-impl<E, P> futures_core::stream::Stream for netring::pcap_flow::PcapDatagramStream<E, P> where E: flowscope::extractor::FlowExtractor + core::marker::Unpin, <E as flowscope::extractor::FlowExtractor>::Key: core::hash::Hash + core::cmp::Eq + core::clone::Clone + core::marker::Send + core::marker::Unpin + 'static, P: flowscope::session::DatagramParser + core::clone::Clone + core::marker::Send + core::marker::Sync + core::marker::Unpin, <P as flowscope::session::DatagramParser>::Message: core::marker::Unpin
-pub type netring::pcap_flow::PcapDatagramStream<E, P>::Item = core::result::Result<netring::async_adapters::session_event::SessionEvent<<E as flowscope::extractor::FlowExtractor>::Key, <P as flowscope::session::DatagramParser>::Message>, netring::error::Error>
+pub fn netring::pcap_flow::PcapDatagramStream<E, P>::with_config(self, config: flowscope::tracker::FlowTrackerConfig) -> Self
+pub fn netring::pcap_flow::PcapDatagramStream<E, P>::with_dedup(self, dedup: netring::dedup::Dedup) -> Self
+pub fn netring::pcap_flow::PcapDatagramStream<E, P>::with_emit_anomalies(self, enable: bool) -> Self
+pub fn netring::pcap_flow::PcapDatagramStream<E, P>::with_idle_timeout_fn<G>(self, f: G) -> Self where G: core::ops::function::Fn(&<E as flowscope::extractor::FlowExtractor>::Key, core::option::Option<flowscope::extractor::L4Proto>) -> core::option::Option<core::time::Duration> + core::marker::Send + core::marker::Sync + 'static
+pub fn netring::pcap_flow::PcapDatagramStream<E, P>::with_monotonic_timestamps(self, enable: bool) -> Self
+impl<E, P> futures_core::stream::Stream for netring::pcap_flow::PcapDatagramStream<E, P> where E: flowscope::extractor::FlowExtractor + core::marker::Unpin, <E as flowscope::extractor::FlowExtractor>::Key: core::hash::Hash + core::cmp::Eq + core::clone::Clone + core::marker::Send + core::marker::Unpin + 'static, P: flowscope::session::DatagramParser + core::clone::Clone + core::marker::Unpin, <P as flowscope::session::DatagramParser>::Message: core::marker::Unpin
+pub type netring::pcap_flow::PcapDatagramStream<E, P>::Item = core::result::Result<flowscope::session::SessionEvent<<E as flowscope::extractor::FlowExtractor>::Key, <P as flowscope::session::DatagramParser>::Message>, netring::error::Error>
 pub fn netring::pcap_flow::PcapDatagramStream<E, P>::poll_next(self: core::pin::Pin<&mut Self>, cx: &mut core::task::wake::Context<'_>) -> core::task::poll::Poll<core::option::Option<Self::Item>>
 pub struct netring::PcapFlowStream<E> where E: flowscope::extractor::FlowExtractor
 impl<E> netring::pcap_flow::PcapFlowStream<E> where E: flowscope::extractor::FlowExtractor, <E as flowscope::extractor::FlowExtractor>::Key: core::clone::Clone + core::marker::Send + 'static
 pub fn netring::pcap_flow::PcapFlowStream<E>::active_flows(&self) -> usize
+pub fn netring::pcap_flow::PcapFlowStream<E>::dedup(&self) -> core::option::Option<&netring::dedup::Dedup>
 pub fn netring::pcap_flow::PcapFlowStream<E>::packets_read(&self) -> u64
 pub fn netring::pcap_flow::PcapFlowStream<E>::tracker(&self) -> &flowscope::tracker::FlowTracker<E, ()>
 pub fn netring::pcap_flow::PcapFlowStream<E>::tracker_stats(&self) -> &flowscope::tracker::FlowTrackerStats
 pub fn netring::pcap_flow::PcapFlowStream<E>::with_config(self, config: flowscope::tracker::FlowTrackerConfig) -> Self
+pub fn netring::pcap_flow::PcapFlowStream<E>::with_dedup(self, dedup: netring::dedup::Dedup) -> Self
 pub fn netring::pcap_flow::PcapFlowStream<E>::with_idle_timeout_fn<G>(self, f: G) -> Self where G: core::ops::function::Fn(&<E as flowscope::extractor::FlowExtractor>::Key, core::option::Option<flowscope::extractor::L4Proto>) -> core::option::Option<core::time::Duration> + core::marker::Send + core::marker::Sync + 'static
+pub fn netring::pcap_flow::PcapFlowStream<E>::with_monotonic_timestamps(self, enable: bool) -> Self
 impl<E> netring::pcap_flow::PcapFlowStream<E> where E: flowscope::extractor::FlowExtractor, <E as flowscope::extractor::FlowExtractor>::Key: core::hash::Hash + core::cmp::Eq + core::clone::Clone + core::marker::Send + 'static
-pub fn netring::pcap_flow::PcapFlowStream<E>::datagram_stream<P>(self, parser: P) -> netring::pcap_flow::PcapDatagramStream<E, P> where <E as flowscope::extractor::FlowExtractor>::Key: core::hash::Hash + core::cmp::Eq, P: flowscope::session::DatagramParser + core::clone::Clone + core::marker::Send + core::marker::Sync
-pub fn netring::pcap_flow::PcapFlowStream<E>::session_stream<P>(self, parser: P) -> netring::pcap_flow::PcapSessionStream<E, P> where <E as flowscope::extractor::FlowExtractor>::Key: core::hash::Hash + core::cmp::Eq, P: flowscope::session::SessionParser + core::clone::Clone + core::marker::Send + core::marker::Sync
+pub fn netring::pcap_flow::PcapFlowStream<E>::datagram_stream<P>(self, parser: P) -> netring::pcap_flow::PcapDatagramStream<E, P> where P: flowscope::session::DatagramParser + core::clone::Clone
+pub fn netring::pcap_flow::PcapFlowStream<E>::session_stream<P>(self, parser: P) -> netring::pcap_flow::PcapSessionStream<E, P> where P: flowscope::session::SessionParser + core::clone::Clone
 impl<E> futures_core::stream::Stream for netring::pcap_flow::PcapFlowStream<E> where E: flowscope::extractor::FlowExtractor + core::marker::Unpin, <E as flowscope::extractor::FlowExtractor>::Key: core::clone::Clone + core::marker::Unpin
 pub type netring::pcap_flow::PcapFlowStream<E>::Item = core::result::Result<flowscope::event::FlowEvent<<E as flowscope::extractor::FlowExtractor>::Key>, netring::error::Error>
 pub fn netring::pcap_flow::PcapFlowStream<E>::poll_next(self: core::pin::Pin<&mut Self>, cx: &mut core::task::wake::Context<'_>) -> core::task::poll::Poll<core::option::Option<Self::Item>>
-pub struct netring::PcapSessionStream<E, P> where E: flowscope::extractor::FlowExtractor, <E as flowscope::extractor::FlowExtractor>::Key: core::hash::Hash + core::cmp::Eq + core::clone::Clone + core::marker::Send + 'static, P: flowscope::session::SessionParser + core::clone::Clone + core::marker::Send + core::marker::Sync
-impl<E, P> netring::pcap_flow::PcapSessionStream<E, P> where E: flowscope::extractor::FlowExtractor, <E as flowscope::extractor::FlowExtractor>::Key: core::hash::Hash + core::cmp::Eq + core::clone::Clone + core::marker::Send + 'static, P: flowscope::session::SessionParser + core::clone::Clone + core::marker::Send + core::marker::Sync
+pub struct netring::PcapSessionStream<E, P> where E: flowscope::extractor::FlowExtractor, <E as flowscope::extractor::FlowExtractor>::Key: core::hash::Hash + core::cmp::Eq + core::clone::Clone + core::marker::Send + 'static, P: flowscope::session::SessionParser + core::clone::Clone
+impl<E, P> netring::pcap_flow::PcapSessionStream<E, P> where E: flowscope::extractor::FlowExtractor, <E as flowscope::extractor::FlowExtractor>::Key: core::hash::Hash + core::cmp::Eq + core::clone::Clone + core::marker::Send + 'static, P: flowscope::session::SessionParser + core::clone::Clone
 pub fn netring::pcap_flow::PcapSessionStream<E, P>::active_flows(&self) -> usize
+pub fn netring::pcap_flow::PcapSessionStream<E, P>::dedup(&self) -> core::option::Option<&netring::dedup::Dedup>
+pub fn netring::pcap_flow::PcapSessionStream<E, P>::driver(&self) -> &flowscope::session::driver::SessionDriver<E, flowscope::session::TemplateFactory<P>>
 pub fn netring::pcap_flow::PcapSessionStream<E, P>::packets_read(&self) -> u64
+pub fn netring::pcap_flow::PcapSessionStream<E, P>::snapshot_flow_stats(&self) -> impl core::iter::traits::iterator::Iterator<Item = (<E as flowscope::extractor::FlowExtractor>::Key, flowscope::event::FlowStats)> + '_
 pub fn netring::pcap_flow::PcapSessionStream<E, P>::tracker(&self) -> &flowscope::tracker::FlowTracker<E, ()>
 pub fn netring::pcap_flow::PcapSessionStream<E, P>::tracker_stats(&self) -> &flowscope::tracker::FlowTrackerStats
-impl<E, P> futures_core::stream::Stream for netring::pcap_flow::PcapSessionStream<E, P> where E: flowscope::extractor::FlowExtractor + core::marker::Unpin, <E as flowscope::extractor::FlowExtractor>::Key: core::hash::Hash + core::cmp::Eq + core::clone::Clone + core::marker::Send + core::marker::Unpin + 'static, P: flowscope::session::SessionParser + core::clone::Clone + core::marker::Send + core::marker::Sync + core::marker::Unpin, <P as flowscope::session::SessionParser>::Message: core::marker::Unpin
-pub type netring::pcap_flow::PcapSessionStream<E, P>::Item = core::result::Result<netring::async_adapters::session_event::SessionEvent<<E as flowscope::extractor::FlowExtractor>::Key, <P as flowscope::session::SessionParser>::Message>, netring::error::Error>
+pub fn netring::pcap_flow::PcapSessionStream<E, P>::with_config(self, config: flowscope::tracker::FlowTrackerConfig) -> Self
+pub fn netring::pcap_flow::PcapSessionStream<E, P>::with_dedup(self, dedup: netring::dedup::Dedup) -> Self
+pub fn netring::pcap_flow::PcapSessionStream<E, P>::with_emit_anomalies(self, enable: bool) -> Self
+pub fn netring::pcap_flow::PcapSessionStream<E, P>::with_idle_timeout_fn<G>(self, f: G) -> Self where G: core::ops::function::Fn(&<E as flowscope::extractor::FlowExtractor>::Key, core::option::Option<flowscope::extractor::L4Proto>) -> core::option::Option<core::time::Duration> + core::marker::Send + core::marker::Sync + 'static
+pub fn netring::pcap_flow::PcapSessionStream<E, P>::with_monotonic_timestamps(self, enable: bool) -> Self
+impl<E, P> futures_core::stream::Stream for netring::pcap_flow::PcapSessionStream<E, P> where E: flowscope::extractor::FlowExtractor + core::marker::Unpin, <E as flowscope::extractor::FlowExtractor>::Key: core::hash::Hash + core::cmp::Eq + core::clone::Clone + core::marker::Send + core::marker::Unpin + 'static, P: flowscope::session::SessionParser + core::clone::Clone + core::marker::Unpin, <P as flowscope::session::SessionParser>::Message: core::marker::Unpin
+pub type netring::pcap_flow::PcapSessionStream<E, P>::Item = core::result::Result<flowscope::session::SessionEvent<<E as flowscope::extractor::FlowExtractor>::Key, <P as flowscope::session::SessionParser>::Message>, netring::error::Error>
 pub fn netring::pcap_flow::PcapSessionStream<E, P>::poll_next(self: core::pin::Pin<&mut Self>, cx: &mut core::task::wake::Context<'_>) -> core::task::poll::Poll<core::option::Option<Self::Item>>
 pub struct netring::PcapTap
 impl netring::pcap_tap::PcapTap
@@ -8979,6 +9017,36 @@ pub struct netring::ReadableGuard<'a, S: netring::traits::PacketSource + std::os
 impl<'a, S: netring::traits::PacketSource + std::os::fd::raw::AsRawFd> netring::async_adapters::tokio_adapter::ReadableGuard<'a, S>
 pub fn netring::async_adapters::tokio_adapter::ReadableGuard<'a, S>::get_inner_mut(&mut self) -> &mut S
 pub fn netring::async_adapters::tokio_adapter::ReadableGuard<'a, S>::next_batch(&mut self) -> core::option::Option<netring::packet::PacketBatch<'_>>
+pub struct netring::SessionStream<C, E, F> where E: flowscope::extractor::FlowExtractor, <E as flowscope::extractor::FlowExtractor>::Key: core::cmp::Eq + core::hash::Hash + core::clone::Clone + core::marker::Send + 'static, F: flowscope::session::SessionParserFactory<<E as flowscope::extractor::FlowExtractor>::Key>
+impl<C, E, F> netring::async_adapters::session_stream::SessionStream<C, E, F> where E: flowscope::extractor::FlowExtractor, <E as flowscope::extractor::FlowExtractor>::Key: core::cmp::Eq + core::hash::Hash + core::clone::Clone + core::marker::Send + 'static, F: flowscope::session::SessionParserFactory<<E as flowscope::extractor::FlowExtractor>::Key>
+pub fn netring::async_adapters::session_stream::SessionStream<C, E, F>::active_flows(&self) -> usize
+pub fn netring::async_adapters::session_stream::SessionStream<C, E, F>::dedup(&self) -> core::option::Option<&netring::dedup::Dedup>
+pub fn netring::async_adapters::session_stream::SessionStream<C, E, F>::dedup_mut(&mut self) -> core::option::Option<&mut netring::dedup::Dedup>
+pub fn netring::async_adapters::session_stream::SessionStream<C, E, F>::driver(&self) -> &flowscope::session::driver::SessionDriver<E, F>
+pub fn netring::async_adapters::session_stream::SessionStream<C, E, F>::snapshot_flow_stats(&self) -> impl core::iter::traits::iterator::Iterator<Item = (<E as flowscope::extractor::FlowExtractor>::Key, flowscope::event::FlowStats)> + '_
+pub fn netring::async_adapters::session_stream::SessionStream<C, E, F>::tracker(&self) -> &flowscope::tracker::FlowTracker<E, ()>
+pub fn netring::async_adapters::session_stream::SessionStream<C, E, F>::tracker_stats(&self) -> &flowscope::tracker::FlowTrackerStats
+pub fn netring::async_adapters::session_stream::SessionStream<C, E, F>::with_config(self, config: flowscope::tracker::FlowTrackerConfig) -> Self
+pub fn netring::async_adapters::session_stream::SessionStream<C, E, F>::with_dedup(self, dedup: netring::dedup::Dedup) -> Self
+pub fn netring::async_adapters::session_stream::SessionStream<C, E, F>::with_emit_anomalies(self, enable: bool) -> Self
+pub fn netring::async_adapters::session_stream::SessionStream<C, E, F>::with_idle_timeout_fn<G>(self, f: G) -> Self where G: core::ops::function::Fn(&<E as flowscope::extractor::FlowExtractor>::Key, core::option::Option<flowscope::extractor::L4Proto>) -> core::option::Option<core::time::Duration> + core::marker::Send + core::marker::Sync + 'static
+pub fn netring::async_adapters::session_stream::SessionStream<C, E, F>::with_monotonic_timestamps(self, enable: bool) -> Self
+pub fn netring::async_adapters::session_stream::SessionStream<C, E, F>::with_pcap_tap<W>(self, writer: netring::pcap::CaptureWriter<W>) -> Self where W: core::io::write::Write + core::marker::Send + 'static
+pub fn netring::async_adapters::session_stream::SessionStream<C, E, F>::with_pcap_tap_policy<W>(self, writer: netring::pcap::CaptureWriter<W>, policy: netring::pcap_tap::TapErrorPolicy) -> Self where W: core::io::write::Write + core::marker::Send + 'static
+pub fn netring::async_adapters::session_stream::SessionStream<C, E, F>::with_pcap_tap_snaplen(self, snaplen: u32) -> Self
+impl<E, F> netring::async_adapters::session_stream::SessionStream<netring::async_adapters::tokio_xdp_capture::AsyncXdpCapture, E, F> where E: flowscope::extractor::FlowExtractor, <E as flowscope::extractor::FlowExtractor>::Key: core::cmp::Eq + core::hash::Hash + core::clone::Clone + core::marker::Send + 'static, F: flowscope::session::SessionParserFactory<<E as flowscope::extractor::FlowExtractor>::Key>
+pub fn netring::async_adapters::session_stream::SessionStream<netring::async_adapters::tokio_xdp_capture::AsyncXdpCapture, E, F>::capture_stats(&self) -> core::result::Result<netring::stats::CaptureStats, netring::error::Error>
+pub fn netring::async_adapters::session_stream::SessionStream<netring::async_adapters::tokio_xdp_capture::AsyncXdpCapture, E, F>::xdp_capture(&self) -> &netring::async_adapters::tokio_xdp_capture::AsyncXdpCapture
+impl<C, E, F> futures_core::stream::Stream for netring::async_adapters::session_stream::SessionStream<C, E, F> where C: AsyncFlowSource + core::marker::Unpin, E: flowscope::extractor::FlowExtractor + core::marker::Unpin, <E as flowscope::extractor::FlowExtractor>::Key: core::cmp::Eq + core::hash::Hash + core::clone::Clone + core::marker::Send + 'static + core::marker::Unpin, F: flowscope::session::SessionParserFactory<<E as flowscope::extractor::FlowExtractor>::Key> + core::marker::Unpin, <F as flowscope::session::SessionParserFactory>::Parser: core::marker::Unpin, <<F as flowscope::session::SessionParserFactory>::Parser as flowscope::session::SessionParser>::Message: core::marker::Unpin
+pub type netring::async_adapters::session_stream::SessionStream<C, E, F>::Item = core::result::Result<flowscope::session::SessionEvent<<E as flowscope::extractor::FlowExtractor>::Key, <<F as flowscope::session::SessionParserFactory<<E as flowscope::extractor::FlowExtractor>::Key>>::Parser as flowscope::session::SessionParser>::Message>, netring::error::Error>
+pub fn netring::async_adapters::session_stream::SessionStream<C, E, F>::poll_next(self: core::pin::Pin<&mut Self>, cx: &mut core::task::wake::Context<'_>) -> core::task::poll::Poll<core::option::Option<Self::Item>>
+impl<S, E, F> netring::async_adapters::stream_capture::StreamCapture for netring::async_adapters::session_stream::SessionStream<netring::async_adapters::tokio_adapter::AsyncCapture<S>, E, F> where S: netring::traits::PacketSource + std::os::fd::raw::AsRawFd, E: flowscope::extractor::FlowExtractor, <E as flowscope::extractor::FlowExtractor>::Key: core::cmp::Eq + core::hash::Hash + core::clone::Clone + core::marker::Send + 'static, F: flowscope::session::SessionParserFactory<<E as flowscope::extractor::FlowExtractor>::Key>
+pub type netring::async_adapters::session_stream::SessionStream<netring::async_adapters::tokio_adapter::AsyncCapture<S>, E, F>::Source = S
+pub fn netring::async_adapters::session_stream::SessionStream<netring::async_adapters::tokio_adapter::AsyncCapture<S>, E, F>::capture(&self) -> &netring::async_adapters::tokio_adapter::AsyncCapture<S>
+pub fn netring::async_adapters::session_stream::SessionStream<netring::async_adapters::tokio_adapter::AsyncCapture<S>, E, F>::capture_cumulative_stats(&self) -> core::result::Result<netring::stats::CaptureStats, netring::error::Error>
+pub fn netring::async_adapters::session_stream::SessionStream<netring::async_adapters::tokio_adapter::AsyncCapture<S>, E, F>::capture_stats(&self) -> core::result::Result<netring::stats::CaptureStats, netring::error::Error>
+pub fn netring::async_adapters::session_stream::SessionStream<netring::async_adapters::tokio_adapter::AsyncCapture<S>, E, F>::dedup(&self) -> core::option::Option<&netring::dedup::Dedup>
+pub fn netring::async_adapters::session_stream::SessionStream<netring::async_adapters::tokio_adapter::AsyncCapture<S>, E, F>::dedup_mut(&mut self) -> core::option::Option<&mut netring::dedup::Dedup>
 pub struct netring::TaggedEvent<E>
 pub netring::TaggedEvent::event: E
 pub netring::TaggedEvent::source_idx: u16
@@ -9031,7 +9099,7 @@ pub fn netring::async_adapters::multi_streams::XdpMultiDatagramStream<E, F>::per
 pub fn netring::async_adapters::multi_streams::XdpMultiDatagramStream<E, F>::per_source_tracker_stats(&self) -> alloc::vec::Vec<(alloc::string::String, core::option::Option<&flowscope::tracker::FlowTrackerStats>)>
 pub fn netring::async_adapters::multi_streams::XdpMultiDatagramStream<E, F>::total_active_flows(&self) -> usize
 impl<E, F> futures_core::stream::Stream for netring::async_adapters::multi_streams::XdpMultiDatagramStream<E, F> where E: flowscope::extractor::FlowExtractor + core::marker::Unpin, <E as flowscope::extractor::FlowExtractor>::Key: core::cmp::Eq + core::hash::Hash + core::clone::Clone + core::marker::Send + 'static + core::marker::Unpin, F: flowscope::session::DatagramParserFactory<<E as flowscope::extractor::FlowExtractor>::Key> + core::marker::Unpin, <F as flowscope::session::DatagramParserFactory>::Parser: core::marker::Unpin, <<F as flowscope::session::DatagramParserFactory>::Parser as flowscope::session::DatagramParser>::Message: core::marker::Unpin
-pub type netring::async_adapters::multi_streams::XdpMultiDatagramStream<E, F>::Item = core::result::Result<netring::async_adapters::multi_streams::TaggedEvent<netring::async_adapters::session_event::SessionEvent<<E as flowscope::extractor::FlowExtractor>::Key, <<F as flowscope::session::DatagramParserFactory<<E as flowscope::extractor::FlowExtractor>::Key>>::Parser as flowscope::session::DatagramParser>::Message>>, netring::error::Error>
+pub type netring::async_adapters::multi_streams::XdpMultiDatagramStream<E, F>::Item = core::result::Result<netring::async_adapters::multi_streams::TaggedEvent<flowscope::session::SessionEvent<<E as flowscope::extractor::FlowExtractor>::Key, <<F as flowscope::session::DatagramParserFactory<<E as flowscope::extractor::FlowExtractor>::Key>>::Parser as flowscope::session::DatagramParser>::Message>>, netring::error::Error>
 pub fn netring::async_adapters::multi_streams::XdpMultiDatagramStream<E, F>::poll_next(self: core::pin::Pin<&mut Self>, cx: &mut core::task::wake::Context<'_>) -> core::task::poll::Poll<core::option::Option<Self::Item>>
 pub struct netring::XdpMultiFlowStream<E> where E: flowscope::extractor::FlowExtractor
 impl<E> netring::async_adapters::multi_streams::XdpMultiFlowStream<E> where E: flowscope::extractor::FlowExtractor + core::clone::Clone + core::marker::Unpin + core::marker::Send + 'static, <E as flowscope::extractor::FlowExtractor>::Key: core::clone::Clone + core::marker::Unpin + core::marker::Send + 'static
@@ -9052,7 +9120,7 @@ pub fn netring::async_adapters::multi_streams::XdpMultiSessionStream<E, F>::per_
 pub fn netring::async_adapters::multi_streams::XdpMultiSessionStream<E, F>::per_source_tracker_stats(&self) -> alloc::vec::Vec<(alloc::string::String, core::option::Option<&flowscope::tracker::FlowTrackerStats>)>
 pub fn netring::async_adapters::multi_streams::XdpMultiSessionStream<E, F>::total_active_flows(&self) -> usize
 impl<E, F> futures_core::stream::Stream for netring::async_adapters::multi_streams::XdpMultiSessionStream<E, F> where E: flowscope::extractor::FlowExtractor + core::marker::Unpin, <E as flowscope::extractor::FlowExtractor>::Key: core::cmp::Eq + core::hash::Hash + core::clone::Clone + core::marker::Send + 'static + core::marker::Unpin, F: flowscope::session::SessionParserFactory<<E as flowscope::extractor::FlowExtractor>::Key> + core::marker::Unpin, <F as flowscope::session::SessionParserFactory>::Parser: core::marker::Unpin, <<F as flowscope::session::SessionParserFactory>::Parser as flowscope::session::SessionParser>::Message: core::marker::Unpin
-pub type netring::async_adapters::multi_streams::XdpMultiSessionStream<E, F>::Item = core::result::Result<netring::async_adapters::multi_streams::TaggedEvent<netring::async_adapters::session_event::SessionEvent<<E as flowscope::extractor::FlowExtractor>::Key, <<F as flowscope::session::SessionParserFactory<<E as flowscope::extractor::FlowExtractor>::Key>>::Parser as flowscope::session::SessionParser>::Message>>, netring::error::Error>
+pub type netring::async_adapters::multi_streams::XdpMultiSessionStream<E, F>::Item = core::result::Result<netring::async_adapters::multi_streams::TaggedEvent<flowscope::session::SessionEvent<<E as flowscope::extractor::FlowExtractor>::Key, <<F as flowscope::session::SessionParserFactory<<E as flowscope::extractor::FlowExtractor>::Key>>::Parser as flowscope::session::SessionParser>::Message>>, netring::error::Error>
 pub fn netring::async_adapters::multi_streams::XdpMultiSessionStream<E, F>::poll_next(self: core::pin::Pin<&mut Self>, cx: &mut core::task::wake::Context<'_>) -> core::task::poll::Poll<core::option::Option<Self::Item>>
 pub struct netring::XdpPacket<'a>
 impl<'a> netring::XdpPacket<'a>

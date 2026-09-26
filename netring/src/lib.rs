@@ -190,11 +190,14 @@ pub mod flow {
         Reassembler, ReassemblerFactory,
     };
 
-    // netring 0.20-adoption: flowscope retired its public `SessionEvent`
-    // (flowscope #100) and deleted `Flow{Session,Datagram}Driver`
-    // (#99). netring now owns its session-stream event type.
-    #[cfg(all(feature = "tokio", feature = "flow"))]
-    pub use crate::async_adapters::session_event::SessionEvent;
+    // flowscope 0.25: the single-parser engines (`SessionDriver` /
+    // `DatagramDriver`) and their ordered `SessionEvent` are public
+    // again; netring's session / datagram streams are async fronts for
+    // them and yield flowscope's event type unchanged.
+    #[cfg(feature = "flow")]
+    pub use flowscope::{
+        DatagramDriver, GapResponse, ReassemblyStop, SessionDriver, SessionEvent, StreamChunks,
+    };
 
     /// Async reassembly types for tokio integration.
     /// Available under `flow + tokio`.
@@ -207,6 +210,8 @@ pub mod flow {
 
 #[cfg(all(feature = "tokio", feature = "flow"))]
 pub use async_adapters::conversation::{Conversation, ConversationChunk, ConversationStream};
+#[cfg(all(feature = "tokio", feature = "flow"))]
+pub use async_adapters::datagram_stream::DatagramStream;
 #[cfg(all(feature = "tokio", feature = "flow"))]
 pub use async_adapters::flow_broadcast::{BroadcastRecvError, FlowBroadcast, FlowSubscriber};
 #[cfg(all(feature = "tokio", feature = "flow"))]
@@ -235,6 +240,8 @@ pub use async_adapters::multi_streams::{
 pub use async_adapters::multi_streams::{
     XdpMultiDatagramStream, XdpMultiFlowStream, XdpMultiSessionStream,
 };
+#[cfg(all(feature = "tokio", feature = "flow"))]
+pub use async_adapters::session_stream::SessionStream;
 #[cfg(feature = "tokio")]
 pub use async_adapters::stream_capture::{StreamCapture, StreamSetFilter};
 #[cfg(all(feature = "pcap", feature = "tokio", feature = "flow"))]

@@ -179,7 +179,7 @@ tap) makes interesting.
 | Event | When | What it means for your detector |
 |---|---|---|
 | `AnyFlowAnomaly` | reassembly gaps, retransmissions with different bytes, out-of-window segments, buffer / memcap limits, eviction pressure | registering a handler turns anomaly reporting on (`MonitorBuilder::emit_anomalies` to force it either way) |
-| `ParserClosed<P>` | `P`'s parser stopped for a flow: malformed input (`ParseError`), finished (`ParserDone`), a gap it can't bridge (`StreamGap`) | no more `P` messages from this flow; the flow continues |
+| `ParserClosed<P>` | once per (parser, flow): early when the parser stopped — malformed input (`ParseError`), finished (`ParserDone`), a gap it can't bridge (`StreamGap`) — or, at the flow's end, right before `FlowEnded` with the flow's reason | after an early close: no more `P` messages from this flow, though the flow continues |
 | `ParserSideStopped<P>` | `P`'s parser stopped reading **one side** (a gap, or that side's buffer cap) | the other side is still parsed |
 
 `ParserClosed<Http>` reaches the HTTP parser's protocol (0.31 — it

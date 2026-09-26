@@ -403,7 +403,7 @@ macro_rules! pcap_l7_stream {
                     + Sync
                     + 'static,
             {
-                self.driver.tracker_mut().set_idle_timeout_fn(f);
+                self.driver.set_idle_timeout_fn(f);
                 self
             }
 

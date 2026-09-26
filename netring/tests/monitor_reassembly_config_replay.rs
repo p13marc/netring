@@ -29,11 +29,16 @@ fn http_pcap() -> NamedTempFile {
     use pcap_file::pcap::{PcapHeader, PcapPacket, PcapWriter};
     let (c, s, m) = ([10, 0, 0, 1], [10, 0, 0, 2], [0u8; 6]);
     let req = b"GET /index.html HTTP/1.1\r\nHost: example.test\r\nUser-Agent: t\r\n\r\n";
+    // The request arrives in two segments, the second one first: it
+    // has to be held out of order, which is what the memcap bounds
+    // (in-order bytes are handed to the parser without being held).
+    let (head, tail) = req.split_at(10);
     let frames = [
         ipv4_tcp(m, m, c, s, 40000, 80, 100, 0, 0x02, &[]),
         ipv4_tcp(m, m, s, c, 80, 40000, 900, 101, 0x12, &[]),
         ipv4_tcp(m, m, c, s, 40000, 80, 101, 901, 0x10, &[]),
-        ipv4_tcp(m, m, c, s, 40000, 80, 101, 901, 0x18, req),
+        ipv4_tcp(m, m, c, s, 40000, 80, 111, 901, 0x18, tail),
+        ipv4_tcp(m, m, c, s, 40000, 80, 101, 901, 0x18, head),
     ];
     let file = NamedTempFile::new().unwrap();
     let header = PcapHeader {

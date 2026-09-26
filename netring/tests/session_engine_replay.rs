@@ -172,6 +172,16 @@ fn closes<M>(events: &[SessionEvent<FiveTupleKey, M>]) -> Vec<(EndReason, Option
         .collect()
 }
 
+fn side_stops<M>(events: &[SessionEvent<FiveTupleKey, M>]) -> Vec<(FlowSide, EndReason)> {
+    events
+        .iter()
+        .filter_map(|e| match e {
+            SessionEvent::ParserSideStopped { side, reason, .. } => Some((*side, *reason)),
+            _ => None,
+        })
+        .collect()
+}
+
 fn ended<M>(events: &[SessionEvent<FiveTupleKey, M>]) -> Vec<(EndReason, flowscope::FlowStats)> {
     events
         .iter()
@@ -228,9 +238,12 @@ async fn n2_drop_flow_overflow_is_reported_and_does_not_wedge_silently() {
     let events = sessions(&path, cfg, parser).await;
 
     assert_eq!(bytes.load(Ordering::SeqCst), 0);
-    let closes = closes(&events);
-    assert_eq!(closes.len(), 1);
-    assert_eq!(closes[0].0, EndReason::BufferOverflow);
+    // The overflow stops the side that overflowed (flowscope 0.25:
+    // the parser keeps reading the other one).
+    assert_eq!(
+        side_stops(&events),
+        vec![(FlowSide::Initiator, EndReason::BufferOverflow)]
+    );
     assert!(events.iter().any(|e| matches!(
         e,
         SessionEvent::FlowAnomaly {
@@ -291,12 +304,14 @@ async fn a_missing_segment_is_a_reported_gap_not_a_silent_truncation() {
     let parser = CountBytes::default();
     let bytes = parser.bytes.clone();
     let events = sessions(&path, FlowTrackerConfig::default(), parser).await;
-    // The default parser response to a gap is to stop: the 10 bytes
-    // before it were delivered, and the stop is explicit.
+    // The default parser response to a gap is to stop reading that
+    // side: the 10 bytes before it were delivered, and the stop is
+    // explicit.
     assert_eq!(bytes.load(Ordering::SeqCst), 10);
-    let closes = closes(&events);
-    assert_eq!(closes.len(), 1);
-    assert_eq!(closes[0].0, EndReason::StreamGap);
+    assert_eq!(
+        side_stops(&events),
+        vec![(FlowSide::Initiator, EndReason::StreamGap)]
+    );
     assert!(events.iter().any(|e| matches!(
         e,
         SessionEvent::FlowAnomaly {

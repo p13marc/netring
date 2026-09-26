@@ -208,3 +208,30 @@ async fn message_handlers_see_the_side() {
         ]
     );
 }
+
+/// #161: an `EventStream` awaited before any message arrives is woken
+/// by the first one (it used to return Pending without registering a
+/// waker and hang forever).
+#[tokio::test(flavor = "current_thread")]
+async fn event_stream_wakes_on_push() {
+    use futures::StreamExt;
+    let file = pcap(http_flow(false, false));
+    let monitor = Monitor::builder()
+        .pcap_source(file.path())
+        .protocol::<Tcp>()
+        .with_broadcast::<Http>()
+        .build()
+        .unwrap();
+    let mut stream = monitor.subscribe::<Http>().unwrap();
+    let waiter = tokio::spawn(async move {
+        tokio::time::timeout(Duration::from_secs(5), stream.next())
+            .await
+            .expect("woken by the first message")
+    });
+    tokio::task::yield_now().await; // let the waiter park on an empty queue
+    monitor.replay().await.unwrap();
+    assert!(matches!(
+        waiter.await.unwrap(),
+        Some(flowscope::http::HttpMessage::Request(_))
+    ));
+}

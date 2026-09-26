@@ -204,10 +204,12 @@ pub mod flow {
     #[cfg(all(feature = "tokio", feature = "flow"))]
     pub use crate::async_adapters::async_reassembler::{
         AsyncReassembler, AsyncReassemblerFactory, ChannelFactory, ChannelReassembler,
-        channel_factory,
+        ConsumerFuture, ReassembledChunk, ReassemblyStream, channel_factory,
     };
 }
 
+#[cfg(all(feature = "tokio", feature = "flow"))]
+pub use async_adapters::async_reassembler::ReassemblyStream;
 #[cfg(all(feature = "tokio", feature = "flow"))]
 pub use async_adapters::conversation::{Conversation, ConversationChunk, ConversationStream};
 #[cfg(all(feature = "tokio", feature = "flow"))]
@@ -215,7 +217,7 @@ pub use async_adapters::datagram_stream::DatagramStream;
 #[cfg(all(feature = "tokio", feature = "flow"))]
 pub use async_adapters::flow_broadcast::{BroadcastRecvError, FlowBroadcast, FlowSubscriber};
 #[cfg(all(feature = "tokio", feature = "flow"))]
-pub use async_adapters::flow_stream::{AsyncReassemblerSlot, FlowStream, NoReassembler};
+pub use async_adapters::flow_stream::FlowStream;
 #[cfg(all(feature = "tokio", feature = "flow"))]
 pub use async_adapters::multi_capture::AsyncMultiCapture;
 #[cfg(all(

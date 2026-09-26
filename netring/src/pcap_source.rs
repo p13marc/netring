@@ -487,7 +487,9 @@ mod tests {
         };
         let AsyncPcapSource {
             receiver, _task, ..
-        } = AsyncPcapSource::open_with_config(f.path(), cfg).await.unwrap();
+        } = AsyncPcapSource::open_with_config(f.path(), cfg)
+            .await
+            .unwrap();
         drop(receiver);
         tokio::time::timeout(Duration::from_secs(5), _task)
             .await
@@ -504,7 +506,9 @@ mod tests {
             loop_at_eof: true,
             ..Default::default()
         };
-        let mut src = AsyncPcapSource::open_with_config(f.path(), cfg).await.unwrap();
+        let mut src = AsyncPcapSource::open_with_config(f.path(), cfg)
+            .await
+            .unwrap();
         let next = tokio::time::timeout(Duration::from_secs(5), src.next())
             .await
             .expect("stream ends");
@@ -523,7 +527,9 @@ mod tests {
             loop_at_eof: true,
             ..Default::default()
         };
-        let mut src = AsyncPcapSource::open_with_config(f.path(), cfg).await.unwrap();
+        let mut src = AsyncPcapSource::open_with_config(f.path(), cfg)
+            .await
+            .unwrap();
         let mut ts = Vec::new();
         for _ in 0..6 {
             ts.push(src.next().await.unwrap().unwrap().timestamp);
@@ -550,8 +556,12 @@ mod tests {
             ..Default::default()
         };
         let mut w = PcapWriter::with_header(file.reopen().unwrap(), header).unwrap();
-        w.write_packet(&PcapPacket::new(Duration::from_secs(1), sll.len() as u32, &sll))
-            .unwrap();
+        w.write_packet(&PcapPacket::new(
+            Duration::from_secs(1),
+            sll.len() as u32,
+            &sll,
+        ))
+        .unwrap();
         drop(w);
         let mut src = AsyncPcapSource::open(file.path()).await.unwrap();
         let p = src.next().await.unwrap().unwrap();

@@ -1,7 +1,8 @@
 //! `Conversation` aggregate demo.
 //!
-//! Captures live, yields one async iterator per flow that emits
-//! both directions' bytes plus a terminal Closed marker. Way less
+//! Captures live, yields one async iterator per TCP flow that emits
+//! both directions' reassembled bytes, the gaps capture loss left, and
+//! a terminal Closed marker with the flow's end reason. Way less
 //! boilerplate than `with_async_reassembler(channel_factory(...))`.
 //!
 //! Usage:
@@ -34,13 +35,15 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         tokio::spawn(async move {
             let mut init_bytes = 0u64;
             let mut resp_bytes = 0u64;
+            let mut lost = 0u64;
             while let Some(chunk) = conv.next_chunk().await {
                 match chunk {
                     ConversationChunk::Initiator(b) => init_bytes += b.len() as u64,
                     ConversationChunk::Responder(b) => resp_bytes += b.len() as u64,
+                    ConversationChunk::Gap { len, .. } => lost += len,
                     ConversationChunk::Closed { reason } => {
                         eprintln!(
-                            "← flow {} <-> {}  closed={reason:?}  init_bytes={init_bytes}  resp_bytes={resp_bytes}",
+                            "← flow {} <-> {}  closed={reason:?}  init_bytes={init_bytes}  resp_bytes={resp_bytes}  lost={lost}",
                             key.a, key.b
                         );
                         break;

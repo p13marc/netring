@@ -21,9 +21,7 @@ use flowscope::SessionEvent;
 use crate::Capture;
 use crate::async_adapters::datagram_stream::DatagramStream;
 use crate::async_adapters::flow_source::{AsyncFlowSource, DrainOutcome, SourcePacket};
-use crate::async_adapters::flow_stream::{
-    FlowStream, NoReassembler, clamp_now, clamp_view, current_timestamp,
-};
+use crate::async_adapters::flow_stream::{FlowStream, clamp_now, clamp_view, current_timestamp};
 use crate::async_adapters::session_stream::SessionStream;
 use crate::async_adapters::tokio_adapter::AsyncCapture;
 use crate::dedup::Dedup;
@@ -116,14 +114,7 @@ pub struct MultiFlowStream<E>
 where
     E: FlowExtractor,
 {
-    select: SelectState<
-        FlowStream<
-            crate::async_adapters::tokio_adapter::AsyncCapture<Capture>,
-            E,
-            (),
-            NoReassembler,
-        >,
-    >,
+    select: SelectState<FlowStream<crate::async_adapters::tokio_adapter::AsyncCapture<Capture>, E>>,
     labels: Vec<String>,
 }
 
@@ -146,12 +137,7 @@ where
         I: IntoIterator<
             Item = (
                 String,
-                FlowStream<
-                    crate::async_adapters::tokio_adapter::AsyncCapture<Capture>,
-                    E,
-                    (),
-                    NoReassembler,
-                >,
+                FlowStream<crate::async_adapters::tokio_adapter::AsyncCapture<Capture>, E>,
             ),
         >,
     {
@@ -322,7 +308,7 @@ pub struct XdpMultiFlowStream<E>
 where
     E: FlowExtractor,
 {
-    select: SelectState<FlowStream<crate::AsyncXdpCapture, E, (), NoReassembler>>,
+    select: SelectState<FlowStream<crate::AsyncXdpCapture, E>>,
     labels: Vec<String>,
 }
 

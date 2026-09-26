@@ -44,7 +44,7 @@ use tokio::sync::broadcast;
 use tokio_stream::wrappers::BroadcastStream;
 use tokio_stream::wrappers::errors::BroadcastStreamRecvError;
 
-use crate::async_adapters::flow_stream::{FlowStream, NoReassembler};
+use crate::async_adapters::flow_stream::FlowStream;
 use crate::traits::PacketSource;
 
 /// Multi-subscriber broadcast handle for [`FlowStream`] events.
@@ -113,9 +113,9 @@ impl<K: Send + Sync + 'static> Stream for FlowSubscriber<K> {
     }
 }
 
-// ── Conversion entry point on FlowStream<NoReassembler> ──────────────
+// ── Conversion entry point on FlowStream ─────────────────────────────
 
-impl<S, E> FlowStream<crate::async_adapters::tokio_adapter::AsyncCapture<S>, E, (), NoReassembler>
+impl<S, E> FlowStream<crate::async_adapters::tokio_adapter::AsyncCapture<S>, E>
 where
     S: PacketSource + std::os::unix::io::AsRawFd + Send + Unpin + 'static,
     E: FlowExtractor + Unpin + Send + 'static,

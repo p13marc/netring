@@ -88,7 +88,7 @@ pub(crate) mod syscall;
 // Promote the most common types to the crate root so users can write
 // `use netring::Capture;` rather than `use netring::afpacket::rx::Capture;`.
 
-pub use afpacket::rx::{Capture, CaptureBuilder, Packets};
+pub use afpacket::rx::{Capture, CaptureBuilder, Packets, StopHandle};
 pub use afpacket::tx::{Injector, InjectorBuilder, TxSlot};
 pub use bridge::{
     Bridge, BridgeAction, BridgeBuilder, BridgeDirection, BridgeHandles, BridgeStats,

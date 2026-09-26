@@ -62,6 +62,102 @@ pub struct Capture {
     /// [`busy_poll_config`](Self::busy_poll_config). Empty (all
     /// `None`) when no busy-poll knobs were set.
     busy_poll: BusyPollConfig,
+    /// Created by [`Capture::stop_handle`]; polled with the socket.
+    stop: Option<std::sync::Arc<StopSignal>>,
+}
+
+/// The eventfd behind [`StopHandle`].
+#[derive(Debug)]
+struct StopSignal {
+    fd: OwnedFd,
+    stopped: std::sync::atomic::AtomicBool,
+}
+
+impl StopSignal {
+    fn new() -> Result<Self, Error> {
+        // SAFETY: plain eventfd(2); the returned fd is owned below.
+        let fd = unsafe { libc::eventfd(0, libc::EFD_CLOEXEC | libc::EFD_NONBLOCK) };
+        if fd < 0 {
+            return Err(Error::Io(std::io::Error::last_os_error()));
+        }
+        // SAFETY: `fd` is a fresh, valid descriptor we own.
+        let fd = unsafe { <OwnedFd as std::os::fd::FromRawFd>::from_raw_fd(fd) };
+        Ok(Self {
+            fd,
+            stopped: std::sync::atomic::AtomicBool::new(false),
+        })
+    }
+
+    fn raise(&self) {
+        self.stopped
+            .store(true, std::sync::atomic::Ordering::SeqCst);
+        let one: u64 = 1;
+        // SAFETY: 8-byte write to an eventfd we own. A failure (the
+        // counter saturated) still leaves it readable, i.e. raised.
+        unsafe {
+            libc::write(
+                self.fd.as_raw_fd(),
+                (&one as *const u64).cast(),
+                std::mem::size_of::<u64>(),
+            )
+        };
+    }
+
+    fn is_raised(&self) -> bool {
+        self.stopped.load(std::sync::atomic::Ordering::SeqCst)
+    }
+
+    fn clear(&self) {
+        let mut v: u64 = 0;
+        // SAFETY: 8-byte read from a non-blocking eventfd we own.
+        unsafe {
+            libc::read(
+                self.fd.as_raw_fd(),
+                (&mut v as *mut u64).cast(),
+                std::mem::size_of::<u64>(),
+            )
+        };
+        self.stopped
+            .store(false, std::sync::atomic::Ordering::SeqCst);
+    }
+}
+
+/// Stops a [`Capture`]'s blocking reads from another thread (issue
+/// #146). Returned by [`Capture::stop_handle`]; clone it freely.
+///
+/// [`stop`](Self::stop) wakes a thread blocked in
+/// [`Packets::next_packet`], [`Packets::for_each`] or
+/// [`Capture::next_batch_blocking`] immediately (an eventfd is polled
+/// alongside the socket): `next_packet` returns `None`, `for_each`
+/// returns, `next_batch_blocking` returns `Ok(None)` — and keep doing
+/// so until [`Capture::clear_stop`].
+///
+/// ```no_run
+/// # fn f() -> Result<(), netring::Error> {
+/// let mut cap = netring::Capture::open("eth0")?;
+/// let stop = cap.stop_handle()?;
+/// std::thread::spawn(move || {
+///     std::thread::sleep(std::time::Duration::from_secs(30));
+///     stop.stop();
+/// });
+/// cap.packets().for_each(|pkt| { let _ = pkt.len(); });
+/// # Ok(()) }
+/// ```
+#[derive(Debug, Clone)]
+pub struct StopHandle {
+    signal: std::sync::Arc<StopSignal>,
+}
+
+impl StopHandle {
+    /// Ask the capture to stop reading. Idempotent.
+    pub fn stop(&self) {
+        self.signal.raise();
+    }
+
+    /// Whether a stop was requested (and not cleared).
+    pub fn is_stopped(&self) -> bool {
+        self.signal.is_raised()
+    }
 }
 
 impl Capture {
@@ -293,10 +389,15 @@ impl Capture {
     ///
     /// EINTR is handled internally — callers see `Ok(None)` on timeout, not
     /// a spurious error from a signal interrupting the underlying `poll(2)`.
+    /// Also returns `Ok(None)` right away once a stop was requested
+    /// through a [`StopHandle`].
     pub fn next_batch_blocking(
         &mut self,
         timeout: Duration,
     ) -> Result<Option<PacketBatch<'_>>, Error> {
+        if self.stop_requested() {
+            return Ok(None);
+        }
         // Check if a batch is already available (non-blocking).
         {
             let bd = self.ring.block_ptr(self.current_block);
@@ -306,13 +407,53 @@ impl Capture {
             }
         }
 
-        let mut pfds = [nix::poll::PollFd::new(
-            self.fd.as_fd(),
-            nix::poll::PollFlags::POLLIN,
-        )];
-        crate::syscall::poll_eintr_safe(&mut pfds, timeout).map_err(Error::Io)?;
-
+        match self.stop.as_ref() {
+            None => {
+                let mut pfds = [nix::poll::PollFd::new(
+                    self.fd.as_fd(),
+                    nix::poll::PollFlags::POLLIN,
+                )];
+                crate::syscall::poll_eintr_safe(&mut pfds, timeout).map_err(Error::Io)?;
+            }
+            Some(stop) => {
+                let mut pfds = [
+                    nix::poll::PollFd::new(self.fd.as_fd(), nix::poll::PollFlags::POLLIN),
+                    nix::poll::PollFd::new(stop.fd.as_fd(), nix::poll::PollFlags::POLLIN),
+                ];
+                crate::syscall::poll_eintr_safe(&mut pfds, timeout).map_err(Error::Io)?;
+            }
+        }
+        if self.stop_requested() {
+            return Ok(None);
+        }
         Ok(self.next_batch())
+    }
+
+    /// A handle that stops blocking reads on this capture from another
+    /// thread (see [`StopHandle`]). Creates the eventfd on first call;
+    /// later calls return handles to the same signal.
+    pub fn stop_handle(&mut self) -> Result<StopHandle, Error> {
+        let signal = match &self.stop {
+            Some(s) => std::sync::Arc::clone(s),
+            None => {
+                let s = std::sync::Arc::new(StopSignal::new()?);
+                self.stop = Some(std::sync::Arc::clone(&s));
+                s
+            }
+        };
+        Ok(StopHandle { signal })
+    }
+
+    /// Whether a stop was requested through a [`StopHandle`].
+    pub fn stop_requested(&self) -> bool {
+        self.stop.as_ref().is_some_and(|s| s.is_raised())
+    }
+
+    /// Re-arm after a stop: reads block again.
+    pub fn clear_stop(&mut self) {
+        if let Some(s) = &self.stop {
+            s.clear();
+        }
     }
 }
 
@@ -445,8 +586,57 @@ impl<'cap> Packets<'cap> {
     /// let _ = (a, b);
     /// # }
     /// ```
+    ///
+    /// Blocks until a packet arrives, the deadline passes, a stop is
+    /// requested through a [`StopHandle`], or an error occurs (see
+    /// [`take_error`](Self::take_error)); poll timeouts are retried.
+    /// Use [`next_packet_timeout`](Self::next_packet_timeout) to get
+    /// control back on every poll timeout instead.
     pub fn next_packet(&mut self) -> Option<Packet<'_>> {
+        self.next_inner(true)
+    }
+
+    /// Like [`next_packet`](Self::next_packet), but returns `Ok(None)`
+    /// when a poll times out (after the capture's `poll_timeout`), the
+    /// deadline passes, or a stop is requested — so the caller can
+    /// check its own stop flag or deadline on an idle interface
+    /// (issue #146). Errors are returned, not stashed.
+    ///
+    /// ```no_run
+    /// # use std::sync::atomic::{AtomicBool, Ordering};
+    /// # fn f(cap: &mut netring::Capture, shutdown: &AtomicBool) -> Result<(), netring::Error> {
+    /// let mut pkts = cap.packets();
+    /// while !shutdown.load(Ordering::Relaxed) {
+    ///     if let Some(pkt) = pkts.next_packet_timeout()? {
+    ///         let _ = pkt.len();
+    ///     }
+    /// }
+    /// # Ok(()) }
+    /// ```
+    pub fn next_packet_timeout(&mut self) -> Result<Option<Packet<'_>>, Error> {
+        let this: *mut Self = self;
+        // SAFETY: reborrow through a raw pointer to work around the
+        // borrow checker's conditional-return limitation: the `Some`
+        // arm returns the packet bound to this call's `&mut self`, and
+        // the `None` arm touches `self` only when no packet exists.
+        match unsafe { (*this).next_inner(false) } {
+            Some(pkt) => Ok(Some(pkt)),
+            None => match self.last_error.take() {
+                Some(e) => Err(e),
+                None => Ok(None),
+            },
+        }
+    }
+
+    /// The body of [`next_packet`](Self::next_packet): `retry` keeps
+    /// waiting across poll timeouts. Errors land in `last_error`.
+    fn next_inner(&mut self, retry: bool) -> Option<Packet<'_>> {
         loop {
+            // SAFETY: see below — `cap` outlives every `Packets`.
+            if unsafe { (*self.cap).stop_requested() } {
+                self.drop_batch();
+                return None;
+            }
             if let Some(it) = self.iter.as_mut() {
                 if let Some(pkt) = it.next() {
                     // SAFETY: `pkt` borrows the `'static`-erased batch stored in
@@ -501,7 +691,8 @@ impl<'cap> Packets<'cap> {
                     let iter_erased: BatchIter<'static> = unsafe { std::mem::transmute(iter) };
                     self.iter = Some(iter_erased);
                 }
-                Ok(None) => continue,
+                Ok(None) if retry => continue,
+                Ok(None) => return None,
                 Err(e) => {
                     self.last_error = Some(e);
                     return None;
@@ -510,9 +701,11 @@ impl<'cap> Packets<'cap> {
         }
     }
 
-    /// Process every packet (until the deadline / a spurious empty wake ends
-    /// the run) with a closure — ergonomic internal iteration that keeps the
-    /// zero-copy borrow without the lending-loop boilerplate. The closure
+    /// Process every packet — until the deadline passes, a stop is
+    /// requested through a [`StopHandle`], or an error occurs (see
+    /// [`take_error`](Self::take_error)); poll timeouts are waited
+    /// through — with a closure: ergonomic internal iteration that keeps
+    /// the zero-copy borrow without the lending-loop boilerplate. The closure
     /// receives each [`Packet`] bounded to that call, so it can read or
     /// [`to_owned`](Packet::to_owned) it but not retain the borrow.
     ///
@@ -942,12 +1135,53 @@ fn build_inner(b: &CaptureBuilder, block_count: usize) -> Result<Capture, Error>
         poll_timeout: b.poll_timeout,
         cumulative: Cell::new(CaptureStats::default()),
         busy_poll,
+        stop: None,
     })
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn readable(sig: &StopSignal, timeout_ms: i32) -> bool {
+        let mut pfd = libc::pollfd {
+            fd: sig.fd.as_raw_fd(),
+            events: libc::POLLIN,
+            revents: 0,
+        };
+        // SAFETY: one valid pollfd.
+        let n = unsafe { libc::poll(&mut pfd, 1, timeout_ms) };
+        n == 1 && pfd.revents & libc::POLLIN != 0
+    }
+
+    /// #146: raising the stop signal makes its eventfd readable (so a
+    /// thread polling it with the socket wakes at once) from another
+    /// thread; clearing re-arms it.
+    #[test]
+    fn stop_signal_wakes_poll_and_clears() {
+        let sig = std::sync::Arc::new(StopSignal::new().unwrap());
+        let handle = StopHandle {
+            signal: std::sync::Arc::clone(&sig),
+        };
+        assert!(!handle.is_stopped());
+        assert!(!readable(&sig, 0));
+        let t = std::thread::spawn({
+            let h = handle.clone();
+            move || {
+                std::thread::sleep(std::time::Duration::from_millis(20));
+                h.stop();
+            }
+        });
+        let start = std::time::Instant::now();
+        assert!(readable(&sig, 5_000), "woken by stop()");
+        assert!(start.elapsed() < std::time::Duration::from_secs(4));
+        t.join().unwrap();
+        assert!(handle.is_stopped());
+        handle.stop(); // idempotent
+        sig.clear();
+        assert!(!handle.is_stopped());
+        assert!(!readable(&sig, 0), "cleared");
+    }
 
     #[test]
     fn builder_rejects_missing_interface() {

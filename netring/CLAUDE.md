@@ -20,7 +20,8 @@ built on AF_PACKET with TPACKET_V3 (block-based mmap ring buffers) and AF_XDP.
 
 ## Implementation Status
 
-**0.31.0 — unreleased** (breaking; `docs/MIGRATING_0.30_TO_0.31.md`).
+**0.31.0 — RELEASED 2026-09-26** (published to crates.io, tag `0.31.0`,
+alongside **`netring-exporters` 0.7.0**; breaking; `docs/MIGRATING_0.30_TO_0.31.md`).
 "flowscope 0.25: one session engine". Depends on **flowscope 0.25**
 (published to crates.io 2026-09-26; no `[patch.crates-io]`).
 Driven by a downstream report (des-capture) against 0.30.0.

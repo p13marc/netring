@@ -1,6 +1,6 @@
 # Changelog
 
-## 0.31.0 — unreleased — flowscope 0.25: one session engine
+## 0.31.0 — 2026-09-26 — flowscope 0.25: one session engine
 
 Depends on **flowscope 0.25** (session-engine redesign, published
 2026-09-26). `netring-exporters` → **0.7.0** (dependency bump, no API

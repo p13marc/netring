@@ -275,3 +275,34 @@ async fn sink_is_flushed_without_a_drain_phase() {
         .unwrap();
     assert!(flushes.load(Ordering::SeqCst) >= 1);
 }
+
+/// Tick handlers run on replay, on packet time (they never ran there):
+/// one per period of capture time, stamped with the scheduled time, a
+/// long silence costing one tick rather than a backlog.
+#[tokio::test(flavor = "current_thread")]
+async fn ticks_run_on_packet_time_during_replay() {
+    // Packets at 1..=5 s, then one at 100 s.
+    let mut frames: Vec<_> = (1..=5).map(|s| udp(5000, s)).collect();
+    frames.push(udp(5000, 100));
+    let file = pcap(&frames);
+    let ticks = Arc::new(Mutex::new(Vec::new()));
+    let t = Arc::clone(&ticks);
+    Monitor::builder()
+        .pcap_source(file.path())
+        .protocol::<Udp>()
+        .tick_ctx(
+            Duration::from_secs(1),
+            move |ctx: &mut netring::ctx::Ctx<'_>| {
+                t.lock().unwrap().push(ctx.ts.sec);
+                Ok(())
+            },
+        )
+        .build()
+        .unwrap()
+        .replay()
+        .await
+        .unwrap();
+    // Armed at 1 s: due at 2, 3, 4, 5 (before the packets at those
+    // times), then once for the 95 s gap.
+    assert_eq!(*ticks.lock().unwrap(), vec![2, 3, 4, 5, 6]);
+}

@@ -441,6 +441,12 @@ pub(crate) async fn run_loop(monitor: Monitor, stop: StopCondition) -> Result<()
                     // dead air. Without this, a 1s idle timeout +
                     // 500ms tick handler would never resolve.
                     last_event_at = Instant::now();
+                    // Packet time (the clock of every event's `ctx.ts`,
+                    // so time-bound state lines up), wall time before
+                    // the first packet.
+                    let now = packet_clock.now().unwrap_or_else(|| {
+                        flowscope::Timestamp::from_system_time(SystemTime::now())
+                    });
                     fire_tick(
                         tick_idx,
                         &mut tick_handlers,
@@ -451,6 +457,7 @@ pub(crate) async fn run_loop(monitor: Monitor, stop: StopCondition) -> Result<()
                         monitor_name_borrow,
                         &mut flow_states,
                         &label_table,
+                        now,
                     )
                     .await?;
                     // 0.24 Phase C4: a tick is progress too — keeps liveness
@@ -870,7 +877,7 @@ pub(crate) async fn replay_loop(
         mut state_map,
         mut counters,
         mut sink,
-        tick_handlers: _,
+        mut tick_handlers,
         detector_names: _,
         monitor_name,
         drain_timeout,
@@ -928,6 +935,9 @@ pub(crate) async fn replay_loop(
     // Replay sweeps on packet time, every `sweep_interval` of it.
     let sweep_interval = driver.tracker().config().sweep_interval;
     let mut last_sweep: Option<flowscope::Timestamp> = None;
+    // Tick handlers run on packet time too: next due time per handler,
+    // armed by the first packet.
+    let mut tick_due: Vec<Option<std::time::Duration>> = vec![None; tick_handlers.len()];
     // 0.25 A1: packet-tier dispatch also runs on offline replay.
     let pkt_extractor = packet_field_extractor();
 
@@ -980,6 +990,39 @@ pub(crate) async fn replay_loop(
                     None,
                 )
                 .await?;
+            }
+
+            // Ticks that fell due before this packet, at their
+            // scheduled time; missed ones are skipped (like the live
+            // interval), so a long silence costs one tick, not many.
+            let now_d = now.to_duration();
+            for (i, due) in tick_due.iter_mut().enumerate() {
+                let period = tick_handlers[i].period;
+                if period.is_zero() {
+                    continue;
+                }
+                match *due {
+                    None => *due = Some(now_d + period),
+                    Some(d) if d <= now_d => {
+                        fire_tick(
+                            i,
+                            &mut tick_handlers,
+                            &mut dispatcher,
+                            sink.as_mut(),
+                            &mut state_map,
+                            &mut counters,
+                            monitor_name_borrow,
+                            &mut flow_states,
+                            &label_table,
+                            flowscope::Timestamp::new(d.as_secs() as u32, d.subsec_nanos()),
+                        )
+                        .await?;
+                        let steps = (now_d - d).as_nanos() / period.as_nanos() + 1;
+                        let ahead = (period.as_nanos() * steps).min(u64::MAX as u128) as u64;
+                        *due = Some(d + std::time::Duration::from_nanos(ahead));
+                    }
+                    Some(_) => {}
+                }
             }
 
             let view = flowscope::PacketView::new(&pkt.data, pkt.timestamp);
@@ -1883,10 +1926,11 @@ async fn fire_tick(
     monitor_name: Option<&str>,
     flow_states: &mut crate::ctx::FlowStateRegistry,
     label_table: &flowscope::well_known::LabelTable,
+    now: flowscope::Timestamp,
 ) -> Result<()> {
     let reg = &mut tick_handlers[tick_idx];
     let tick = Tick {
-        now: flowscope::Timestamp::from_system_time(SystemTime::now()),
+        now,
         period: reg.period,
     };
     {

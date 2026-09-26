@@ -1440,6 +1440,7 @@ dependencies = [
  "ldap-parser",
  "lru",
  "md-5",
+ "pcap-file",
  "quic-parser",
  "radius-parser",
  "serde",

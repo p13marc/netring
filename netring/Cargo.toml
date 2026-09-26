@@ -110,7 +110,7 @@ af-xdp = []
 # Lets `XdpSocketBuilder::with_default_program()` create an XSKMAP, load the
 # program, attach it, and register the socket — no external loader required.
 xdp-loader = ["af-xdp", "dep:aya"]
-pcap = ["dep:pcap-file"]
+pcap = ["dep:pcap-file", "flowscope/pcap-reader"]
 
 # ── Axis: parse depth (parse → flow → L7 parsers) ────────────────────────────
 parse = ["dep:etherparse", "flowscope/extractors"]

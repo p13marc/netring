@@ -17,10 +17,12 @@
 //!   the flow exactly as it would have live — `idle_timeout_fn`
 //!   included. The end of the file flushes every remaining flow.
 //! - [`with_dedup`](PcapFlowStream::with_dedup) drops duplicate frames
-//!   before tracking. Capture files carry no packet direction, so use
-//!   a direction-agnostic [`Dedup::content`](crate::Dedup::content) —
-//!   e.g. for merged multi-interface captures, or raw AF_PACKET dumps
-//!   of `lo` (libpcap/tcpdump already drop `lo`'s outgoing copy).
+//!   before tracking. The packet direction is known when the capture
+//!   recorded it (pcapng EPB flags, Linux cooked `tcpdump -i any`
+//!   captures), so [`Dedup::loopback`](crate::Dedup::loopback) works on
+//!   those; otherwise use a direction-agnostic
+//!   [`Dedup::content`](crate::Dedup::content) — e.g. for merged
+//!   multi-interface captures.
 //! - [`with_monotonic_timestamps`](PcapFlowStream::with_monotonic_timestamps)
 //!   clamps timestamps to a running max — for merged captures whose
 //!   interfaces interleave out of order, or `loop_at_eof` replays.
@@ -132,9 +134,10 @@ impl Replay {
 
 macro_rules! replay_builders {
     () => {
-        /// Drop duplicate frames before tracking. Capture files carry
-        /// no packet direction: use a direction-agnostic
-        /// [`Dedup::content`](crate::Dedup::content).
+        /// Drop duplicate frames before tracking. The direction-aware
+        /// [`Dedup::loopback`](crate::Dedup::loopback) needs a capture
+        /// that recorded it (pcapng EPB flags, Linux cooked); otherwise
+        /// use [`Dedup::content`](crate::Dedup::content).
         pub fn with_dedup(mut self, dedup: Dedup) -> Self {
             self.replay.dedup = Some(dedup);
             self

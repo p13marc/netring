@@ -1,5 +1,74 @@
 # Changelog
 
+## 0.31.1 — unreleased — mixed-source fan-ins, Monitor dedup, flowscope 0.25.1
+
+Patch release, additive. Follow-ups from des-capture's move to 0.31.0
+(milestone "0.31.1 — des-capture upgrade follow-ups"). Depends on
+**flowscope 0.25.1**; `netring-exporters` stays 0.7.0 (its
+`netring = "0.31"` dependency resolves 0.31.1).
+
+### Added
+
+- **`MultiSource`** (#176, #177): every source stream — `FlowStream`,
+  `SessionStream`, `DatagramStream` over AF_PACKET or AF_XDP, and the
+  three `Pcap*Stream`s — hands back its tracker, live flow snapshots,
+  dedup and ring / file counters through one sealed trait, and the
+  `Multi*Stream` fan-ins expose it per source: `source(idx)` /
+  `source_mut(idx)`, `is_alive(idx)`, `len` / `is_empty`,
+  `per_source_snapshot_flow_stats()`. The accessors need only the
+  struct bounds now (a fan-in built with `from_streams` from a
+  non-`Clone` factory can use them).
+- **Sources of any kind on the fan-ins** (#177): `Multi*Stream::empty()`
+  + `push_source(label, stream)` / `with_source` accept any
+  `MultiSource` stream of the fan-in's event type — an AF_PACKET or
+  AF_XDP live stream, a pcap replay — so one `MultiSessionStream<E, F>`
+  serves a live multi-interface run and a `--read capture.pcap` run
+  through the same event loop. A finished source (a replay at
+  end-of-file) is kept with its final counters readable.
+  `XdpMultiSessionStream` / `XdpMultiDatagramStream::capture_stats()`;
+  `MergedFlowStream::{dedup, dedup_mut}`; example
+  `scaling/async_mixed_sources`; scaling.md recipes.
+- **Monitor packet dedup** (#178): `MonitorBuilder::dedup(Dedup)` /
+  `dedup_loopback()` — per-capture-source duplicate filtering before
+  packet subscriptions, the L2 watchers, the byte accumulators,
+  IP-fragment reassembly and the tracker, on the live loop and on
+  `replay()`. Without it a Monitor on `lo` counted every packet twice
+  (doubled `FlowEnded` stats and bandwidth, spurious
+  `RetransmittedSegment` / `retransmits_*`, a phantom flow after the
+  duplicated FIN exchange). `CaptureTelemetry::dedup_dropped` /
+  `CaptureHealth::dedup_dropped`; `netring_capture_dedup_dropped`
+  gauge.
+
+### Changed
+
+- flowscope 0.25 → **0.25.1** (#179).
+- `Multi*Stream::per_source_capture_stats`: `None` now means "no kernel
+  ring" (a replay source); `per_source_tracker_stats` is always `Some`
+  — finished sources are kept instead of dropped.
+
+### Fixed
+
+- The fan-ins' select loop returned `Pending` without a registered
+  waker when its last source finished, parking the stream until an
+  unrelated wake-up (invisible before 0.31.1: live sources never end).
+- `publish-crates.yml` skips a workspace member whose exact version is
+  already on crates.io, so a netring-only patch no longer fails on
+  `netring-exporters` (#179).
+
+### Docs
+
+- Monitor `ParserClosed<P>` fires at flow end as well as on an early
+  parser stop; `EndReason::is_transport()` / `is_parser()` (flowscope
+  0.25.1) tell the two apart. The streams' `SessionEvent::ParserClosed`
+  never fires for the flow's own end (#179).
+
+### Tests
+
+- `tests/multi_source_replay.rs`, in-crate `mixed_source_tests`,
+  privileged `live_and_replay_share_one_multi_session_stream`;
+  `tests/monitor_dedup_replay.rs`, privileged `tests/monitor_lo_dedup.rs`;
+  the allocation gate covers a dedup-armed Monitor (0 per packet).
+
 ## 0.31.0 — 2026-09-26 — flowscope 0.25: one session engine
 
 Depends on **flowscope 0.25** (session-engine redesign, published

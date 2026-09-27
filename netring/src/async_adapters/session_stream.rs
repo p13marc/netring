@@ -15,7 +15,10 @@
 //!   [`SessionEvent::ParserClosed`] with [`EndReason::ParseError`](flowscope::EndReason::ParseError) /
 //!   [`EndReason::ParserDone`](flowscope::EndReason::ParserDone) and its reason in `detail` — and never
 //!   fed again for that flow. The flow stays tracked and ends later
-//!   with [`SessionEvent::Closed`].
+//!   with [`SessionEvent::Closed`]. Unlike the Monitor's
+//!   `ParserClosed<P>`, the stream's `ParserClosed` never fires for the
+//!   flow's own end (`Closed` is that): its reason always satisfies
+//!   [`EndReason::is_parser`](flowscope::EndReason::is_parser).
 //! - Bytes that never arrived are reported to the parser through
 //!   [`SessionParser::on_gap`]; the default answer closes it with
 //!   [`EndReason::StreamGap`](flowscope::EndReason::StreamGap).

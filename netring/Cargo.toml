@@ -23,7 +23,7 @@ exclude = ["CLAUDE.md", "SPEC.md"]
 # pulls only `bitflags` + `thiserror` — both already in netring's tree.
 # The `parse` feature additionally enables `flowscope/extractors`,
 # `flow` enables `tracker`/`reassembler`/`session`.
-flowscope = { version = "0.25", default-features = false }
+flowscope = { version = "0.25.1", default-features = false }
 
 libc = { workspace = true }
 nix = { workspace = true }
@@ -75,7 +75,7 @@ arc-swap = "1"
 # `#[non_exhaustive]` (since 0.22), so tests synthesize them via
 # `flowscope::test_helpers` (behind flowscope's `test-helpers` feature) rather
 # than struct literals.
-flowscope = { version = "0.25", default-features = false, features = ["test-helpers"] }
+flowscope = { version = "0.25.1", default-features = false, features = ["test-helpers"] }
 env_logger = "0.11"
 tempfile = "3"
 divan = "0.1"

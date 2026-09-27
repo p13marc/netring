@@ -168,9 +168,10 @@ impl AsyncReassembler for Mine {
   protocol's parser; `ParserClosed<Tcp>` / `<Udp>` / `<Icmp>` still
   fire for every parser on the transport. It fires once per (parser,
   flow): early, with the stop reason (the flow goes on), or right
-  before `FlowEnded` with the flow's reason. New
-  `ParserSideStopped<P>`, routed the same way. `ParserClosed::new` takes
-  `detail`.
+  before `FlowEnded` with the flow's reason — `reason.is_parser()` /
+  `is_transport()` (flowscope 0.25.1, netring 0.31.1) tell the two
+  apart. New `ParserSideStopped<P>`, routed the same way.
+  `ParserClosed::new` takes `detail`.
 - **Anomalies.** Registering an `AnyFlowAnomaly` handler turns
   flowscope's anomalies on; `MonitorBuilder::emit_anomalies(bool)`
   forces it either way. `emit_packet_details(true)` fills

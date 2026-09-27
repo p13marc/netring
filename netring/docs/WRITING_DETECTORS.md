@@ -179,7 +179,7 @@ tap) makes interesting.
 | Event | When | What it means for your detector |
 |---|---|---|
 | `AnyFlowAnomaly` | reassembly gaps, retransmissions with different bytes, out-of-window segments, buffer / memcap limits, eviction pressure | registering a handler turns anomaly reporting on (`MonitorBuilder::emit_anomalies` to force it either way) |
-| `ParserClosed<P>` | once per (parser, flow): early when the parser stopped — malformed input (`ParseError`), finished (`ParserDone`), a gap it can't bridge (`StreamGap`) — or, at the flow's end, right before `FlowEnded` with the flow's reason | after an early close: no more `P` messages from this flow, though the flow continues |
+| `ParserClosed<P>` | once per (parser, flow): early when the parser stopped — malformed input (`ParseError`), finished (`ParserDone`), a gap it can't bridge (`StreamGap`) — or, at the flow's end, right before `FlowEnded` with the flow's reason; `reason.is_parser()` / `is_transport()` (flowscope 0.25.1) tell the two apart | after an early close (`reason.is_parser()`): no more `P` messages from this flow, though the flow continues |
 | `ParserSideStopped<P>` | `P`'s parser stopped reading **one side** (a gap, or that side's buffer cap) | the other side is still parsed |
 
 `ParserClosed<Http>` reaches the HTTP parser's protocol (0.31 — it
@@ -323,7 +323,9 @@ reports exactly what a lossy tap would produce.
 2. **The parser gave up.** Add a `ParserClosed<P>` /
    `ParserSideStopped<P>` handler and an `AnyFlowAnomaly` handler:
    malformed input, a gap, or a buffer cap stops the messages you are
-   waiting for.
+   waiting for. Filter the close on `e.reason.is_parser()` — at the
+   flow's end every parser still open gets a `ParserClosed<P>` with the
+   flow's transport reason, which is not a failure.
 3. **Time.** Counters and `KeyIndexed` take the *event* timestamp
    (`ctx.ts`); mixing in wall-clock time breaks replay. Ticks carry
    packet time too (live: the packet clock; replay: scheduled on

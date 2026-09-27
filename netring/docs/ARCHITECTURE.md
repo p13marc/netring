@@ -259,8 +259,9 @@ today users pipe per-shard `OwnedAnomaly`s through a
 
 **Graceful drain.** `MonitorBuilder::drain_timeout(d)` budgets
 a final-events sweep after the shutdown signal: any in-flight
-flow emits its `FlowEnded` (or `ParserClosed`) lifecycle event
-before the runtime exits. Without `drain_timeout`, shutdown
+flow emits its `FlowEnded` lifecycle event (preceded by one
+`ParserClosed<P>` per parser still open on it, with the same
+transport reason) before the runtime exits. Without `drain_timeout`, shutdown
 returns as soon as the signal arrives.
 
 **Pcap replay.** `MonitorBuilder::pcap_source(path)` swaps the

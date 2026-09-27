@@ -16,7 +16,10 @@
 //!   sender), whatever the address order.
 //! - A parser that reports `is_poisoned()` / `is_done()` is closed
 //!   ([`SessionEvent::ParserClosed`]) and never fed again for that
-//!   flow; the flow ends later with [`SessionEvent::Closed`].
+//!   flow; the flow ends later with [`SessionEvent::Closed`] — the
+//!   stream never emits a `ParserClosed` for the flow's own end
+//!   (`reason.is_parser()` always holds), unlike the Monitor's
+//!   `ParserClosed<P>`.
 //!
 //! ```no_run
 //! # use futures::StreamExt;

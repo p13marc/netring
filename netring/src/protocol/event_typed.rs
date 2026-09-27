@@ -601,6 +601,18 @@ impl<P: Protocol> std::fmt::Debug for FlowTick<P> {
 /// [`Self::detail`] says why. At the flow's end `reason` is the flow's
 /// end reason and the close comes right before [`FlowEnded`].
 ///
+/// [`EndReason::is_parser`] / [`EndReason::is_transport`] (flowscope
+/// 0.25.1) tell the two apart — the test for "the parser gave up":
+///
+/// ```ignore
+/// .on::<ParserClosed<Http>>(|e: &ParserClosed<Http>| {
+///     if e.reason.is_parser() {
+///         // malformed input, finished, or a gap: no more Http from this flow
+///     }
+///     Ok(())
+/// })
+/// ```
+///
 /// Distinct from [`FlowEnded`]: this fires per (parser, flow).
 /// Routed to the parser's own protocol — `ParserClosed<Http>` fires
 /// for the HTTP parser only — and to the flow's transport marker:
@@ -680,7 +692,9 @@ impl<P: Protocol> std::fmt::Debug for ParserClosed<P> {
 /// it cannot bridge ([`EndReason::StreamGap`]) or a reassembly limit
 /// on that side ([`EndReason::BufferOverflow`]). The other side keeps
 /// being parsed; when both sides are stopped a [`ParserClosed`]
-/// follows. New in 0.31.0 (flowscope 0.25).
+/// follows. New in 0.31.0 (flowscope 0.25). `reason` is always a
+/// parser-level reason ([`EndReason::is_parser`]); unlike
+/// [`ParserClosed`] it never accompanies the flow's own end.
 ///
 /// Routed like [`ParserClosed`]: to the parser's own protocol `P`
 /// (`ParserSideStopped<Http>` for the HTTP parser), and to the

@@ -589,6 +589,47 @@ where
     }
 }
 
+// ── MultiSource (fan-in introspection, #176 / #177) ──────────────
+
+impl<C, E> crate::async_adapters::multi_source::Sealed for FlowStream<C, E, ()> where
+    E: FlowExtractor
+{
+}
+
+impl<C, E> crate::async_adapters::multi_source::MultiSource<E> for FlowStream<C, E, ()>
+where
+    C: AsyncFlowSource,
+    E: FlowExtractor,
+{
+    fn tracker(&self) -> &FlowTracker<E, ()> {
+        &self.tracker
+    }
+
+    fn snapshot_flow_stats(&self) -> Box<dyn Iterator<Item = (E::Key, flowscope::FlowStats)> + '_> {
+        Box::new(
+            self.tracker
+                .iter_active()
+                .map(|af| (af.key.clone(), af.stats.clone())),
+        )
+    }
+
+    fn dedup(&self) -> Option<&Dedup> {
+        self.dedup.as_ref()
+    }
+
+    fn dedup_mut(&mut self) -> Option<&mut Dedup> {
+        self.dedup.as_mut()
+    }
+
+    fn capture_stats(&self) -> Option<Result<crate::stats::CaptureStats, Error>> {
+        self.cap.capture_stats()
+    }
+
+    fn packets_read(&self) -> Option<u64> {
+        None
+    }
+}
+
 // ── StreamCapture trait impl ───────────────────────────────────────
 //
 // Restricted to the AF_PACKET source: `StreamCapture::capture()` returns a

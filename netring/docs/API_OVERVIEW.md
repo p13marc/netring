@@ -247,8 +247,13 @@ heartbeats, any time-driven L7 logic.
 
 `AsyncMultiCapture` fans in N AF_PACKET captures (multi-interface or
 per-CPU workers in a fanout group) and yields `TaggedEvent { source_idx, event }`.
-See [`docs/scaling.md`](scaling.md) for the recipe +
-`FanoutMode` decision matrix.
+Since 0.31.1 a `Multi*Stream` also takes sources of any kind —
+`empty()` + `push_source(label, stream)` with an AF_PACKET, AF_XDP or
+`Pcap*Stream` replay source of the same event type — and hands each one
+back through the `MultiSource` trait (`source(idx)`: tracker, live flow
+snapshots, dedup, ring / file counters;
+`per_source_snapshot_flow_stats()`). See [`docs/scaling.md`](scaling.md)
+for the recipes + `FanoutMode` decision matrix.
 
 ### Offline pcap (`pcap + flow` features)
 
@@ -259,6 +264,8 @@ See [`docs/scaling.md`](scaling.md) for the recipe +
 | [`PcapSessionStream<E, P>`](https://docs.rs/netring/latest/netring/struct.PcapSessionStream.html) | `SessionEvent<K, M>` | `source.sessions(ext, parser)` |
 | [`PcapDatagramStream<E, P>`](https://docs.rs/netring/latest/netring/struct.PcapDatagramStream.html) | `SessionEvent<K, M>` | `source.datagrams(ext, parser)` |
 
+Each `Pcap*Stream` is a `MultiSource`: push it into the matching
+`Multi*Stream` to replay through the same fan-in as live interfaces.
 Format (PCAP vs PCAPNG) is auto-detected at `open`. EOF flush via
 `Timestamp::MAX` so every still-open flow emits its terminal event.
 
@@ -310,6 +317,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 | `.fanout(mode, group_id)` | Bind to a `PACKET_FANOUT` group (use with `ShardedRunner`) |
 | `.pcap_source(path)` | Source from offline pcap instead of live capture |
 | `.pcap_speed_factor(f)` | Replay pacing multiplier (1.0 = wire, `f32::INFINITY` = as-fast) |
+| `.dedup(Dedup)` / `.dedup_loopback()` | **(0.31.1)** Drop duplicate frames per capture source before any handler (the `lo` twin problem); count in `CaptureTelemetry::dedup_dropped` |
 | `.drain_timeout(d)` | Graceful drain phase after shutdown signal |
 | `.subscribe(sub)` | **(0.25)** register a typed subscription (`packet()`/`flow::<P>()`/`session::<P>()`) — see below |
 | `.on_effect::<E>(handler)` | **(0.25)** async read+effect: `Fn(&Payload, &Ctx) -> impl Future<Output=Result<Effects>>` |

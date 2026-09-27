@@ -224,6 +224,14 @@ work without ceremony.
 
 ## Patterns
 
+### Live interfaces + pcap replay in one fan-in
+
+`MultiSessionStream::empty()` + `push_source` takes live AF_PACKET /
+AF_XDP session streams and `PcapSessionStream` replays alike, so one
+event loop serves both modes; `source(idx)` introspects each source.
+See [`docs/scaling.md`](scaling.md) → "Mixing live and replay sources"
+and `examples/scaling/async_mixed_sources.rs`.
+
 ### Capture → mpsc → workers
 
 The canonical fan-out pattern. One task captures, N workers process.

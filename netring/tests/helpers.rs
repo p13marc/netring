@@ -105,3 +105,125 @@ impl Drop for VethPair {
             .output();
     }
 }
+
+/// Synthetic captures for the replay (no-privilege) tests.
+#[cfg(all(
+    feature = "tokio",
+    feature = "flow",
+    feature = "pcap",
+    feature = "parse"
+))]
+pub mod pcap {
+    use std::path::{Path, PathBuf};
+    use std::time::Duration;
+
+    use flowscope::extract::parse::test_frames::{ipv4_tcp, ipv4_udp};
+    use pcap_file::pcap::{PcapHeader, PcapPacket, PcapWriter};
+    use pcap_file::{DataLink, Endianness, TsResolution};
+
+    pub const SYN: u8 = 0x02;
+    pub const ACK: u8 = 0x10;
+    pub const PSH: u8 = 0x08;
+    pub const FIN: u8 = 0x01;
+
+    /// Client 10.0.0.1:40000 → server 10.0.0.2:9000: handshake, the given
+    /// (offset, payload) client segments, FIN exchange. 1 ms apart from
+    /// t = 1 s.
+    pub fn flow(segments: &[(u32, Vec<u8>)]) -> Vec<(Duration, Vec<u8>)> {
+        flow_from(40_000, segments)
+    }
+
+    /// [`flow`] with the client port `cp` (distinct flows in one capture).
+    pub fn flow_from(cp: u16, segments: &[(u32, Vec<u8>)]) -> Vec<(Duration, Vec<u8>)> {
+        flow_to(cp, 9_000, segments)
+    }
+
+    /// [`flow`] with explicit client and server ports (`sp = 80` puts the
+    /// flow on the HTTP parser).
+    pub fn flow_to(cp: u16, sp: u16, segments: &[(u32, Vec<u8>)]) -> Vec<(Duration, Vec<u8>)> {
+        let (c, s) = ([10, 0, 0, 1], [10, 0, 0, 2]);
+        let (cisn, sisn) = (1000u32, 5000u32);
+        let m = [0u8; 6];
+        let mut v = vec![
+            ipv4_tcp(m, m, c, s, cp, sp, cisn, 0, SYN, &[]),
+            ipv4_tcp(m, m, s, c, sp, cp, sisn, cisn + 1, SYN | ACK, &[]),
+            ipv4_tcp(m, m, c, s, cp, sp, cisn + 1, sisn + 1, ACK, &[]),
+        ];
+        let mut end = cisn + 1;
+        for (off, payload) in segments {
+            let seq = cisn + 1 + off;
+            v.push(ipv4_tcp(
+                m,
+                m,
+                c,
+                s,
+                cp,
+                sp,
+                seq,
+                sisn + 1,
+                PSH | ACK,
+                payload,
+            ));
+            end = end.max(seq + payload.len() as u32);
+        }
+        v.push(ipv4_tcp(m, m, c, s, cp, sp, end, sisn + 1, FIN | ACK, &[]));
+        v.push(ipv4_tcp(
+            m,
+            m,
+            s,
+            c,
+            sp,
+            cp,
+            sisn + 1,
+            end + 1,
+            FIN | ACK,
+            &[],
+        ));
+        v.push(ipv4_tcp(m, m, c, s, cp, sp, end + 1, sisn + 2, ACK, &[]));
+        v.into_iter()
+            .enumerate()
+            .map(|(i, f)| (Duration::from_millis(1_000 + i as u64), f))
+            .collect()
+    }
+
+    /// `n` UDP datagrams 10.0.0.1:`sport` → 10.0.0.2:53, 1 ms apart.
+    pub fn udp_flow(sport: u16, n: usize) -> Vec<(Duration, Vec<u8>)> {
+        (0..n)
+            .map(|i| {
+                (
+                    Duration::from_millis(1_000 + i as u64),
+                    ipv4_udp([10, 0, 0, 1], [10, 0, 0, 2], sport, 53, b"query"),
+                )
+            })
+            .collect()
+    }
+
+    /// Every frame twice, the twin `gap` later (a `tcpdump -i lo` shape).
+    pub fn doubled(frames: &[(Duration, Vec<u8>)], gap: Duration) -> Vec<(Duration, Vec<u8>)> {
+        frames
+            .iter()
+            .flat_map(|(t, f)| [(*t, f.clone()), (*t + gap, f.clone())])
+            .collect()
+    }
+
+    /// Write `frames` as a classic nanosecond-resolution Ethernet pcap.
+    pub fn write_pcap(dir: &Path, name: &str, frames: &[(Duration, Vec<u8>)]) -> PathBuf {
+        let path = dir.join(format!("{name}.pcap"));
+        let header = PcapHeader {
+            version_major: 2,
+            version_minor: 4,
+            ts_correction: 0,
+            ts_accuracy: 0,
+            snaplen: u32::MAX,
+            datalink: DataLink::ETHERNET,
+            ts_resolution: TsResolution::NanoSecond,
+            endianness: Endianness::native(),
+        };
+        let mut w = PcapWriter::with_header(std::fs::File::create(&path).unwrap(), header).unwrap();
+        for (ts, f) in frames {
+            w.write_packet(&PcapPacket::new_owned(*ts, f.len() as u32, f.clone()))
+                .unwrap();
+        }
+        path
+    }
+}

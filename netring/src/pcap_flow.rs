@@ -241,6 +241,45 @@ where
     }
 }
 
+impl<E> crate::async_adapters::multi_source::Sealed for PcapFlowStream<E> where E: FlowExtractor {}
+
+/// A replay source for [`MultiFlowStream`](crate::MultiFlowStream)
+/// (`push_source`): no kernel ring, so `capture_stats()` is `None` and
+/// `packets_read()` counts the frames read from the file.
+impl<E> crate::async_adapters::multi_source::MultiSource<E> for PcapFlowStream<E>
+where
+    E: FlowExtractor,
+    E::Key: Clone + Send + 'static,
+{
+    fn tracker(&self) -> &FlowTracker<E, ()> {
+        &self.tracker
+    }
+
+    fn snapshot_flow_stats(&self) -> Box<dyn Iterator<Item = (E::Key, FlowStats)> + '_> {
+        Box::new(
+            self.tracker
+                .iter_active()
+                .map(|af| (af.key.clone(), af.stats.clone())),
+        )
+    }
+
+    fn dedup(&self) -> Option<&Dedup> {
+        self.replay.dedup.as_ref()
+    }
+
+    fn dedup_mut(&mut self) -> Option<&mut Dedup> {
+        self.replay.dedup.as_mut()
+    }
+
+    fn capture_stats(&self) -> Option<Result<crate::stats::CaptureStats, Error>> {
+        None
+    }
+
+    fn packets_read(&self) -> Option<u64> {
+        Some(self.replay.source.packets_yielded())
+    }
+}
+
 impl<E> Stream for PcapFlowStream<E>
 where
     E: FlowExtractor + Unpin,
@@ -460,6 +499,49 @@ macro_rules! pcap_l7_stream {
             /// Count of live flow entries.
             pub fn active_flows(&self) -> usize {
                 self.driver.tracker().flow_count()
+            }
+        }
+
+        impl<E, P> crate::async_adapters::multi_source::Sealed for $name<E, P>
+        where
+            E: FlowExtractor,
+            E::Key: std::hash::Hash + Eq + Clone + Send + 'static,
+            P: $parser + Clone,
+        {
+        }
+
+        /// A replay source for the matching `Multi*Stream` fan-in
+        /// (`push_source`): no kernel ring, so `capture_stats()` is
+        /// `None` and `packets_read()` counts the frames read from the
+        /// file.
+        impl<E, P> crate::async_adapters::multi_source::MultiSource<E> for $name<E, P>
+        where
+            E: FlowExtractor,
+            E::Key: std::hash::Hash + Eq + Clone + Send + 'static,
+            P: $parser + Clone,
+        {
+            fn tracker(&self) -> &FlowTracker<E, ()> {
+                self.driver.tracker()
+            }
+
+            fn snapshot_flow_stats(&self) -> Box<dyn Iterator<Item = (E::Key, FlowStats)> + '_> {
+                Box::new(self.driver.snapshot_flow_stats())
+            }
+
+            fn dedup(&self) -> Option<&Dedup> {
+                self.replay.dedup.as_ref()
+            }
+
+            fn dedup_mut(&mut self) -> Option<&mut Dedup> {
+                self.replay.dedup.as_mut()
+            }
+
+            fn capture_stats(&self) -> Option<Result<crate::stats::CaptureStats, Error>> {
+                None
+            }
+
+            fn packets_read(&self) -> Option<u64> {
+                Some(self.replay.source.packets_yielded())
             }
         }
 

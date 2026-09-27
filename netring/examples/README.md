@@ -62,6 +62,7 @@ The async API surface. Use these as templates for the typical
 | `fanout` | Sync `Capture` joining a `PACKET_FANOUT` group |
 | `async_fanout_workers` | `AsyncMultiCapture::open_workers` |
 | `async_multi_interface` | `AsyncMultiCapture::open(&["lo", "eth0"])` |
+| `async_mixed_sources` | `MultiSessionStream::empty()` + `push_source`: live interfaces and pcap replays in one fan-in, per-source report via `MultiSource` |
 
 See [`docs/scaling.md`](../docs/scaling.md) for the fanout decision
 matrix and anti-patterns.
@@ -248,6 +249,8 @@ cargo run --example monitor_net_diagnostic --features monitor-quickstart,icmp --
 
 # Offline pcap replay (no privileges needed):
 cargo run --example async_pcap_sessions --features tokio,flow,parse,pcap -- trace.pcap
+# Live interfaces + a replay in one fan-in (replay only needs no privileges):
+cargo run --example async_mixed_sources --features tokio,flow,parse,pcap -- --read trace.pcap
 ```
 
 ```bash

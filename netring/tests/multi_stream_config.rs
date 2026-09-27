@@ -158,3 +158,70 @@ fn session_stream_with_compiles_with_full_config() {
         assert_eq!(stream.alive_sources(), 1);
     });
 }
+
+/// One `MultiSessionStream` over a live `lo` source (`from_streams`) and
+/// a pcap replay (`push_source`) — the des-capture shape (#177). The
+/// live source has a kernel ring, the replay has none; the replay ends
+/// and stays introspectable.
+#[cfg(feature = "pcap")]
+#[test]
+fn live_and_replay_share_one_multi_session_stream() {
+    use flowscope::SessionParser;
+    use futures::StreamExt;
+    use netring::{AsyncCapture, AsyncPcapSource, MultiSessionStream};
+
+    #[derive(Clone, Default)]
+    struct Nop;
+    impl SessionParser for Nop {
+        type Message = ();
+        fn feed_initiator(&mut self, _: &[u8], _: Timestamp, _: &mut Vec<()>) {}
+        fn feed_responder(&mut self, _: &[u8], _: Timestamp, _: &mut Vec<()>) {}
+    }
+
+    let rt = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .unwrap();
+    rt.block_on(async {
+        let live = AsyncCapture::open(helpers::LOOPBACK)
+            .unwrap()
+            .flow_stream(FiveTuple::bidirectional())
+            .session_stream(Nop);
+        let dir = tempfile::tempdir().unwrap();
+        let path = helpers::pcap::write_pcap(
+            dir.path(),
+            "a",
+            &helpers::pcap::flow(&[(0, b"hello".to_vec())]),
+        );
+        let replay = AsyncPcapSource::open(&path)
+            .await
+            .unwrap()
+            .sessions(FiveTuple::bidirectional(), Nop);
+
+        let mut m = MultiSessionStream::from_streams([(helpers::LOOPBACK.to_string(), live)]);
+        let idx = m.push_source("a.pcap", replay);
+        assert_eq!(idx, 1);
+        assert_eq!(m.alive_sources(), 2);
+        assert!(
+            m.source(0).unwrap().capture_stats().is_some(),
+            "the live source has a kernel ring"
+        );
+        assert!(m.source(idx).unwrap().capture_stats().is_none());
+        assert_eq!(m.source(idx).unwrap().packets_read(), Some(0));
+
+        let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
+        while m.is_alive(idx) == Some(true) && tokio::time::Instant::now() < deadline {
+            let _ = tokio::time::timeout(Duration::from_millis(200), m.next()).await;
+        }
+        assert_eq!(
+            m.is_alive(idx),
+            Some(false),
+            "the replay reached end-of-file"
+        );
+        assert_eq!(m.is_alive(0), Some(true));
+        assert_eq!(m.alive_sources(), 1);
+        assert_eq!(m.source(idx).unwrap().tracker_stats().flows_ended, 1);
+        assert_eq!(m.source(idx).unwrap().packets_read(), Some(7));
+        assert_eq!(m.per_source_snapshot_flow_stats().len(), 2);
+    });
+}

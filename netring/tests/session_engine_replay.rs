@@ -11,12 +11,14 @@
     feature = "parse"
 ))]
 
-use std::path::{Path, PathBuf};
+mod helpers;
+
+use std::path::Path;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::Duration;
 
-use flowscope::extract::parse::test_frames::{ipv4_tcp, ipv4_udp};
+use flowscope::extract::parse::test_frames::ipv4_udp;
 use flowscope::extract::{FiveTuple, FiveTupleKey};
 use flowscope::{
     AnomalyKind, DatagramParser, EndReason, FlowEvent, FlowSide, FlowTrackerConfig, OverflowPolicy,
@@ -25,82 +27,8 @@ use flowscope::{
 use futures::StreamExt;
 use netring::flow::SessionEvent;
 use netring::{AsyncPcapSource, Dedup};
-use pcap_file::pcap::{PcapHeader, PcapPacket, PcapWriter};
-use pcap_file::{DataLink, Endianness, TsResolution};
 
-const SYN: u8 = 0x02;
-const ACK: u8 = 0x10;
-const PSH: u8 = 0x08;
-const FIN: u8 = 0x01;
-
-/// Client 10.0.0.1:40000 → server 10.0.0.2:9000: handshake, the given
-/// (offset, payload) client segments, FIN exchange. 1 ms apart.
-fn flow(segments: &[(u32, Vec<u8>)]) -> Vec<(Duration, Vec<u8>)> {
-    let (c, s) = ([10, 0, 0, 1], [10, 0, 0, 2]);
-    let (cp, sp) = (40_000, 9_000);
-    let (cisn, sisn) = (1000u32, 5000u32);
-    let m = [0u8; 6];
-    let mut v = vec![
-        ipv4_tcp(m, m, c, s, cp, sp, cisn, 0, SYN, &[]),
-        ipv4_tcp(m, m, s, c, sp, cp, sisn, cisn + 1, SYN | ACK, &[]),
-        ipv4_tcp(m, m, c, s, cp, sp, cisn + 1, sisn + 1, ACK, &[]),
-    ];
-    let mut end = cisn + 1;
-    for (off, payload) in segments {
-        let seq = cisn + 1 + off;
-        v.push(ipv4_tcp(
-            m,
-            m,
-            c,
-            s,
-            cp,
-            sp,
-            seq,
-            sisn + 1,
-            PSH | ACK,
-            payload,
-        ));
-        end = end.max(seq + payload.len() as u32);
-    }
-    v.push(ipv4_tcp(m, m, c, s, cp, sp, end, sisn + 1, FIN | ACK, &[]));
-    v.push(ipv4_tcp(
-        m,
-        m,
-        s,
-        c,
-        sp,
-        cp,
-        sisn + 1,
-        end + 1,
-        FIN | ACK,
-        &[],
-    ));
-    v.push(ipv4_tcp(m, m, c, s, cp, sp, end + 1, sisn + 2, ACK, &[]));
-    v.into_iter()
-        .enumerate()
-        .map(|(i, f)| (Duration::from_millis(1_000 + i as u64), f))
-        .collect()
-}
-
-fn write_pcap(dir: &Path, name: &str, frames: &[(Duration, Vec<u8>)]) -> PathBuf {
-    let path = dir.join(format!("{name}.pcap"));
-    let header = PcapHeader {
-        version_major: 2,
-        version_minor: 4,
-        ts_correction: 0,
-        ts_accuracy: 0,
-        snaplen: u32::MAX,
-        datalink: DataLink::ETHERNET,
-        ts_resolution: TsResolution::NanoSecond,
-        endianness: Endianness::native(),
-    };
-    let mut w = PcapWriter::with_header(std::fs::File::create(&path).unwrap(), header).unwrap();
-    for (ts, f) in frames {
-        w.write_packet(&PcapPacket::new_owned(*ts, f.len() as u32, f.clone()))
-            .unwrap();
-    }
-    path
-}
+use helpers::pcap::{flow, write_pcap};
 
 #[derive(Clone, Default)]
 struct PoisonAfterFirstFeed {

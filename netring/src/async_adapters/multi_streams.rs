@@ -3,7 +3,16 @@
 //!
 //! Construction goes through
 //! [`AsyncMultiCapture::flow_stream`](super::multi_capture::AsyncMultiCapture::flow_stream)
-//! and siblings. Internal round-robin polling avoids the
+//! and siblings (one AF_PACKET stream per interface, uniformly
+//! configured), through `from_streams` (per-source configuration), or
+//! — since 0.31.1 — source by source with `empty()` + `push_source` /
+//! `with_source`, which accept **any** netring source stream with the
+//! same event type: AF_PACKET or AF_XDP live streams and the
+//! `Pcap*Stream` replay streams alike. Every source hands back its
+//! tracker, live flow snapshots, dedup and ring / file counters
+//! through [`MultiSource`] (`source(idx)`), and a source that reaches
+//! end-of-file stays in place with its final counters readable.
+//! Internal round-robin polling avoids the
 //! `futures::stream::select_all` dependency.
 
 use std::collections::VecDeque;
@@ -11,8 +20,8 @@ use std::pin::Pin;
 use std::task::{Context, Poll};
 
 use flowscope::{
-    DatagramParser, DatagramParserFactory, FlowEvent, FlowExtractor, FlowTracker, SessionParser,
-    SessionParserFactory, Timestamp,
+    DatagramParser, DatagramParserFactory, FlowEvent, FlowExtractor, FlowStats, FlowTracker,
+    FlowTrackerStats, SessionParser, SessionParserFactory, Timestamp,
 };
 use futures_core::Stream;
 
@@ -22,6 +31,7 @@ use crate::Capture;
 use crate::async_adapters::datagram_stream::DatagramStream;
 use crate::async_adapters::flow_source::{AsyncFlowSource, DrainOutcome, SourcePacket};
 use crate::async_adapters::flow_stream::{FlowStream, clamp_now, clamp_view, current_timestamp};
+use crate::async_adapters::multi_source::MultiSource;
 use crate::async_adapters::session_stream::SessionStream;
 use crate::async_adapters::tokio_adapter::AsyncCapture;
 use crate::dedup::Dedup;
@@ -29,12 +39,14 @@ use crate::error::Error;
 use crate::stats::CaptureStats;
 
 /// An event annotated with the source it came from within an
-/// [`AsyncMultiCapture`](super::multi_capture::AsyncMultiCapture).
+/// [`AsyncMultiCapture`](super::multi_capture::AsyncMultiCapture) or
+/// any `Multi*Stream` built from sources.
 ///
-/// `source_idx` is an index into the multi-capture's source list
-/// (0..[`len()`](super::multi_capture::AsyncMultiCapture::len)).
-/// Map it back to a human-readable label via
-/// [`MultiFlowStream::label`] (or the sibling methods).
+/// `source_idx` is an index into the fan-in's source list
+/// (0..[`len()`](MultiFlowStream::len), in the order the sources were
+/// given or pushed). Map it back to a human-readable label via
+/// [`MultiFlowStream::label`] (or the sibling methods), or introspect
+/// the source with [`MultiFlowStream::source`].
 #[derive(Debug, Clone)]
 pub struct TaggedEvent<E> {
     /// Index of the source within the multi-capture.
@@ -45,11 +57,18 @@ pub struct TaggedEvent<E> {
 
 // ── select_state ─────────────────────────────────────────────────
 //
-// Round-robin select over a Vec of pinned, owned streams. None-out
-// exhausted slots so indices stay stable for stats access.
+// Round-robin select over a Vec of owned streams. A slot that has
+// returned `None` is marked done but kept, so indices stay stable and
+// its final counters (tracker, dedup, packets read) remain readable
+// after end-of-file (#176).
+
+struct Slot<S> {
+    stream: S,
+    done: bool,
+}
 
 struct SelectState<S> {
-    streams: Vec<Option<S>>,
+    slots: Vec<Slot<S>>,
     /// Index to start polling at — incremented each yield for fairness.
     next: usize,
 }
@@ -57,13 +76,47 @@ struct SelectState<S> {
 impl<S> SelectState<S> {
     fn new(streams: Vec<S>) -> Self {
         Self {
-            streams: streams.into_iter().map(Some).collect(),
+            slots: streams
+                .into_iter()
+                .map(|stream| Slot {
+                    stream,
+                    done: false,
+                })
+                .collect(),
             next: 0,
         }
     }
 
     fn alive_count(&self) -> usize {
-        self.streams.iter().filter(|s| s.is_some()).count()
+        self.slots.iter().filter(|s| !s.done).count()
+    }
+
+    fn len(&self) -> usize {
+        self.slots.len()
+    }
+
+    fn push(&mut self, stream: S) -> u16 {
+        self.slots.push(Slot {
+            stream,
+            done: false,
+        });
+        (self.slots.len() - 1) as u16
+    }
+
+    fn is_alive(&self, idx: u16) -> Option<bool> {
+        self.slots.get(idx as usize).map(|s| !s.done)
+    }
+
+    fn get(&self, idx: u16) -> Option<&S> {
+        self.slots.get(idx as usize).map(|s| &s.stream)
+    }
+
+    fn get_mut(&mut self, idx: u16) -> Option<&mut S> {
+        self.slots.get_mut(idx as usize).map(|s| &mut s.stream)
+    }
+
+    fn streams(&self) -> impl Iterator<Item = &S> {
+        self.slots.iter().map(|s| &s.stream)
     }
 }
 
@@ -72,34 +125,34 @@ where
     S: Stream<Item = Result<T, Error>> + Unpin,
 {
     /// Poll all alive streams in round-robin order. Yields the first
-    /// `Ready` (Item or Err). Drops `None` slots; returns
-    /// `Poll::Ready(None)` when all slots are exhausted.
+    /// `Ready` (Item or Err). Marks `None` slots done; returns
+    /// `Poll::Ready(None)` when every slot is done (or there are none).
     fn poll_next_select(&mut self, cx: &mut Context<'_>) -> Poll<Option<(u16, Result<T, Error>)>> {
-        let n = self.streams.len();
-        if n == 0 {
-            return Poll::Ready(None);
-        }
-        let mut any_alive = false;
+        let n = self.slots.len();
         for offset in 0..n {
             let i = (self.next + offset) % n;
-            let Some(stream) = self.streams[i].as_mut() else {
+            let slot = &mut self.slots[i];
+            if slot.done {
                 continue;
-            };
-            any_alive = true;
-            match Pin::new(stream).poll_next(cx) {
+            }
+            match Pin::new(&mut slot.stream).poll_next(cx) {
                 Poll::Ready(Some(item)) => {
                     self.next = (i + 1) % n;
                     return Poll::Ready(Some((i as u16, item)));
                 }
                 Poll::Ready(None) => {
-                    // Stream exhausted — None it out; keep iterating
-                    // in case another slot is also ready this tick.
-                    self.streams[i] = None;
+                    // Stream exhausted — keep it (final stats stay
+                    // readable), stop polling it; keep iterating in
+                    // case another slot is also ready this tick.
+                    slot.done = true;
                 }
                 Poll::Pending => {}
             }
         }
-        if any_alive {
+        // Every slot still alive returned `Pending` above and registered
+        // its waker. Decide on the state *after* the loop: a slot that
+        // just finished must not leave us parked with no waker at all.
+        if self.slots.iter().any(|s| !s.done) {
             Poll::Pending
         } else {
             Poll::Ready(None)
@@ -107,14 +160,301 @@ where
     }
 }
 
+// ── AnySource: the constructor's concrete stream, or anything boxed ──
+
+/// Object-safe bundle of [`MultiSource`] + `Stream` for the boxed slot.
+/// Blanket-implemented; users never name it.
+pub(crate) trait DynSource<E: FlowExtractor>:
+    MultiSource<E> + Stream<Item = Result<Self::Event, Error>>
+{
+    type Event;
+}
+
+impl<E, T, Ev> DynSource<E> for T
+where
+    E: FlowExtractor,
+    T: MultiSource<E> + Stream<Item = Result<Ev, Error>>,
+{
+    type Event = Ev;
+}
+
+pub(crate) type BoxedSource<E, Ev> =
+    Box<dyn DynSource<E, Event = Ev, Item = Result<Ev, Error>> + Send + Unpin>;
+
+/// One fan-in slot: the concrete stream a constructor built (`Native`,
+/// no indirection) or a source pushed through `push_source` (`Boxed`,
+/// one vtable call per poll).
+pub(crate) enum AnySource<E, N, Ev>
+where
+    E: FlowExtractor,
+{
+    Native(N),
+    Boxed(BoxedSource<E, Ev>),
+}
+
+impl<E, N, Ev> AnySource<E, N, Ev>
+where
+    E: FlowExtractor,
+    N: MultiSource<E>,
+{
+    fn as_dyn(&self) -> &dyn MultiSource<E> {
+        match self {
+            AnySource::Native(n) => n,
+            AnySource::Boxed(b) => {
+                let d: &dyn MultiSource<E> = &**b;
+                d
+            }
+        }
+    }
+
+    fn as_dyn_mut(&mut self) -> &mut dyn MultiSource<E> {
+        match self {
+            AnySource::Native(n) => n,
+            AnySource::Boxed(b) => {
+                let d: &mut dyn MultiSource<E> = &mut **b;
+                d
+            }
+        }
+    }
+}
+
+impl<E, N, Ev> Stream for AnySource<E, N, Ev>
+where
+    E: FlowExtractor,
+    N: Stream<Item = Result<Ev, Error>> + Unpin,
+{
+    type Item = Result<Ev, Error>;
+
+    fn poll_next(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
+        match self.get_mut() {
+            AnySource::Native(n) => Pin::new(n).poll_next(cx),
+            AnySource::Boxed(b) => Pin::new(b).poll_next(cx),
+        }
+    }
+}
+
+/// A fan-in's slots.
+type Slots<E, N, Ev> = SelectState<AnySource<E, N, Ev>>;
+/// The AF_PACKET source the `AsyncMultiCapture` constructors build.
+type AfPacket = crate::async_adapters::tokio_adapter::AsyncCapture<Capture>;
+/// A session fan-in's event: the factory's parser's message type.
+type SessionEv<E, F> = SessionEvent<
+    <E as FlowExtractor>::Key,
+    <<F as SessionParserFactory<<E as FlowExtractor>::Key>>::Parser as SessionParser>::Message,
+>;
+/// A datagram fan-in's event.
+type DatagramEv<E, F> = SessionEvent<
+    <E as FlowExtractor>::Key,
+    <<F as DatagramParserFactory<<E as FlowExtractor>::Key>>::Parser as DatagramParser>::Message,
+>;
+/// [`per_source_snapshot_flow_stats`](MultiSessionStream::per_source_snapshot_flow_stats):
+/// one `(label, live flows)` entry per source. New in 0.31.1.
+pub type PerSourceFlowStats<K> = Vec<(String, Vec<(K, FlowStats)>)>;
+
+/// The per-source accessor bodies, shared by the six fan-in types.
+impl<E, N, Ev> SelectState<AnySource<E, N, Ev>>
+where
+    E: FlowExtractor,
+    N: MultiSource<E>,
+{
+    fn source(&self, idx: u16) -> Option<&dyn MultiSource<E>> {
+        self.get(idx).map(AnySource::as_dyn)
+    }
+
+    fn source_mut(&mut self, idx: u16) -> Option<&mut dyn MultiSource<E>> {
+        self.get_mut(idx).map(AnySource::as_dyn_mut)
+    }
+
+    fn per_source_capture_stats(
+        &self,
+        labels: &[String],
+    ) -> Vec<(String, Option<Result<CaptureStats, Error>>)> {
+        self.streams()
+            .enumerate()
+            .map(|(i, s)| (labels[i].clone(), s.as_dyn().capture_stats()))
+            .collect()
+    }
+
+    fn capture_stats(&self) -> CaptureStats {
+        let mut acc = CaptureStats::default();
+        for s in self.streams() {
+            if let Some(Ok(stats)) = s.as_dyn().capture_stats() {
+                acc.packets = acc.packets.saturating_add(stats.packets);
+                acc.drops = acc.drops.saturating_add(stats.drops);
+                acc.freeze_count = acc.freeze_count.saturating_add(stats.freeze_count);
+            }
+        }
+        acc
+    }
+
+    fn per_source_tracker_stats(
+        &self,
+        labels: &[String],
+    ) -> Vec<(String, Option<&FlowTrackerStats>)> {
+        self.streams()
+            .enumerate()
+            .map(|(i, s)| (labels[i].clone(), Some(s.as_dyn().tracker_stats())))
+            .collect()
+    }
+
+    fn per_source_snapshot_flow_stats(&self, labels: &[String]) -> PerSourceFlowStats<E::Key> {
+        self.streams()
+            .enumerate()
+            .map(|(i, s)| {
+                (
+                    labels[i].clone(),
+                    s.as_dyn().snapshot_flow_stats().collect(),
+                )
+            })
+            .collect()
+    }
+
+    fn total_active_flows(&self) -> usize {
+        self.streams().map(|s| s.as_dyn().active_flows()).sum()
+    }
+}
+
+/// The public per-source API, identical on the six fan-in types.
+/// `$ev` is the type's event (the `Stream` item without the
+/// `TaggedEvent` / `Result` envelopes).
+macro_rules! multi_source_api {
+    ($ev:ty) => {
+        /// Human-readable label for `source_idx`.
+        pub fn label(&self, source_idx: u16) -> Option<&str> {
+            self.labels.get(source_idx as usize).map(|s| s.as_str())
+        }
+
+        /// Number of sources still being polled (haven't returned `None`
+        /// from their inner stream). Decrements as sources exhaust —
+        /// replay sources do at end-of-file; live captures never.
+        pub fn alive_sources(&self) -> usize {
+            self.select.alive_count()
+        }
+
+        /// Number of sources, finished ones included (the range of
+        /// `source_idx`).
+        pub fn len(&self) -> usize {
+            self.select.len()
+        }
+
+        /// `true` when no source was added.
+        pub fn is_empty(&self) -> bool {
+            self.select.len() == 0
+        }
+
+        /// A fan-in with no sources yet; add them with
+        /// [`push_source`](Self::push_source) / [`with_source`](Self::with_source).
+        /// Polling an empty fan-in ends the stream at once. New in 0.31.1.
+        pub fn empty() -> Self {
+            Self {
+                select: SelectState::new(Vec::new()),
+                labels: Vec::new(),
+            }
+        }
+
+        /// Append a source of any kind — a live stream over AF_PACKET or
+        /// AF_XDP, or a `Pcap*Stream` replaying a file — with its label.
+        /// Returns its `source_idx` (the next free one). May be called
+        /// before polling or between polls; the next `poll_next` picks
+        /// the new source up. New in 0.31.1.
+        ///
+        /// The source must yield this fan-in's event type: for a session
+        /// fan-in, `SessionEvent<E::Key, M>` with the same message type
+        /// `M` — one parser type used both live and on replay (flowscope's
+        /// blanket `SessionParserFactory` impl for `P: SessionParser +
+        /// Default + Clone` and `TemplateFactory<P>` make that the common
+        /// case).
+        pub fn push_source<S>(&mut self, label: impl Into<String>, source: S) -> u16
+        where
+            S: MultiSource<E> + Stream<Item = Result<$ev, Error>> + Send + Unpin + 'static,
+        {
+            self.labels.push(label.into());
+            self.select.push(AnySource::Boxed(Box::new(source)))
+        }
+
+        /// Builder form of [`push_source`](Self::push_source).
+        pub fn with_source<S>(mut self, label: impl Into<String>, source: S) -> Self
+        where
+            S: MultiSource<E> + Stream<Item = Result<$ev, Error>> + Send + Unpin + 'static,
+        {
+            self.push_source(label, source);
+            self
+        }
+
+        /// Introspect one source — tracker, live flow snapshots, dedup,
+        /// ring / file counters — finished sources included. `None` for
+        /// an index out of range. New in 0.31.1.
+        pub fn source(&self, source_idx: u16) -> Option<&dyn MultiSource<E>> {
+            self.select.source(source_idx)
+        }
+
+        /// Mutable form of [`source`](Self::source) (e.g. `dedup_mut()`).
+        pub fn source_mut(&mut self, source_idx: u16) -> Option<&mut dyn MultiSource<E>> {
+            self.select.source_mut(source_idx)
+        }
+
+        /// Whether `source_idx` is still being polled; `None` for an
+        /// index out of range. New in 0.31.1.
+        pub fn is_alive(&self, source_idx: u16) -> Option<bool> {
+            self.select.is_alive(source_idx)
+        }
+
+        /// Per-source kernel ring stats. One entry per source, in order:
+        /// `Some(Ok(..))` for a live source, `Some(Err(..))` when its
+        /// `getsockopt` failed, `None` for a source without a kernel
+        /// ring (a replay source — see
+        /// [`MultiSource::packets_read`]). Reading resets the kernel
+        /// counters. (Before 0.31.1 `None` meant "ended"; finished
+        /// sources are now kept and report normally.)
+        pub fn per_source_capture_stats(
+            &self,
+        ) -> Vec<(String, Option<Result<CaptureStats, Error>>)> {
+            self.select.per_source_capture_stats(&self.labels)
+        }
+
+        /// Aggregate kernel ring stats across all live sources. `Err`
+        /// from any individual source is silently skipped — use
+        /// [`per_source_capture_stats`](Self::per_source_capture_stats)
+        /// for fine-grained inspection.
+        pub fn capture_stats(&self) -> CaptureStats {
+            self.select.capture_stats()
+        }
+
+        /// Per-source tracker stats. One entry per source, in order;
+        /// always `Some` since 0.31.1 (finished sources are kept — the
+        /// `Option` remains for compatibility).
+        pub fn per_source_tracker_stats(&self) -> Vec<(String, Option<&FlowTrackerStats>)> {
+            self.select.per_source_tracker_stats(&self.labels)
+        }
+
+        /// Per-source live `(key, stats)` snapshots, owned, in
+        /// `source_idx` order (a flushed replay source is simply empty).
+        /// The per-flow report of a multi-interface capture. New in 0.31.1.
+        pub fn per_source_snapshot_flow_stats(&self) -> PerSourceFlowStats<E::Key> {
+            self.select.per_source_snapshot_flow_stats(&self.labels)
+        }
+
+        /// Sum of live flow counts across all sources. O(n × per-source LRU).
+        pub fn total_active_flows(&self) -> usize {
+            self.select.total_active_flows()
+        }
+    };
+}
+
 // ── MultiFlowStream ──────────────────────────────────────────────
 
-/// Tagged fan-in of [`FlowStream`]s.
+/// Tagged fan-in of [`FlowStream`]s — one flow table per source.
+///
+/// Sources: the AF_PACKET streams
+/// [`AsyncMultiCapture::flow_stream`](super::multi_capture::AsyncMultiCapture::flow_stream)
+/// builds, [`from_streams`](Self::from_streams), or any flow stream
+/// (AF_PACKET, AF_XDP, [`PcapFlowStream`](crate::PcapFlowStream)) via
+/// [`push_source`](Self::push_source). See the [module docs](self).
 pub struct MultiFlowStream<E>
 where
     E: FlowExtractor,
 {
-    select: SelectState<FlowStream<crate::async_adapters::tokio_adapter::AsyncCapture<Capture>, E>>,
+    select: Slots<E, FlowStream<AfPacket, E>, FlowEvent<E::Key>>,
     labels: Vec<String>,
 }
 
@@ -131,7 +471,8 @@ where
     /// a pcap tap per interface (`with_pcap_tap`), dedup only on `lo`,
     /// a different tracker config per source… The result keeps the
     /// fair round-robin fan-in, [`TaggedEvent`] and the per-source
-    /// stats accessors.
+    /// stats accessors. For sources of other kinds (AF_XDP, pcap
+    /// replay) use [`push_source`](Self::push_source).
     pub fn from_streams<I>(sources: I) -> Self
     where
         I: IntoIterator<
@@ -143,10 +484,12 @@ where
     {
         let (labels, streams): (Vec<_>, Vec<_>) = sources.into_iter().unzip();
         Self {
-            select: SelectState::new(streams),
+            select: SelectState::new(streams.into_iter().map(AnySource::Native).collect()),
             labels,
         }
     }
+
+    multi_source_api!(FlowEvent<E::Key>);
 }
 
 impl<E> MultiFlowStream<E>
@@ -175,86 +518,12 @@ where
     ) -> Self {
         let streams = captures
             .into_iter()
-            .map(|cap| config.apply(cap.flow_stream(extractor.clone())))
+            .map(|cap| AnySource::Native(config.apply(cap.flow_stream(extractor.clone()))))
             .collect();
         Self {
             select: SelectState::new(streams),
             labels,
         }
-    }
-
-    /// Human-readable label for `source_idx`.
-    pub fn label(&self, source_idx: u16) -> Option<&str> {
-        self.labels.get(source_idx as usize).map(|s| s.as_str())
-    }
-
-    /// Number of sources still being polled (haven't returned `None`
-    /// from their inner stream). Decrements as sources exhaust.
-    pub fn alive_sources(&self) -> usize {
-        self.select.alive_count()
-    }
-
-    /// Per-source kernel ring stats. One entry per source, in order;
-    /// sources that have ended return `None`, sources whose
-    /// `getsockopt` failed return `Err`.
-    pub fn per_source_capture_stats(&self) -> Vec<(String, Option<Result<CaptureStats, Error>>)> {
-        use crate::async_adapters::stream_capture::StreamCapture;
-        self.select
-            .streams
-            .iter()
-            .enumerate()
-            .map(|(i, slot)| {
-                let label = self.labels[i].clone();
-                let stats = slot.as_ref().map(|s| s.capture_stats());
-                (label, stats)
-            })
-            .collect()
-    }
-
-    /// Aggregate kernel ring stats across all live sources.
-    /// `Err` from any individual source is silently skipped — use
-    /// [`per_source_capture_stats`](Self::per_source_capture_stats)
-    /// for fine-grained inspection.
-    /// Aggregate kernel ring stats. See
-    /// [`MultiFlowStream::capture_stats`].
-    pub fn capture_stats(&self) -> CaptureStats {
-        use crate::async_adapters::stream_capture::StreamCapture;
-        let mut acc = CaptureStats::default();
-        for slot in &self.select.streams {
-            if let Some(s) = slot
-                && let Ok(stats) = s.capture_stats()
-            {
-                acc.packets = acc.packets.saturating_add(stats.packets);
-                acc.drops = acc.drops.saturating_add(stats.drops);
-                acc.freeze_count = acc.freeze_count.saturating_add(stats.freeze_count);
-            }
-        }
-        acc
-    }
-
-    /// Per-source tracker stats. One entry per source, in order;
-    /// `None` for sources that have ended.
-    pub fn per_source_tracker_stats(&self) -> Vec<(String, Option<&flowscope::FlowTrackerStats>)> {
-        self.select
-            .streams
-            .iter()
-            .enumerate()
-            .map(|(i, slot)| {
-                let label = self.labels[i].clone();
-                let stats = slot.as_ref().map(|s| s.tracker_stats());
-                (label, stats)
-            })
-            .collect()
-    }
-
-    /// Sum of live flow counts across all sources. O(n × per-source LRU).
-    pub fn total_active_flows(&self) -> usize {
-        self.select
-            .streams
-            .iter()
-            .filter_map(|slot| slot.as_ref())
-            .map(|s| s.active_flows())
-            .sum()
     }
 }
 
@@ -288,12 +557,13 @@ where
 
 /// Tagged fan-in of AF_XDP [`FlowStream`]s — one multi-queue capture per
 /// interface, merged into a unified `TaggedEvent` stream (issue #104).
+/// `push_source` also takes AF_PACKET and replay sources (0.31.1).
 #[cfg(all(feature = "af-xdp", feature = "xdp-loader"))]
 pub struct XdpMultiFlowStream<E>
 where
     E: FlowExtractor,
 {
-    select: SelectState<FlowStream<crate::AsyncXdpCapture, E>>,
+    select: Slots<E, FlowStream<crate::AsyncXdpCapture, E>, FlowEvent<E::Key>>,
     labels: Vec<String>,
 }
 
@@ -312,10 +582,12 @@ where
     {
         let (labels, streams): (Vec<_>, Vec<_>) = sources.into_iter().unzip();
         Self {
-            select: SelectState::new(streams),
+            select: SelectState::new(streams.into_iter().map(AnySource::Native).collect()),
             labels,
         }
     }
+
+    multi_source_api!(FlowEvent<E::Key>);
 }
 
 #[cfg(all(feature = "af-xdp", feature = "xdp-loader"))]
@@ -332,72 +604,12 @@ where
     ) -> Self {
         let streams = captures
             .into_iter()
-            .map(|cap| config.apply(cap.flow_stream(extractor.clone())))
+            .map(|cap| AnySource::Native(config.apply(cap.flow_stream(extractor.clone()))))
             .collect();
         Self {
             select: SelectState::new(streams),
             labels,
         }
-    }
-
-    /// Human-readable label (interface name) for `source_idx`.
-    pub fn label(&self, source_idx: u16) -> Option<&str> {
-        self.labels.get(source_idx as usize).map(|s| s.as_str())
-    }
-
-    /// Number of sources still being polled.
-    pub fn alive_sources(&self) -> usize {
-        self.select.alive_count()
-    }
-
-    /// Per-source kernel-ring stats (summed across each capture's RX queues).
-    /// One entry per interface, in order; `None` for ended sources.
-    pub fn per_source_capture_stats(&self) -> Vec<(String, Option<Result<CaptureStats, Error>>)> {
-        self.select
-            .streams
-            .iter()
-            .enumerate()
-            .map(|(i, slot)| {
-                let label = self.labels[i].clone();
-                (label, slot.as_ref().map(|s| s.capture_stats()))
-            })
-            .collect()
-    }
-
-    /// Aggregate kernel-ring stats across all live sources.
-    pub fn capture_stats(&self) -> CaptureStats {
-        let mut acc = CaptureStats::default();
-        for slot in self.select.streams.iter().flatten() {
-            if let Ok(stats) = slot.capture_stats() {
-                acc.packets = acc.packets.saturating_add(stats.packets);
-                acc.drops = acc.drops.saturating_add(stats.drops);
-                acc.freeze_count = acc.freeze_count.saturating_add(stats.freeze_count);
-            }
-        }
-        acc
-    }
-
-    /// Per-source tracker stats. One entry per interface, in order.
-    pub fn per_source_tracker_stats(&self) -> Vec<(String, Option<&flowscope::FlowTrackerStats>)> {
-        self.select
-            .streams
-            .iter()
-            .enumerate()
-            .map(|(i, slot)| {
-                let label = self.labels[i].clone();
-                (label, slot.as_ref().map(|s| s.tracker_stats()))
-            })
-            .collect()
-    }
-
-    /// Sum of live flow counts across all sources.
-    pub fn total_active_flows(&self) -> usize {
-        self.select
-            .streams
-            .iter()
-            .filter_map(|slot| slot.as_ref())
-            .map(|s| s.active_flows())
-            .sum()
     }
 }
 
@@ -427,10 +639,10 @@ where
 //
 // AF_XDP analogues of MultiSessionStream / MultiDatagramStream: N
 // multi-queue captures fanned into one tagged L7 stream, reusing the same
-// SelectState round-robin. Per-source capture-stats come from the inherent
-// AF_XDP accessor (StreamCapture is AF_PACKET-only).
+// SelectState round-robin and the same per-source API.
 
 /// Tagged fan-in of AF_XDP [`SessionStream`]s (issue #104).
+/// `push_source` also takes AF_PACKET and replay sources (0.31.1).
 #[cfg(all(feature = "af-xdp", feature = "xdp-loader"))]
 pub struct XdpMultiSessionStream<E, F>
 where
@@ -438,7 +650,7 @@ where
     E::Key: Eq + std::hash::Hash + Clone + Send + 'static,
     F: SessionParserFactory<E::Key>,
 {
-    select: SelectState<SessionStream<crate::AsyncXdpCapture, E, F>>,
+    select: Slots<E, SessionStream<crate::AsyncXdpCapture, E, F>, SessionEv<E, F>>,
     labels: Vec<String>,
 }
 
@@ -459,10 +671,12 @@ where
     {
         let (labels, streams): (Vec<_>, Vec<_>) = sources.into_iter().unzip();
         Self {
-            select: SelectState::new(streams),
+            select: SelectState::new(streams.into_iter().map(AnySource::Native).collect()),
             labels,
         }
     }
+
+    multi_source_api!(SessionEvent<E::Key, <F::Parser as SessionParser>::Message>);
 }
 
 #[cfg(all(feature = "af-xdp", feature = "xdp-loader"))]
@@ -484,66 +698,18 @@ where
         let streams = captures
             .into_iter()
             .map(|cap| {
-                config
-                    .apply(cap.flow_stream(extractor.clone()))
-                    .session_stream(factory.clone())
-                    .with_emit_anomalies(config.emit_anomalies)
+                AnySource::Native(
+                    config
+                        .apply(cap.flow_stream(extractor.clone()))
+                        .session_stream(factory.clone())
+                        .with_emit_anomalies(config.emit_anomalies),
+                )
             })
             .collect();
         Self {
             select: SelectState::new(streams),
             labels,
         }
-    }
-
-    /// Label (interface name) for `source_idx`.
-    pub fn label(&self, source_idx: u16) -> Option<&str> {
-        self.labels.get(source_idx as usize).map(|s| s.as_str())
-    }
-
-    /// Number of sources still being polled.
-    pub fn alive_sources(&self) -> usize {
-        self.select.alive_count()
-    }
-
-    /// Per-source kernel-ring stats (summed across each capture's RX queues).
-    pub fn per_source_capture_stats(&self) -> Vec<(String, Option<Result<CaptureStats, Error>>)> {
-        self.select
-            .streams
-            .iter()
-            .enumerate()
-            .map(|(i, slot)| {
-                (
-                    self.labels[i].clone(),
-                    slot.as_ref().map(|s| s.capture_stats()),
-                )
-            })
-            .collect()
-    }
-
-    /// Per-source tracker stats.
-    pub fn per_source_tracker_stats(&self) -> Vec<(String, Option<&flowscope::FlowTrackerStats>)> {
-        self.select
-            .streams
-            .iter()
-            .enumerate()
-            .map(|(i, slot)| {
-                (
-                    self.labels[i].clone(),
-                    slot.as_ref().map(|s| s.tracker_stats()),
-                )
-            })
-            .collect()
-    }
-
-    /// Sum of live flow counts across all sources.
-    pub fn total_active_flows(&self) -> usize {
-        self.select
-            .streams
-            .iter()
-            .filter_map(|slot| slot.as_ref())
-            .map(|s| s.active_flows())
-            .sum()
     }
 }
 
@@ -574,6 +740,7 @@ where
 }
 
 /// Tagged fan-in of AF_XDP [`DatagramStream`]s (issue #104).
+/// `push_source` also takes AF_PACKET and replay sources (0.31.1).
 #[cfg(all(feature = "af-xdp", feature = "xdp-loader"))]
 pub struct XdpMultiDatagramStream<E, F>
 where
@@ -581,7 +748,7 @@ where
     E::Key: Eq + std::hash::Hash + Clone + Send + 'static,
     F: DatagramParserFactory<E::Key>,
 {
-    select: SelectState<DatagramStream<crate::AsyncXdpCapture, E, F>>,
+    select: Slots<E, DatagramStream<crate::AsyncXdpCapture, E, F>, DatagramEv<E, F>>,
     labels: Vec<String>,
 }
 
@@ -602,10 +769,12 @@ where
     {
         let (labels, streams): (Vec<_>, Vec<_>) = sources.into_iter().unzip();
         Self {
-            select: SelectState::new(streams),
+            select: SelectState::new(streams.into_iter().map(AnySource::Native).collect()),
             labels,
         }
     }
+
+    multi_source_api!(SessionEvent<E::Key, <F::Parser as DatagramParser>::Message>);
 }
 
 #[cfg(all(feature = "af-xdp", feature = "xdp-loader"))]
@@ -627,66 +796,18 @@ where
         let streams = captures
             .into_iter()
             .map(|cap| {
-                config
-                    .apply(cap.flow_stream(extractor.clone()))
-                    .datagram_stream(factory.clone())
-                    .with_emit_anomalies(config.emit_anomalies)
+                AnySource::Native(
+                    config
+                        .apply(cap.flow_stream(extractor.clone()))
+                        .datagram_stream(factory.clone())
+                        .with_emit_anomalies(config.emit_anomalies),
+                )
             })
             .collect();
         Self {
             select: SelectState::new(streams),
             labels,
         }
-    }
-
-    /// Label (interface name) for `source_idx`.
-    pub fn label(&self, source_idx: u16) -> Option<&str> {
-        self.labels.get(source_idx as usize).map(|s| s.as_str())
-    }
-
-    /// Number of sources still being polled.
-    pub fn alive_sources(&self) -> usize {
-        self.select.alive_count()
-    }
-
-    /// Per-source kernel-ring stats (summed across each capture's RX queues).
-    pub fn per_source_capture_stats(&self) -> Vec<(String, Option<Result<CaptureStats, Error>>)> {
-        self.select
-            .streams
-            .iter()
-            .enumerate()
-            .map(|(i, slot)| {
-                (
-                    self.labels[i].clone(),
-                    slot.as_ref().map(|s| s.capture_stats()),
-                )
-            })
-            .collect()
-    }
-
-    /// Per-source tracker stats.
-    pub fn per_source_tracker_stats(&self) -> Vec<(String, Option<&flowscope::FlowTrackerStats>)> {
-        self.select
-            .streams
-            .iter()
-            .enumerate()
-            .map(|(i, slot)| {
-                (
-                    self.labels[i].clone(),
-                    slot.as_ref().map(|s| s.tracker_stats()),
-                )
-            })
-            .collect()
-    }
-
-    /// Sum of live flow counts across all sources.
-    pub fn total_active_flows(&self) -> usize {
-        self.select
-            .streams
-            .iter()
-            .filter_map(|slot| slot.as_ref())
-            .map(|s| s.active_flows())
-            .sum()
     }
 }
 
@@ -833,6 +954,19 @@ where
     /// `source_idx - 1`, since legs are stamped 1-based).
     pub fn label(&self, source: usize) -> Option<&str> {
         self.labels.get(source).map(|s| s.as_str())
+    }
+
+    /// The one shared dedup
+    /// ([`MultiStreamConfig::with_dedup`](super::multi_config::MultiStreamConfig::with_dedup)),
+    /// if configured — its `dropped()` / `seen()` count across every
+    /// leg. New in 0.31.1.
+    pub fn dedup(&self) -> Option<&Dedup> {
+        self.dedup.as_ref()
+    }
+
+    /// Mutable access to the shared dedup (e.g. `reset()`). New in 0.31.1.
+    pub fn dedup_mut(&mut self) -> Option<&mut Dedup> {
+        self.dedup.as_mut()
     }
 }
 
@@ -982,16 +1116,64 @@ where
 
 // ── MultiSessionStream ───────────────────────────────────────────
 
-/// Tagged fan-in of [`SessionStream`]s.
+/// Tagged fan-in of [`SessionStream`]s — one flow table and one
+/// parser set per source.
+///
+/// Sources: the AF_PACKET streams
+/// [`AsyncMultiCapture::session_stream`](super::multi_capture::AsyncMultiCapture::session_stream)
+/// builds, [`from_streams`](Self::from_streams), or any session stream
+/// with the same message type — AF_PACKET, AF_XDP,
+/// [`PcapSessionStream`](crate::PcapSessionStream) — via
+/// [`push_source`](Self::push_source). That last form is what lets one
+/// event loop serve both a live multi-interface capture and a
+/// `--read capture.pcap` replay:
+///
+/// ```no_run
+/// # #[cfg(feature = "pcap")]
+/// # async fn ex() -> Result<(), Box<dyn std::error::Error>> {
+/// use futures::StreamExt;
+/// use netring::flow::extract::FiveTuple;
+/// use netring::{AsyncCapture, AsyncPcapSource, Dedup, MultiSessionStream};
+/// # #[derive(Clone, Default)] struct MyParser;
+/// # impl flowscope::SessionParser for MyParser { type Message = ();
+/// #   fn feed_initiator(&mut self, _: &[u8], _: flowscope::Timestamp, _: &mut Vec<()>) {}
+/// #   fn feed_responder(&mut self, _: &[u8], _: flowscope::Timestamp, _: &mut Vec<()>) {} }
+///
+/// let mut fanin = MultiSessionStream::<FiveTuple, MyParser>::empty();
+/// for iface in ["lo", "eth0"] {
+///     let live = AsyncCapture::open(iface)?
+///         .flow_stream(FiveTuple::bidirectional())
+///         .session_stream(MyParser);
+///     fanin.push_source(iface, live);
+/// }
+/// let replay = AsyncPcapSource::open("capture.pcap")
+///     .await?
+///     .sessions(FiveTuple::bidirectional(), MyParser)
+///     .with_dedup(Dedup::content(std::time::Duration::from_millis(1), 256));
+/// let idx = fanin.push_source("capture.pcap", replay);
+///
+/// while let Some(ev) = fanin.next().await {
+///     let ev = ev?;
+///     println!("[{}] {:?}", fanin.label(ev.source_idx).unwrap_or("?"), ev.event);
+///     if fanin.is_alive(idx) == Some(false) {
+///         // The file is flushed; its final counters are still readable.
+///         let src = fanin.source(idx).unwrap();
+///         println!("read {:?} frames, {:?} dropped as duplicates",
+///             src.packets_read(), src.dedup().map(|d| d.dropped()));
+///     }
+/// }
+/// for (label, flows) in fanin.per_source_snapshot_flow_stats() {
+///     println!("{label}: {} live flows", flows.len());
+/// }
+/// # Ok(()) }
+/// ```
 pub struct MultiSessionStream<E, F>
 where
     E: FlowExtractor,
     E::Key: Eq + std::hash::Hash + Clone + Send + 'static,
     F: SessionParserFactory<E::Key>,
 {
-    select: SelectState<
-        SessionStream<crate::async_adapters::tokio_adapter::AsyncCapture<Capture>, E, F>,
-    >,
+    select: Slots<E, SessionStream<AfPacket, E, F>, SessionEv<E, F>>,
     labels: Vec<String>,
 }
 
@@ -1010,7 +1192,8 @@ where
     /// a pcap tap per interface (`with_pcap_tap`), dedup only on `lo`,
     /// a different tracker config per source… The result keeps the
     /// fair round-robin fan-in, [`TaggedEvent`] and the per-source
-    /// stats accessors.
+    /// stats accessors. For sources of other kinds (AF_XDP, pcap
+    /// replay) use [`push_source`](Self::push_source).
     pub fn from_streams<I>(sources: I) -> Self
     where
         I: IntoIterator<
@@ -1022,10 +1205,12 @@ where
     {
         let (labels, streams): (Vec<_>, Vec<_>) = sources.into_iter().unzip();
         Self {
-            select: SelectState::new(streams),
+            select: SelectState::new(streams.into_iter().map(AnySource::Native).collect()),
             labels,
         }
     }
+
+    multi_source_api!(SessionEvent<E::Key, <F::Parser as SessionParser>::Message>);
 }
 
 impl<E, F> MultiSessionStream<E, F>
@@ -1061,86 +1246,18 @@ where
         let streams = captures
             .into_iter()
             .map(|cap| {
-                config
-                    .apply(cap.flow_stream(extractor.clone()))
-                    .session_stream(factory.clone())
-                    .with_emit_anomalies(config.emit_anomalies)
+                AnySource::Native(
+                    config
+                        .apply(cap.flow_stream(extractor.clone()))
+                        .session_stream(factory.clone())
+                        .with_emit_anomalies(config.emit_anomalies),
+                )
             })
             .collect();
         Self {
             select: SelectState::new(streams),
             labels,
         }
-    }
-
-    /// Human-readable label for `source_idx`.
-    pub fn label(&self, source_idx: u16) -> Option<&str> {
-        self.labels.get(source_idx as usize).map(|s| s.as_str())
-    }
-
-    /// Number of sources still being polled (haven't returned `None`
-    /// from their inner stream). Decrements as sources exhaust.
-    pub fn alive_sources(&self) -> usize {
-        self.select.alive_count()
-    }
-
-    /// Per-source kernel ring stats. See
-    /// [`MultiFlowStream::per_source_capture_stats`].
-    pub fn per_source_capture_stats(&self) -> Vec<(String, Option<Result<CaptureStats, Error>>)> {
-        use crate::async_adapters::stream_capture::StreamCapture;
-        self.select
-            .streams
-            .iter()
-            .enumerate()
-            .map(|(i, slot)| {
-                (
-                    self.labels[i].clone(),
-                    slot.as_ref().map(|s| s.capture_stats()),
-                )
-            })
-            .collect()
-    }
-
-    /// Aggregate kernel ring stats. See
-    /// [`MultiFlowStream::capture_stats`].
-    pub fn capture_stats(&self) -> CaptureStats {
-        use crate::async_adapters::stream_capture::StreamCapture;
-        let mut acc = CaptureStats::default();
-        for slot in &self.select.streams {
-            if let Some(s) = slot
-                && let Ok(stats) = s.capture_stats()
-            {
-                acc.packets = acc.packets.saturating_add(stats.packets);
-                acc.drops = acc.drops.saturating_add(stats.drops);
-                acc.freeze_count = acc.freeze_count.saturating_add(stats.freeze_count);
-            }
-        }
-        acc
-    }
-
-    /// Per-source tracker stats. See
-    /// [`MultiFlowStream::per_source_tracker_stats`].
-    pub fn per_source_tracker_stats(&self) -> Vec<(String, Option<&flowscope::FlowTrackerStats>)> {
-        self.select
-            .streams
-            .iter()
-            .enumerate()
-            .map(|(i, slot)| {
-                let label = self.labels[i].clone();
-                let stats = slot.as_ref().map(|s| s.tracker_stats());
-                (label, stats)
-            })
-            .collect()
-    }
-
-    /// Sum of live flow counts across all sources.
-    pub fn total_active_flows(&self) -> usize {
-        self.select
-            .streams
-            .iter()
-            .filter_map(|slot| slot.as_ref())
-            .map(|s| s.active_flows())
-            .sum()
     }
 }
 
@@ -1171,16 +1288,23 @@ where
 
 // ── MultiDatagramStream ──────────────────────────────────────────
 
-/// Tagged fan-in of [`DatagramStream`]s.
+/// Tagged fan-in of [`DatagramStream`]s — one flow table and one
+/// parser set per source.
+///
+/// Sources: the AF_PACKET streams
+/// [`AsyncMultiCapture::datagram_stream`](super::multi_capture::AsyncMultiCapture::datagram_stream)
+/// builds, [`from_streams`](Self::from_streams), or any datagram
+/// stream with the same message type — AF_PACKET, AF_XDP,
+/// [`PcapDatagramStream`](crate::PcapDatagramStream) — via
+/// [`push_source`](Self::push_source). See [`MultiSessionStream`] for
+/// the live + replay pattern.
 pub struct MultiDatagramStream<E, F>
 where
     E: FlowExtractor,
     E::Key: Eq + std::hash::Hash + Clone + Send + 'static,
     F: DatagramParserFactory<E::Key>,
 {
-    select: SelectState<
-        DatagramStream<crate::async_adapters::tokio_adapter::AsyncCapture<Capture>, E, F>,
-    >,
+    select: Slots<E, DatagramStream<AfPacket, E, F>, DatagramEv<E, F>>,
     labels: Vec<String>,
 }
 
@@ -1199,7 +1323,8 @@ where
     /// a pcap tap per interface (`with_pcap_tap`), dedup only on `lo`,
     /// a different tracker config per source… The result keeps the
     /// fair round-robin fan-in, [`TaggedEvent`] and the per-source
-    /// stats accessors.
+    /// stats accessors. For sources of other kinds (AF_XDP, pcap
+    /// replay) use [`push_source`](Self::push_source).
     pub fn from_streams<I>(sources: I) -> Self
     where
         I: IntoIterator<
@@ -1211,10 +1336,12 @@ where
     {
         let (labels, streams): (Vec<_>, Vec<_>) = sources.into_iter().unzip();
         Self {
-            select: SelectState::new(streams),
+            select: SelectState::new(streams.into_iter().map(AnySource::Native).collect()),
             labels,
         }
     }
+
+    multi_source_api!(SessionEvent<E::Key, <F::Parser as DatagramParser>::Message>);
 }
 
 impl<E, F> MultiDatagramStream<E, F>
@@ -1250,86 +1377,18 @@ where
         let streams = captures
             .into_iter()
             .map(|cap| {
-                config
-                    .apply(cap.flow_stream(extractor.clone()))
-                    .datagram_stream(factory.clone())
-                    .with_emit_anomalies(config.emit_anomalies)
+                AnySource::Native(
+                    config
+                        .apply(cap.flow_stream(extractor.clone()))
+                        .datagram_stream(factory.clone())
+                        .with_emit_anomalies(config.emit_anomalies),
+                )
             })
             .collect();
         Self {
             select: SelectState::new(streams),
             labels,
         }
-    }
-
-    /// Human-readable label for `source_idx`.
-    pub fn label(&self, source_idx: u16) -> Option<&str> {
-        self.labels.get(source_idx as usize).map(|s| s.as_str())
-    }
-
-    /// Number of sources still being polled (haven't returned `None`
-    /// from their inner stream). Decrements as sources exhaust.
-    pub fn alive_sources(&self) -> usize {
-        self.select.alive_count()
-    }
-
-    /// Per-source kernel ring stats. See
-    /// [`MultiFlowStream::per_source_capture_stats`].
-    pub fn per_source_capture_stats(&self) -> Vec<(String, Option<Result<CaptureStats, Error>>)> {
-        use crate::async_adapters::stream_capture::StreamCapture;
-        self.select
-            .streams
-            .iter()
-            .enumerate()
-            .map(|(i, slot)| {
-                (
-                    self.labels[i].clone(),
-                    slot.as_ref().map(|s| s.capture_stats()),
-                )
-            })
-            .collect()
-    }
-
-    /// Aggregate kernel ring stats. See
-    /// [`MultiFlowStream::capture_stats`].
-    pub fn capture_stats(&self) -> CaptureStats {
-        use crate::async_adapters::stream_capture::StreamCapture;
-        let mut acc = CaptureStats::default();
-        for slot in &self.select.streams {
-            if let Some(s) = slot
-                && let Ok(stats) = s.capture_stats()
-            {
-                acc.packets = acc.packets.saturating_add(stats.packets);
-                acc.drops = acc.drops.saturating_add(stats.drops);
-                acc.freeze_count = acc.freeze_count.saturating_add(stats.freeze_count);
-            }
-        }
-        acc
-    }
-
-    /// Per-source tracker stats. See
-    /// [`MultiFlowStream::per_source_tracker_stats`].
-    pub fn per_source_tracker_stats(&self) -> Vec<(String, Option<&flowscope::FlowTrackerStats>)> {
-        self.select
-            .streams
-            .iter()
-            .enumerate()
-            .map(|(i, slot)| {
-                let label = self.labels[i].clone();
-                let stats = slot.as_ref().map(|s| s.tracker_stats());
-                (label, stats)
-            })
-            .collect()
-    }
-
-    /// Sum of live flow counts across all sources.
-    pub fn total_active_flows(&self) -> usize {
-        self.select
-            .streams
-            .iter()
-            .filter_map(|slot| slot.as_ref())
-            .map(|s| s.active_flows())
-            .sum()
     }
 }
 
@@ -1743,5 +1802,194 @@ mod merged_tests {
                 .capture_leg_inconsistent,
             "a second, different leg for a bound direction must trip the flag",
         );
+    }
+}
+
+#[cfg(all(test, feature = "pcap"))]
+mod mixed_source_tests {
+    //! One `MultiSessionStream` over a live-shaped source (the test
+    //! `VecSource`) and a pcap replay pushed through `push_source`
+    //! (#176 / #177): tagged events from both, per-source introspection
+    //! through `MultiSource`, and the replay source kept — with its final
+    //! counters — after end-of-file.
+
+    use std::time::Duration;
+
+    use flowscope::extract::FiveTuple;
+    use flowscope::extract::parse::test_frames::ipv4_tcp;
+    use flowscope::{SessionEvent, SessionParser, Timestamp};
+    use futures::StreamExt;
+    use pcap_file::pcap::{PcapHeader, PcapPacket, PcapWriter};
+    use pcap_file::{DataLink, Endianness, TsResolution};
+
+    use super::{MultiFlowStream, MultiSessionStream};
+    use crate::async_adapters::flow_source::VecSource;
+    use crate::async_adapters::flow_stream::{FlowStream, current_timestamp};
+    use crate::dedup::Dedup;
+    use crate::pcap_source::AsyncPcapSource;
+
+    #[derive(Clone, Default)]
+    struct Len;
+    impl SessionParser for Len {
+        type Message = usize;
+        fn feed_initiator(&mut self, b: &[u8], _: Timestamp, out: &mut Vec<usize>) {
+            out.push(b.len());
+        }
+        fn feed_responder(&mut self, b: &[u8], _: Timestamp, out: &mut Vec<usize>) {
+            out.push(b.len());
+        }
+    }
+
+    /// Handshake + one client segment (+ FIN exchange when `close`),
+    /// 1 ms apart from t = 1 s.
+    fn tcp_flow(cp: u16, close: bool) -> Vec<(Duration, Vec<u8>)> {
+        let (c, s) = ([10, 0, 0, 1], [10, 0, 0, 2]);
+        let (sp, m) = (9_000, [0u8; 6]);
+        let (cisn, sisn) = (1000u32, 5000u32);
+        let mut v = vec![
+            ipv4_tcp(m, m, c, s, cp, sp, cisn, 0, 0x02, &[]),
+            ipv4_tcp(m, m, s, c, sp, cp, sisn, cisn + 1, 0x12, &[]),
+            ipv4_tcp(m, m, c, s, cp, sp, cisn + 1, sisn + 1, 0x10, &[]),
+            ipv4_tcp(m, m, c, s, cp, sp, cisn + 1, sisn + 1, 0x18, b"hello"),
+        ];
+        if close {
+            let end = cisn + 6;
+            v.push(ipv4_tcp(m, m, c, s, cp, sp, end, sisn + 1, 0x11, &[]));
+            v.push(ipv4_tcp(m, m, s, c, sp, cp, sisn + 1, end + 1, 0x11, &[]));
+            v.push(ipv4_tcp(m, m, c, s, cp, sp, end + 1, sisn + 2, 0x10, &[]));
+        }
+        v.into_iter()
+            .enumerate()
+            .map(|(i, f)| (Duration::from_millis(1_000 + i as u64), f))
+            .collect()
+    }
+
+    fn write_pcap(dir: &std::path::Path, frames: &[(Duration, Vec<u8>)]) -> std::path::PathBuf {
+        let path = dir.join("replay.pcap");
+        let header = PcapHeader {
+            version_major: 2,
+            version_minor: 4,
+            ts_correction: 0,
+            ts_accuracy: 0,
+            snaplen: u32::MAX,
+            datalink: DataLink::ETHERNET,
+            ts_resolution: TsResolution::NanoSecond,
+            endianness: Endianness::native(),
+        };
+        let mut w = PcapWriter::with_header(std::fs::File::create(&path).unwrap(), header).unwrap();
+        for (ts, f) in frames {
+            w.write_packet(&PcapPacket::new_owned(*ts, f.len() as u32, f.clone()))
+                .unwrap();
+        }
+        path
+    }
+
+    fn assert_send<T: Send>() {}
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn mixed_live_shaped_and_replay_sources() {
+        assert_send::<MultiSessionStream<FiveTuple, Len>>();
+        assert_send::<MultiFlowStream<FiveTuple>>();
+
+        // Source 0: live-shaped; the flow stays open (no FIN).
+        let now = current_timestamp();
+        let live = FlowStream::new(
+            VecSource(
+                tcp_flow(40_000, false)
+                    .into_iter()
+                    .map(|(_, f)| (f, now))
+                    .collect(),
+            ),
+            FiveTuple::bidirectional(),
+        )
+        .session_stream(Len);
+
+        // Source 1: a replay with every frame twice, 50 µs apart.
+        let dir = tempfile::tempdir().unwrap();
+        let frames: Vec<_> = tcp_flow(50_000, true)
+            .into_iter()
+            .flat_map(|(t, f)| [(t, f.clone()), (t + Duration::from_micros(50), f)])
+            .collect();
+        let path = write_pcap(dir.path(), &frames);
+        let replay = AsyncPcapSource::open(&path)
+            .await
+            .unwrap()
+            .sessions(FiveTuple::bidirectional(), Len)
+            .with_dedup(Dedup::content(Duration::from_millis(1), 64));
+
+        let mut m = MultiSessionStream::<FiveTuple, Len>::empty();
+        assert!(m.is_empty());
+        assert_eq!(m.push_source("vec", live), 0);
+        assert_eq!(m.push_source("replay", replay), 1);
+        assert_eq!((m.len(), m.alive_sources()), (2, 2));
+        assert_eq!(m.label(1), Some("replay"));
+
+        let mut from_live = 0;
+        let mut data_from_replay = 0;
+        loop {
+            let ev = tokio::time::timeout(Duration::from_secs(5), m.next())
+                .await
+                .expect("events keep coming")
+                .expect("a live source never ends the stream")
+                .unwrap();
+            match (ev.source_idx, &ev.event) {
+                (0, _) => from_live += 1,
+                (1, SessionEvent::Application { .. }) => data_from_replay += 1,
+                (1, SessionEvent::Closed { .. }) => break,
+                (1, _) => {}
+                _ => unreachable!("{ev:?}"),
+            }
+        }
+        assert!(from_live >= 1, "the live-shaped source produced events");
+        assert_eq!(
+            data_from_replay, 1,
+            "the duplicates never reached the parser"
+        );
+
+        // The next poll retires the replay source (end-of-file) and finds
+        // the live one idle.
+        assert!(
+            tokio::time::timeout(Duration::from_millis(300), m.next())
+                .await
+                .is_err()
+        );
+        assert_eq!(m.is_alive(0), Some(true));
+        assert_eq!(m.is_alive(1), Some(false));
+        assert_eq!(m.is_alive(2), None);
+        assert_eq!(m.alive_sources(), 1);
+        assert_eq!(m.len(), 2);
+
+        // Introspection, finished source included.
+        let s1 = m.source(1).expect("kept after EOF");
+        assert_eq!(s1.tracker_stats().flows_ended, 1);
+        assert_eq!(s1.active_flows(), 0);
+        assert_eq!(s1.packets_read(), Some(frames.len() as u64));
+        assert_eq!(s1.dedup().unwrap().dropped(), frames.len() as u64 / 2);
+        assert!(s1.capture_stats().is_none());
+        let s0 = m.source(0).unwrap();
+        assert_eq!(s0.active_flows(), 1);
+        assert!(s0.dedup().is_none());
+        assert!(
+            s0.capture_stats().is_none(),
+            "no kernel ring behind a VecSource"
+        );
+        assert_eq!(s0.packets_read(), None);
+        assert!(m.source(2).is_none());
+
+        let snap = m.per_source_snapshot_flow_stats();
+        assert_eq!(snap.len(), 2);
+        assert_eq!((snap[0].0.as_str(), snap[0].1.len()), ("vec", 1));
+        assert_eq!((snap[1].0.as_str(), snap[1].1.len()), ("replay", 0));
+        let ts = m.per_source_tracker_stats();
+        assert_eq!(ts[1].1.map(|t| t.flows_created), Some(1));
+        assert!(
+            m.per_source_capture_stats()
+                .iter()
+                .all(|(_, s)| s.is_none())
+        );
+        assert_eq!(m.total_active_flows(), 1);
+
+        m.source_mut(1).unwrap().dedup_mut().unwrap().reset();
+        assert_eq!(m.source(1).unwrap().dedup().unwrap().dropped(), 0);
     }
 }

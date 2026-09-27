@@ -46,6 +46,11 @@ pub const GAUGE_FREEZES: &str = "netring_capture_freezes";
 
 /// Gauge name: windowed drop rate (`[0.0, 1.0]`), per capture source.
 pub const GAUGE_DROP_RATE: &str = "netring_capture_drop_rate";
+/// `netring_capture_dedup_dropped{source}` — cumulative frames the
+/// source's [`Dedup`](crate::Dedup) dropped as duplicates
+/// ([`MonitorBuilder::dedup`](crate::monitor::MonitorBuilder::dedup)).
+/// New in 0.31.1.
+pub const GAUGE_DEDUP_DROPPED: &str = "netring_capture_dedup_dropped";
 
 /// Gauge name: cumulative handler errors swallowed under
 /// `HandlerErrorPolicy::Isolate`. Emitted by

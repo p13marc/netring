@@ -1,6 +1,6 @@
 [package]
 name = "netring"
-version = "0.31.0"
+version = "0.31.1"
 edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
@@ -414,6 +414,11 @@ required-features = ["tokio", "flow", "parse"]
 name = "async_multi_interface"
 path = "examples/scaling/async_multi_interface.rs"
 required-features = ["tokio", "flow", "parse"]
+
+[[example]]
+name = "async_mixed_sources"
+path = "examples/scaling/async_mixed_sources.rs"
+required-features = ["tokio", "flow", "parse", "pcap"]
 
 # xdp/ — AF_XDP
 [[example]]

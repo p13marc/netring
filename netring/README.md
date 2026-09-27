@@ -11,7 +11,7 @@ Flow/session logic lives in the companion crate
 
 ```toml
 [dependencies]
-netring = { version = "0.30", features = ["tokio"] }
+netring = { version = "0.31", features = ["tokio"] }
 ```
 
 ```rust,ignore
@@ -176,7 +176,7 @@ usable directly (flat `packets()` iterator or block-level batches). See
 ## Flow & session tracking
 
 ```toml
-netring = { version = "0.30", features = ["tokio", "flow"] }
+netring = { version = "0.31", features = ["tokio", "flow"] }
 ```
 
 ```rust,ignore

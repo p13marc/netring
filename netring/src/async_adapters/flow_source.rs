@@ -63,6 +63,14 @@ pub(crate) trait AsyncFlowSource {
         cx: &mut Context<'_>,
         sink: &mut dyn FnMut(SourcePacket<'_>),
     ) -> Poll<std::io::Result<DrainOutcome>>;
+
+    /// Kernel-ring statistics when the source has a ring (AF_PACKET,
+    /// AF_XDP); `None` otherwise. Backs
+    /// [`MultiSource::capture_stats`](super::multi_source::MultiSource::capture_stats)
+    /// for the live streams.
+    fn capture_stats(&self) -> Option<Result<crate::stats::CaptureStats, crate::error::Error>> {
+        None
+    }
 }
 
 // ── AF_PACKET: AsyncCapture<S> ─────────────────────────────────────────────
@@ -103,6 +111,10 @@ where
             Poll::Ready(Ok(DrainOutcome::Idle))
         }
     }
+
+    fn capture_stats(&self) -> Option<Result<crate::stats::CaptureStats, crate::error::Error>> {
+        Some(self.stats())
+    }
 }
 
 /// Build a [`PacketView`] for a backend that exposes only raw bytes + an
@@ -139,6 +151,10 @@ impl AsyncFlowSource for crate::AsyncXdpCapture {
             })),
             Poll::Pending => Poll::Pending,
         }
+    }
+
+    fn capture_stats(&self) -> Option<Result<crate::stats::CaptureStats, crate::error::Error>> {
+        Some(self.capture_stats())
     }
 }
 
@@ -182,6 +198,8 @@ mod tests {
         fn is_flow_source<T: AsyncFlowSource>() {}
         fn is_stream<T: futures_core::Stream>() {}
 
+        fn is_source<T: crate::async_adapters::multi_source::MultiSource<Ext>>() {}
+
         type Ext = flowscope::extract::FiveTuple;
         is_flow_source::<crate::AsyncCapture<crate::Capture>>();
         is_stream::<
@@ -190,6 +208,16 @@ mod tests {
                 Ext,
             >,
         >();
+        // Fan-in sources (#176 / #177): every netring source stream is a
+        // `MultiSource`.
+        is_source::<
+            crate::async_adapters::flow_stream::FlowStream<
+                crate::AsyncCapture<crate::Capture>,
+                Ext,
+            >,
+        >();
+        #[cfg(feature = "pcap")]
+        is_source::<crate::pcap_flow::PcapFlowStream<Ext>>();
 
         #[cfg(all(feature = "af-xdp", feature = "xdp-loader"))]
         {
@@ -212,6 +240,22 @@ mod tests {
             is_flow_source::<crate::AsyncXdpCapture>();
             is_stream::<crate::async_adapters::flow_stream::FlowStream<crate::AsyncXdpCapture, Ext>>(
             );
+            is_source::<crate::async_adapters::flow_stream::FlowStream<crate::AsyncXdpCapture, Ext>>(
+            );
+            is_source::<
+                crate::async_adapters::session_stream::SessionStream<
+                    crate::AsyncXdpCapture,
+                    Ext,
+                    SParser,
+                >,
+            >();
+            is_source::<
+                crate::async_adapters::datagram_stream::DatagramStream<
+                    crate::AsyncXdpCapture,
+                    Ext,
+                    DParser,
+                >,
+            >();
             is_stream::<crate::async_adapters::multi_streams::XdpMultiFlowStream<Ext>>();
             // AF_XDP tap merge (#105 Phase B over AF_XDP): one shared tracker.
             is_stream::<

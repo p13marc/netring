@@ -45,5 +45,25 @@ jobs:
       # crates.io dependency on it only resolves once the matching version
       # is live (cargo publish blocks until the index has it, so no manual
       # wait).
-      - run: cargo publish -p netring --token ${{ secrets.CARGO_REGISTRY_TOKEN }}
-      - run: cargo publish -p netring-exporters --token ${{ secrets.CARGO_REGISTRY_TOKEN }}
+      #
+      # A member whose exact version is already on crates.io is skipped
+      # (#179): a netring-only patch leaves netring-exporters unchanged, and
+      # `cargo publish` of an existing version fails — which turned the run
+      # red after netring was already out. It also makes a re-run
+      # idempotent.
+      - name: Publish netring, then netring-exporters (skipping published versions)
+        run: |
+          set -euo pipefail
+          for crate in netring netring-exporters; do
+            version=$(cargo metadata --no-deps --format-version 1 \
+              | jq -r --arg c "$crate" '.packages[] | select(.name == $c) | .version')
+            status=$(curl -s -o /dev/null -w '%{http_code}' \
+              -H 'User-Agent: netring-publish (git.marcpardo.eu)' \
+              "https://crates.io/api/v1/crates/$crate/$version")
+            if [ "$status" = "200" ]; then
+              echo "$crate $version is already on crates.io; skipping"
+              continue
+            fi
+            echo "publishing $crate $version (crates.io answered $status)"
+            cargo publish -p "$crate" --token "${{ secrets.CARGO_REGISTRY_TOKEN }}"
+          done

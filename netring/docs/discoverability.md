@@ -154,6 +154,9 @@ Purpose-built periodic reports, each armed with one builder call plus an
   `TlsFingerprint.{app_protocol, pq_key_share}` — see FINGERPRINTS.md.
 - `.reassemble_ip_fragments()` — reassemble IPv4 fragments before parsing
   (defeats fragmentation evasion; example `ip_defrag`).
+- `.dedup(Dedup)` / `.dedup_loopback()` (0.31.1) — drop the duplicate
+  frames a `lo` (or mirrored) source delivers, per source, before any
+  handler; `CaptureTelemetry::dedup_dropped` counts them.
 
 ## Capture placement & recording (0.29)
 

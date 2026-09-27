@@ -20,6 +20,32 @@ built on AF_PACKET with TPACKET_V3 (block-based mmap ring buffers) and AF_XDP.
 
 ## Implementation Status
 
+**0.31.1 — unreleased** (additive patch, CHANGELOG `## 0.31.1`;
+milestone "0.31.1 — des-capture upgrade follow-ups", issues #176–#179).
+Depends on **flowscope 0.25.1**; `netring-exporters` stays 0.7.0.
+
+- **`MultiSource`** (`async_adapters/multi_source.rs`, sealed):
+  per-source introspection of every source stream (tracker, flow
+  snapshots, dedup, `capture_stats` = None for replay, `packets_read`
+  = None for kernel sources). The `Multi*Stream` fan-ins hold
+  `SelectState<AnySource<E, Native, Ev>>` — the constructor's concrete
+  stream or a boxed `push_source`d one — and expose `source(idx)` /
+  `source_mut` / `is_alive` / `len` / `per_source_snapshot_flow_stats`
+  via the `multi_source_api!` macro under the struct bounds only. A
+  finished source is kept (`Slot { done }`); the select loop decides
+  Pending vs Ready(None) *after* polling (a fixed no-waker park).
+  Example `scaling/async_mixed_sources`.
+- **Monitor dedup** (`MonitorBuilder::dedup` / `dedup_loopback`): a
+  `netring::Dedup` template cloned per source in `run_loop` (`dedups`
+  parallel to `caps`, kept across `Reopen`) and once in `replay_loop`;
+  `AnyBackend::drain_batch` passes the `PacketDirection`; count in
+  `CaptureTelemetry::dedup_dropped` / `netring_capture_dedup_dropped`.
+  Inert profiles: `loopback()` on AF_XDP and direction-less pcap.
+- `publish-crates.yml` skips already-published versions.
+- Regression tests: `tests/multi_source_replay.rs`,
+  `tests/monitor_dedup_replay.rs`, `tests/monitor_lo_dedup.rs`
+  (privileged), `tests/alloc_gate.rs` (dedup-armed Monitor).
+
 **0.31.0 — RELEASED 2026-09-26** (published to crates.io, tag `0.31.0`,
 alongside **`netring-exporters` 0.7.0**; breaking; `docs/MIGRATING_0.30_TO_0.31.md`).
 "flowscope 0.25: one session engine". Depends on **flowscope 0.25**

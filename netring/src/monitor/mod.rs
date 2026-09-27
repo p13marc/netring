@@ -355,6 +355,9 @@ pub struct Monitor {
     /// Issue #134: IP-fragment reassembly config (off unless
     /// [`MonitorBuilder::reassemble_ip_fragments`] armed it).
     pub(crate) ip_frag_config: Option<ip_frag::IpFragConfig>,
+    /// #178: packet dedup template ([`MonitorBuilder::dedup`]), cloned
+    /// once per capture source by the run loop; `None` = off.
+    pub(crate) dedup: Option<crate::dedup::Dedup>,
     /// Issue #53: the live IOC set, for [`Self::reload_handle`].
     pub(crate) ioc_swap: Option<std::sync::Arc<arc_swap::ArcSwap<ioc::IocSet>>>,
     /// Issue #53: the live Sigma rule set, for [`Self::reload_handle`].
@@ -1030,6 +1033,8 @@ pub struct MonitorBuilder {
     red_armed: bool,
     /// Issue #134: IP-fragment reassembly config (off = `None`).
     ip_frag_config: Option<ip_frag::IpFragConfig>,
+    /// #178: packet dedup template (off = `None`).
+    dedup: Option<crate::dedup::Dedup>,
     /// Issue #130: set if `owner_bandwidth()` was armed without an attribution
     /// hook available at that point — surfaces [`BuildError::AttributionHookRequired`].
     owner_bandwidth_needs_hook: bool,
@@ -2523,6 +2528,53 @@ impl MonitorBuilder {
     pub fn reassemble_ip_fragments_with(mut self, config: ip_frag::IpFragConfig) -> Self {
         self.ip_frag_config = Some(config);
         self
+    }
+
+    /// #178: drop duplicate frames **per capture source** before anything
+    /// sees them — the Monitor's counterpart of the async streams'
+    /// `with_dedup` and of
+    /// [`MultiStreamConfig::with_dedup`](crate::MultiStreamConfig::with_dedup).
+    /// Off by default. New in 0.31.1.
+    ///
+    /// Without it a Monitor on `lo` (every frame seen once outgoing and
+    /// once incoming) counts every packet twice: doubled packet / byte
+    /// counts in [`FlowEnded`](crate::protocol::event_typed::FlowEnded)
+    /// stats and bandwidth aggregation, spurious `RetransmittedSegment`
+    /// anomalies and `retransmits_*`, every packet-tier handler called
+    /// twice.
+    ///
+    /// - `dedup` is a **template**: each capture source (and each shard
+    ///   under `ShardedRunner`) gets its own clone — a fresh ring and
+    ///   counters ([`Dedup::clone`](crate::Dedup) resets state). A
+    ///   `BackendErrorPolicy::Reopen` keeps the source's ring.
+    /// - It runs **first** in the per-frame chain — before packet-tier
+    ///   subscriptions, the ARP / NDP / LLDP / CDP / asset / p0f watchers,
+    ///   the nPrint / YARA accumulators, IP-fragment reassembly and the
+    ///   flow tracker — mirroring the streams, which dedup before their
+    ///   pcap tap. A dropped frame reaches nothing; record at the
+    ///   `Capture` level if you need the kernel's duplicates on disk.
+    /// - [`Dedup::loopback`](crate::Dedup::loopback) is **direction-aware**
+    ///   and therefore inert on AF_XDP sources (no direction) and on a
+    ///   [`pcap_source`](Self::pcap_source) without recorded direction
+    ///   (legacy pcap; pcapng EPB flags and Linux cooked captures carry
+    ///   it) — use [`Dedup::content`](crate::Dedup::content) there.
+    /// - Under `ShardedRunner` twins stay on one shard only with
+    ///   `FanoutMode::Hash` (identical frames hash identically).
+    /// - The drop count is
+    ///   [`CaptureTelemetry::dedup_dropped`](crate::monitor::CaptureTelemetry::dedup_dropped)
+    ///   / `CaptureHealth::dedup_dropped` and the
+    ///   `netring_capture_dedup_dropped` gauge (`metrics`).
+    ///
+    /// Idempotent — the last call wins.
+    pub fn dedup(mut self, dedup: crate::dedup::Dedup) -> Self {
+        self.dedup = Some(dedup);
+        self
+    }
+
+    /// Sugar for `.dedup(Dedup::loopback())` — the `lo` profile (1 ms
+    /// window, direction-aware). See [`dedup`](Self::dedup). New in 0.31.1.
+    pub fn dedup_loopback(self) -> Self {
+        self.dedup(crate::dedup::Dedup::loopback())
     }
 
     /// 0.22 §2.5: handle ICMP errors — Destination Unreachable / Time
@@ -4538,6 +4590,7 @@ impl MonitorBuilder {
             ml_feature_handlers: self.ml_feature_handlers,
             byte_accumulators,
             ip_frag_config: self.ip_frag_config,
+            dedup: self.dedup,
             ioc_swap: self.ioc_swap,
             #[cfg(feature = "sigma")]
             sigma_swap: self.sigma_swap,

@@ -139,6 +139,27 @@ async fn monitor(path: &std::path::Path) {
         .unwrap();
 }
 
+/// `monitor` with a content dedup armed (#178): the ring is
+/// preallocated and `keep_raw` hashes in place, so it must stay
+/// allocation-free per packet.
+async fn monitor_dedup(path: &std::path::Path) {
+    Monitor::builder()
+        .pcap_source(path)
+        .dedup(netring::Dedup::content(Duration::from_millis(5), 64))
+        .protocol::<Tcp>()
+        .on::<FlowStarted<Tcp>>(|_: &FlowStarted<Tcp>| Ok(()))
+        .on::<FlowPacket>(|p: &FlowPacket| {
+            std::hint::black_box(p.len);
+            Ok(())
+        })
+        .on::<FlowEnded<Tcp>>(|_: &FlowEnded<Tcp>| Ok(()))
+        .build()
+        .unwrap()
+        .replay()
+        .await
+        .unwrap();
+}
+
 #[derive(Clone, Default)]
 struct Silent;
 
@@ -178,10 +199,18 @@ where
 async fn engine_and_dispatch_add_no_allocations_per_packet() {
     let src = marginal(|p| async move { source_only(&p).await }).await;
     let mon = marginal(|p| async move { monitor(&p).await }).await;
+    let mon_dedup = marginal(|p| async move { monitor_dedup(&p).await }).await;
     let ses = marginal(|p| async move { sessions(&p).await }).await;
-    eprintln!("allocations per packet: source {src:.3}, monitor {mon:.3}, session stream {ses:.3}");
+    eprintln!(
+        "allocations per packet: source {src:.3}, monitor {mon:.3} (dedup {mon_dedup:.3}), session stream {ses:.3}"
+    );
     // A few hundredths of slack for amortised growth (channel blocks).
     assert!(mon - src < 0.05, "Monitor adds {:.3}/packet", mon - src);
+    assert!(
+        mon_dedup - src < 0.05,
+        "Monitor with dedup adds {:.3}/packet",
+        mon_dedup - src
+    );
     assert!(
         ses - src < 0.05,
         "PcapSessionStream adds {:.3}/packet",

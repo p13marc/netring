@@ -349,6 +349,48 @@ where
     }
 }
 
+// ── MultiSource (fan-in introspection, #176 / #177) ──────────────
+
+impl<C, E, F> crate::async_adapters::multi_source::Sealed for DatagramStream<C, E, F>
+where
+    E: FlowExtractor,
+    E::Key: Eq + std::hash::Hash + Clone + Send + 'static,
+    F: DatagramParserFactory<E::Key>,
+{
+}
+
+impl<C, E, F> crate::async_adapters::multi_source::MultiSource<E> for DatagramStream<C, E, F>
+where
+    C: AsyncFlowSource,
+    E: FlowExtractor,
+    E::Key: Eq + std::hash::Hash + Clone + Send + 'static,
+    F: DatagramParserFactory<E::Key>,
+{
+    fn tracker(&self) -> &FlowTracker<E, ()> {
+        self.driver.tracker()
+    }
+
+    fn snapshot_flow_stats(&self) -> Box<dyn Iterator<Item = (E::Key, FlowStats)> + '_> {
+        Box::new(self.driver.snapshot_flow_stats())
+    }
+
+    fn dedup(&self) -> Option<&Dedup> {
+        self.dedup.as_ref()
+    }
+
+    fn dedup_mut(&mut self) -> Option<&mut Dedup> {
+        self.dedup.as_mut()
+    }
+
+    fn capture_stats(&self) -> Option<Result<crate::stats::CaptureStats, Error>> {
+        self.cap.capture_stats()
+    }
+
+    fn packets_read(&self) -> Option<u64> {
+        None
+    }
+}
+
 // ── StreamCapture trait impl ───────────────────────────────────────
 
 use crate::async_adapters::stream_capture::{Sealed, StreamCapture};

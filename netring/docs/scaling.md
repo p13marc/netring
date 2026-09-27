@@ -205,6 +205,71 @@ for i in 0..4 {
 let multi = AsyncMultiCapture::from_captures(captures, Some(labels))?;
 ```
 
+## Mixing live and replay sources (0.31.1)
+
+The `Multi*Stream` fan-ins are not tied to the streams their
+constructors build. `empty()` + `push_source(label, stream)` /
+`with_source` accept **any** netring source stream with the same event
+type — `SessionStream` over AF_PACKET or AF_XDP, `PcapSessionStream`
+replaying a file — so one `MultiSessionStream<E, F>` serves a live
+multi-interface run and a `--read capture.pcap` run through the same
+event loop (`examples/scaling/async_mixed_sources.rs`):
+
+```rust
+use netring::{AsyncCapture, AsyncPcapSource, Dedup, MultiSessionStream, MultiSource};
+
+let mut fanin = MultiSessionStream::<FiveTuple, MyParser>::empty();
+for iface in ["lo", "eth0"] {
+    let live = AsyncCapture::open(iface)?
+        .flow_stream(FiveTuple::bidirectional())
+        .session_stream(MyParser);
+    fanin.push_source(iface, live);            // source_idx 0, 1
+}
+let replay = AsyncPcapSource::open("capture.pcap").await?
+    .sessions(FiveTuple::bidirectional(), MyParser)
+    .with_dedup(Dedup::content(Duration::from_millis(1), 256));
+let idx = fanin.push_source("capture.pcap", replay); // 2
+```
+
+The parser type is shared by the live and the replay streams
+(flowscope's blanket `SessionParserFactory` impl for
+`P: SessionParser + Default + Clone`), which is what makes the event
+types line up. A replay source ends at end-of-file: `alive_sources()`
+decrements, `is_alive(idx)` turns `false`, and the source **stays in
+place** with its final counters readable; the fan-in itself ends only
+when every source has (never, with a live one).
+
+## Per-source introspection (0.31.1)
+
+Every source implements `MultiSource` — tracker, live flow snapshots,
+dedup, kernel-ring or file counters — and the fan-in hands it out with
+`source(idx)` / `source_mut(idx)`, finished sources included:
+
+```rust
+// The per-flow report of a multi-interface capture:
+for (label, flows) in fanin.per_source_snapshot_flow_stats() {
+    for (key, stats) in flows {
+        println!("[{label}] {key} {}/{} pkts, gaps {}/{}", stats.packets_initiator,
+            stats.packets_responder, stats.reassembly_gaps_initiator,
+            stats.reassembly_gaps_responder);
+    }
+}
+// One source in detail:
+let src = fanin.source(idx).unwrap();
+println!("{:?} live, {} ended, dedup dropped {:?}, {}",
+    src.active_flows(), src.tracker_stats().flows_ended,
+    src.dedup().map(|d| d.dropped()),
+    match (src.capture_stats(), src.packets_read()) {
+        (Some(Ok(s)), _) => format!("ring {} pkts / {} drops", s.packets, s.drops),
+        (None, Some(n)) => format!("file: {n} frames"),
+        _ => String::new(),
+    });
+fanin.source_mut(idx).unwrap().dedup_mut().map(|d| d.reset());
+```
+
+These accessors need only the struct bounds, so a fan-in assembled with
+`from_streams` from a non-`Clone` factory can use them too.
+
 ## Aggregating stats across sources
 
 ```rust
@@ -218,10 +283,14 @@ for (label, stats) in stream.per_source_capture_stats() {
     match stats {
         Some(Ok(s)) => println!("[{label}] {s:?}"),
         Some(Err(e)) => eprintln!("[{label}] error: {e}"),
-        None => eprintln!("[{label}] exhausted"),
+        None => println!("[{label}] no kernel ring (replay source)"),
     }
 }
 ```
+
+`per_source_tracker_stats()` is always `Some` since 0.31.1 (finished
+sources are kept); `per_source_snapshot_flow_stats()` adds the live
+flows per source.
 
 ## AF_XDP: one socket per RX queue
 

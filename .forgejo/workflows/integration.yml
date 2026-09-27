@@ -61,8 +61,46 @@ jobs:
           # --no-fail-fast so one failing binary does not mask the rest: this
           # lane has had multiple independent failures at once, and stopping at
           # the first turns a two-bug run into two more red runs.
+          # The job log is not retrievable from outside this Forgejo, so the
+          # run keeps its own output for the failure report below.
+          set -o pipefail
           cargo test -p netring --features "integration-tests,tokio,channel,af-xdp,flow,parse,pcap,http,icmp" \
-            --no-fail-fast -- --test-threads=1 --nocapture
+            --no-fail-fast -- --test-threads=1 --nocapture 2>&1 | tee integration-test.log
+      # Neither job logs nor artifacts can be fetched from outside this
+      # Forgejo with an API token, so on failure the run reports the failing
+      # sections itself, as a comment on the pull request.
+      - name: Report the failing tests on the pull request
+        if: failure() && github.event_name == 'pull_request'
+        env:
+          API: ${{ github.api_url }}
+          REPO: ${{ github.repository }}
+          PR: ${{ github.event.pull_request.number }}
+          SHA: ${{ github.sha }}
+          TOKEN: ${{ github.token }}
+        run: |
+          {
+            echo "### \`test-integration\` failed on \`${SHA:0:8}\`"
+            echo
+            echo '```'
+            grep -E "^test .* FAILED$|^failures:$|^---- |panicked at|^error(\[E[0-9]+\])?:|^thread .* panicked" -A 14 integration-test.log | head -400
+            echo '```'
+            echo
+            echo '<details><summary>last 120 lines</summary>'
+            echo
+            echo '```'
+            tail -120 integration-test.log
+            echo '```'
+            echo '</details>'
+          } > comment.md
+          python3 - <<'EOF'
+          import json, os, urllib.request
+          body = open('comment.md').read()
+          url = f"{os.environ['API']}/repos/{os.environ['REPO']}/issues/{os.environ['PR']}/comments"
+          req = urllib.request.Request(url, data=json.dumps({"body": body}).encode(), method="POST",
+              headers={"Authorization": "token " + os.environ['TOKEN'], "Content-Type": "application/json"})
+          with urllib.request.urlopen(req) as r:
+              print("comment posted:", r.status)
+          EOF
 
   # INFORMATIONAL: bpf(BPF_MAP_CREATE) requires init-namespace CAP_BPF, which
   # rootless podman cannot grant (and enabling unprivileged BPF on the

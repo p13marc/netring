@@ -22,6 +22,7 @@ so a scrape always sees the latest sample rather than an increment.
 | `netring_capture_drops`     | gauge | `source` | Cumulative packets the kernel dropped (ring full). |
 | `netring_capture_freezes`   | gauge | `source` | Cumulative TPACKET_V3 ring-freeze events. |
 | `netring_capture_drop_rate` | gauge | `source` | Windowed drop rate `[0.0, 1.0]` over the last sample period. |
+| `netring_capture_dedup_dropped` | gauge | `source` | **(0.31.1)** Cumulative frames the source's `Dedup` dropped as duplicates (`MonitorBuilder::dedup`); 0 without one. |
 
 `source` is the capture source's index (`.interfaces([...])`
 registration order), rendered as a string. **Cardinality:** one series

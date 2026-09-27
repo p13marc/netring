@@ -217,6 +217,7 @@ pub(crate) async fn run_loop(monitor: Monitor, stop: StopCondition) -> Result<()
         mut ml_feature_handlers,
         mut byte_accumulators,
         ip_frag_config,
+        dedup,
         ioc_swap: _,
         #[cfg(feature = "sigma")]
             sigma_swap: _,
@@ -307,6 +308,11 @@ pub(crate) async fn run_loop(monitor: Monitor, stop: StopCondition) -> Result<()
         };
         caps.push(cap);
     }
+    // #178: one dedup ring per source, parallel to `specs` / `caps`
+    // (`Dedup::clone` yields a fresh ring). Kept across a `Reopen` —
+    // dedup state is about the traffic, not the socket.
+    let mut dedups: Vec<Option<crate::dedup::Dedup>> =
+        specs.iter().map(|_| dedup.clone()).collect();
     // 0.24 Phase C4: all sockets are open and the loop is about to run —
     // readiness flips true. `mark_started` stamps the uptime/liveness
     // clock now (not at build time).
@@ -490,6 +496,7 @@ pub(crate) async fn run_loop(monitor: Monitor, stop: StopCondition) -> Result<()
                     if let Some(reg) = capture_stats.as_mut() {
                         sample_and_fire_capture_stats(
                             &caps,
+                            &dedups,
                             &mut telemetry_sampler,
                             reg,
                             sink.as_mut(),
@@ -583,8 +590,15 @@ pub(crate) async fn run_loop(monitor: Monitor, stop: StopCondition) -> Result<()
             // synchronous — its borrows drop before the `.await` below, preserving
             // `Send`. A `Propagate` error is stashed and surfaced after the drain.
             let mut packet_err: Option<crate::error::Error> = None;
+            // #178: the source's dedup ring, checked first for every frame.
+            let mut dedup_i = dedups[i].as_mut();
             let last_ts = caps[i]
-                .drain_batch(|view| {
+                .drain_batch(|view, direction| {
+                    if let Some(d) = dedup_i.as_deref_mut()
+                        && !d.keep_raw(view.frame, direction, view.timestamp)
+                    {
+                        return;
+                    }
                     if !packet_subs.is_empty()
                         && packet_err.is_none()
                         && let Err(e) = dispatch_packet_subs(
@@ -896,6 +910,7 @@ pub(crate) async fn replay_loop(
         mut ml_feature_handlers,
         mut byte_accumulators,
         ip_frag_config,
+        mut dedup,
         ioc_swap: _,
         #[cfg(feature = "sigma")]
             sigma_swap: _,
@@ -1025,6 +1040,14 @@ pub(crate) async fn replay_loop(
                 }
             }
 
+            // #178: dedup first, as on the live path (a legacy pcap records
+            // no direction, so `Dedup::loopback` is inert here — see
+            // `MonitorBuilder::dedup`).
+            if let Some(d) = dedup.as_mut()
+                && !d.keep_raw(&pkt.data, pkt.direction, pkt.timestamp)
+            {
+                continue;
+            }
             let view = flowscope::PacketView::new(&pkt.data, pkt.timestamp);
 
             // 0.25 A1: packet-tier subs fire before tracking, as on the live path.
@@ -1464,6 +1487,7 @@ fn emit_active_flow_records(
 #[allow(clippy::too_many_arguments)]
 fn sample_and_fire_capture_stats(
     caps: &[AnyBackend],
+    dedups: &[Option<crate::dedup::Dedup>],
     sampler: &mut crate::monitor::telemetry::TelemetrySampler,
     reg: &mut crate::monitor::telemetry::CaptureStatsRegistration,
     sink: &mut dyn AnomalySink,
@@ -1491,7 +1515,11 @@ fn sample_and_fire_capture_stats(
                 continue;
             }
         };
-        let telemetry = sampler.sample(i, cum, detail);
+        let mut telemetry = sampler.sample(i, cum, detail);
+        telemetry.dedup_dropped = dedups
+            .get(i)
+            .and_then(|d| d.as_ref())
+            .map_or(0, |d| d.dropped());
         total_packets += telemetry.packets;
         total_drops += telemetry.drops;
         let mut ctx = Ctx::new(

@@ -30,6 +30,7 @@ use flowscope::{PacketView, Timestamp};
 
 use crate::AsyncCapture;
 use crate::error::{Error, Result};
+use crate::packet::PacketDirection;
 use crate::stats::CaptureStats;
 
 /// A live capture backend behind the Monitor run loop. AF_PACKET today;
@@ -77,7 +78,10 @@ impl AnyBackend {
     }
 
     /// Drain every retired batch currently ready on this backend, invoking
-    /// `on_packet` with a borrowed [`PacketView`] per packet. Returns the
+    /// `on_packet` with a borrowed [`PacketView`] per packet plus the
+    /// frame's direction (AF_PACKET reports it; AF_XDP has none —
+    /// `PacketDirection::Unknown(0)`, as the streams do — which is what
+    /// the direction-aware loopback dedup needs, #178). Returns the
     /// last packet's timestamp, or `None` on a spurious wake (no data).
     ///
     /// The readiness guard is held only across the synchronous callback
@@ -85,7 +89,7 @@ impl AnyBackend {
     /// crosses the run loop's later `.await`, preserving `Send`.
     pub(crate) async fn drain_batch(
         &mut self,
-        mut on_packet: impl FnMut(PacketView<'_>),
+        mut on_packet: impl FnMut(PacketView<'_>, PacketDirection),
     ) -> Result<Option<Timestamp>> {
         let mut last_ts: Option<Timestamp> = None;
         match self {
@@ -95,7 +99,7 @@ impl AnyBackend {
                     for pkt in &batch {
                         let ts = pkt.timestamp();
                         last_ts = Some(ts);
-                        on_packet(PacketView::new(pkt.data(), ts));
+                        on_packet(PacketView::new(pkt.data(), ts), pkt.direction());
                     }
                 }
             }
@@ -111,6 +115,7 @@ impl AnyBackend {
                         last_ts = Some(ts);
                         on_packet(
                             PacketView::new(pkt.data(), ts).with_rx_metadata(pkt.rx_metadata()),
+                            PacketDirection::Unknown(0),
                         );
                     }
                 }
@@ -135,6 +140,7 @@ impl AnyBackend {
                             last_ts = Some(ts);
                             on_packet(
                                 PacketView::new(pkt.data(), ts).with_rx_metadata(pkt.rx_metadata()),
+                                PacketDirection::Unknown(0),
                             );
                         }
                     }

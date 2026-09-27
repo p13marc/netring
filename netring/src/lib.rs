@@ -230,6 +230,8 @@ pub use async_adapters::multi_capture::AsyncXdpMultiCapture;
 #[cfg(all(feature = "tokio", feature = "flow"))]
 pub use async_adapters::multi_config::MultiStreamConfig;
 #[cfg(all(feature = "tokio", feature = "flow"))]
+pub use async_adapters::multi_source::MultiSource;
+#[cfg(all(feature = "tokio", feature = "flow"))]
 pub use async_adapters::multi_streams::{
     MergedFlowStream, MultiDatagramStream, MultiFlowStream, MultiSessionStream, TaggedEvent,
 };

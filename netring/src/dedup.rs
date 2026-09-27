@@ -17,6 +17,10 @@
 //!   window + ring size. Direction-agnostic. Use for any
 //!   capture path that delivers duplicates.
 //!
+//! Every async stream takes one (`with_dedup`), `MultiStreamConfig`
+//! clones a template per source, and so does the Monitor
+//! (`MonitorBuilder::dedup` / `dedup_loopback`, 0.31.1).
+//!
 //! # Cost
 //!
 //! ~100 ns per packet (xxh3-64 hash + linear scan of a small ring).

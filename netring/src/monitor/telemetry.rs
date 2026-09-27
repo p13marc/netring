@@ -63,6 +63,10 @@ pub struct CaptureTelemetry {
     /// kept distinct). The flat [`drops`](Self::drops) tells you *how
     /// many*; this tells you *why*.
     pub detail: DropBreakdown,
+    /// Cumulative frames this source's [`Dedup`](crate::Dedup) dropped as
+    /// duplicates ([`MonitorBuilder::dedup`](crate::monitor::MonitorBuilder::dedup));
+    /// `0` when no dedup is configured. New in 0.31.1.
+    pub dedup_dropped: u64,
 }
 
 impl CaptureTelemetry {
@@ -97,6 +101,8 @@ impl CaptureTelemetry {
     /// [`netring_capture_drops`](crate::metrics::GAUGE_DROPS),
     /// [`netring_capture_freezes`](crate::metrics::GAUGE_FREEZES) (all
     /// cumulative), and
+    /// [`netring_capture_dedup_dropped`](crate::metrics::GAUGE_DEDUP_DROPPED)
+    /// (0.31.1), and
     /// [`netring_capture_drop_rate`](crate::metrics::GAUGE_DROP_RATE) (the
     /// windowed rate). Gauges, not counters: `drop_rate` is a rate and the
     /// totals are read as absolute cumulative values, so a scrape always
@@ -116,7 +122,10 @@ impl CaptureTelemetry {
             .set(self.drops as f64);
         metrics::gauge!(crate::metrics::GAUGE_FREEZES, "source" => source.clone())
             .set(self.freezes as f64);
-        metrics::gauge!(crate::metrics::GAUGE_DROP_RATE, "source" => source).set(self.drop_rate);
+        metrics::gauge!(crate::metrics::GAUGE_DROP_RATE, "source" => source.clone())
+            .set(self.drop_rate);
+        metrics::gauge!(crate::metrics::GAUGE_DEDUP_DROPPED, "source" => source)
+            .set(self.dedup_dropped as f64);
     }
 }
 
@@ -157,6 +166,9 @@ pub struct CaptureHealth {
     /// object (`{"AfPacket":{…}}` / `{"Xdp":{…}}`) so the report line is
     /// self-describing about *where* loss occurred.
     pub detail: DropBreakdown,
+    /// Cumulative frames dropped as duplicates by the source's dedup
+    /// (`0` without one). New in 0.31.1.
+    pub dedup_dropped: u64,
 }
 
 impl crate::report::Report for CaptureHealth {
@@ -173,6 +185,7 @@ impl From<CaptureTelemetry> for CaptureHealth {
             drop_rate: t.drop_rate,
             lifetime_drop_rate: t.lifetime_drop_rate(),
             detail: t.detail,
+            dedup_dropped: t.dedup_dropped,
         }
     }
 }
@@ -233,6 +246,7 @@ impl TelemetrySampler {
             freezes: cum.freeze_count as u64,
             drop_rate,
             detail,
+            dedup_dropped: 0,
         }
     }
 }
@@ -371,8 +385,10 @@ mod tests {
             drop_rate: 0.25,
             lifetime_drop_rate: 0.14,
             detail: DropBreakdown::AfPacket { freezes: 0 },
+            dedup_dropped: 3,
         };
         let line = serde_json::to_string(&h).expect("serialize");
+        assert!(line.contains("\"dedup_dropped\":3"));
         assert!(line.contains("\"source\":1"));
         assert!(line.contains("\"packets\":42"));
         assert!(line.contains("\"drop_rate\":0.25"));

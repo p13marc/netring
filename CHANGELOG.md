@@ -1,6 +1,6 @@
 # Changelog
 
-## 0.31.1 — unreleased — mixed-source fan-ins, Monitor dedup, flowscope 0.25.1
+## 0.31.1 — 2026-09-28 — mixed-source fan-ins, Monitor dedup, flowscope 0.25.1
 
 Patch release, additive. Follow-ups from des-capture's move to 0.31.0
 (milestone "0.31.1 — des-capture upgrade follow-ups"). Depends on

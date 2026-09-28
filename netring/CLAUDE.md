@@ -20,7 +20,7 @@ built on AF_PACKET with TPACKET_V3 (block-based mmap ring buffers) and AF_XDP.
 
 ## Implementation Status
 
-**0.31.1 — unreleased** (additive patch, CHANGELOG `## 0.31.1`;
+**0.31.1 — RELEASED 2026-09-28** (published to crates.io, tag `0.31.1`; `netring-exporters` stays 0.7.0; additive patch, CHANGELOG `## 0.31.1`;
 milestone "0.31.1 — des-capture upgrade follow-ups", issues #176–#179).
 Depends on **flowscope 0.25.1**; `netring-exporters` stays 0.7.0.
 

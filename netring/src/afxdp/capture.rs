@@ -25,9 +25,10 @@ pub enum Queues {
     Single(u32),
     /// An explicit half-open range of queue ids, e.g. `0..4`.
     Range(std::ops::Range<u32>),
-    /// Every RSS/combined queue on the interface, auto-detected via
-    /// `ETHTOOL_GCHANNELS`. Falls back to queue 0 only if detection fails
-    /// (virtual interface, `lo`, missing support) — always safe to use.
+    /// Every RX queue (combined + RX-only channels) on the interface,
+    /// auto-detected via `ETHTOOL_GCHANNELS`. Falls back to queue 0 only if
+    /// detection fails (virtual interface, `lo`, missing support) — always
+    /// safe to use.
     Auto,
 }
 
@@ -77,13 +78,14 @@ impl Queues {
 
 // ── Queue-count discovery ───────────────────────────────────────────────────
 
-/// Number of RSS/combined RX queues on `iface`, via the `ETHTOOL_GCHANNELS`
-/// ioctl (issue #6 G3).
+/// Number of RX queues on `iface`, via the `ETHTOOL_GCHANNELS` ioctl (issue
+/// #6 G3).
 ///
-/// Returns the NIC's `combined_count` (RSS-bearing queues), or `rx_count` on
-/// rx/tx-split NICs. Requires no privilege. Errors on interfaces that don't
-/// support channel queries (e.g. `lo`, many virtual devices) — callers that want
-/// a soft fallback should use [`Queues::Auto`], which degrades to queue 0.
+/// Returns the NIC's combined channels plus its RX-only channels
+/// (`combined_count + rx_count`). Requires no privilege. Errors on interfaces
+/// that don't support channel queries (e.g. `lo`, many virtual devices) —
+/// callers that want a soft fallback should use [`Queues::Auto`], which
+/// degrades to queue 0.
 pub fn queue_count(iface: &str) -> Result<u32, Error> {
     use std::os::fd::{AsRawFd, FromRawFd, OwnedFd};
 
@@ -114,14 +116,18 @@ pub fn queue_count(iface: &str) -> Result<u32, Error> {
         return Err(Error::Io(std::io::Error::last_os_error()));
     }
 
-    let n = if channels.combined_count > 0 {
-        channels.combined_count
-    } else if channels.rx_count > 0 {
-        channels.rx_count
-    } else {
-        1
-    };
-    Ok(n)
+    Ok(rx_queue_count(&channels))
+}
+
+/// RX queues described by an `ETHTOOL_GCHANNELS` reply: the combined
+/// channels plus the RX-only ones. The kernel numbers RX queues
+/// `0..combined_count + rx_count` (`ethtool_set_channels()` in
+/// `net/ethtool/ioctl.c`), so `combined 4 rx 4` is 8 RX queues.
+fn rx_queue_count(channels: &ffi::ethtool_channels) -> u32 {
+    match channels.combined_count.saturating_add(channels.rx_count) {
+        0 => 1,
+        n => n,
+    }
 }
 
 /// The NUMA node the NIC backing `iface` sits on (issue #6 F3), read from
@@ -565,6 +571,22 @@ mod tests {
             .err()
             .expect("queue u32::MAX must not build");
         assert!(matches!(err, Error::Config(_)), "{err:?}");
+    }
+
+    /// A NIC's RX queues are its combined channels plus its RX-only ones
+    /// (`ethtool -L <if> combined 4 rx 4` → queues 0..8).
+    #[test]
+    fn rx_queue_count_adds_rx_only_channels() {
+        let ch = |combined_count, rx_count| ffi::ethtool_channels {
+            combined_count,
+            rx_count,
+            ..Default::default()
+        };
+        assert_eq!(rx_queue_count(&ch(4, 0)), 4);
+        assert_eq!(rx_queue_count(&ch(4, 4)), 8);
+        assert_eq!(rx_queue_count(&ch(0, 2)), 2);
+        assert_eq!(rx_queue_count(&ch(0, 0)), 1);
+        assert_eq!(rx_queue_count(&ch(u32::MAX, 1)), u32::MAX);
     }
 
     #[test]

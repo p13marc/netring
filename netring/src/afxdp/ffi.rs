@@ -57,8 +57,9 @@ pub const SIOCETHTOOL: libc::c_ulong = 0x8946;
 /// ethtool sub-command: get channel (queue) counts. From `<linux/ethtool.h>`.
 pub const ETHTOOL_GCHANNELS: u32 = 0x0000_003c;
 
-/// `struct ethtool_channels` from `<linux/ethtool.h>`. The RSS queue count for
-/// AF_XDP capture is `combined_count` (or `rx_count` on rx/tx-split NICs).
+/// `struct ethtool_channels` from `<linux/ethtool.h>`. The RX queue count for
+/// AF_XDP capture is `combined_count + rx_count` (combined plus RX-only
+/// channels).
 #[repr(C)]
 #[derive(Debug, Default, Clone, Copy)]
 pub struct ethtool_channels {

@@ -459,22 +459,35 @@ pub enum HandlerErrorPolicy {
     Isolate,
 }
 
-/// How the run loop reacts when a capture backend errors (e.g. a readiness or
-/// receive failure). See [`MonitorBuilder::backend_error_policy`].
+/// How the run loop reacts when a capture backend errors — a readiness or
+/// receive failure, typically `ENETDOWN` once a capture interface was
+/// removed. See [`MonitorBuilder::backend_error_policy`].
+///
+/// An interface that is merely **down** is not an error under any policy:
+/// its source delivers nothing until the interface is back up. A removed
+/// one is noticed on the kernel's error report, or within a second when it
+/// was already down (#212). Every backend error counts in
+/// [`MonitorHealth::backend_errors`].
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 #[non_exhaustive]
 pub enum BackendErrorPolicy {
     /// Propagate the error and stop the monitor (the default).
     #[default]
     FailFast,
-    /// Log + count the error and keep servicing the other capture sources.
+    /// Log the error and **retire** the failed source: the monitor keeps
+    /// running on the others, and stops with the error once no source is
+    /// left.
     SkipSource,
-    /// Log + count the error and **re-open** the failed source in place (0.25
-    /// W1e) — same kind/filter as the original — so a transient backend fault
-    /// (interface flap, driver reset) self-heals without tearing down the
-    /// monitor. If the re-open itself fails, the source is left out (like
-    /// [`Self::SkipSource`]) and retried on its next error; after many
-    /// consecutive failures the monitor gives up (circuit breaker).
+    /// Log the error and **re-open** the failed source in place (0.25 W1e) —
+    /// same kind/filter/namespace as the original — so a transient backend
+    /// fault (an interface removed and re-created, a driver reset)
+    /// self-heals without tearing down the monitor. The failed backend is
+    /// closed first (an AF_XDP backend releases its queue and XDP program
+    /// for the new one). A re-open that fails (the interface isn't back
+    /// yet) is retried every 500 ms; 64 failures in a row stop the monitor
+    /// with the last one. A backend injected by an `XdpShardedRunner` can't
+    /// be re-opened: its error stops the monitor, as with
+    /// [`Self::FailFast`].
     Reopen,
 }
 
@@ -1651,11 +1664,12 @@ impl MonitorBuilder {
     /// 0.24 Phase B: set the capture-backend error policy.
     ///
     /// Default [`BackendErrorPolicy::FailFast`] stops the monitor on a backend
-    /// error. [`BackendErrorPolicy::SkipSource`] logs + counts and keeps
-    /// servicing the other capture sources (useful for multi-interface monitors
-    /// where one NIC can fail independently). [`BackendErrorPolicy::Reopen`]
-    /// (0.25 W1e) additionally tries to **re-open** the failed source so a
-    /// transient error (e.g. an interface flap) self-heals.
+    /// error. [`BackendErrorPolicy::SkipSource`] retires the failed source and
+    /// keeps servicing the others (useful for multi-interface monitors where
+    /// one NIC can fail independently). [`BackendErrorPolicy::Reopen`]
+    /// (0.25 W1e) **re-opens** the failed source, retrying until it can, so an
+    /// interface that is removed and re-created self-heals. A down interface
+    /// is not an error under any of them.
     pub fn backend_error_policy(mut self, policy: BackendErrorPolicy) -> Self {
         self.backend_error_policy = policy;
         self

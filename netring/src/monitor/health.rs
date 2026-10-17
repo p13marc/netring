@@ -50,9 +50,9 @@ pub(crate) struct HealthState {
     drops: AtomicU64,
     /// 0.24 Phase B/C: resilience counters. Handler errors swallowed by
     /// [`HandlerErrorPolicy::Isolate`](crate::monitor::HandlerErrorPolicy)
-    /// and backend errors swallowed by
-    /// [`BackendErrorPolicy::SkipSource`](crate::monitor::BackendErrorPolicy)
-    /// are silent by design — these counters make the silent-drop rate
+    /// and backend errors absorbed by
+    /// [`BackendErrorPolicy`](crate::monitor::BackendErrorPolicy)
+    /// `SkipSource` / `Reopen` are silent by design — these counters make the silent-drop rate
     /// observable so operators can alert on it.
     handler_errors: AtomicU64,
     backend_errors: AtomicU64,
@@ -78,8 +78,8 @@ impl HealthState {
         self.handler_errors.fetch_add(1, Ordering::Relaxed);
     }
 
-    /// Count one capture-backend error swallowed under
-    /// `BackendErrorPolicy::SkipSource`.
+    /// Count one capture-backend error absorbed under
+    /// `BackendErrorPolicy::SkipSource` / `Reopen`.
     pub(crate) fn record_backend_error(&self) {
         self.backend_errors.fetch_add(1, Ordering::Relaxed);
     }
@@ -208,9 +208,10 @@ impl MonitorHealth {
         self.inner.handler_errors.load(Ordering::Relaxed)
     }
 
-    /// Cumulative capture-backend errors swallowed under
-    /// [`BackendErrorPolicy::SkipSource`](crate::monitor::BackendErrorPolicy).
-    /// `0` under the default `FailFast` policy.
+    /// Cumulative capture-backend errors absorbed under
+    /// [`BackendErrorPolicy`](crate::monitor::BackendErrorPolicy)
+    /// `SkipSource` / `Reopen` (a source retired or re-opened). `0` under
+    /// the default `FailFast` policy, whose first error stops the monitor.
     pub fn backend_errors(&self) -> u64 {
         self.inner.backend_errors.load(Ordering::Relaxed)
     }

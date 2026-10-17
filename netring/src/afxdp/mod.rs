@@ -1221,6 +1221,37 @@ impl XdpSocket {
         Ok(n > 0)
     }
 
+    /// Whether the socket can still receive.
+    ///
+    /// `Ok(())` while it is bound to its device, even if that device is
+    /// administratively down. `Err` once the device was unregistered: the
+    /// kernel sets `ENETDOWN` on the socket and unbinds it
+    /// (xsk_notifier()), after which `poll(2)` reports nothing at all, so
+    /// an epoll-driven wait can only learn of it by asking. Reads (and so
+    /// clears) the socket's pending error; an unbound socket with none
+    /// left is `ENETDOWN` too. [`AsyncXdpSocket`](crate::AsyncXdpSocket)
+    /// calls this on an error event and every second of idle waiting
+    /// (#212).
+    ///
+    /// # Errors
+    ///
+    /// The socket's pending error, or `ENETDOWN` once it is unbound.
+    #[cfg(feature = "af-xdp")]
+    pub fn check_health(&self) -> Result<(), Error> {
+        let err = crate::afpacket::socket::take_socket_error(self.fd.as_fd())?;
+        if err != 0 {
+            return Err(Error::Io(std::io::Error::from_raw_os_error(err)));
+        }
+        // xsk_check_common(): ENXIO for an unbound socket (ENETDOWN for a
+        // down device, which is not fatal).
+        match crate::syscall::recvfrom_probe(self.fd.as_raw_fd()) {
+            Err(e) if e.raw_os_error() == Some(libc::ENXIO) => {
+                Err(Error::Io(std::io::Error::from_raw_os_error(libc::ENETDOWN)))
+            }
+            _ => Ok(()),
+        }
+    }
+
     /// Get XDP socket statistics from the kernel.
     ///
     /// Counters are monotonically non-decreasing for the socket's lifetime

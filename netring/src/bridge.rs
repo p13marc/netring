@@ -48,6 +48,18 @@ pub enum BridgeDirection {
     BtoA,
 }
 
+/// The async loops' idle health check: every
+/// [`LIVENESS_PROBE`](crate::async_adapters::registered::LIVENESS_PROBE),
+/// first one period from now, missed ticks skipped.
+#[cfg(feature = "tokio")]
+fn liveness_probe() -> tokio::time::Interval {
+    use crate::async_adapters::registered::LIVENESS_PROBE;
+    let mut probe =
+        tokio::time::interval_at(tokio::time::Instant::now() + LIVENESS_PROBE, LIVENESS_PROBE);
+    probe.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+    probe
+}
+
 /// Forwarding statistics for both directions, plus per-cause drop counters.
 ///
 /// The drop counters track packets that were dropped *by the bridge itself*
@@ -250,7 +262,12 @@ impl Bridge {
     ///
     /// # Errors
     ///
-    /// Returns [`Error::Io`] if `AsyncFd` registration or a `flush()` fails.
+    /// Returns [`Error::Io`] if `AsyncFd` registration or a `flush()` fails,
+    /// or with `ENETDOWN` when either interface is removed (noticed on the
+    /// kernel's error event, or within a second when the interface was
+    /// already down). A side that is merely down is waited out, as with
+    /// [`run`](Self::run). The idle check runs on tokio's timer: the
+    /// runtime needs its time driver.
     #[cfg(feature = "tokio")]
     pub async fn run_async<F>(&mut self, mut filter: F) -> Result<(), Error>
     where
@@ -261,32 +278,33 @@ impl Bridge {
 
         // Register dups of the RX fds: an `AsyncFd` must own what it
         // registers, and owning a dup keeps it from borrowing `self`, which
-        // the drain below needs mutably.
-        let async_a = register_dup(self.rx_a.as_fd(), Interest::READABLE).map_err(Error::Io)?;
-        let async_b = register_dup(self.rx_b.as_fd(), Interest::READABLE).map_err(Error::Io)?;
+        // the drain below needs mutably. `ERROR` too: a side whose
+        // interface goes down or away raises only an error event (#212).
+        let interest = Interest::READABLE | Interest::ERROR;
+        let async_a = register_dup(self.rx_a.as_fd(), interest).map_err(Error::Io)?;
+        let async_b = register_dup(self.rx_b.as_fd(), interest).map_err(Error::Io)?;
+        let mut probe = liveness_probe();
 
         loop {
             tokio::select! {
-                result = async_a.readable() => {
+                result = async_a.ready(interest) => {
                     let mut guard = result.map_err(Error::Io)?;
-                    // Re-arm tokio's readiness only once the ring is empty;
-                    // a capped drain leaves it set so the backlog is resumed
-                    // (epoll is edge-triggered: no new edge would come).
-                    if self.drain_direction(&mut filter, BridgeDirection::AtoB)? {
-                        guard.clear_ready();
-                    }
+                    self.serve_ready(&mut guard, &mut filter, BridgeDirection::AtoB)?;
                 }
-                result = async_b.readable() => {
+                result = async_b.ready(interest) => {
                     let mut guard = result.map_err(Error::Io)?;
-                    if self.drain_direction(&mut filter, BridgeDirection::BtoA)? {
-                        guard.clear_ready();
-                    }
+                    self.serve_ready(&mut guard, &mut filter, BridgeDirection::BtoA)?;
                 }
+                _ = probe.tick() => self.check_health()?,
             }
         }
     }
 
     /// Async version of [`run_iterations`](Self::run_iterations) for tokio runtimes.
+    ///
+    /// # Errors
+    ///
+    /// As [`run_async`](Self::run_async).
     #[cfg(feature = "tokio")]
     pub async fn run_iterations_async<F>(
         &mut self,
@@ -299,31 +317,75 @@ impl Bridge {
         use crate::async_adapters::registered::register_dup;
         use tokio::io::Interest;
 
-        let async_a = register_dup(self.rx_a.as_fd(), Interest::READABLE).map_err(Error::Io)?;
-        let async_b = register_dup(self.rx_b.as_fd(), Interest::READABLE).map_err(Error::Io)?;
+        let interest = Interest::READABLE | Interest::ERROR;
+        let async_a = register_dup(self.rx_a.as_fd(), interest).map_err(Error::Io)?;
+        let async_b = register_dup(self.rx_b.as_fd(), interest).map_err(Error::Io)?;
+        let mut probe = liveness_probe();
 
         for _ in 0..iterations {
             // Bound each iteration with poll_timeout so a quiet bridge still
             // returns control eventually (mirrors run_iterations semantics).
             tokio::select! {
-                result = async_a.readable() => {
+                result = async_a.ready(interest) => {
                     let mut guard = result.map_err(Error::Io)?;
-                    if self.drain_direction(&mut filter, BridgeDirection::AtoB)? {
-                        guard.clear_ready();
-                    }
+                    self.serve_ready(&mut guard, &mut filter, BridgeDirection::AtoB)?;
                 }
-                result = async_b.readable() => {
+                result = async_b.ready(interest) => {
                     let mut guard = result.map_err(Error::Io)?;
-                    if self.drain_direction(&mut filter, BridgeDirection::BtoA)? {
-                        guard.clear_ready();
-                    }
+                    self.serve_ready(&mut guard, &mut filter, BridgeDirection::BtoA)?;
                 }
+                _ = probe.tick() => self.check_health()?,
                 _ = tokio::time::sleep(self.poll_timeout) => {
                     // Idle iteration — fall through to next loop pass.
                 }
             }
         }
         Ok(())
+    }
+
+    /// Serve one readiness event of the async loops on side `direction`'s
+    /// RX socket: an error event is checked (a removed interface ends the
+    /// run with `ENETDOWN`, a down one is waited out), then ready frames
+    /// are forwarded. Each readiness bit is cleared only once handled, so
+    /// the next wait re-arms via epoll.
+    #[cfg(feature = "tokio")]
+    fn serve_ready<F>(
+        &mut self,
+        guard: &mut tokio::io::unix::AsyncFdReadyGuard<'_, std::os::fd::OwnedFd>,
+        filter: &mut F,
+        direction: BridgeDirection,
+    ) -> Result<(), Error>
+    where
+        F: FnMut(&Packet<'_>, BridgeDirection) -> BridgeAction,
+    {
+        use tokio::io::Ready;
+
+        let ready = guard.ready();
+        if ready.is_error() {
+            guard.clear_ready_matching(Ready::ERROR);
+            let rx = match direction {
+                BridgeDirection::AtoB => &self.rx_a,
+                BridgeDirection::BtoA => &self.rx_b,
+            };
+            crate::afpacket::socket::check_health(rx.as_fd())?;
+        }
+        // Re-arm the read readiness only once the ring is empty; a capped
+        // drain leaves it set so the backlog is resumed (epoll is
+        // edge-triggered: no new edge would come).
+        if (ready.is_readable() || ready.is_read_closed())
+            && self.drain_direction(filter, direction)?
+        {
+            guard.clear_ready_matching(Ready::READABLE | Ready::READ_CLOSED);
+        }
+        Ok(())
+    }
+
+    /// Both sides still usable? A removed interface raises no event when it
+    /// was already down, so the async loops ask once a second.
+    #[cfg(feature = "tokio")]
+    fn check_health(&self) -> Result<(), Error> {
+        crate::afpacket::socket::check_health(self.rx_a.as_fd())?;
+        crate::afpacket::socket::check_health(self.rx_b.as_fd())
     }
 
     /// Drain retired blocks from one direction, forwarding through the filter.

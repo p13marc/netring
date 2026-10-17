@@ -279,17 +279,10 @@ pub(crate) fn set_timestamp_source(
 /// `POLLERR` means `sk_err` is set — `ENETDOWN` when the interface went
 /// down (packet_notifier()) or was down at bind() (packet_do_bind()). The
 /// kernel keeps reporting it on every poll until `SO_ERROR` is read, so a
-/// caller that ignores it polls in a tight loop. It is read (and so
-/// cleared) here:
-///
-/// - `ENETDOWN` with the device still registered is **transient**: the
-///   kernel re-arms the socket when the interface comes back up
-///   (NETDEV_UP), so it is logged and the read reports "no batch" — the
-///   next poll waits normally instead of spinning.
-/// - `ENETDOWN` after the device was unregistered (`getsockname` reports
-///   ifindex -1) is permanent and returned, like any other socket error.
-///   An interface deleted while already down raises no new `POLLERR` (the
-///   socket was no longer running), so an idle poll checks the binding too.
+/// caller that ignores it polls in a tight loop. [`check_health`] reads
+/// (and so clears) it. An interface deleted while already down raises no
+/// new `POLLERR` (the socket was no longer running), so an idle poll
+/// checks the binding too.
 ///
 /// `POLLHUP` / `POLLNVAL` are errors too.
 pub(crate) fn poll_error(
@@ -300,27 +293,49 @@ pub(crate) fn poll_error(
 
     let Some(revents) = revents.filter(|r| !r.is_empty()) else {
         // Nothing happened on this socket (timeout, or a stop wake-up).
-        return if bound_ifindex(fd)? < 0 {
-            Err(Error::Io(std::io::Error::from_raw_os_error(libc::ENETDOWN)))
-        } else {
-            Ok(())
-        };
+        return check_bound(fd);
     };
     if revents.contains(PollFlags::POLLNVAL) {
         return Err(Error::Io(std::io::Error::from_raw_os_error(libc::EBADF)));
     }
     if revents.contains(PollFlags::POLLERR) {
-        let err = take_socket_error(fd)?;
-        if err == libc::ENETDOWN && bound_ifindex(fd)? >= 0 {
-            tracing::warn!("capture interface is down; waiting for it to come back up");
-        } else if err != 0 {
-            return Err(Error::Io(std::io::Error::from_raw_os_error(err)));
-        }
+        check_health(fd)?;
     }
     if revents.contains(PollFlags::POLLHUP) {
         return Err(Error::Io(std::io::Error::other("hangup on packet socket")));
     }
     Ok(())
+}
+
+/// Whether a packet socket can still capture: reads (and so clears) its
+/// pending error.
+///
+/// - `ENETDOWN` with the device still registered is **transient**: the
+///   kernel re-arms the socket when the interface comes back up
+///   (NETDEV_UP), so it is logged and `Ok` — the caller keeps waiting.
+/// - `ENETDOWN` after the device was unregistered (`getsockname` reports
+///   ifindex -1) is permanent and returned, like any other socket error.
+/// - A socket with no error but no device either (the interface was
+///   deleted while down, which raises no error) is `ENETDOWN` too.
+pub(crate) fn check_health(fd: BorrowedFd<'_>) -> Result<(), Error> {
+    let err = take_socket_error(fd)?;
+    if err == libc::ENETDOWN && bound_ifindex(fd)? >= 0 {
+        tracing::warn!("capture interface is down; waiting for it to come back up");
+        return Ok(());
+    }
+    if err != 0 {
+        return Err(Error::Io(std::io::Error::from_raw_os_error(err)));
+    }
+    check_bound(fd)
+}
+
+/// `ENETDOWN` once the socket's device was unregistered.
+fn check_bound(fd: BorrowedFd<'_>) -> Result<(), Error> {
+    if bound_ifindex(fd)? < 0 {
+        Err(Error::Io(std::io::Error::from_raw_os_error(libc::ENETDOWN)))
+    } else {
+        Ok(())
+    }
 }
 
 /// The ifindex a packet socket is bound to: -1 once the device was
@@ -344,7 +359,7 @@ fn bound_ifindex(fd: BorrowedFd<'_>) -> Result<i32, Error> {
 }
 
 /// Read and clear the socket's pending error (`SO_ERROR`).
-fn take_socket_error(fd: BorrowedFd<'_>) -> Result<libc::c_int, Error> {
+pub(crate) fn take_socket_error(fd: BorrowedFd<'_>) -> Result<libc::c_int, Error> {
     let mut err: libc::c_int = 0;
     let mut len = std::mem::size_of::<libc::c_int>() as libc::socklen_t;
     // SAFETY: fd is valid; `err` / `len` are an int-sized out-buffer.

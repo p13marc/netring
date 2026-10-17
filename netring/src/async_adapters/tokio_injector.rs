@@ -56,7 +56,7 @@ impl AsyncInjector {
     /// Returns [`Error::Io`] if duplicating the fd or the `AsyncFd`
     /// registration fails.
     pub fn new(tx: Injector) -> Result<Self, Error> {
-        let inner = Registered::new(tx, tokio::io::Interest::WRITABLE).map_err(Error::Io)?;
+        let inner = Registered::new_tx(tx, tokio::io::Interest::WRITABLE).map_err(Error::Io)?;
         Ok(Self { inner })
     }
 

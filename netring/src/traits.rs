@@ -99,6 +99,24 @@ pub trait PacketSource: AsFd {
     fn cumulative_stats(&self) -> Result<CaptureStats, Error> {
         self.stats()
     }
+
+    /// Whether the source can still deliver packets.
+    ///
+    /// `Ok(())` — it can, even if nothing arrives right now (an idle or
+    /// administratively down interface may come back). `Err` — it is gone
+    /// for good, e.g. `ENETDOWN` once its interface was removed.
+    ///
+    /// The async adapters call this when the kernel reports an error on
+    /// the source's fd and every second of idle waiting, and end the wait
+    /// with its error (#212). It may consume a pending socket error
+    /// (`SO_ERROR`). Default: always `Ok(())`.
+    ///
+    /// # Errors
+    ///
+    /// The source's fatal error.
+    fn check_health(&self) -> Result<(), Error> {
+        Ok(())
+    }
 }
 
 /// A sink for outgoing packets (TX path).

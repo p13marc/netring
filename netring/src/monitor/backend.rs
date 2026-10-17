@@ -64,6 +64,22 @@ pub(crate) enum AnyBackend {
     /// 1-spec↔1-backend invariant (so `Reopen` rebuilds the whole capture).
     #[cfg(all(feature = "af-xdp", feature = "xdp-loader"))]
     XdpMq(crate::AsyncXdpCapture),
+    /// No backend: a source retired by `BackendErrorPolicy::SkipSource`, or
+    /// one between its old backend's drop and its re-open under `Reopen`
+    /// (#212). Never ready, delivers nothing, has no counters.
+    Closed,
+}
+
+/// What one [`AnyBackend::drain_batch`] call did.
+pub(crate) struct Drained {
+    /// The last delivered packet's timestamp; `None` when nothing was
+    /// delivered (a spurious wake, or an error before the first packet).
+    pub(crate) last_ts: Option<Timestamp>,
+    /// The budget cut the drain short: more is ready.
+    pub(crate) more_ready: bool,
+    /// The backend failed — after delivering what `last_ts` covers, which
+    /// the caller still dispatches.
+    pub(crate) error: Option<Error>,
 }
 
 impl AnyBackend {
@@ -85,7 +101,13 @@ impl AnyBackend {
             }),
             #[cfg(all(feature = "af-xdp", feature = "xdp-loader"))]
             AnyBackend::XdpMq(cap) => cap.poll_read_ready(cx),
+            AnyBackend::Closed => Poll::Pending,
         }
+    }
+
+    /// Whether this is the [`AnyBackend::Closed`] placeholder.
+    pub(crate) fn is_closed(&self) -> bool {
+        matches!(self, AnyBackend::Closed)
     }
 
     /// Drain the retired batches currently ready on this backend — up to
@@ -93,9 +115,11 @@ impl AnyBackend {
     /// `on_packet` with a borrowed [`PacketView`] per packet plus the
     /// frame's direction (AF_PACKET reports it; AF_XDP has none —
     /// `PacketDirection::Unknown(0)`, as the streams do — which is what
-    /// the direction-aware loopback dedup needs, #178). Returns the
-    /// last packet's timestamp, or `None` on a spurious wake (no data),
-    /// and whether the budget cut the drain short (more is ready).
+    /// the direction-aware loopback dedup needs, #178). Reports the
+    /// last packet's timestamp (`None` on a spurious wake), whether the
+    /// budget cut the drain short (more is ready), and a backend error —
+    /// after whatever was delivered before it, which the caller still
+    /// dispatches.
     ///
     /// The readiness guard is held only across the synchronous callback
     /// loop and dropped before this future resolves — no ring borrow
@@ -103,12 +127,15 @@ impl AnyBackend {
     pub(crate) async fn drain_batch(
         &mut self,
         mut on_packet: impl FnMut(PacketView<'_>, PacketDirection),
-    ) -> Result<(Option<Timestamp>, bool)> {
+    ) -> Drained {
         let mut last_ts: Option<Timestamp> = None;
         let mut delivered: usize = 0;
-        match self {
+        let error: Option<Error> = match self {
             AnyBackend::AfPacket(cap) => {
-                let mut guard = cap.readable().await?;
+                let mut guard = match cap.readable().await {
+                    Ok(g) => g,
+                    Err(e) => return Drained::failed(e),
+                };
                 while delivered < DRAIN_BUDGET
                     && let Some(batch) = guard.next_batch()
                 {
@@ -119,10 +146,14 @@ impl AnyBackend {
                         on_packet(PacketView::new(pkt.data(), ts), pkt.direction());
                     }
                 }
+                None
             }
             #[cfg(feature = "af-xdp")]
             AnyBackend::Xdp(xdp) => {
-                let mut guard = xdp.readable().await?;
+                let mut guard = match xdp.readable().await {
+                    Ok(g) => g,
+                    Err(e) => return Drained::failed(e),
+                };
                 while delivered < DRAIN_BUDGET
                     && let Some(batch) = guard.next_batch()
                 {
@@ -139,6 +170,7 @@ impl AnyBackend {
                         );
                     }
                 }
+                None
             }
             #[cfg(all(feature = "af-xdp", feature = "xdp-loader"))]
             AnyBackend::XdpMq(cap) => {
@@ -148,12 +180,21 @@ impl AnyBackend {
                 // (no blocking on idle queues).
                 let n = cap.socket_count();
                 let start = cap.next_cursor();
+                let mut error = None;
                 for off in 0..n {
                     let i = (start + off) % n;
                     if delivered >= DRAIN_BUDGET || !cap.socket_rx_ready(i) {
                         continue;
                     }
-                    let mut guard = cap.socket_readable(i).await?;
+                    let mut guard = match cap.socket_readable(i).await {
+                        Ok(g) => g,
+                        Err(e) => {
+                            // Earlier queues' packets were delivered: hand
+                            // them back with the error.
+                            error = Some(e);
+                            break;
+                        }
+                    };
                     while delivered < DRAIN_BUDGET
                         && let Some(batch) = guard.next_batch()
                     {
@@ -168,9 +209,15 @@ impl AnyBackend {
                         }
                     }
                 }
+                error
             }
+            AnyBackend::Closed => None,
+        };
+        Drained {
+            last_ts,
+            more_ready: error.is_none() && delivered >= DRAIN_BUDGET,
+            error,
         }
-        Ok((last_ts, delivered >= DRAIN_BUDGET))
     }
 
     /// Cumulative `u64` counters (delivered packets split from drops)
@@ -192,6 +239,20 @@ impl AnyBackend {
             }
             #[cfg(all(feature = "af-xdp", feature = "xdp-loader"))]
             AnyBackend::XdpMq(cap) => cap.counters(),
+            AnyBackend::Closed => Err(Error::Io(std::io::Error::new(
+                std::io::ErrorKind::NotConnected,
+                "capture source closed",
+            ))),
+        }
+    }
+}
+
+impl Drained {
+    fn failed(error: Error) -> Self {
+        Self {
+            last_ts: None,
+            more_ready: false,
+            error: Some(error),
         }
     }
 }

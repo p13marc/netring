@@ -20,6 +20,7 @@
 //!    closure *and* dispatch the typed `Tick` event so users
 //!    who registered via `.on::<Tick>(...)` see it too.
 
+use std::ops::ControlFlow;
 use std::task::{Context, Poll};
 use std::time::{Duration, Instant};
 
@@ -91,6 +92,17 @@ enum BackendSpec {
     /// from the Monitor's `injected_xdp` vec at first open. Not reopenable.
     #[cfg(feature = "af-xdp")]
     XdpProvided,
+}
+
+impl BackendSpec {
+    /// Whether `BackendErrorPolicy::Reopen` can rebuild this source.
+    fn reopenable(&self) -> bool {
+        match self {
+            #[cfg(feature = "af-xdp")]
+            BackendSpec::XdpProvided => false,
+            _ => true,
+        }
+    }
 }
 
 /// Open (or re-open) one capture backend from its [`BackendSpec`], applying the
@@ -344,9 +356,11 @@ pub(crate) async fn run_loop(monitor: Monitor, stop: StopCondition) -> Result<()
     // clock step, not reordering.
     let mut packet_clock = PacketClock::new(caps.len(), sweep_period);
     let mut rr_anchor: usize = 0;
-    // 0.24 Phase B: consecutive backend-error count for the SkipSource circuit
-    // breaker. Reset on every successful readable wake.
-    let mut backend_errors: u64 = 0;
+    // #212: `BackendErrorPolicy::Reopen` bookkeeping, plus the timer that
+    // retries a failed re-open (polled only while one is due).
+    let mut reopen = ReopenState::new(caps.len());
+    let mut reopen_timer = periodic(REOPEN_RETRY);
+    let open = |spec: &BackendSpec| open_backend(spec, fanout, &kernel_prefilter, promiscuous);
     // 0.21 E.2: bumped on every readable wake (traffic only). Idle
     // mode computes its deadline as `last_event_at + window`,
     // so refreshing this resets the idle timer. Initialized to
@@ -532,56 +546,56 @@ pub(crate) async fn run_loop(monitor: Monitor, stop: StopCondition) -> Result<()
                     }
                     continue;
                 }
+                // #212: retry the sources whose re-open failed. Gated like the
+                // telemetry branch; not traffic.
+                _ = reopen_timer.tick(), if reopen.any_due() => {
+                    for i in 0..caps.len() {
+                        if !reopen.due[i] {
+                            continue;
+                        }
+                        if let ControlFlow::Break(res) = reopen_source(
+                            i,
+                            &mut caps,
+                            &specs,
+                            &mut reopen,
+                            &mut reopen_timer,
+                            &open,
+                        ) {
+                            return res;
+                        }
+                    }
+                    continue;
+                }
                 idx = ready_capture(&mut caps, &mut rr_anchor) => idx,
             };
+            // A backend error goes through the `BackendErrorPolicy` (#212).
+            macro_rules! backend_error {
+                ($i:expr, $e:expr) => {
+                    match on_backend_error(
+                        $i,
+                        $e,
+                        backend_error_policy,
+                        &mut caps,
+                        &specs,
+                        &mut reopen,
+                        &mut reopen_timer,
+                        capture_stats.is_some().then_some(&mut telemetry_sampler),
+                        &health,
+                        &open,
+                    ) {
+                        ControlFlow::Continue(()) => {}
+                        ControlFlow::Break(res) => return res,
+                    }
+                };
+            }
             let i = match ready {
                 Some((i, Ok(()))) => i,
-                Some((i, Err(e))) => match backend_error_policy {
-                    BackendErrorPolicy::FailFast => return Err(e),
-                    BackendErrorPolicy::SkipSource => {
-                        backend_errors += 1;
-                        health.record_backend_error();
-                        tracing::warn!(error = %e, count = backend_errors, "capture backend error (SkipSource)");
-                        // Circuit breaker: a persistently-failing fd would otherwise
-                        // spin the readiness select. Back off, and after many
-                        // consecutive failures give up rather than burn a core.
-                        if backend_errors > 64 {
-                            return Err(e);
-                        }
-                        tokio::time::sleep(Duration::from_millis(50)).await;
-                        continue;
-                    }
-                    // 0.25 W1e: try to rebuild the failed source in place from its
-                    // recorded spec. A failed re-open leaves the (still-broken)
-                    // backend as-is so the next error retries it; same circuit
-                    // breaker as SkipSource bounds a hard-down source.
-                    BackendErrorPolicy::Reopen => {
-                        backend_errors += 1;
-                        health.record_backend_error();
-                        match open_backend(&specs[i], fanout, &kernel_prefilter, promiscuous) {
-                            Ok(b) => {
-                                // The new backend's counters start at zero:
-                                // hand the old one's totals to the sampler.
-                                if capture_stats.is_some() {
-                                    telemetry_sampler.retire(i, caps[i].counters().ok());
-                                }
-                                caps[i] = b;
-                                tracing::warn!(error = %e, idx = i, count = backend_errors, "capture backend error (Reopen) — source reopened");
-                            }
-                            Err(e2) => {
-                                tracing::warn!(error = %e, reopen_error = %e2, idx = i, count = backend_errors, "capture backend error (Reopen) — reopen failed, will retry");
-                            }
-                        }
-                        if backend_errors > 64 {
-                            return Err(e);
-                        }
-                        tokio::time::sleep(Duration::from_millis(50)).await;
-                        continue;
-                    }
-                },
+                Some((i, Err(e))) => {
+                    backend_error!(i, e);
+                    continue;
+                }
                 None => break, // all captures exhausted (AF_PACKET never reports this)
             };
-            backend_errors = 0; // a successful wake clears the circuit breaker
             let source = SourceIdx(i as u8);
             // Reset idle timer on every readable wake.
             last_event_at = Instant::now();
@@ -606,7 +620,7 @@ pub(crate) async fn run_loop(monitor: Monitor, stop: StopCondition) -> Result<()
             let mut packet_err: Option<crate::error::Error> = None;
             // #178: the source's dedup ring, checked first for every frame.
             let mut dedup_i = dedups[i].as_mut();
-            let (last_ts, more_ready) = caps[i]
+            let drained = caps[i]
                 .drain_batch(|view, direction| {
                     if let Some(d) = dedup_i.as_deref_mut()
                         && !d.keep_raw(view.frame, direction, view.timestamp)
@@ -781,13 +795,19 @@ pub(crate) async fn run_loop(monitor: Monitor, stop: StopCondition) -> Result<()
                         },
                     }
                 })
-                .await?;
+                .await;
             if let Some(e) = packet_err {
                 return Err(e);
             }
+            let backend_err = drained.error;
 
             // A spurious wake (no retired block) leaves `last_ts == None`.
-            let Some(ts) = last_ts else { continue };
+            let Some(ts) = drained.last_ts else {
+                if let Some(e) = backend_err {
+                    backend_error!(i, e);
+                }
+                continue;
+            };
             // Issue #134: age out fragment datagrams that never completed.
             if let Some(r) = ip_reassembly.as_mut() {
                 r.evict(ts);
@@ -836,8 +856,13 @@ pub(crate) async fn run_loop(monitor: Monitor, stop: StopCondition) -> Result<()
             // `Pending`, so the runtime would never turn its timer driver
             // and the timers above would never fire (on a current-thread
             // runtime nothing else does). Yield first.
-            if more_ready {
+            if drained.more_ready {
                 tokio::task::yield_now().await;
+            }
+            // The packets delivered before a backend error are dispatched;
+            // now the error.
+            if let Some(e) = backend_err {
+                backend_error!(i, e);
             }
         }
         #[allow(unreachable_code)]
@@ -1421,6 +1446,170 @@ async fn ready_capture(caps: &mut [AnyBackend], anchor: &mut usize) -> Option<(u
     .await
 }
 
+/// How often a failed `BackendErrorPolicy::Reopen` re-open is retried —
+/// also the least time between two re-opens of one source (#212).
+const REOPEN_RETRY: Duration = Duration::from_millis(500);
+
+/// Consecutive failed re-opens of one source that end the run.
+const REOPEN_MAX_FAILURES: u32 = 64;
+
+/// Per-source `BackendErrorPolicy::Reopen` state (#212), parallel to `caps`.
+struct ReopenState {
+    /// The last re-open failed (or was deferred): the reopen timer retries.
+    due: Vec<bool>,
+    /// Consecutive failed re-opens.
+    failures: Vec<u32>,
+    /// When the source was last (re-)opened by the policy.
+    last: Vec<Option<Instant>>,
+}
+
+impl ReopenState {
+    fn new(sources: usize) -> Self {
+        Self {
+            due: vec![false; sources],
+            failures: vec![0; sources],
+            last: vec![None; sources],
+        }
+    }
+
+    fn any_due(&self) -> bool {
+        self.due.iter().any(|d| *d)
+    }
+
+    /// Mark source `i` for a retry, starting the retry period when it is
+    /// the only source due.
+    fn defer(&mut self, i: usize, timer: &mut tokio::time::Interval) {
+        if !self.any_due() {
+            timer.reset();
+        }
+        self.due[i] = true;
+    }
+}
+
+/// Apply the [`BackendErrorPolicy`] to source `i`'s error `e` — a readiness
+/// error and a drain error alike (#212). `Continue` keeps the run going;
+/// `Break` ends it with its result.
+///
+/// - `FailFast`: end the run with `e`.
+/// - `SkipSource`: retire the source (its final counters go to the
+///   telemetry sampler); the run ends with `e` once no source is left.
+/// - `Reopen`: rebuild the source in place, dropping the failed backend
+///   first (an AF_XDP backend holds its queue and the XDP attachment, which
+///   the new one needs). A failed re-open is retried every
+///   [`REOPEN_RETRY`]; [`REOPEN_MAX_FAILURES`] in a row end the run. An
+///   injected AF_XDP backend (`XdpShardedRunner`) can't be rebuilt: like
+///   `FailFast`.
+#[allow(clippy::too_many_arguments)]
+fn on_backend_error(
+    i: usize,
+    e: crate::error::Error,
+    policy: BackendErrorPolicy,
+    caps: &mut [AnyBackend],
+    specs: &[BackendSpec],
+    reopen: &mut ReopenState,
+    reopen_timer: &mut tokio::time::Interval,
+    telemetry: Option<&mut crate::monitor::telemetry::TelemetrySampler>,
+    health: &crate::monitor::health::HealthState,
+    open: &impl Fn(&BackendSpec) -> Result<AnyBackend>,
+) -> ControlFlow<Result<()>> {
+    match policy {
+        BackendErrorPolicy::FailFast => return ControlFlow::Break(Err(e)),
+        BackendErrorPolicy::SkipSource | BackendErrorPolicy::Reopen => {
+            health.record_backend_error()
+        }
+    }
+    match policy {
+        BackendErrorPolicy::FailFast => ControlFlow::Break(Err(e)),
+        BackendErrorPolicy::SkipSource => {
+            if let Some(sampler) = telemetry {
+                sampler.retire(i, caps[i].counters().ok());
+            }
+            caps[i] = AnyBackend::Closed;
+            if caps.iter().all(AnyBackend::is_closed) {
+                tracing::error!(error = %e, source = i, "capture backend error (SkipSource): no capture source left");
+                return ControlFlow::Break(Err(e));
+            }
+            tracing::warn!(error = %e, source = i, "capture backend error (SkipSource): source retired");
+            ControlFlow::Continue(())
+        }
+        BackendErrorPolicy::Reopen => {
+            if !specs[i].reopenable() {
+                tracing::error!(
+                    error = %e,
+                    source = i,
+                    "capture backend error (Reopen): an injected AF_XDP backend (XdpShardedRunner) \
+                     cannot be re-opened; stopping"
+                );
+                return ControlFlow::Break(Err(e));
+            }
+            tracing::warn!(error = %e, source = i, "capture backend error (Reopen): re-opening the source");
+            // The new backend's counters start at zero: hand the old one's
+            // totals to the sampler.
+            if let Some(sampler) = telemetry {
+                sampler.retire(i, caps[i].counters().ok());
+            }
+            // Failing again right after a re-open: wait for the retry timer
+            // rather than re-open in a loop.
+            if reopen.last[i].is_some_and(|t| t.elapsed() < REOPEN_RETRY) {
+                caps[i] = AnyBackend::Closed;
+                reopen.defer(i, reopen_timer);
+                return ControlFlow::Continue(());
+            }
+            reopen_source(i, caps, specs, reopen, reopen_timer, open)
+        }
+    }
+}
+
+/// Re-open source `i` in place (`BackendErrorPolicy::Reopen`). A failure
+/// leaves the source closed and due for a retry; the
+/// [`REOPEN_MAX_FAILURES`]th in a row ends the run with its error.
+fn reopen_source(
+    i: usize,
+    caps: &mut [AnyBackend],
+    specs: &[BackendSpec],
+    reopen: &mut ReopenState,
+    reopen_timer: &mut tokio::time::Interval,
+    open: &impl Fn(&BackendSpec) -> Result<AnyBackend>,
+) -> ControlFlow<Result<()>> {
+    reopen.last[i] = Some(Instant::now());
+    match replace_then_open(&mut caps[i], AnyBackend::Closed, || open(&specs[i])) {
+        Ok(()) => {
+            reopen.due[i] = false;
+            reopen.failures[i] = 0;
+            tracing::info!(source = i, "capture source re-opened");
+            ControlFlow::Continue(())
+        }
+        Err(e) => {
+            reopen.failures[i] += 1;
+            let attempts = reopen.failures[i];
+            if attempts >= REOPEN_MAX_FAILURES {
+                tracing::error!(error = %e, source = i, attempts, "re-opening the capture source keeps failing; stopping");
+                return ControlFlow::Break(Err(e));
+            }
+            tracing::warn!(error = %e, source = i, attempts, "re-opening the capture source failed; will retry");
+            if !reopen.due[i] {
+                reopen.defer(i, reopen_timer);
+            }
+            ControlFlow::Continue(())
+        }
+    }
+}
+
+/// Replace `slot`'s value with what `open` builds — dropping the old value
+/// (leaving `placeholder`) **before** `open` runs, so whatever exclusive
+/// kernel resources it held (an AF_XDP queue binding, an XDP program
+/// attachment) are free for the new one. On failure `slot` keeps
+/// `placeholder`.
+fn replace_then_open<B>(
+    slot: &mut B,
+    placeholder: B,
+    open: impl FnOnce() -> Result<B>,
+) -> Result<()> {
+    drop(std::mem::replace(slot, placeholder));
+    *slot = open()?;
+    Ok(())
+}
+
 /// A tokio interval for `period` (non-zero — `build()` rejects zero
 /// periods): first tick one `period` from now, missed ticks skipped (a
 /// slow handler doesn't pile up a backlog). A period too long to
@@ -1574,6 +1763,15 @@ fn sample_and_fire_capture_stats(
     let mut total_packets: u64 = 0;
     let mut total_drops: u64 = 0;
     for (i, cap) in caps.iter().enumerate() {
+        // A retired source (#212): nothing to sample, but what it counted
+        // still counts toward the health totals.
+        if cap.is_closed() {
+            if let Some(retired) = sampler.retired_total(i) {
+                total_packets += retired.delivered;
+                total_drops += retired.drops;
+            }
+            continue;
+        }
         let (cum, detail) = match cap.counters() {
             Ok(s) => s,
             Err(e) => {
@@ -3747,5 +3945,186 @@ mod packet_clock_tests {
         clock.sources[1] = Some((secs(500), t0 + Duration::from_secs(1)));
         let now = clock.now_at(t0 + Duration::from_secs(60)).unwrap();
         assert!(now >= secs(559) && now < secs(561), "{now:?}");
+    }
+}
+
+#[cfg(test)]
+mod backend_error_tests {
+    use std::sync::Arc;
+    use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+
+    use super::*;
+    use crate::error::Error;
+    use crate::monitor::health::HealthState;
+
+    /// Sets its flag when dropped.
+    struct Probe(Arc<AtomicBool>);
+
+    impl Drop for Probe {
+        fn drop(&mut self) {
+            self.0.store(true, Ordering::SeqCst);
+        }
+    }
+
+    /// #212: `Reopen` drops the failed backend before building its
+    /// replacement — an AF_XDP backend holds its queue binding and the XDP
+    /// attachment, so building the new one first failed with EBUSY.
+    #[test]
+    fn replace_then_open_drops_old_first() {
+        let old_dropped = Arc::new(AtomicBool::new(false));
+        let mut slot = Some(Probe(Arc::clone(&old_dropped)));
+        replace_then_open(&mut slot, None, || {
+            assert!(
+                old_dropped.load(Ordering::SeqCst),
+                "the old value is still alive while its replacement is built"
+            );
+            Ok(Some(Probe(Arc::new(AtomicBool::new(false)))))
+        })
+        .unwrap();
+        assert!(slot.is_some());
+
+        // A failed open leaves the placeholder.
+        let res = replace_then_open(&mut slot, None, || Err(Error::Config("no".into())));
+        assert!(res.is_err());
+        assert!(slot.is_none());
+    }
+
+    fn enetdown() -> Error {
+        Error::Io(std::io::Error::from_raw_os_error(libc::ENETDOWN))
+    }
+
+    fn spec() -> Vec<BackendSpec> {
+        vec![BackendSpec::AfPacket(
+            crate::monitor::AfPacketIfaceSpec::host("nr-test0"),
+        )]
+    }
+
+    /// `Reopen` with the interface gone: the source is closed and retried
+    /// from the timer until a re-open succeeds.
+    #[tokio::test]
+    async fn reopen_retries_until_the_source_is_back() {
+        let health = HealthState::new();
+        let specs = spec();
+        let mut caps = vec![AnyBackend::Closed];
+        let mut reopen = ReopenState::new(1);
+        let mut timer = periodic(REOPEN_RETRY);
+        let attempts = AtomicUsize::new(0);
+        // Fails twice, then "opens" (a closed stand-in: a real backend
+        // needs privileges).
+        let open = |_: &BackendSpec| {
+            if attempts.fetch_add(1, Ordering::SeqCst) < 2 {
+                Err(Error::InterfaceNotFound("nr-test0".into()))
+            } else {
+                Ok(AnyBackend::Closed)
+            }
+        };
+        let flow = on_backend_error(
+            0,
+            enetdown(),
+            BackendErrorPolicy::Reopen,
+            &mut caps,
+            &specs,
+            &mut reopen,
+            &mut timer,
+            None,
+            &health,
+            &open,
+        );
+        assert!(flow.is_continue());
+        assert!(reopen.due[0], "a failed re-open is retried");
+        assert_eq!(reopen.failures[0], 1);
+        assert!(reopen_source(0, &mut caps, &specs, &mut reopen, &mut timer, &open).is_continue());
+        assert!(reopen.due[0]);
+        assert!(reopen_source(0, &mut caps, &specs, &mut reopen, &mut timer, &open).is_continue());
+        assert!(!reopen.due[0], "re-opened");
+        assert_eq!(reopen.failures[0], 0);
+        assert_eq!(attempts.load(Ordering::SeqCst), 3);
+
+        // Failing again at once waits for the timer instead of re-opening
+        // in a loop.
+        let flow = on_backend_error(
+            0,
+            enetdown(),
+            BackendErrorPolicy::Reopen,
+            &mut caps,
+            &specs,
+            &mut reopen,
+            &mut timer,
+            None,
+            &health,
+            &open,
+        );
+        assert!(flow.is_continue());
+        assert!(reopen.due[0]);
+        assert_eq!(attempts.load(Ordering::SeqCst), 3);
+        let handle = crate::monitor::MonitorHealth::new(Arc::clone(&health));
+        assert_eq!(handle.backend_errors(), 2);
+    }
+
+    /// `Reopen` gives up after `REOPEN_MAX_FAILURES` failed re-opens in a
+    /// row, with the last re-open error.
+    #[tokio::test]
+    async fn reopen_gives_up_after_repeated_failures() {
+        let health = HealthState::new();
+        let specs = spec();
+        let mut caps = vec![AnyBackend::Closed];
+        let mut reopen = ReopenState::new(1);
+        let mut timer = periodic(REOPEN_RETRY);
+        let open = |_: &BackendSpec| Err(Error::InterfaceNotFound("nr-test0".into()));
+        let mut flow = on_backend_error(
+            0,
+            enetdown(),
+            BackendErrorPolicy::Reopen,
+            &mut caps,
+            &specs,
+            &mut reopen,
+            &mut timer,
+            None,
+            &health,
+            &open,
+        );
+        let mut tries = 1;
+        while flow.is_continue() {
+            flow = reopen_source(0, &mut caps, &specs, &mut reopen, &mut timer, &open);
+            tries += 1;
+            assert!(tries <= REOPEN_MAX_FAILURES, "never gave up");
+        }
+        assert_eq!(tries, REOPEN_MAX_FAILURES);
+        match flow {
+            ControlFlow::Break(Err(Error::InterfaceNotFound(_))) => {}
+            ControlFlow::Break(other) => panic!("{other:?}"),
+            ControlFlow::Continue(()) => unreachable!(),
+        }
+    }
+
+    /// `SkipSource` ends the run once no source is left; `FailFast` at once.
+    #[tokio::test]
+    async fn skip_source_stops_with_no_source_left() {
+        let health = HealthState::new();
+        let specs = spec();
+        let mut reopen = ReopenState::new(1);
+        let mut timer = periodic(REOPEN_RETRY);
+        let open = |_: &BackendSpec| -> Result<AnyBackend> { unreachable!("no re-open") };
+        for policy in [BackendErrorPolicy::SkipSource, BackendErrorPolicy::FailFast] {
+            let mut caps = vec![AnyBackend::Closed];
+            let flow = on_backend_error(
+                0,
+                enetdown(),
+                policy,
+                &mut caps,
+                &specs,
+                &mut reopen,
+                &mut timer,
+                None,
+                &health,
+                &open,
+            );
+            match flow {
+                ControlFlow::Break(Err(Error::Io(e))) => {
+                    assert_eq!(e.raw_os_error(), Some(libc::ENETDOWN))
+                }
+                _ => panic!("{policy:?} kept running with no source"),
+            }
+        }
     }
 }

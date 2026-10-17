@@ -43,10 +43,15 @@ use std::time::Duration;
 
 use tokio::io::Interest;
 
-use crate::async_adapters::registered::{ReadyMut, Registered};
+use crate::async_adapters::registered::{ReadyMut, Registered, health_io};
 use crate::error::Error;
 use crate::packet::OwnedPacket;
 use crate::{XdpBatch, XdpSocket, XdpStats};
+
+/// [`XdpSocket::check_health`] for the registration's liveness checks.
+fn socket_health(socket: &XdpSocket) -> std::io::Result<()> {
+    health_io(socket.check_health())
+}
 
 /// Async wrapper around an [`XdpSocket`].
 ///
@@ -68,13 +73,24 @@ impl AsyncXdpSocket {
     /// Registers a duplicate of the socket's fd for both `POLLIN` and
     /// `POLLOUT`, so the adapter holds one extra fd for its lifetime.
     ///
+    /// Waits end with an error once the socket's device is unregistered
+    /// (`ENETDOWN`): AF_XDP raises no readiness event for that, so on an
+    /// error event and every second of idle waiting they ask
+    /// [`XdpSocket::check_health`]. That idle check runs on tokio's timer:
+    /// the runtime needs its time driver (`enable_all()` /
+    /// `enable_time()`, as `#[tokio::main]` sets up).
+    ///
     /// # Errors
     ///
     /// Returns [`Error::Io`] if duplicating the fd or the `AsyncFd`
     /// registration fails.
     pub fn new(socket: XdpSocket) -> Result<Self, Error> {
-        let inner =
-            Registered::new(socket, Interest::READABLE | Interest::WRITABLE).map_err(Error::Io)?;
+        let inner = Registered::new_rx(
+            socket,
+            Interest::READABLE | Interest::WRITABLE,
+            socket_health,
+        )
+        .map_err(Error::Io)?;
         Ok(Self { inner })
     }
 

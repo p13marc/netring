@@ -305,6 +305,12 @@ impl TelemetrySampler {
         }
     }
 
+    /// The totals of `source`'s retired backends — all it counted, once
+    /// its last backend was retired (`BackendErrorPolicy::SkipSource`).
+    pub(crate) fn retired_total(&self, source: usize) -> Option<SourceCounters> {
+        self.slots.get(source).map(|s| s.base)
+    }
+
     /// The last cumulative totals reported for `source` (for a sample whose
     /// read failed, so the health totals don't dip).
     pub(crate) fn last_cumulative(&self, source: usize) -> Option<SourceCounters> {

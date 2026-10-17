@@ -498,6 +498,12 @@ impl PacketSource for Capture {
     fn cumulative_stats(&self) -> Result<CaptureStats, Error> {
         Capture::cumulative_stats(self)
     }
+
+    /// A down interface is `Ok` (it may come back); a removed one is
+    /// `ENETDOWN`. Reads (and clears) the socket's pending error.
+    fn check_health(&self) -> Result<(), Error> {
+        socket::check_health(self.fd.as_fd())
+    }
 }
 
 // Plan 21: Capture supports atomic BPF filter swap.

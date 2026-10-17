@@ -3,7 +3,7 @@ use flowscope::extract::{FiveTuple, FiveTupleKey};
 
 use crate::protocol::{Dispatch, MessageProtocol, Protocol, ProtocolInitError};
 
-/// QUIC (UDP/443) Initial-packet visibility — on-path SNI / ALPN / version from
+/// QUIC (UDP/443, and UDP/853 for DNS over QUIC) Initial-packet visibility — on-path SNI / ALPN / version from
 /// the unprotected ClientHello, *without decryption* (issue #14).
 ///
 /// `on::<Quic>(|m: &QuicInitial, ctx|)` fires once per parsed QUIC Initial.
@@ -28,7 +28,8 @@ impl Protocol for Quic {
     const NAME: &'static str = "quic";
 
     fn dispatch() -> Dispatch {
-        Dispatch::Udp(vec![flowscope::quic::QUIC_PORT])
+        // 853: DNS over QUIC (RFC 9250), for `on_encrypted_dns`.
+        Dispatch::Udp(vec![flowscope::quic::QUIC_PORT, 853])
     }
 
     fn register(
@@ -47,9 +48,9 @@ mod tests {
     use super::*;
 
     #[test]
-    fn dispatch_targets_udp_443() {
+    fn dispatch_targets_udp_443_and_doq() {
         match Quic::dispatch() {
-            Dispatch::Udp(ports) => assert_eq!(ports, vec![443]),
+            Dispatch::Udp(ports) => assert_eq!(ports, vec![443, 853]),
             other => panic!("expected Dispatch::Udp, got {other:?}"),
         }
     }

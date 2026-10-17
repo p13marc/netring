@@ -3047,7 +3047,15 @@ impl MonitorBuilder {
         }
         self.on_ctx::<TlsHandshake>(
             move |hs: &flowscope::tls::TlsHandshake, ctx: &mut Ctx<'_>| {
-                let fp = TlsFingerprint::from_handshake(hs, ctx.flow);
+                let fp = TlsFingerprint::from_handshake(
+                    hs,
+                    ctx.flow,
+                    crate::monitor::fingerprint::server_port(
+                        ctx.flow,
+                        ctx.side(),
+                        ctx.orientation(),
+                    ),
+                );
                 handler(&fp, ctx)
             },
         )
@@ -3144,7 +3152,11 @@ impl MonitorBuilder {
             self = self.protocol::<Quic>();
         }
         self.on_ctx::<Quic>(move |initial: &flowscope::QuicInitial, ctx: &mut Ctx<'_>| {
-            let fp = QuicFingerprint::from_initial(initial, ctx.flow);
+            let fp = QuicFingerprint::from_initial(
+                initial,
+                ctx.flow,
+                crate::monitor::fingerprint::server_port(ctx.flow, ctx.side(), ctx.orientation()),
+            );
             handler(&fp, ctx)
         })
     }
@@ -3243,7 +3255,15 @@ impl MonitorBuilder {
         let h = std::sync::Arc::clone(&handler);
         self = self.on_ctx::<TlsHandshake>(
             move |hs: &flowscope::tls::TlsHandshake, ctx: &mut Ctx<'_>| {
-                let fp = TlsFingerprint::from_handshake(hs, ctx.flow);
+                let fp = TlsFingerprint::from_handshake(
+                    hs,
+                    ctx.flow,
+                    crate::monitor::fingerprint::server_port(
+                        ctx.flow,
+                        ctx.side(),
+                        ctx.orientation(),
+                    ),
+                );
                 if !fp.app_protocol.is_encrypted_dns() {
                     return Ok(());
                 }
@@ -3271,7 +3291,15 @@ impl MonitorBuilder {
             }
             let h = std::sync::Arc::clone(&handler);
             self = self.on_ctx::<Quic>(move |qi: &flowscope::QuicInitial, ctx: &mut Ctx<'_>| {
-                let fp = QuicFingerprint::from_initial(qi, ctx.flow);
+                let fp = QuicFingerprint::from_initial(
+                    qi,
+                    ctx.flow,
+                    crate::monitor::fingerprint::server_port(
+                        ctx.flow,
+                        ctx.side(),
+                        ctx.orientation(),
+                    ),
+                );
                 if !fp.app_protocol.is_encrypted_dns() {
                     return Ok(());
                 }

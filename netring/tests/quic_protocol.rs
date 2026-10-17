@@ -14,8 +14,8 @@ use netring::prelude::Quic;
 use netring::protocol::{Dispatch, Protocol};
 
 #[test]
-fn dispatch_targets_udp_443() {
-    assert!(matches!(Quic::dispatch(), Dispatch::Udp(ref p) if p == &[443]));
+fn dispatch_targets_udp_443_and_doq() {
+    assert!(matches!(Quic::dispatch(), Dispatch::Udp(ref p) if p == &[443, 853]));
     assert_eq!(Quic::NAME, "quic");
 }
 

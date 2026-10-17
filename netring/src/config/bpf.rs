@@ -154,10 +154,21 @@ impl BpfFilter {
     /// `"<raw bytecode, N instructions>"` since the symbolic IR
     /// isn't available.
     ///
+    /// The main chain and each [`or`](crate::config::BpfFilterBuilder::or)
+    /// branch render as alternatives (`(tcp and dst port 80) or udp`),
+    /// and [`negate`](crate::config::BpfFilterBuilder::negate) wraps the
+    /// whole expression (`not (…)`).
+    ///
     /// Best-effort: the output is guaranteed to be syntactically
     /// valid pcap-filter when constructed via the typed builder;
     /// no claim of byte-identical match with libpcap's
-    /// `tcpdump -dd` bytecode output.
+    /// `tcpdump -dd` bytecode output. Nor is it a promise of the same
+    /// match set under libpcap: the rendering spells out the builder's
+    /// chain, not the fragments the compiler implies. In particular a
+    /// chain naming neither `.ipv4()` / `.ipv6()` nor an IPv6 address
+    /// compiles IPv4-only, so `tcp and port 443` here means IPv4 TCP,
+    /// whereas libpcap's `tcp` / `udp` / `port` also match IPv6 —
+    /// prefix `ip and` for the libpcap equivalent.
     pub fn to_human(&self) -> String {
         self.to_string()
     }

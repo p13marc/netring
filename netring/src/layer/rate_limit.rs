@@ -1,7 +1,7 @@
 //! Per-kind token-bucket rate limiter.
 
 use std::borrow::Cow;
-use std::time::{Duration, Instant};
+use std::time::Duration;
 
 use flowscope::Timestamp;
 use rustc_hash::FxHashMap;
@@ -14,9 +14,12 @@ use crate::layer::Layer;
 /// `max_per_period` per `period`. Each kind gets its own bucket;
 /// kinds are independent.
 ///
-/// Algorithm: a sliding window — we track the bucket-start
-/// timestamp and the count seen since. When `period` elapses the
-/// count resets.
+/// Algorithm: a fixed window per kind — we track the window's start and
+/// the count seen since. Once `period` has passed the count resets.
+/// Measured in **packet time** (each anomaly's own timestamp), so a fast
+/// [`Monitor::replay`](crate::monitor::Monitor) is limited exactly as a
+/// live run over the same traffic would be; an anomaly timestamped before
+/// its kind's window start counts toward that window.
 ///
 /// `Clone` (0.22): the per-kind buckets live in the per-`wrap()` sink,
 /// so the config clones cleanly for
@@ -28,8 +31,8 @@ pub struct RateLimitAnomalies {
 }
 
 impl RateLimitAnomalies {
-    /// `max_per_period` anomalies per `period`, per kind. Overflow
-    /// is silently dropped.
+    /// `max_per_period` anomalies per `period` (of packet time), per kind.
+    /// Overflow is silently dropped.
     pub fn new(max_per_period: u32, period: Duration) -> Self {
         Self {
             period,
@@ -50,7 +53,7 @@ impl Layer for RateLimitAnomalies {
 }
 
 struct Bucket {
-    window_start: Instant,
+    window_start: Timestamp,
     count: u32,
 }
 
@@ -72,13 +75,12 @@ impl AnomalySink for RateLimitAnomaliesLayered {
         observations: &[(&'static str, Cow<'_, str>)],
         metrics: &[(&'static str, f64)],
     ) {
-        let now = Instant::now();
         let bucket = self.buckets.entry(kind).or_insert(Bucket {
-            window_start: now,
+            window_start: ts,
             count: 0,
         });
-        if now.duration_since(bucket.window_start) >= self.period {
-            bucket.window_start = now;
+        if ts.saturating_sub(bucket.window_start) >= self.period {
+            bucket.window_start = ts;
             bucket.count = 0;
         }
         // Every anomaly — a kind's first, a period's first — spends
@@ -86,8 +88,6 @@ impl AnomalySink for RateLimitAnomaliesLayered {
         let allow = bucket.count < self.max_per_period;
         if allow {
             bucket.count += 1;
-        }
-        if allow {
             self.inner
                 .write(kind, severity, ts, key, observations, metrics);
         }
@@ -101,7 +101,6 @@ impl AnomalySink for RateLimitAnomaliesLayered {
 #[cfg(test)]
 mod tests {
     use std::sync::{Arc, Mutex};
-    use std::thread::sleep;
 
     use super::*;
 
@@ -166,21 +165,27 @@ mod tests {
         for _ in 0..3 {
             sink.begin("X", Severity::Info, Timestamp::new(0, 0)).emit();
         }
-        sleep(Duration::from_millis(20));
-        sink.begin("X", Severity::Info, Timestamp::new(0, 0)).emit();
+        sink.begin("X", Severity::Info, Timestamp::new(0, 20_000_000))
+            .emit();
         assert_eq!(*n.lock().unwrap(), 0);
     }
 
+    /// The period is packet time: the budget refills a full period after
+    /// the window started, not a nanosecond before.
     #[test]
     fn period_resets_after_expiry() {
         let inner = Capture::default();
         let n = inner.n();
         let mut sink: Box<dyn AnomalySink> =
             Box::new(RateLimitAnomalies::new(1, Duration::from_millis(10))).wrap(Box::new(inner));
-        sink.begin("X", Severity::Info, Timestamp::new(0, 0)).emit();
-        sink.begin("X", Severity::Info, Timestamp::new(0, 0)).emit();
-        sleep(Duration::from_millis(20));
-        sink.begin("X", Severity::Info, Timestamp::new(0, 0)).emit();
+        for ts in [
+            Timestamp::new(3, 0),
+            Timestamp::new(3, 0),
+            Timestamp::new(3, 9_999_999),
+            Timestamp::new(3, 10_000_000),
+        ] {
+            sink.begin("X", Severity::Info, ts).emit();
+        }
         assert_eq!(*n.lock().unwrap(), 2);
     }
 }

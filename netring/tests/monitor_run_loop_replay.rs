@@ -845,3 +845,75 @@ async fn effect_handlers_receive_parser_events() {
     assert_eq!(calls.get("side tcp"), 1);
     assert_eq!(calls.get("closed http"), 1);
 }
+
+/// Counts what reaches it.
+struct CountingSink(Arc<AtomicUsize>);
+
+impl netring::anomaly::sink::AnomalySink for CountingSink {
+    fn write(
+        &mut self,
+        _kind: &'static str,
+        _severity: netring::anomaly::Severity,
+        _ts: flowscope::Timestamp,
+        _key: Option<&dyn netring::anomaly::Key>,
+        _observations: &[(&'static str, std::borrow::Cow<'_, str>)],
+        _metrics: &[(&'static str, f64)],
+    ) {
+        self.0.fetch_add(1, Ordering::SeqCst);
+    }
+}
+
+/// Replay two UDP flows an hour apart, emitting the same anomaly at each
+/// `FlowStarted`, through `layer`; returns how many reached the sink.
+async fn anomalies_through(layer: impl netring::layer::Layer + 'static) -> usize {
+    use netring::protocol::builtin::Udp;
+    use netring::protocol::event_typed::FlowStarted;
+    let udp = |sport: u16, t: u64| {
+        (
+            Duration::from_secs(t),
+            ipv4_udp([10, 0, 0, 1], [10, 0, 0, 2], sport, 53, b"query"),
+        )
+    };
+    let file = pcap(&[udp(5000, 1), udp(6000, 3_601)]);
+    let written = Arc::new(AtomicUsize::new(0));
+    Monitor::builder()
+        .pcap_source(file.path())
+        .protocol::<Udp>()
+        .on_ctx::<FlowStarted<Udp>>(|_e: &FlowStarted<Udp>, ctx: &mut Ctx<'_>| {
+            let ts = ctx.ts;
+            ctx.sink_mut()
+                .begin("Probe", netring::anomaly::Severity::Warning, ts)
+                .with_key(&1u32)
+                .emit();
+            Ok(())
+        })
+        .layer(layer)
+        .sink(CountingSink(Arc::clone(&written)))
+        .build()
+        .unwrap()
+        .replay()
+        .await
+        .unwrap();
+    written.load(Ordering::SeqCst)
+}
+
+/// #216: `DedupeAnomalies` and `RateLimitAnomalies` measure their windows
+/// in packet time. Two identical anomalies an hour apart in the capture
+/// both pass a 10-minute window, although the replay takes milliseconds:
+/// on the wall clock they were one instant apart, and the second was
+/// suppressed.
+#[tokio::test(flavor = "current_thread")]
+async fn anomaly_layers_measure_windows_in_packet_time() {
+    use netring::layer::{DedupeAnomalies, RateLimitAnomalies};
+    let ten_minutes = Duration::from_secs(600);
+    assert_eq!(
+        anomalies_through(DedupeAnomalies::within(ten_minutes)).await,
+        2,
+        "dedupe"
+    );
+    assert_eq!(
+        anomalies_through(RateLimitAnomalies::new(1, ten_minutes)).await,
+        2,
+        "rate limit"
+    );
+}

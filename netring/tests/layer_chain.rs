@@ -121,6 +121,51 @@ fn rate_limit_enforces_per_kind_budget() {
     assert_eq!(calls.lock().unwrap().len(), 6, "3+3");
 }
 
+/// `t` seconds plus `ns` nanoseconds of packet time.
+fn at(t: u32, ns: u32) -> Timestamp {
+    Timestamp::new(t, ns)
+}
+
+/// #216: the dedupe window is measured in packet time (each anomaly's
+/// timestamp), not on the wall clock: a repeat one nanosecond short of
+/// the window is dropped, one a full window later fires again — however
+/// fast they arrive.
+#[test]
+fn dedupe_window_is_measured_in_packet_time() {
+    let base = CaptureSink::default();
+    let calls = base.list();
+    let layers: Vec<Box<dyn Layer>> =
+        vec![Box::new(DedupeAnomalies::within(Duration::from_secs(60)))];
+    let mut sink = compose(layers, Box::new(base));
+    let mut emit = |ts: Timestamp| sink.begin("X", Severity::Info, ts).with_key(&7u32).emit();
+    emit(at(100, 0)); // fires
+    emit(at(159, 999_999_999)); // window − 1 ns: a duplicate
+    emit(at(160, 0)); // window + 0: fires again
+    emit(at(219, 999_999_999)); // within the new window: a duplicate
+    emit(at(130, 0)); // earlier than the last one: still a duplicate
+    assert_eq!(calls.lock().unwrap().len(), 2);
+}
+
+/// #216: the rate-limit period is measured in packet time too.
+#[test]
+fn rate_limit_window_is_measured_in_packet_time() {
+    let base = CaptureSink::default();
+    let calls = base.list();
+    let layers: Vec<Box<dyn Layer>> = vec![Box::new(RateLimitAnomalies::new(
+        2,
+        Duration::from_secs(60),
+    ))];
+    let mut sink = compose(layers, Box::new(base));
+    let mut emit = |ts: Timestamp| sink.begin("Burst", Severity::Info, ts).emit();
+    emit(at(100, 0)); // 1st of the window
+    emit(at(110, 0)); // 2nd
+    emit(at(159, 999_999_999)); // over budget, window − 1 ns
+    emit(at(160, 0)); // a new window
+    emit(at(160, 1)); // its 2nd
+    emit(at(161, 0)); // over budget
+    assert_eq!(calls.lock().unwrap().len(), 4);
+}
+
 #[test]
 fn sample_at_rate_zero_drops_everything() {
     let base = CaptureSink::default();

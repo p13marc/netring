@@ -274,6 +274,61 @@ pub(crate) fn set_timestamp_source(
     )
 }
 
+/// Turn a packet socket's exceptional `poll(2)` events into an error.
+///
+/// `POLLERR` means `sk_err` is set — `ENETDOWN` when the interface went
+/// down (packet_notifier()) or was down at bind() (packet_do_bind()). The
+/// kernel keeps reporting it on every poll, so a caller that ignores it
+/// polls in a tight loop; reading `SO_ERROR` returns and clears it, so it
+/// is reported once. `POLLHUP` / `POLLNVAL` are errors too.
+pub(crate) fn poll_error(
+    fd: BorrowedFd<'_>,
+    revents: Option<nix::poll::PollFlags>,
+) -> Result<(), Error> {
+    use nix::poll::PollFlags;
+
+    let Some(revents) = revents else {
+        return Ok(());
+    };
+    if revents.contains(PollFlags::POLLNVAL) {
+        return Err(Error::Io(std::io::Error::from_raw_os_error(libc::EBADF)));
+    }
+    if revents.contains(PollFlags::POLLERR) {
+        let err = take_socket_error(fd)?;
+        if err != 0 {
+            return Err(Error::Io(std::io::Error::from_raw_os_error(err)));
+        }
+    }
+    if revents.contains(PollFlags::POLLHUP) {
+        return Err(Error::Io(std::io::Error::other("hangup on packet socket")));
+    }
+    Ok(())
+}
+
+/// Read and clear the socket's pending error (`SO_ERROR`).
+fn take_socket_error(fd: BorrowedFd<'_>) -> Result<libc::c_int, Error> {
+    let mut err: libc::c_int = 0;
+    let mut len = std::mem::size_of::<libc::c_int>() as libc::socklen_t;
+    // SAFETY: fd is valid; `err` / `len` are an int-sized out-buffer.
+    let ret = unsafe {
+        libc::getsockopt(
+            fd.as_raw_fd(),
+            libc::SOL_SOCKET,
+            libc::SO_ERROR,
+            (&mut err as *mut libc::c_int).cast(),
+            &mut len,
+        )
+    };
+    if ret == -1 {
+        Err(Error::SockOpt {
+            option: "SO_ERROR",
+            source: std::io::Error::last_os_error(),
+        })
+    } else {
+        Ok(err)
+    }
+}
+
 /// Get `PACKET_STATISTICS` (tpacket_stats_v3). Resets kernel counters.
 pub(crate) fn get_packet_stats(fd: BorrowedFd<'_>) -> Result<ffi::tpacket_stats_v3, Error> {
     let mut stats: ffi::tpacket_stats_v3 = unsafe { std::mem::zeroed() };

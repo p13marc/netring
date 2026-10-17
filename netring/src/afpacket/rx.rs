@@ -402,6 +402,14 @@ impl Capture {
     /// a spurious error from a signal interrupting the underlying `poll(2)`.
     /// Also returns `Ok(None)` right away once a stop was requested
     /// through a [`StopHandle`].
+    ///
+    /// # Errors
+    ///
+    /// [`Error::Io`] with `ENETDOWN` when the interface went down, or was
+    /// down when the capture was opened. Like libpcap, the error is
+    /// reported once (reading it clears it in the kernel): calling again
+    /// waits for packets, which flow again once the interface is back up.
+    /// [`Error::Io`] also for a failed `poll(2)`.
     pub fn next_batch_blocking(
         &mut self,
         timeout: Duration,
@@ -418,13 +426,14 @@ impl Capture {
             }
         }
 
-        match self.stop.as_ref() {
+        let revents = match self.stop.as_ref() {
             None => {
                 let mut pfds = [nix::poll::PollFd::new(
                     self.fd.as_fd(),
                     nix::poll::PollFlags::POLLIN,
                 )];
                 crate::syscall::poll_eintr_safe(&mut pfds, timeout).map_err(Error::Io)?;
+                pfds[0].revents()
             }
             Some(stop) => {
                 let mut pfds = [
@@ -432,11 +441,13 @@ impl Capture {
                     nix::poll::PollFd::new(stop.fd.as_fd(), nix::poll::PollFlags::POLLIN),
                 ];
                 crate::syscall::poll_eintr_safe(&mut pfds, timeout).map_err(Error::Io)?;
+                pfds[0].revents()
             }
-        }
+        };
         if self.stop_requested() {
             return Ok(None);
         }
+        socket::poll_error(self.fd.as_fd(), revents)?;
         Ok(self.next_batch())
     }
 

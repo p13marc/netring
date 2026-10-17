@@ -152,7 +152,8 @@ impl Bridge {
     ///
     /// # Errors
     ///
-    /// Returns [`Error::Io`] if `poll(2)` or a `flush()` syscall fails.
+    /// Returns [`Error::Io`] if `poll(2)` or a `flush()` syscall fails, or
+    /// with `ENETDOWN` when either interface goes down.
     pub fn run<F>(&mut self, mut filter: F) -> Result<(), Error>
     where
         F: FnMut(&Packet<'_>, BridgeDirection) -> BridgeAction,
@@ -192,6 +193,8 @@ impl Bridge {
     ///
     /// Returns `[a_ready, b_ready]`. Both `false` indicates the timeout
     /// elapsed with no traffic. EINTR is handled by [`crate::syscall::poll_eintr_safe`].
+    /// A socket error (`ENETDOWN` when a side went down) is returned rather
+    /// than left to make every poll return at once.
     fn poll_both(&self, timeout: Duration) -> Result<[bool; 2], Error> {
         use nix::poll::{PollFd, PollFlags};
 
@@ -200,6 +203,8 @@ impl Bridge {
             PollFd::new(self.rx_b.as_fd(), PollFlags::POLLIN),
         ];
         crate::syscall::poll_eintr_safe(&mut pfds, timeout).map_err(Error::Io)?;
+        crate::afpacket::socket::poll_error(self.rx_a.as_fd(), pfds[0].revents())?;
+        crate::afpacket::socket::poll_error(self.rx_b.as_fd(), pfds[1].revents())?;
         Ok([
             pfds[0]
                 .revents()

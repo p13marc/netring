@@ -280,15 +280,18 @@ impl Bridge {
             tokio::select! {
                 result = async_a.readable() => {
                     let mut guard = result.map_err(Error::Io)?;
-                    self.drain_direction(&mut filter, BridgeDirection::AtoB)?;
-                    // We've drained until next_batch returned None — re-arm
-                    // tokio's readiness so the next iteration awaits epoll.
-                    guard.clear_ready();
+                    // Re-arm tokio's readiness only once the ring is empty;
+                    // a capped drain leaves it set so the backlog is resumed
+                    // (epoll is edge-triggered: no new edge would come).
+                    if self.drain_direction(&mut filter, BridgeDirection::AtoB)? {
+                        guard.clear_ready();
+                    }
                 }
                 result = async_b.readable() => {
                     let mut guard = result.map_err(Error::Io)?;
-                    self.drain_direction(&mut filter, BridgeDirection::BtoA)?;
-                    guard.clear_ready();
+                    if self.drain_direction(&mut filter, BridgeDirection::BtoA)? {
+                        guard.clear_ready();
+                    }
                 }
             }
         }
@@ -328,13 +331,15 @@ impl Bridge {
             tokio::select! {
                 result = async_a.readable() => {
                     let mut guard = result.map_err(Error::Io)?;
-                    self.drain_direction(&mut filter, BridgeDirection::AtoB)?;
-                    guard.clear_ready();
+                    if self.drain_direction(&mut filter, BridgeDirection::AtoB)? {
+                        guard.clear_ready();
+                    }
                 }
                 result = async_b.readable() => {
                     let mut guard = result.map_err(Error::Io)?;
-                    self.drain_direction(&mut filter, BridgeDirection::BtoA)?;
-                    guard.clear_ready();
+                    if self.drain_direction(&mut filter, BridgeDirection::BtoA)? {
+                        guard.clear_ready();
+                    }
                 }
                 _ = tokio::time::sleep(self.poll_timeout) => {
                     // Idle iteration — fall through to next loop pass.
@@ -344,16 +349,18 @@ impl Bridge {
         Ok(())
     }
 
-    /// Drain every retired block from one direction, forwarding through the filter.
+    /// Drain retired blocks from one direction, forwarding through the filter.
     ///
-    /// Continues until `next_batch()` reports nothing more is currently retired,
-    /// so a single readability wakeup empties the backlog (otherwise blocks
-    /// pile up until the next poll cycle).
+    /// Takes up to [`DRAIN_BATCHES`] blocks, then returns so the other
+    /// direction gets its turn: draining until empty never ends while one
+    /// side is under sustained load, starving the other. Returns `true` when
+    /// the direction had nothing more retired. The leftover backlog keeps
+    /// the RX fd readable, so the next `poll(2)` returns at once.
     fn drain_direction<F>(
         &mut self,
         filter: &mut F,
         direction: BridgeDirection,
-    ) -> Result<(), Error>
+    ) -> Result<bool, Error>
     where
         F: FnMut(&Packet<'_>, BridgeDirection) -> BridgeAction,
     {
@@ -374,7 +381,10 @@ impl Bridge {
 
         let tx_capacity = tx.frame_capacity();
 
-        while let Some(batch) = rx.next_batch() {
+        for _ in 0..DRAIN_BATCHES {
+            let Some(batch) = rx.next_batch() else {
+                return Ok(true);
+            };
             for pkt in &batch {
                 // Frames leaving this interface are not bridged: without
                 // qdisc bypass the other direction's own forwards pass the
@@ -406,7 +416,7 @@ impl Bridge {
             }
             tx.flush()?;
         }
-        Ok(())
+        Ok(false)
     }
 
     /// Get forwarding statistics for both directions.
@@ -469,6 +479,9 @@ impl Bridge {
         (&self.rx_a, &self.tx_b, &self.rx_b, &self.tx_a)
     }
 }
+
+/// Blocks one direction forwards before the other gets its turn.
+const DRAIN_BATCHES: usize = 4;
 
 /// Copy `data` into a TX slot and queue it. A batch can hold more packets
 /// than the TX ring has frames, and queued frames only leave the ring on a

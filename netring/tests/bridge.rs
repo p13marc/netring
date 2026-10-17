@@ -208,11 +208,15 @@ fn count_marked(cap: &mut netring::Capture, marker: &[u8], window: Duration) -> 
     found
 }
 
-/// Two veth pairs `x` and `y` with `nrp` names unique to this process.
+/// Two veth pairs `x` and `y` with `nrp` names unique to this process,
+/// with IPv6 off so the only traffic on them is the test's own.
 fn veth_pairs(tag: &str) -> Option<(VethPair, VethPair)> {
     let pid = std::process::id() % 1000;
     let x = VethPair::create(&format!("nrp{tag}{pid}x0"), &format!("nrp{tag}{pid}x1"))?;
     let y = VethPair::create(&format!("nrp{tag}{pid}y0"), &format!("nrp{tag}{pid}y1"))?;
+    for name in [&x.a, &x.b, &y.a, &y.b] {
+        let _ = std::fs::write(format!("/proc/sys/net/ipv6/conf/{name}/disable_ipv6"), "1");
+    }
     Some((x, y))
 }
 
@@ -290,4 +294,96 @@ fn bridge_does_not_forward_its_own_transmissions() {
 
     let found = count_marked(&mut sink, marker.as_bytes(), Duration::from_millis(300));
     assert_eq!(found, 1, "y0 received the one bridged frame {found} times");
+}
+
+/// A backlog on one side does not hold up the other: B's frame is served
+/// after a bounded share of A's blocks, not after A's whole ring. (Under
+/// sustained load on A, draining A until empty never ends.)
+#[test]
+fn bridge_serves_both_sides_under_a_backlog() {
+    let Some((x, y)) = veth_pairs("s") else {
+        eprintln!("skipping: needs CAP_NET_ADMIN to create veth");
+        return;
+    };
+    let a_marker = format!("netring_bridge_a_{}", helpers::unique_port());
+    let b_marker = format!("netring_bridge_b_{}", helpers::unique_port());
+    // Small blocks on A, so its backlog spans many of them.
+    let mut bridge = Bridge::builder()
+        .interface_a(&x.b)
+        .interface_b(&y.b)
+        .a_block_size(1 << 16)
+        .a_block_count(64)
+        .a_block_timeout_ms(5)
+        .b_block_timeout_ms(5)
+        .build()
+        .expect("build bridge");
+
+    const N: u16 = 3_000;
+    inject_marked(&x.a, a_marker.as_bytes(), N);
+    inject_marked(&y.a, b_marker.as_bytes(), 1);
+    std::thread::sleep(Duration::from_millis(100)); // every block retired
+
+    let has =
+        |pkt: &netring::Packet<'_>, m: &str| pkt.data().windows(m.len()).any(|w| w == m.as_bytes());
+    let (mut a_seen, mut a_before_b, mut b_seen) = (0usize, None, false);
+    bridge
+        .run_iterations(1, |pkt, dir| {
+            if dir == BridgeDirection::AtoB && has(pkt, &a_marker) {
+                a_seen += 1;
+            }
+            if dir == BridgeDirection::BtoA && has(pkt, &b_marker) {
+                b_seen = true;
+                a_before_b.get_or_insert(a_seen);
+            }
+            BridgeAction::Drop
+        })
+        .expect("run_iterations");
+
+    assert!(b_seen, "B's frame was not served in the first iteration");
+    let a_before_b = a_before_b.unwrap();
+    assert!(
+        a_before_b < usize::from(N),
+        "B waited for all {a_before_b} of A's backlog"
+    );
+}
+
+/// The async loop comes back for the part of a backlog one turn left
+/// behind, although no new packet (no new epoll edge) arrives.
+#[cfg(feature = "tokio")]
+#[tokio::test]
+async fn bridge_async_resumes_a_backlog() {
+    let Some((x, y)) = veth_pairs("q") else {
+        eprintln!("skipping: needs CAP_NET_ADMIN to create veth");
+        return;
+    };
+    let marker = format!("netring_bridge_q_{}", helpers::unique_port());
+    let mut bridge = Bridge::builder()
+        .interface_a(&x.b)
+        .interface_b(&y.b)
+        .a_block_size(1 << 16)
+        .a_block_count(64)
+        .a_block_timeout_ms(5)
+        .poll_timeout(Duration::from_millis(20))
+        .build()
+        .expect("build bridge");
+
+    const N: u16 = 3_000;
+    inject_marked(&x.a, marker.as_bytes(), N);
+    tokio::time::sleep(Duration::from_millis(100)).await; // every block retired
+
+    let mut seen = 0usize;
+    bridge
+        .run_iterations_async(20, |pkt, _dir| {
+            if pkt
+                .data()
+                .windows(marker.len())
+                .any(|w| w == marker.as_bytes())
+            {
+                seen += 1;
+            }
+            BridgeAction::Drop
+        })
+        .await
+        .expect("run_iterations_async");
+    assert_eq!(seen, usize::from(N), "the async bridge stopped mid-backlog");
 }

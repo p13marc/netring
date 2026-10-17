@@ -358,6 +358,15 @@ impl<S: PacketSource + AsRawFd> AsyncCapture<S> {
     /// Borrow the inner source mutably (e.g. for stats accessors). Most
     /// users want [`readable()`](AsyncCapture::readable) to
     /// call [`next_batch()`](PacketSource::next_batch) for zero-copy access.
+    ///
+    /// Reading packets through it with a [`Capture`](crate::Capture)
+    /// `packets()` loop that stops part-way through a ring block leaves the
+    /// rest of that block pending in the `Capture` (0.32, #211). The async
+    /// reads wait on the fd's readiness, which those packets don't raise:
+    /// a stream resumes with them only at the next readiness edge (the
+    /// kernel retiring another block). Drain them with
+    /// [`next_batch()`](PacketSource::next_batch) before going back to the
+    /// async reads.
     pub fn get_mut(&mut self) -> &mut S {
         self.inner.get_mut()
     }

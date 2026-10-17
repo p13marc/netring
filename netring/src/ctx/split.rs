@@ -51,6 +51,11 @@ impl Ctx<'_> {
     /// `dyn AnomalySink` is the registered sink. They live in
     /// distinct struct fields of `Ctx`, so projecting both at
     /// once is sound.
+    ///
+    /// Anomalies begun on the returned sink don't know the current flow
+    /// (see [`Ctx::sink_mut`]): use
+    /// [`AnomalyWriter::with_flow`](crate::anomaly::sink::AnomalyWriter::with_flow)
+    /// to name its initiator.
     pub fn split_state_sink<T>(&mut self) -> (&mut T, &mut dyn AnomalySink)
     where
         T: Default + Send + 'static,

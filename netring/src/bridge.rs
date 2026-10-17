@@ -172,6 +172,18 @@ impl Bridge {
     /// allocations or heavy processing. Copy interesting packets via
     /// [`Packet::to_owned()`] and process them elsewhere.
     ///
+    /// # Backpressure
+    ///
+    /// Each forwarded batch is kicked with [`Injector::flush`], which waits
+    /// until the device has transmitted every frame it took — the loop's
+    /// backpressure: a slow side slows the bridge rather than overrunning
+    /// its TX ring. A device that **holds** frames (a queueing or shaping
+    /// qdisc with [`qdisc_bypass(false)`](BridgeBuilder::qdisc_bypass), a
+    /// stalled link) therefore blocks the whole loop — both directions —
+    /// for as long as it holds them. The default `qdisc_bypass(true)`
+    /// transmits directly and never waits on a qdisc; the async loops
+    /// ([`run_async`](Self::run_async)) never wait for the device.
+    ///
     /// # Errors
     ///
     /// Returns [`Error::Io`] if `poll(2)` or a `flush()` syscall fails, or

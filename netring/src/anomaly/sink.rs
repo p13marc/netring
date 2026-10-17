@@ -130,6 +130,12 @@ impl Endpoints {
     /// The 5-tuple fields of an owned anomaly, which flowscope's
     /// detectors and [`flowscope::OwnedAnomaly::with_flow`] fill from the
     /// initiator (directional). `None` when it carries no address.
+    ///
+    /// Always `directional: true` — an `OwnedAnomaly` doesn't say how its
+    /// fields were filled. One built with `OwnedAnomaly::with_key` from an
+    /// address-sorted flow key (a custom detector) is therefore labelled
+    /// directional although its `src` is just the lower address; build it
+    /// with `with_flow(&key, initiator)` instead.
     pub fn from_owned(anomaly: &flowscope::OwnedAnomaly) -> Option<Self> {
         if anomaly.src_ip.is_none() && anomaly.dest_ip.is_none() {
             return None;
@@ -333,7 +339,10 @@ impl<T: AnomalySink + Sized> AnomalySinkExt for T {}
 ///   no copy beyond the `Cow::Borrowed` re-wrap.
 /// - The record carries no `key`; the anomaly's 5-tuple fields become
 ///   its [`Endpoints`] ([`Endpoints::from_owned`], directional — flowscope
-///   fills them from the flow's initiator, or the anomaly's subject).
+///   fills them from the flow's initiator, or the anomaly's subject). A
+///   custom detector that filled them with `OwnedAnomaly::with_key` on an
+///   address-sorted flow key is labelled directional all the same: fill
+///   them with `OwnedAnomaly::with_flow(&key, initiator)`.
 pub fn publish_owned(sink: &mut dyn AnomalySink, owned: &flowscope::OwnedAnomaly) {
     // Translate the SmallVec<Cow<'static, str>> observations into the
     // borrowed slice shape AnomalySink::write expects. The internal

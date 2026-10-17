@@ -424,6 +424,14 @@ impl<'a> Ctx<'a> {
     }
 
     /// Borrow the anomaly sink mutably.
+    ///
+    /// An anomaly begun on it (`ctx.sink_mut().begin(..)`) does not know the
+    /// current flow, unlike [`Self::emit`]: a flow key attached there reaches
+    /// the sinks in its stored (address-sorted) order, `directional: false`,
+    /// unless the writer is told who opened the flow —
+    /// [`with_flow(&key, initiator)`](crate::anomaly::sink::AnomalyWriter::with_flow)
+    /// with [`Self::initiator`]. The same holds for the sinks the `split_*`
+    /// helpers return.
     #[inline]
     pub fn sink_mut(&mut self) -> &mut dyn crate::anomaly::sink::AnomalySink {
         self.sink

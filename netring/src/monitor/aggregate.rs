@@ -219,8 +219,9 @@ impl AggregateReport<'_> {
     }
 
     /// How many records each dimension folded into its overflow total
-    /// because a bucket was full ([`AggregateConfig::max_keys`]). New in
-    /// 0.32.0 (#214).
+    /// because a bucket was full ([`AggregateConfig::max_keys`]) —
+    /// cumulative since the monitor started, not per window (compare two
+    /// reports for a rate). New in 0.32.0 (#214).
     pub fn overflow(&self) -> AggregateOverflow {
         self.state.overflow()
     }

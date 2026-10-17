@@ -1026,7 +1026,7 @@ just ci-full         # setcap + full test suite
   - `mod.rs` — `FanoutMode` / `FanoutFlags` / `TimestampSource` / `RingProfile`
 - `src/error.rs` — Error enum (now includes `Loader` for `xdp-loader` feature)
 - `src/afpacket/rx.rs` — AfPacketRx + builder (busy-poll trio added in 0.8)
-- `src/afpacket/tx.rs` — AfPacketTx + builder (V1 frame-based TX)
+- `src/afpacket/tx.rs` — `Injector` + builder (`TPACKET_V2` frame-ring TX)
 - `src/afpacket/ring.rs` — MmapRing (NonNull, strict provenance, AtomicU32)
 - `src/afpacket/socket.rs` — All setsockopt wrappers (incl. busy-poll trio);
   `PromiscGuard` (issue #4) — self-cleaning `PACKET_MR_PROMISC` guard reused by
@@ -1231,7 +1231,8 @@ Cargo features unique to 0.21:
 
 - `LendingIterator` not stabilized — flat `packets()` iterator uses unsafe (raw pointer + lifetime erasure via transmute)
 - `gen` blocks not stabilized — `nightly` feature reserved for future
-- TX uses V1 frame-based semantics (not V3 blocks)
+- TX uses a `TPACKET_V2` frame ring (`tpacket2_hdr`); the socket version and the
+  header layout must agree or the kernel never sends (#187)
 - `tpacket_bd_ts.ts_usec` in libc — read as nanoseconds for TPACKET_V3
 - `AsyncCapture` uses `wait_readable()` + `get_mut().next_batch()` for zero-copy, or `recv()` for owned packets, due to borrow-checker limitations with AsyncFd + lending returns
 - `MAP_LOCKED` fallback: catches EPERM, ENOMEM, and EAGAIN, retries without MAP_LOCKED

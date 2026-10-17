@@ -160,9 +160,11 @@ with any async runtime or synchronous code.
 
 ## TX path
 
-TPACKET_V3 TX uses V1 frame-based semantics (not block-based):
+The TX socket uses a `TPACKET_V2` frame ring (TX is frame-based on every
+TPACKET version; V3's block layout is RX-only):
 
-- Flat array of fixed-size frames
+- Flat array of fixed-size frames, each starting with a `tpacket2_hdr`
+  (`u32 tp_status` at offset 0, data at offset 32)
 - Status flow: `AVAILABLE → SEND_REQUEST → kernel sends → AVAILABLE` (or
   `WRONG_FORMAT` on rejection)
 - `sendto(fd, NULL, 0, ...)` triggers kernel transmission

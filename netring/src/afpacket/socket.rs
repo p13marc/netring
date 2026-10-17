@@ -51,13 +51,15 @@ pub(crate) fn resolve_interface(name: &str) -> Result<i32, Error> {
 
 // ── setsockopt wrappers ────────────────────────────────────────────────────
 
-/// Set `PACKET_VERSION` to `TPACKET_V3`.
-pub(crate) fn set_packet_version(fd: BorrowedFd<'_>) -> Result<(), Error> {
+/// Set `PACKET_VERSION` (`ffi::TPACKET_V3_INT` for RX, `ffi::TPACKET_V2_INT`
+/// for TX). The version decides the frame-header layout the kernel reads and
+/// writes, so it must match the header type the ring code uses.
+pub(crate) fn set_packet_version(fd: BorrowedFd<'_>, version: libc::c_int) -> Result<(), Error> {
     raw_setsockopt(
         fd,
         ffi::SOL_PACKET,
         ffi::PACKET_VERSION,
-        &ffi::TPACKET_V3_INT,
+        &version,
         "PACKET_VERSION",
     )
 }

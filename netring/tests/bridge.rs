@@ -81,3 +81,84 @@ fn bridge_builder_into_inner() {
         }
     }
 }
+
+/// End-to-end forwarding: a frame injected on `x0` enters the bridge on `x1`
+/// (side A), is re-sent out of `y1` (side B), and must be captured on `y0`.
+/// Before #187 the bridge's TX rings never transmitted, so nothing arrived.
+#[test]
+fn bridge_forwards_frames_a_to_b() {
+    use netring::{CaptureBuilder, Injector};
+    use std::time::Instant;
+
+    let Some(x) = VethPair::create("nrtest_x0", "nrtest_x1") else {
+        eprintln!("skipping: needs CAP_NET_ADMIN to create veth");
+        return;
+    };
+    let Some(y) = VethPair::create("nrtest_y0", "nrtest_y1") else {
+        eprintln!("skipping: needs CAP_NET_ADMIN to create veth");
+        return;
+    };
+
+    let marker = format!("netring_bridge_{}", helpers::unique_port());
+    let mut sink = CaptureBuilder::default()
+        .interface(&y.a)
+        .block_timeout_ms(10)
+        .build()
+        .expect("build capture on y0");
+
+    let (a, b) = (x.b.clone(), y.b.clone());
+    let bridge_thread = std::thread::spawn(move || {
+        let mut bridge = Bridge::builder()
+            .interface_a(&a)
+            .interface_b(&b)
+            .poll_timeout(Duration::from_millis(20))
+            .build()
+            .expect("build bridge");
+        bridge
+            .run_iterations(100, |_pkt, _dir| BridgeAction::Forward)
+            .expect("run_iterations");
+    });
+    // Let the bridge open its sockets before traffic starts.
+    std::thread::sleep(Duration::from_millis(200));
+
+    let mut tx = Injector::open(&x.a).expect("injector on x0");
+    const N: u16 = 4;
+    for seq in 0..N {
+        let mut frame = Vec::with_capacity(64);
+        frame.extend_from_slice(&[0xff; 6]);
+        frame.extend_from_slice(&[0x02, 0, 0, 0, 0, 0x02]);
+        frame.extend_from_slice(&0x88b5u16.to_be_bytes());
+        frame.extend_from_slice(&seq.to_be_bytes());
+        frame.extend_from_slice(marker.as_bytes());
+        frame.resize(frame.len().max(60), 0);
+        let mut slot = tx.allocate(frame.len()).expect("allocate");
+        slot.data_mut()[..frame.len()].copy_from_slice(&frame);
+        slot.set_len(frame.len());
+        slot.send();
+    }
+    tx.flush().expect("flush");
+
+    let mut found = 0;
+    let deadline = Instant::now() + Duration::from_secs(3);
+    while Instant::now() < deadline && found < N as usize {
+        if let Some(batch) = sink
+            .next_batch_blocking(Duration::from_millis(100))
+            .unwrap()
+        {
+            for pkt in &batch {
+                if pkt
+                    .data()
+                    .windows(marker.len())
+                    .any(|w| w == marker.as_bytes())
+                {
+                    found += 1;
+                }
+            }
+        }
+    }
+    bridge_thread.join().expect("bridge thread");
+    assert!(
+        found >= N as usize,
+        "y0 captured {found} of {N} bridged frames"
+    );
+}

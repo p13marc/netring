@@ -1055,7 +1055,7 @@ fn build_inner(b: &CaptureBuilder, block_count: usize) -> Result<Capture, Error>
     let fd = socket::create_packet_socket()?;
 
     // Set TPACKET_V3
-    socket::set_packet_version(fd.as_fd())?;
+    socket::set_packet_version(fd.as_fd(), ffi::TPACKET_V3_INT)?;
 
     // Configure RX ring
     let mut req: ffi::tpacket_req3 = unsafe { std::mem::zeroed() };

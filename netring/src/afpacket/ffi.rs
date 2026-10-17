@@ -49,6 +49,12 @@ pub use libc::ETH_P_ALL;
 /// `libc` exports this as an enum variant `libc::tpacket_versions::TPACKET_V3`.
 pub const TPACKET_V3_INT: c_int = libc::tpacket_versions::TPACKET_V3 as c_int;
 
+/// TPACKET_V2 as a plain integer for `setsockopt(PACKET_VERSION)`.
+///
+/// The TX ring uses V2: TX is frame-based on every version, and V2's
+/// `tpacket2_hdr` keeps a `u32 tp_status` at offset 0.
+pub const TPACKET_V2_INT: c_int = libc::tpacket_versions::TPACKET_V2 as c_int;
+
 // ── Alignment ──────────────────────────────────────────────────────────────
 
 pub use libc::TPACKET_ALIGNMENT;

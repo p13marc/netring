@@ -222,3 +222,75 @@ fn injector_does_not_queue_received_traffic() {
     assert_eq!(rc, 0, "SIOCINQ: {}", std::io::Error::last_os_error());
     assert_eq!(queued, 0, "the TX socket queued received packets");
 }
+
+/// CPU time the calling thread has used.
+fn thread_cpu() -> Duration {
+    let mut ts = libc::timespec {
+        tv_sec: 0,
+        tv_nsec: 0,
+    };
+    // SAFETY: valid out-pointer for the call.
+    unsafe { libc::clock_gettime(libc::CLOCK_THREAD_CPUTIME_ID, &mut ts) };
+    Duration::new(ts.tv_sec as u64, ts.tv_nsec as u32)
+}
+
+/// Queue `frame` (allocate + send, no kick).
+fn queue(tx: &mut Injector, frame: &[u8]) {
+    let mut slot = tx.allocate(frame.len()).expect("a free slot");
+    slot.data_mut()[..frame.len()].copy_from_slice(frame);
+    slot.set_len(frame.len());
+    slot.send();
+}
+
+/// #226: `Injector::wait_drained` must sleep, not spin, while frames are
+/// pending. poll(2) on a TX-ring packet socket reports POLLOUT whenever its
+/// write memory is below half `sk_sndbuf` (datagram_poll()), whatever the
+/// ring holds, and POLLERR while TX timestamps sit unread in its error
+/// queue — so the poll returned at once, every time, and the wait burnt a
+/// core until its timeout. (A queued, never-kicked frame can't drain:
+/// the wait times out, which is the point here.)
+#[test]
+fn wait_drained_does_not_spin() {
+    let frame = marked_frame(b"netring-wait-drained", 0);
+    for timestamps in [false, true] {
+        let mut tx = match Injector::builder()
+            .interface("lo")
+            .frame_count(8)
+            .tx_timestamps(timestamps)
+            .build()
+        {
+            Ok(tx) => tx,
+            Err(e) => {
+                eprintln!("skip (needs CAP_NET_RAW): {e}");
+                return;
+            }
+        };
+        if timestamps {
+            // Transmit a few, so egress timestamps wait, unread, in the
+            // socket's error queue.
+            for _ in 0..4 {
+                queue(&mut tx, &frame);
+            }
+            tx.flush().unwrap();
+            tx.wait_drained(Duration::from_secs(2)).unwrap();
+        }
+        queue(&mut tx, &frame);
+        let (cpu, start) = (thread_cpu(), Instant::now());
+        let err = tx
+            .wait_drained(Duration::from_millis(300))
+            .expect_err("a never-kicked frame never drains");
+        let (cpu, wall) = (thread_cpu() - cpu, start.elapsed());
+        assert!(
+            matches!(&err, netring::Error::Io(e) if e.kind() == std::io::ErrorKind::TimedOut),
+            "{err:?}"
+        );
+        assert!(
+            wall >= Duration::from_millis(300),
+            "returned early: {wall:?}"
+        );
+        assert!(
+            cpu < Duration::from_millis(100),
+            "timestamps={timestamps}: {cpu:?} of CPU in a {wall:?} wait"
+        );
+    }
+}

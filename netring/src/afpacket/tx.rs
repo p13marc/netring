@@ -325,38 +325,38 @@ impl Injector {
     /// still be in flight when the ring is unmapped. Calling
     /// `wait_drained(...)` first ensures the kernel has finished.
     ///
-    /// Internally polls `POLLOUT` (re-arms when slots become available) and
-    /// re-checks `pending_count`. Polling is bounded by the remaining
-    /// timeout slice each iteration so wakeups don't oversleep.
+    /// Checks [`pending_count`](Self::pending_count) every millisecond,
+    /// sleeping in between. `poll(2)` can't wait for completions here: a
+    /// TX-ring packet socket reports `POLLOUT` whenever its write memory is
+    /// below half `SO_SNDBUF` (datagram_poll()), whatever the ring holds,
+    /// and `POLLERR` while TX timestamps sit unread in its error queue — so
+    /// a poll returns at once, and waiting on it burnt a core (#226).
+    ///
+    /// A frame queued but never kicked ([`flush`](Self::flush)) never
+    /// drains: the wait then times out.
     ///
     /// # Errors
     ///
     /// - [`Error::Io`] with `ErrorKind::TimedOut` if the timeout elapses
     ///   with frames still pending.
-    /// - [`Error::Io`] for any underlying poll failure.
     pub fn wait_drained(&mut self, timeout: std::time::Duration) -> Result<(), Error> {
         use std::time::Instant;
+        /// How often a pending frame is looked at.
+        const SLICE: std::time::Duration = std::time::Duration::from_millis(1);
         let deadline = Instant::now() + timeout;
         loop {
             if self.pending_count() == 0 {
                 return Ok(());
             }
             let remaining = match deadline.checked_duration_since(Instant::now()) {
-                Some(r) => r,
-                None => {
+                Some(r) if !r.is_zero() => r,
+                _ => {
                     return Err(Error::Io(std::io::Error::from(
                         std::io::ErrorKind::TimedOut,
                     )));
                 }
             };
-            // Cap each poll at 10ms so we re-check pending_count even if
-            // POLLOUT triggers spuriously on a partial drain.
-            let slice = remaining.min(std::time::Duration::from_millis(10));
-            let mut pfds = [nix::poll::PollFd::new(
-                self.fd.as_fd(),
-                nix::poll::PollFlags::POLLOUT,
-            )];
-            crate::syscall::poll_eintr_safe(&mut pfds, slice).map_err(Error::Io)?;
+            std::thread::sleep(remaining.min(SLICE));
         }
     }
 

@@ -379,8 +379,9 @@ fields + `state()`/`label_table()`/`lookup_icmp_flow()`/`bandwidth()`/
 
 **Sharding completion.** `src/monitor/merge.rs` — cross-shard
 `ShardedRunner::{merge_state, state_auto_merge, on_merge}` merge-worker
-thread (tokio-mpsc request + std-mpsc reply; a gated run-loop `select!`
-branch; `StateMap::take_dyn`). `LayerSpec` + `LayerFactory`
+thread (tokio-mpsc request + one shared std-mpsc reply channel; a gated
+run-loop `select!` branch; `StateMap::take_reset`; a final push per shard
+at run end, 0.32). `LayerSpec` + `LayerFactory`
 (`src/layer/mod.rs`) + `ShardedRunner::layer` + `Monitor::wrap_sink`.
 (Replaces the old "Tee + ChannelSink collator" workaround.)
 

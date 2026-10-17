@@ -61,8 +61,8 @@ pub const GAUGE_DEDUP_DROPPED: &str = "netring_capture_dedup_dropped";
 /// [`MonitorHealth::record_metrics`](crate::monitor::MonitorHealth::record_metrics).
 pub const GAUGE_HANDLER_ERRORS: &str = "netring_monitor_handler_errors";
 
-/// Gauge name: cumulative backend errors swallowed under
-/// `BackendErrorPolicy::SkipSource`.
+/// Gauge name: cumulative backend errors absorbed under
+/// `BackendErrorPolicy::SkipSource` / `Reopen`.
 pub const GAUGE_BACKEND_ERRORS: &str = "netring_monitor_backend_errors";
 
 /// Gauge name: active flows in the central tracker (last event).

@@ -68,10 +68,10 @@ handle has no built-in cadence). **Gauges.**
 | Metric | Type | Labels | Meaning |
 |--------|------|--------|---------|
 | `netring_monitor_handler_errors` | gauge | — | Cumulative handler errors swallowed under `HandlerErrorPolicy::Isolate`. |
-| `netring_monitor_backend_errors` | gauge | — | Cumulative capture-backend errors swallowed under `BackendErrorPolicy::SkipSource`. |
+| `netring_monitor_backend_errors` | gauge | — | Cumulative capture-backend errors absorbed under `BackendErrorPolicy::SkipSource` / `Reopen` (a source retired or re-opened). |
 | `netring_monitor_active_flows`   | gauge | — | Active flows in the tracker as of the last event. |
 
-> These are the "silent failure" signals: `Isolate` / `SkipSource` keep the
+> These are the "silent failure" signals: `Isolate` / `SkipSource` / `Reopen` keep the
 > pipeline alive by swallowing errors, so a **rising** handler/backend error
 > count is what you alert on. Unlabeled — one series each. Safe.
 

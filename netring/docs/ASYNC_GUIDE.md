@@ -47,6 +47,17 @@ let cap = Capture::builder()
 let mut acap = AsyncCapture::new(cap)?;
 ```
 
+### When the interface goes away
+
+A read wait ends with `Error::Io(ENETDOWN)` once the capture's interface
+is removed — noticed on the kernel's error report, or within a second
+when the interface was already down. An interface that is merely down is
+waited out: frames flow again when it comes back up. The same holds for
+`AsyncXdpSocket` and `Bridge::run_async`. (The idle check runs on tokio's
+timer, so the runtime needs its time driver: `#[tokio::main]` /
+`enable_all()`.) A Monitor turns the error into its
+`BackendErrorPolicy`: stop, retire the source, or re-open it.
+
 ### Three reception modes
 
 There are three ways to take a batch off `AsyncCapture`. They differ in

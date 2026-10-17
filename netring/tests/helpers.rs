@@ -167,6 +167,23 @@ impl PluggedDummy {
     }
 }
 
+impl PluggedDummy {
+    /// Let the held frames (and every later one) through.
+    pub fn release(&self) -> std::io::Result<()> {
+        let ifindex =
+            nix::net::if_::if_nametoindex(self.0.as_str()).map_err(std::io::Error::from)?;
+        release_plug_qdisc(ifindex)
+    }
+
+    /// Hold every frame again after a [`release`](Self::release)
+    /// (`tc qdisc change … plug block`).
+    pub fn block(&self) -> std::io::Result<()> {
+        let ifindex =
+            nix::net::if_::if_nametoindex(self.0.as_str()).map_err(std::io::Error::from)?;
+        plug_qdisc_request(ifindex, 0, (libc::NLM_F_REQUEST | libc::NLM_F_ACK) as u16)
+    }
+}
+
 impl Drop for PluggedDummy {
     fn drop(&mut self) {
         let _ = std::process::Command::new("ip")
@@ -179,6 +196,26 @@ impl Drop for PluggedDummy {
 /// `tc` binary needed). `plug` starts out holding (sch_plug: plug_init
 /// throttles): every frame is queued until a release that never comes.
 pub fn add_plug_qdisc(ifindex: u32) -> std::io::Result<()> {
+    plug_qdisc_request(
+        ifindex,
+        0, // TCQ_PLUG_BUFFER
+        (libc::NLM_F_REQUEST | libc::NLM_F_ACK | libc::NLM_F_CREATE | libc::NLM_F_EXCL) as u16,
+    )
+}
+
+/// `tc qdisc change dev <ifindex> root plug release_indefinite`: the plug
+/// lets every held frame (and all later ones) through.
+pub fn release_plug_qdisc(ifindex: u32) -> std::io::Result<()> {
+    plug_qdisc_request(
+        ifindex,
+        2, // TCQ_PLUG_RELEASE_INDEFINITE
+        (libc::NLM_F_REQUEST | libc::NLM_F_ACK) as u16,
+    )
+}
+
+/// One RTM_NEWQDISC for the root `plug` qdisc of `ifindex`, with
+/// `tc_plug_qopt { action, limit: 1 MiB }`.
+fn plug_qdisc_request(ifindex: u32, action: i32, flags: u16) -> std::io::Result<()> {
     use std::os::fd::{AsRawFd, FromRawFd, OwnedFd};
 
     fn attr(buf: &mut Vec<u8>, kind: u16, data: &[u8]) {
@@ -201,14 +238,12 @@ pub fn add_plug_qdisc(ifindex: u32) -> std::io::Result<()> {
     body.extend_from_slice(&0xffff_ffffu32.to_ne_bytes()); // TC_H_ROOT
     body.extend_from_slice(&0u32.to_ne_bytes());
     attr(&mut body, TCA_KIND, b"plug\0");
-    // struct tc_plug_qopt { action: i32 (TCQ_PLUG_BUFFER = 0), limit: u32 }
+    // struct tc_plug_qopt { action: i32, limit: u32 }
     let mut qopt = Vec::new();
-    qopt.extend_from_slice(&0i32.to_ne_bytes());
+    qopt.extend_from_slice(&action.to_ne_bytes());
     qopt.extend_from_slice(&(1u32 << 20).to_ne_bytes());
     attr(&mut body, TCA_OPTIONS, &qopt);
 
-    let flags =
-        (libc::NLM_F_REQUEST | libc::NLM_F_ACK | libc::NLM_F_CREATE | libc::NLM_F_EXCL) as u16;
     let mut msg = Vec::new();
     msg.extend_from_slice(&((16 + body.len()) as u32).to_ne_bytes());
     msg.extend_from_slice(&RTM_NEWQDISC.to_ne_bytes());

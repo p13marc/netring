@@ -372,6 +372,12 @@ impl<T> ReadyMut<'_, T> {
     pub(crate) fn clear_ready(&mut self) {
         self.guard.clear_ready();
     }
+
+    /// The readiness this guard saw. Its read- / write-closed bits are
+    /// sticky: `clear_ready` never clears them.
+    pub(crate) fn ready(&self) -> tokio::io::Ready {
+        self.guard.ready()
+    }
 }
 
 #[cfg(test)]

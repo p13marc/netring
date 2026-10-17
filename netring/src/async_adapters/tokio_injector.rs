@@ -21,8 +21,15 @@ use std::os::fd::{AsFd, AsRawFd, BorrowedFd};
 use std::time::Duration;
 
 use crate::afpacket::tx::Injector;
-use crate::async_adapters::registered::{Registered, health_io};
+use crate::async_adapters::registered::{ProbeTimer, Registered, health_io};
 use crate::error::Error;
+
+/// How often a TX wait looks at the ring once writability can't be trusted
+/// (see [`AsyncInjector::wait_tx`]) — as the sync `Injector::wait_drained`
+/// does (#226).
+const TX_POLL: Duration = Duration::from_millis(1);
+/// How many [`TX_POLL`] ticks between liveness checks in that mode.
+const TX_POLL_HEALTH_EVERY: u32 = 1000;
 
 /// Async wrapper around [`Injector`] using tokio's [`AsyncFd`](tokio::io::unix::AsyncFd).
 ///
@@ -42,6 +49,16 @@ use crate::error::Error;
 /// transmitted by the next `flush()`.
 pub struct AsyncInjector {
     inner: Registered<Injector>,
+    /// Set once the registration reported write-closed: TX timestamps on
+    /// the socket's error queue make epoll report `EPOLLOUT | EPOLLERR`,
+    /// which tokio keeps as a sticky write-closed bit — every later
+    /// writability wait would resolve at once. TX waits then poll the ring
+    /// on [`TX_POLL`] instead.
+    write_closed: bool,
+    /// The [`TX_POLL`] clock (a timerfd, no time driver), made on first use.
+    poll_timer: Option<ProbeTimer>,
+    /// Ticks since the last liveness check in the polled mode.
+    poll_ticks: u32,
 }
 
 /// The registration's liveness check: `ENETDOWN` once the injector's
@@ -72,7 +89,42 @@ impl AsyncInjector {
     pub fn new(tx: Injector) -> Result<Self, Error> {
         let inner =
             Registered::new(tx, tokio::io::Interest::WRITABLE, sink_health).map_err(Error::Io)?;
-        Ok(Self { inner })
+        Ok(Self {
+            inner,
+            write_closed: false,
+            poll_timer: None,
+            poll_ticks: 0,
+        })
+    }
+
+    /// Wait for the TX ring to make progress (a slot freed, a frame
+    /// completed): the socket's writability — the kernel wakes writers as
+    /// the device completes frames — or, once writability is stuck on
+    /// (write-closed, see [`Self::write_closed`]), a 1 ms poll on a
+    /// timerfd. Ends with the injector's error once it is found dead.
+    async fn wait_tx(&mut self) -> Result<(), Error> {
+        if !self.write_closed {
+            let mut guard = self.inner.writable_mut().await.map_err(Error::Io)?;
+            if guard.ready().is_write_closed() {
+                self.write_closed = true;
+            }
+            guard.clear_ready();
+            if !self.write_closed {
+                return Ok(());
+            }
+        }
+        if self.poll_timer.is_none() {
+            self.poll_timer = Some(ProbeTimer::new(TX_POLL).map_err(Error::Io)?);
+        }
+        if let Some(timer) = &self.poll_timer {
+            timer.tick().await.map_err(Error::Io)?;
+        }
+        self.poll_ticks += 1;
+        if self.poll_ticks >= TX_POLL_HEALTH_EVERY {
+            self.poll_ticks = 0;
+            sink_health(self.inner.get_ref()).map_err(Error::Io)?;
+        }
+        Ok(())
     }
 
     /// Open an async injector on `interface` with default settings.
@@ -128,18 +180,15 @@ impl AsyncInjector {
             }
             // Ring full. Frames queued since the last flush leave the ring
             // only on a kick (tpacket_snd() runs from sendto()): kick —
-            // without waiting for the device (#228) — and retry before
-            // waiting for a slot that would never come.
+            // without waiting for the device (#228) — and retry at once
+            // only if it handed something over. A kick that could hand over
+            // nothing (the send buffer is full of frames the device still
+            // holds) would fail again: wait for the device instead, so the
+            // task yields.
             if self.inner.get_mut().flush_nonblocking()? > 0 {
                 continue;
             }
-            // Ring full: wait for kernel to reclaim a slot via POLLOUT.
-            let mut guard = self.inner.writable_mut().await.map_err(Error::Io)?;
-            // The reclamation might be partial; clear_ready re-arms the
-            // reactor so the next iteration's writable_mut() will block.
-            // We do not consult pending_count here (would re-borrow self.inner
-            // while guard is alive); the next allocate() attempt will tell us.
-            guard.clear_ready();
+            self.wait_tx().await?;
         }
     }
 
@@ -151,7 +200,9 @@ impl AsyncInjector {
     /// (#228). Await [`wait_drained`](Self::wait_drained) to wait for
     /// completion.
     ///
-    /// Returns the number of frames queued when the kick started.
+    /// Returns the number of frames the kick handed to the kernel; frames
+    /// it could not (the socket's send buffer is full) stay queued for the
+    /// next `flush` / `send`.
     pub async fn flush(&mut self) -> Result<usize, Error> {
         self.inner.get_mut().flush_nonblocking()
     }
@@ -182,14 +233,16 @@ impl AsyncInjector {
                     )));
                 }
             };
+            // Frames a kick could not hand over (the send buffer was full)
+            // are kicked as the device frees room.
+            if self.inner.get_ref().queued_count() > 0 {
+                self.inner.get_mut().flush_nonblocking()?;
+            }
             // Cap each wait so we re-check pending_count even on partial
             // reclamation events.
             let slice = remaining.min(Duration::from_millis(10));
             tokio::select! {
-                ready = self.inner.writable_mut() => {
-                    let mut guard = ready.map_err(Error::Io)?;
-                    guard.clear_ready();
-                }
+                res = self.wait_tx() => res?,
                 _ = tokio::time::sleep(slice) => {}
             }
         }

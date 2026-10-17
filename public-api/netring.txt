@@ -100,6 +100,7 @@ pub fn netring::afpacket::tx::Injector::frame_capacity(&self) -> usize
 pub fn netring::afpacket::tx::Injector::frame_count(&self) -> usize
 pub fn netring::afpacket::tx::Injector::open(interface: &str) -> core::result::Result<Self, netring::error::Error>
 pub fn netring::afpacket::tx::Injector::pending_count(&self) -> usize
+pub fn netring::afpacket::tx::Injector::queued_count(&self) -> usize
 pub fn netring::afpacket::tx::Injector::read_tx_timestamp(&self) -> core::option::Option<flowscope::timestamp::Timestamp>
 pub fn netring::afpacket::tx::Injector::rejected_slots(&self) -> usize
 pub fn netring::afpacket::tx::Injector::wait_drained(&mut self, timeout: core::time::Duration) -> core::result::Result<(), netring::error::Error>
@@ -9592,6 +9593,7 @@ pub fn netring::afpacket::tx::Injector::frame_capacity(&self) -> usize
 pub fn netring::afpacket::tx::Injector::frame_count(&self) -> usize
 pub fn netring::afpacket::tx::Injector::open(interface: &str) -> core::result::Result<Self, netring::error::Error>
 pub fn netring::afpacket::tx::Injector::pending_count(&self) -> usize
+pub fn netring::afpacket::tx::Injector::queued_count(&self) -> usize
 pub fn netring::afpacket::tx::Injector::read_tx_timestamp(&self) -> core::option::Option<flowscope::timestamp::Timestamp>
 pub fn netring::afpacket::tx::Injector::rejected_slots(&self) -> usize
 pub fn netring::afpacket::tx::Injector::wait_drained(&mut self, timeout: core::time::Duration) -> core::result::Result<(), netring::error::Error>

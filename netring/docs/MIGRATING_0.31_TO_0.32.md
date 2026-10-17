@@ -317,9 +317,11 @@ Drain errors go through the policy too (0.31 returned them directly).
 
 `AsyncInjector::flush().await` (and `send` on a full ring, `send_stream`)
 means **handed to the device**, not transmitted — await
-`wait_drained(timeout)` where you relied on completion. The sync
-`Injector::flush` still waits; `Injector::flush_nonblocking` kicks without
-waiting. The async `Bridge` loops no longer wait for the device either;
+`wait_drained(timeout)` where you relied on completion. It returns the
+number of frames the kick handed over (0.31: the frames queued when it
+started); frames a full send buffer kept back stay queued
+(`Injector::queued_count`) for the next kick. The sync `Injector::flush`
+still waits; `Injector::flush_nonblocking` kicks without waiting. The async `Bridge` loops no longer wait for the device either;
 the blocking `Bridge::run` still does (its backpressure).
 
 ### Reads, statistics, timing

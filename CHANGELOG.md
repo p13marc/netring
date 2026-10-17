@@ -119,10 +119,20 @@ has an old → new snippet there.
   (#228): `AsyncInjector::flush` / `send` / `send_stream` and the async
   `Bridge` loops kicked with a blocking `sendto`, which on a TX ring waits
   until every frame in flight completes. They use `MSG_DONTWAIT` now;
-  `Injector`'s drop no longer blocks either.
+  `Injector`'s drop no longer blocks either. A kick the socket's send
+  buffer cuts short leaves the rest of the queued frames for the next kick
+  (the injector reads what is still queued from the ring), and `send` on a
+  full ring whose kick can hand nothing over waits for the device to free
+  room instead of kicking again.
 - **`Injector::wait_drained` spun at 100% CPU** (#226): `poll(POLLOUT)` on a
   TX-ring socket returns at once whatever the ring holds. It checks the
   ring every millisecond and sleeps in between.
+- **`AsyncInjector::wait_drained` and `send` on a full ring spun with
+  `tx_timestamps(true)`**: the timestamps on the socket's error queue make
+  epoll report `EPOLLOUT | EPOLLERR`, which tokio keeps as a write-closed
+  readiness that never clears, so every writability wait resolved at once.
+  In that state the waits look at the ring every millisecond (a `timerfd`)
+  instead.
 
 ### Fixed — Monitor
 
@@ -189,7 +199,8 @@ has an old → new snippet there.
   bpf_ancillary}`, `CaptureBuilder::vlan_reinsert`, `VlanTag` / `VlanProto`
   re-exports, `BpfFilterBuilder::pass_ip_fragments`.
 - `PacketSource::check_health` (provided), `XdpSocket::check_health`,
-  `Injector::flush_nonblocking`.
+  `Injector::flush_nonblocking` (returns the frames the kick handed over),
+  `Injector::queued_count`.
 - `UmemPlacement`, `RssGuard`, `RssState`, `RssConfig::state()`.
 - `AnomalyRecord`, `Endpoints`, `AnomalyWriter::{with_flow,
   with_initiator, with_endpoints}`, `Ctx::{initiator, endpoints}`,

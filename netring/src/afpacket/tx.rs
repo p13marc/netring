@@ -234,6 +234,23 @@ impl Injector {
             .count()
     }
 
+    /// Number of frames queued with [`TxSlot::send`] that no kick has handed
+    /// to the kernel yet (`TP_STATUS_SEND_REQUEST`): what the next
+    /// [`flush`](Self::flush) / [`flush_nonblocking`](Self::flush_nonblocking)
+    /// will try to hand over. O(frame_count). New in 0.32.0.
+    pub fn queued_count(&self) -> usize {
+        self.queued_frames() as usize
+    }
+
+    /// `TP_STATUS_SEND_REQUEST` slots. The kernel moves a slot out of that
+    /// state only inside our own kick (`tpacket_snd()` runs from
+    /// `sendto()`), so the count is stable between kicks.
+    fn queued_frames(&self) -> u32 {
+        (0..self.frame_count)
+            .filter(|&i| self.read_frame_status(i) == ffi::TP_STATUS_SEND_REQUEST)
+            .count() as u32
+    }
+
     /// Number of slots currently held by the kernel (`TP_STATUS_SEND_REQUEST`
     /// or `TP_STATUS_SENDING`) — i.e., still pending transmission.
     ///
@@ -454,11 +471,13 @@ impl Injector {
         if self.pending == 0 {
             return Ok(0);
         }
-
-        crate::syscall::sendto_kick_eintr_safe(self.fd.as_raw_fd(), 0).map_err(Error::Io)?;
-
         let count = self.pending as usize;
-        self.pending = 0;
+        let res = crate::syscall::sendto_kick_eintr_safe(self.fd.as_raw_fd(), 0);
+        // Whatever the kick did, the ring says what is still queued: a kick
+        // the kernel cut short (an error, a full send buffer) leaves frames
+        // in SEND_REQUEST, and the next flush must kick them.
+        self.pending = self.queued_frames();
+        res.map_err(Error::Io)?;
         Ok(count)
     }
 
@@ -469,11 +488,14 @@ impl Injector {
     /// [`pending_count`](Self::pending_count) or wait with
     /// [`wait_drained`](Self::wait_drained). New in 0.32.0 (#228).
     ///
-    /// When the kernel stops early (`EAGAIN`: the socket's send buffer is
-    /// full) the remaining frames stay queued, and the next flush kicks
-    /// again.
+    /// The kernel stops early when the socket's send buffer fills — with
+    /// `EAGAIN` before the first frame, or after handing over some (it
+    /// then reports success) — and the rest stay queued
+    /// ([`queued_count`](Self::queued_count)); the next flush kicks them.
     ///
-    /// Returns the number of frames queued when this call started.
+    /// Returns the number of frames **this kick handed to the kernel** —
+    /// `0` when it could hand over none (send buffer full; wait for the
+    /// device to complete frames before kicking again).
     ///
     /// # Errors
     ///
@@ -483,14 +505,13 @@ impl Injector {
         if self.pending == 0 {
             return Ok(0);
         }
-        let stopped_early =
-            crate::syscall::sendto_kick_status(self.fd.as_raw_fd(), libc::MSG_DONTWAIT)
-                .map_err(Error::Io)?;
-        let count = self.pending as usize;
-        if !stopped_early {
-            self.pending = 0;
-        }
-        Ok(count)
+        let before = self.queued_frames();
+        let res = crate::syscall::sendto_kick_status(self.fd.as_raw_fd(), libc::MSG_DONTWAIT);
+        // From the ring, not from the return value: tpacket_snd() reports
+        // a kick the send buffer cut short as a success (#228 review).
+        self.pending = self.queued_frames();
+        res.map_err(Error::Io)?;
+        Ok(before.saturating_sub(self.pending) as usize)
     }
 }
 

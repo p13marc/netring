@@ -65,7 +65,7 @@
 use std::collections::{HashMap, VecDeque};
 use std::hash::Hash;
 use std::pin::Pin;
-use std::sync::{Arc, Mutex, Weak};
+use std::sync::{Arc, Mutex};
 use std::task::{Context, Poll};
 
 use ahash::RandomState;
@@ -173,9 +173,10 @@ where
 {
     pending_emit: Arc<Mutex<VecDeque<Conversation<K>>>>,
     /// Live flows → their shared state, so the second side joins the
-    /// first side's conversation. Weak: the senders live in the side
-    /// consumers only. Entries are removed when the flow ends.
-    in_flight: HashMap<K, Weak<ConvShared>, RandomState>,
+    /// first side's conversation — even after the first one stopped.
+    /// Strong: the conversation stays open until the flow ends (the
+    /// entry is removed) and both side consumers are gone.
+    in_flight: HashMap<K, Arc<ConvShared>, RandomState>,
     channel_capacity: usize,
 }
 
@@ -208,11 +209,10 @@ where
     type Reassembler = ConvSideReassembler;
 
     fn new_reassembler(&mut self, key: &K, side: FlowSide) -> ConvSideReassembler {
-        // The other side's consumer may still be alive; otherwise
-        // (first side, or the other side already stopped and was
-        // dropped with its conversation closed) start a conversation.
-        let shared = match self.in_flight.get(key).and_then(Weak::upgrade) {
-            Some(s) => s,
+        // The flow's conversation if the other side started it (its
+        // consumer may already have stopped); otherwise start one.
+        let shared = match self.in_flight.get(key) {
+            Some(s) => s.clone(),
             None => {
                 let (tx, rx) = mpsc::channel(self.channel_capacity);
                 let end_reason = Arc::new(Mutex::new(None));
@@ -223,7 +223,7 @@ where
                     closed_emitted: false,
                 });
                 let s = Arc::new(ConvShared { tx, end_reason });
-                self.in_flight.insert(key.clone(), Arc::downgrade(&s));
+                self.in_flight.insert(key.clone(), s.clone());
                 s
             }
         };
@@ -414,6 +414,7 @@ mod tests {
         ri.close(EndReason::IdleTimeout).await;
         rr.close(EndReason::IdleTimeout).await;
         drop((ri, rr));
+        f.flow_ended(&7);
 
         assert!(
             matches!(conv.next_chunk().await, Some(ConversationChunk::Initiator(b)) if &b[..] == b"hello")
@@ -451,6 +452,7 @@ mod tests {
         rr.data(Bytes::from_static(b"still here")).await;
         rr.close(EndReason::Rst).await;
         drop(rr);
+        f.flow_ended(&7);
 
         assert!(matches!(
             conv.next_chunk().await,
@@ -519,13 +521,53 @@ mod tests {
         );
     }
 
+    /// A side that stops before the other one sent anything doesn't
+    /// end the conversation: the other side's later bytes join it (no
+    /// second conversation for the flow) and it closes with the flow.
+    #[tokio::test(flavor = "current_thread")]
+    async fn a_stopped_side_does_not_split_the_conversation() {
+        let mut f = ConversationFactory::<u32>::new(8);
+        let pending = f.pending();
+        let mut ri = f.new_reassembler(&7u32, FlowSide::Initiator);
+        let mut conv = pending.lock().unwrap().pop_front().unwrap();
+        ri.data(Bytes::from_static(b"head")).await;
+        ri.close(EndReason::BufferOverflow).await;
+        // The stream drops a side's consumer once it is closed.
+        drop(ri);
+
+        let mut rr = f.new_reassembler(&7u32, FlowSide::Responder);
+        assert!(
+            pending.lock().unwrap().is_empty(),
+            "one conversation per flow"
+        );
+        rr.data(Bytes::from_static(b"reply")).await;
+        rr.close(EndReason::Fin).await;
+        drop(rr);
+        f.flow_ended(&7);
+
+        let mut out = Vec::new();
+        while let Some(c) = conv.next_chunk().await {
+            out.push(format!("{c:?}"));
+        }
+        assert_eq!(
+            out,
+            [
+                "Initiator(b\"head\")",
+                "SideStopped { side: Initiator, reason: BufferOverflow }",
+                "Responder(b\"reply\")",
+                "Closed { reason: Fin }",
+            ]
+        );
+    }
+
     #[tokio::test(flavor = "current_thread")]
     async fn dropped_consumers_close_as_force_closed() {
         let mut f = ConversationFactory::<u32>::new(8);
         let pending = f.pending();
         let ri = f.new_reassembler(&7u32, FlowSide::Initiator);
         let mut conv = pending.lock().unwrap().pop_front().unwrap();
-        drop(ri);
+        // The stream dropped mid-flow: consumers and factory go together.
+        drop((ri, f));
         assert!(matches!(
             conv.next_chunk().await,
             Some(ConversationChunk::Closed {

@@ -472,6 +472,8 @@ pub(crate) async fn run_loop(monitor: Monitor, stop: StopCondition) -> Result<()
                         &mut flow_states,
                         &label_table,
                         now,
+                        handler_error_policy,
+                        &health,
                     )
                     .await?;
                     // 0.24 Phase C4: a tick is progress too — keeps liveness
@@ -514,6 +516,8 @@ pub(crate) async fn run_loop(monitor: Monitor, stop: StopCondition) -> Result<()
                             &mut flow_states,
                             &label_table,
                             &health,
+                            handler_error_policy,
+                            dispatcher.catch_panics(),
                         )?;
                     }
                     continue;
@@ -1047,6 +1051,8 @@ pub(crate) async fn replay_loop(
                             &mut flow_states,
                             &label_table,
                             flowscope::Timestamp::new(d.as_secs() as u32, d.subsec_nanos()),
+                            handler_error_policy,
+                            &health,
                         )
                         .await?;
                         let steps = (now_d - d).as_nanos() / period.as_nanos() + 1;
@@ -1515,6 +1521,8 @@ fn sample_and_fire_capture_stats(
     flow_states: &mut crate::ctx::FlowStateRegistry,
     label_table: &flowscope::well_known::LabelTable,
     health: &crate::monitor::health::HealthState,
+    policy: HandlerErrorPolicy,
+    catch_panics: bool,
 ) -> Result<()> {
     let now = flowscope::Timestamp::from_system_time(SystemTime::now());
     // Accumulate the cumulative totals across sources for the health
@@ -1555,7 +1563,12 @@ fn sample_and_fire_capture_stats(
         );
         ctx.monitor_name = monitor_name;
         ctx.label_table = label_table;
-        (reg.handler)(&telemetry, &mut ctx)?;
+        let res = if catch_panics {
+            crate::monitor::dispatcher::call_catching(|| (reg.handler)(&telemetry, &mut ctx))
+        } else {
+            (reg.handler)(&telemetry, &mut ctx)
+        };
+        apply_handler_error_policy(res, policy, health, "capture-stats")?;
     }
     health.record_totals(total_packets, total_drops);
     Ok(())
@@ -1964,7 +1977,9 @@ async fn dispatch_tracked_event(
 ///    users who registered via `.on::<Tick>(...)` also receive
 ///    the event.
 ///
-/// Both run in the order: closure first, then dispatcher.
+/// Both run in the order: closure first, then dispatcher. Errors go
+/// through the [`HandlerErrorPolicy`] like every other handler's: the
+/// closure and the typed `Tick` handlers are isolated from each other.
 #[allow(clippy::too_many_arguments)]
 async fn fire_tick(
     tick_idx: usize,
@@ -1977,13 +1992,15 @@ async fn fire_tick(
     flow_states: &mut crate::ctx::FlowStateRegistry,
     label_table: &flowscope::well_known::LabelTable,
     now: flowscope::Timestamp,
+    policy: HandlerErrorPolicy,
+    health: &crate::monitor::health::HealthState,
 ) -> Result<()> {
     let reg = &mut tick_handlers[tick_idx];
     let tick = Tick {
         now,
         period: reg.period,
     };
-    {
+    let res = {
         let mut ctx = Ctx::new(
             None,
             tick.now,
@@ -1995,9 +2012,14 @@ async fn fire_tick(
         );
         ctx.monitor_name = monitor_name;
         ctx.label_table = label_table;
-        (reg.handler)(&tick, &mut ctx)?;
-    }
-    {
+        if dispatcher.catch_panics() {
+            crate::monitor::dispatcher::call_catching(|| (reg.handler)(&tick, &mut ctx))
+        } else {
+            (reg.handler)(&tick, &mut ctx)
+        }
+    };
+    apply_handler_error_policy(res, policy, health, "tick")?;
+    let res = {
         let mut ctx = Ctx::new(
             None,
             tick.now,
@@ -2009,10 +2031,31 @@ async fn fire_tick(
         );
         ctx.monitor_name = monitor_name;
         ctx.label_table = label_table;
-        dispatcher.dispatch::<Tick>(&tick, &mut ctx)?;
+        dispatcher.dispatch::<Tick>(&tick, &mut ctx)
+    };
+    let res = match res {
+        Ok(()) => dispatcher.dispatch_async::<Tick>(&tick).await,
+        e => e,
+    };
+    apply_handler_error_policy(res, policy, health, "tick")
+}
+
+/// A handler's `res` under `policy`: `Propagate` returns the error,
+/// `Isolate` counts and logs it and carries on.
+fn apply_handler_error_policy(
+    res: Result<()>,
+    policy: HandlerErrorPolicy,
+    health: &crate::monitor::health::HealthState,
+    what: &'static str,
+) -> Result<()> {
+    match res {
+        Err(e) if policy == HandlerErrorPolicy::Isolate => {
+            health.record_handler_error();
+            tracing::warn!(error = %e, handler = what, "handler error isolated");
+            Ok(())
+        }
+        res => res,
     }
-    dispatcher.dispatch_async::<Tick>(&tick).await?;
-    Ok(())
 }
 
 /// Packet time, extrapolated by wall time since the last packet: what

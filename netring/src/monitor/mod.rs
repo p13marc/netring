@@ -1622,7 +1622,8 @@ impl MonitorBuilder {
     }
 
     /// 0.25 W1e: catch panics from **synchronous** handlers (`on` / `on_ctx` /
-    /// detectors / sinks) and convert them into `Error::HandlerPanic`, then
+    /// detectors / sinks / `tick` / `on_capture_stats`) and convert them into
+    /// `Error::HandlerPanic`, then
     /// route that through the configured
     /// [`handler_error_policy`](Self::handler_error_policy) — so pairing this
     /// with [`HandlerErrorPolicy::Isolate`] means one panicking handler is

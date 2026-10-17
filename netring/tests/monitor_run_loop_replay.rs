@@ -148,3 +148,108 @@ async fn idle_ended_flow_keeps_its_state_for_flow_ended() {
         .unwrap();
     assert_eq!(*ended.lock().unwrap(), vec![(5000, 42), (6000, 42)]);
 }
+
+/// `HandlerErrorPolicy::Isolate` covers tick handlers too: an `Err`
+/// from a `.tick(..)` closure or an `.on::<Tick>` handler is counted
+/// and the monitor keeps running (it used to stop the run).
+#[tokio::test(flavor = "current_thread")]
+async fn isolate_policy_covers_tick_handlers() {
+    use netring::monitor::HandlerErrorPolicy;
+    use netring::protocol::builtin::Udp;
+    use netring::protocol::event_typed::Tick;
+    let frames: Vec<_> = (1..=5)
+        .map(|t| {
+            (
+                Duration::from_secs(t),
+                ipv4_udp([10, 0, 0, 1], [10, 0, 0, 2], 5000, 53, b"query"),
+            )
+        })
+        .collect();
+    let file = pcap(&frames);
+    let (closure_ticks, typed_ticks) = (Arc::new(Mutex::new(0)), Arc::new(Mutex::new(0)));
+    let (c, t) = (Arc::clone(&closure_ticks), Arc::clone(&typed_ticks));
+    let monitor = Monitor::builder()
+        .pcap_source(file.path())
+        .protocol::<Udp>()
+        .handler_error_policy(HandlerErrorPolicy::Isolate)
+        .tick_ctx(Duration::from_secs(1), move |_ctx: &mut Ctx<'_>| {
+            *c.lock().unwrap() += 1;
+            Err(netring::Error::Config("tick handler failed".into()))
+        })
+        .on::<Tick>(move |_t: &Tick| {
+            *t.lock().unwrap() += 1;
+            Err(netring::Error::Config("typed tick handler failed".into()))
+        })
+        .build()
+        .unwrap();
+    let health = monitor.health();
+    monitor
+        .replay()
+        .await
+        .expect("Isolate keeps the monitor running");
+    // Due at 2, 3, 4, 5 s.
+    assert_eq!(*closure_ticks.lock().unwrap(), 4);
+    assert_eq!(*typed_ticks.lock().unwrap(), 4);
+    assert_eq!(health.handler_errors(), 8);
+}
+
+/// With `catch_handler_panics`, a panicking `.tick(..)` closure is a
+/// `HandlerPanic` error like a panicking `.on::<E>` handler — isolated
+/// under `Isolate` instead of unwinding the run loop.
+#[tokio::test(flavor = "current_thread")]
+async fn catch_handler_panics_covers_tick_closures() {
+    use netring::monitor::HandlerErrorPolicy;
+    use netring::protocol::builtin::Udp;
+    let frames: Vec<_> = (1..=5)
+        .map(|t| {
+            (
+                Duration::from_secs(t),
+                ipv4_udp([10, 0, 0, 1], [10, 0, 0, 2], 5000, 53, b"query"),
+            )
+        })
+        .collect();
+    let file = pcap(&frames);
+    let monitor = Monitor::builder()
+        .pcap_source(file.path())
+        .protocol::<Udp>()
+        .handler_error_policy(HandlerErrorPolicy::Isolate)
+        .catch_handler_panics(true)
+        .tick_ctx(Duration::from_secs(1), |_ctx: &mut Ctx<'_>| {
+            panic!("tick closure panicked")
+        })
+        .build()
+        .unwrap();
+    let health = monitor.health();
+    monitor
+        .replay()
+        .await
+        .expect("the panic is caught and isolated");
+    assert_eq!(health.handler_errors(), 4);
+}
+
+/// Under the default `Propagate` policy a tick handler error still
+/// stops the monitor.
+#[tokio::test(flavor = "current_thread")]
+async fn propagate_policy_stops_on_a_tick_handler_error() {
+    use netring::protocol::builtin::Udp;
+    let frames: Vec<_> = (1..=5)
+        .map(|t| {
+            (
+                Duration::from_secs(t),
+                ipv4_udp([10, 0, 0, 1], [10, 0, 0, 2], 5000, 53, b"query"),
+            )
+        })
+        .collect();
+    let file = pcap(&frames);
+    let res = Monitor::builder()
+        .pcap_source(file.path())
+        .protocol::<Udp>()
+        .tick_ctx(Duration::from_secs(1), |_ctx: &mut Ctx<'_>| {
+            Err(netring::Error::Config("tick handler failed".into()))
+        })
+        .build()
+        .unwrap()
+        .replay()
+        .await;
+    assert!(res.is_err());
+}

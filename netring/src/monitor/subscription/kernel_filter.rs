@@ -98,8 +98,8 @@ pub(crate) fn compile_union(interests: impl IntoIterator<Item = Predicate>) -> O
 /// is `Always`, exceeds [`MAX_KERNEL_CLAUSES`], or the bytecode build fails) —
 /// a safe "pass all" fallback.
 pub(crate) fn predicate_to_bpf(pred: &Predicate) -> Option<BpfFilter> {
-    let dnf = to_dnf(pred)?;
-    if dnf.is_empty() || dnf.len() > MAX_KERNEL_CLAUSES {
+    let dnf = to_dnf(pred, MAX_KERNEL_CLAUSES)?;
+    if dnf.is_empty() {
         return None;
     }
     let mut clauses = dnf.into_iter();
@@ -127,19 +127,32 @@ pub(crate) fn predicate_to_bpf(pred: &Predicate) -> Option<BpfFilter> {
 
 /// Convert a kernel-only predicate to disjunctive normal form: a list of
 /// conjunctions, each a list of positive [`Atom`]s. `None` if a `Not` is
-/// present (not lowerable). `Always` yields an empty conjunction list's
+/// present (not lowerable) or the DNF would have more than `max_clauses`
+/// conjunctions. `Always` yields an empty conjunction list's
 /// special handling at the call site — here it returns `Some(vec![vec![]])`
 /// (one always-true clause), which the caller treats as "no filter".
-fn to_dnf(pred: &Predicate) -> Option<Vec<Vec<Atom>>> {
+///
+/// The budget is checked **before** each cross product / concatenation is
+/// built. A DNF only grows on the way up — every sub-DNF is non-empty, so
+/// `|l ∧ r| ≥ max(|l|, |r|)` and `|l ∨ r| > max(|l|, |r|)` — so the first
+/// over-budget node already decides the outcome. Checking only the finished
+/// DNF let an innocuous `.expr()` string of ~60 leaves
+/// (`(port 1 or port 2) and …`) expand to 2^30 conjunctions and exhaust
+/// memory first.
+fn to_dnf(pred: &Predicate, max_clauses: usize) -> Option<Vec<Vec<Atom>>> {
     match pred {
         // An always-true clause: one conjunction with no constraints.
         Predicate::Always => Some(vec![vec![]]),
         Predicate::Atom(a) => Some(vec![vec![a.clone()]]),
         Predicate::And(l, r) => {
-            let dl = to_dnf(l)?;
-            let dr = to_dnf(r)?;
+            let dl = to_dnf(l, max_clauses)?;
+            let dr = to_dnf(r, max_clauses)?;
+            let n = dl.len().checked_mul(dr.len())?;
+            if n > max_clauses {
+                return None;
+            }
             // Cross product: (a ∨ b) ∧ (c ∨ d) = ac ∨ ad ∨ bc ∨ bd.
-            let mut out = Vec::with_capacity(dl.len() * dr.len());
+            let mut out = Vec::with_capacity(n);
             for cl in &dl {
                 for cr in &dr {
                     let mut conj = cl.clone();
@@ -150,8 +163,12 @@ fn to_dnf(pred: &Predicate) -> Option<Vec<Vec<Atom>>> {
             Some(out)
         }
         Predicate::Or(l, r) => {
-            let mut dl = to_dnf(l)?;
-            dl.extend(to_dnf(r)?);
+            let mut dl = to_dnf(l, max_clauses)?;
+            let dr = to_dnf(r, max_clauses)?;
+            if dl.len().checked_add(dr.len())? > max_clauses {
+                return None;
+            }
+            dl.extend(dr);
             Some(dl)
         }
         // Per-atom negation isn't expressible through the builder — bail.
@@ -328,6 +345,42 @@ mod tests {
     #[test]
     fn empty_interests_is_none() {
         assert!(compile_union(Vec::<Predicate>::new()).is_none());
+    }
+
+    /// `(port 1 or port 2) and …` repeated `pairs` times, then `and tcp`.
+    fn or_pair_chain(pairs: usize) -> Predicate {
+        let expr = "(port 1 or port 2) and ".repeat(pairs) + "tcp";
+        packet()
+            .expr(&expr)
+            .expect("well under the parser's MAX_NODES")
+            .into_predicate()
+    }
+
+    #[test]
+    fn dnf_blowup_widens_to_none_without_materialising_it() {
+        // Audit A2: 30 OR-pairs is 61 leaves — far below the `.expr()` parser's
+        // MAX_NODES, i.e. a legal untrusted config string — but its DNF has
+        // 2^30 conjunctions. The budget must stop the cross product before it
+        // is built (it used to be checked only on the finished DNF → OOM).
+        let pred = or_pair_chain(30);
+        let (tx, rx) = std::sync::mpsc::channel();
+        std::thread::spawn(move || {
+            let _ = tx.send(compile_union([pred]).is_none());
+        });
+        let widened = rx
+            .recv_timeout(std::time::Duration::from_secs(10))
+            .expect("compile_union must bail out instead of expanding 2^30 clauses");
+        assert!(widened, "an over-budget DNF falls back to capture-all");
+    }
+
+    #[test]
+    fn dnf_budget_is_inclusive() {
+        // 2^6 = 64 conjunctions is exactly MAX_KERNEL_CLAUSES: still lowered.
+        // One more pair (128) is over budget: `None`, i.e. capture-all.
+        let at = to_dnf(&or_pair_chain(6).kernel_approx(), MAX_KERNEL_CLAUSES)
+            .expect("64 clauses fit the budget");
+        assert_eq!(at.len(), MAX_KERNEL_CLAUSES);
+        assert!(to_dnf(&or_pair_chain(7).kernel_approx(), MAX_KERNEL_CLAUSES).is_none());
     }
 
     // ── Signature dispatch (0.30, the `Http2` marker) ───────────────────────

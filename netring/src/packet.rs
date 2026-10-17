@@ -33,14 +33,16 @@ fn ancillary(vlan: Option<VlanTag>, reinserted: bool) -> BpfAncillary {
 
 /// A [`flowscope::PacketView`] of `data` whose `rx_metadata.vlan` is the
 /// tag **not** in `data` (flowscope's meaning: a tag stripped from the
-/// frame), if any.
+/// frame), if any, and whose wire length is `wire_len` (#223: flowscope
+/// counts it and gaps what a snap length cut).
 #[inline]
 fn view_of<'a>(
     data: &'a [u8],
     ts: Timestamp,
     stripped: Option<VlanTag>,
+    wire_len: usize,
 ) -> flowscope::PacketView<'a> {
-    let view = flowscope::PacketView::new(data, ts);
+    let view = flowscope::PacketView::new(data, ts).with_wire_len(wire_len);
     match stripped {
         None => view,
         Some(t) => {
@@ -219,10 +221,16 @@ impl OwnedPacket {
     }
 
     /// View this packet as a [`flowscope::PacketView`]; `rx_metadata.vlan`
-    /// carries [`stripped_vlan`](Self::stripped_vlan). See [`Packet::view`].
+    /// carries [`stripped_vlan`](Self::stripped_vlan), the wire length is
+    /// [`original_len`](Self::original_len). See [`Packet::view`].
     #[inline]
     pub fn view(&self) -> flowscope::PacketView<'_> {
-        view_of(&self.data, self.timestamp, self.stripped_vlan())
+        view_of(
+            &self.data,
+            self.timestamp,
+            self.stripped_vlan(),
+            self.original_len,
+        )
     }
 }
 
@@ -473,6 +481,9 @@ impl<'a> Packet<'a> {
     /// timestamp. `rx_metadata.vlan` is set only from
     /// [`stripped_vlan`](Self::stripped_vlan) — flowscope's meaning, a tag
     /// that is not in the frame; a re-inserted tag is parsed from the data.
+    /// The view's wire length is [`original_len`](Self::original_len) (the
+    /// re-inserted tag included), so flowscope counts what was on the wire
+    /// and gaps the bytes a snap length cut (0.32, #223).
     ///
     /// # Examples
     ///
@@ -485,7 +496,12 @@ impl<'a> Packet<'a> {
     /// ```
     #[inline]
     pub fn view(&self) -> flowscope::PacketView<'a> {
-        view_of(self.data, self.timestamp(), self.stripped_vlan())
+        view_of(
+            self.data,
+            self.timestamp(),
+            self.stripped_vlan(),
+            self.original_len(),
+        )
     }
 }
 
@@ -1598,6 +1614,38 @@ mod tests {
         let held: Vec<Packet<'_>> = batch.iter().collect();
         let again: Vec<Packet<'_>> = batch.iter().collect();
         assert_eq!(held[0].data(), again[0].data());
+    }
+
+    /// #223: a view's wire length is the packet's `original_len()` — the
+    /// snap length cut included, and after re-insertion the tag too (the
+    /// re-insertion grows `tp_len` by 4) — and so is the owned copy's.
+    #[test]
+    fn views_carry_the_wire_length() {
+        let frame = eth_udp();
+        // Captured: the first 40 bytes of a 1000-byte frame.
+        let cut = SynthPkt {
+            wire_len: 1000,
+            ..SynthPkt::new(&frame[..40])
+        };
+        let mut block = build_block(&[cut, cut.tagged(0x8100, 7)], ffi::TP_STATUS_USER);
+        let batch = reinsert_batch(&mut block, 40);
+        let mut it = batch.iter();
+        let plain = it.next().unwrap();
+        let v = plain.view();
+        assert_eq!((v.frame.len(), v.wire_len()), (40, 1000));
+        assert!(v.is_truncated() && v.wire_len_known());
+        assert_eq!(plain.to_owned().view().wire_len(), 1000);
+        let tagged = it.next().unwrap();
+        assert!(tagged.status().vlan_reinserted);
+        assert_eq!((tagged.len(), tagged.original_len()), (40, 1004));
+        assert_eq!(tagged.view().wire_len(), 1004);
+        assert_eq!(tagged.to_owned().view().wire_len(), 1004);
+        // A whole frame: wire length known, nothing cut.
+        let mut block = build_synthetic_block(&[&frame], ffi::TP_STATUS_USER);
+        let batch = reinsert_batch(&mut block, u32::MAX);
+        let whole = batch.iter().next().unwrap().view();
+        assert_eq!(whole.wire_len(), frame.len());
+        assert!(!whole.is_truncated() && whole.wire_len_known());
     }
 
     #[test]

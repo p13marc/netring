@@ -143,13 +143,10 @@ impl AnyBackend {
                     for pkt in &batch {
                         last_ts = Some(pkt.timestamp());
                         // `view()` carries a stripped VLAN tag that is not
-                        // in the data (re-insertion off / impossible); the
-                        // wire length lets flowscope 0.26 count it and gap
-                        // what a snap length cut.
-                        on_packet(
-                            pkt.view().with_wire_len(pkt.original_len()),
-                            pkt.direction(),
-                        );
+                        // in the data (re-insertion off / impossible) and the
+                        // wire length (flowscope counts it and gaps what a
+                        // snap length cut).
+                        on_packet(pkt.view(), pkt.direction());
                     }
                 }
                 None

@@ -1159,11 +1159,11 @@ pub(crate) async fn replay_loop(
             {
                 continue;
             }
-            // A replay is capture source 0: leg 1 (#216). The record's
-            // original length is the packet's wire length: flowscope 0.26
+            // A replay is capture source 0: leg 1 (#216). The view's wire
+            // length is the record's original length: flowscope 0.26
             // counts it and treats what a snap length cut as a gap.
-            let view = flowscope::PacketView::new(&pkt.data, pkt.timestamp)
-                .with_wire_len(pkt.original_len)
+            let view = pkt
+                .view()
                 .with_source_idx(crate::monitor::flow_ctx::leg_tag(0));
 
             // 0.25 A1: packet-tier subs fire before tracking, as on the live path.

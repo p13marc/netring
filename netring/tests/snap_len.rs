@@ -160,3 +160,52 @@ fn filter_accepts_whole_lo_jumbo() {
         assert!(!truncated);
     }
 }
+
+/// #223: a flow tracked over a snap-length capture counts each packet's
+/// wire length — what the snap length cut included. The views
+/// `Packet::view()` (and so every flow / session / datagram stream over an
+/// `AsyncCapture`) handed flowscope carried only the captured bytes: the
+/// flow counted 64 bytes per 1042-byte frame.
+#[cfg(all(feature = "tokio", feature = "flow", feature = "parse"))]
+#[tokio::test(flavor = "current_thread")]
+async fn snap_len_flows_count_wire_bytes() {
+    use futures::StreamExt;
+    use netring::AsyncCapture;
+    use netring::flow::extract::FiveTuple;
+    use netring::flow::{FlowEvent, FlowTrackerConfig};
+
+    const SIZE: usize = 1000;
+    const N: u64 = 5;
+    let port = private_port(3);
+    let Some(cap) = open(base().snap_len(64).bpf_filter(port_filter(port))) else {
+        return;
+    };
+    let mut cfg = FlowTrackerConfig::default();
+    cfg.idle_timeout_udp = Duration::from_millis(300);
+    cfg.sweep_interval = Duration::from_millis(50);
+    let mut events = AsyncCapture::new(cap)
+        .expect("async capture")
+        .flow_stream(FiveTuple::bidirectional())
+        .with_config(cfg);
+    // Queued in the ring before the stream polls.
+    send(port, SIZE, N as usize);
+    let wire = (PAYLOAD_OFF + SIZE) as u64;
+    let stats = tokio::time::timeout(Duration::from_secs(5), async {
+        while let Some(evt) = events.next().await {
+            if let FlowEvent::Ended { stats, .. } = evt.expect("flow event") {
+                return Some(stats);
+            }
+        }
+        None
+    })
+    .await
+    .expect("the flow never ended")
+    .expect("the stream ended first");
+    assert_eq!(stats.packets_initiator, N);
+    assert_eq!(
+        stats.bytes_initiator,
+        N * wire,
+        "wire bytes, not the 64 captured"
+    );
+    assert_eq!(stats.ip_bytes_initiator, N * (wire - 14));
+}

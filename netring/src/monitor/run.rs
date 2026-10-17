@@ -200,7 +200,7 @@ pub(crate) async fn run_loop(monitor: Monitor, stop: StopCondition) -> Result<()
         detector_names: _,
         monitor_name,
         drain_timeout,
-        broadcast_handles: _,
+        broadcast_handles,
         #[cfg(all(feature = "pcap", feature = "tokio"))]
             pcap_source_path: _,
         #[cfg(all(feature = "pcap", feature = "tokio"))]
@@ -244,6 +244,11 @@ pub(crate) async fn run_loop(monitor: Monitor, stop: StopCondition) -> Result<()
         #[cfg(feature = "p0f")]
         mut p0f_watch,
     } = monitor;
+    // Each `BroadcastSlotHandle` is a subscriber with its own queue: the
+    // templates `subscribe()` cloned from would otherwise queue every message,
+    // unread, until the run ends (a `_` pattern doesn't move the field out).
+    // Subscribers minted before the run keep their own handles.
+    drop(broadcast_handles);
     // Issue #134: build the IP-fragment reassembler if armed. It lives in this
     // stack frame and is fed per-frame before `track_into`.
     let mut ip_reassembly = ip_frag_config
@@ -900,7 +905,7 @@ pub(crate) async fn replay_loop(
         detector_names: _,
         monitor_name,
         drain_timeout,
-        broadcast_handles: _,
+        broadcast_handles,
         pcap_source_path: _,
         pcap_speed_factor: _,
         mut flow_states,
@@ -943,6 +948,9 @@ pub(crate) async fn replay_loop(
         #[cfg(feature = "p0f")]
         mut p0f_watch,
     } = monitor;
+    // The `subscribe()` templates are subscribers too — drop them (see
+    // `run_loop`).
+    drop(broadcast_handles);
     // Issue #134: IP-fragment reassembler for offline replay (armed via
     // `reassemble_ip_fragments`). Same interception as the live loop.
     let mut ip_reassembly = ip_frag_config

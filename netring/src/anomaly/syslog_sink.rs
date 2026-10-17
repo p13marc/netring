@@ -15,7 +15,8 @@
 //! - `PRI` = `facility * 8 + severity` (severity per the netring →
 //!   syslog map below).
 //! - `1` = the RFC 5424 version.
-//! - `TIMESTAMP` = the anomaly's timestamp as RFC 3339 (UTC, `…Z`).
+//! - `TIMESTAMP` = the anomaly's timestamp as RFC 3339 (UTC, `…Z`), to the
+//!   microsecond (RFC 5424 allows at most 6 fractional digits).
 //! - `MSGID` = the detector's `kind` slug.
 //! - `SD` = one structured-data element `[netring@<PEN> …]` carrying the
 //!   5-tuple key (when present) + observation/metric params, or `-` when
@@ -208,10 +209,11 @@ fn render_rfc5424(
     let pri = (facility.code() as u16) * 8 + syslog_severity(severity) as u16;
 
     // HEADER: <PRI>VERSION SP TIMESTAMP SP HOSTNAME SP APP-NAME SP PROCID SP MSGID
+    let _ = write!(out, "<{pri}>1 ");
+    push_timestamp(out, ts);
     let _ = write!(
         out,
-        "<{pri}>1 {ts} {host} {app} {procid} {msgid} ",
-        ts = ts.to_iso8601(),
+        " {host} {app} {procid} {msgid} ",
         host = nilable(hostname),
         app = nilable(app_name),
         procid = nilable(procid),
@@ -249,6 +251,16 @@ fn render_rfc5424(
         let _ = write!(out, " {label}=");
         push_control_escaped(out, value);
     }
+}
+
+/// Append `ts` as an RFC 5424 TIMESTAMP: RFC 3339 UTC with microseconds
+/// (TIME-SECFRAC is `1*6DIGIT`, §6.2.3) — the nanoseconds truncated.
+fn push_timestamp(out: &mut String, ts: Timestamp) {
+    use std::fmt::Write as _;
+    // `YYYY-MM-DDTHH:MM:SS.nnnnnnnnnZ`, fixed width for whole seconds.
+    let _ = Timestamp::new(ts.sec, 0).write_iso8601(out);
+    out.truncate(out.len() - ".000000000Z".len());
+    let _ = write!(out, ".{:06}Z", (ts.nsec / 1_000).min(999_999));
 }
 
 /// RFC 5424 NILVALUE substitution: an empty field becomes `-`.
@@ -326,7 +338,7 @@ mod tests {
     use super::*;
 
     fn ts_fixed() -> Timestamp {
-        // 2026-06-07T00:00:00.000000000Z
+        // 2026-06-07T00:00:00.000000Z
         Timestamp::from_unix_f64(1_780_790_400.0)
     }
 
@@ -370,7 +382,32 @@ mod tests {
         // <PRI>1 TIMESTAMP HOSTNAME APP PROCID MSGID SD MSG
         assert_eq!(
             line,
-            "<134>1 2026-06-07T00:00:00.000000000Z host1 netring - heartbeat - heartbeat"
+            "<134>1 2026-06-07T00:00:00.000000Z host1 netring - heartbeat - heartbeat"
+        );
+    }
+
+    /// RFC 5424 §6.2.3: TIME-SECFRAC is at most 6 digits (its example 5,
+    /// with 9, is invalid) — microseconds, truncated.
+    #[test]
+    fn timestamp_has_at_most_six_fractional_digits() {
+        let mut out = String::new();
+        render_rfc5424(
+            &mut out,
+            SyslogFacility::Local0,
+            Severity::Info,
+            "netring",
+            "-",
+            "-",
+            "32473",
+            "k",
+            Timestamp::new(1_780_790_400, 123_456_789),
+            None,
+            &[],
+            &[],
+        );
+        assert!(
+            out.starts_with("<134>1 2026-06-07T00:00:00.123456Z - "),
+            "{out}"
         );
     }
 

@@ -77,7 +77,7 @@ fn monitor(dummy: &str, policy: BackendErrorPolicy, seen: &Arc<Seen>) -> Monitor
         .drain_timeout(Duration::ZERO)
         .backend_error_policy(policy)
         .on_ctx::<FlowPacket>(move |_e: &FlowPacket, ctx: &mut Ctx<'_>| {
-            if let Some(c) = seen.0.get(ctx.source.0 as usize) {
+            if let Some(c) = ctx.source.and_then(|s| seen.0.get(s.0 as usize)) {
                 c.fetch_add(1, Ordering::SeqCst);
             }
             Ok(())

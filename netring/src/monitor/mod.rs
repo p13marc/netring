@@ -145,6 +145,9 @@ pub use xdp_shard::XdpShardedRunner;
 // 0.22 §5.1: cross-shard state merging (internal; driven by ShardedRunner).
 pub(crate) mod merge;
 
+// #216: which capture source (and initiator) a dispatched event gets.
+pub(crate) mod flow_ctx;
+
 // 0.22 §2.3: bandwidth-by-app primitive (gated with the rest of the
 // monitor API on `flow + tokio`).
 pub mod bandwidth;
@@ -208,7 +211,7 @@ impl AfPacketIfaceSpec {
 /// [`Monitor::capture_sources`].
 ///
 /// The position in the returned slice **is** the [`SourceIdx`](crate::ctx::SourceIdx)
-/// that handlers see on `ctx.source`, so a consumer can build a
+/// that handlers see in `ctx.source` (`Some(SourceIdx(i))`), so a consumer can build a
 /// `SourceIdx -> (interface, namespace)` map once at startup and look events up
 /// against it.
 ///
@@ -670,14 +673,15 @@ impl Monitor {
     /// Issue #135: the monitor's capture sources, **in `SourceIdx` order**.
     ///
     /// `capture_sources()[i]` describes the source that stamps
-    /// `SourceIdx(i)` on `ctx.source`, so a handler can be given a
+    /// `Some(SourceIdx(i))` on `ctx.source`, so a handler can be given a
     /// `SourceIdx -> (interface, namespace)` map built once at startup:
     ///
     /// ```ignore
     /// let sources = monitor.capture_sources();
-    /// // inside a handler:
-    /// let src = &sources[ctx.source.0 as usize];
-    /// tracing::info!(iface = %src.interface, netns = ?src.netns_label, "event");
+    /// // inside a handler (`None` for ticks and flowless anomalies):
+    /// if let Some(src) = ctx.source.map(|s| &sources[s.0 as usize]) {
+    ///     tracing::info!(iface = %src.interface, netns = ?src.netns_label, "event");
+    /// }
     /// ```
     ///
     /// The ordering is the run loop's open order — AF_PACKET interfaces first
@@ -1341,9 +1345,10 @@ impl MonitorBuilder {
 
     /// Set the capture interface(s). Phase F.1 enables N > 1 —
     /// each event is tagged with its source-interface index
-    /// (`SourceIdx(0)` for the first interface in registration
-    /// order, etc.). Handlers can branch on `ctx.source` if
-    /// per-interface behaviour is needed.
+    /// (`ctx.source == Some(SourceIdx(0))` for the first interface in
+    /// registration order, etc.; a flow ended by the idle sweep or the
+    /// shutdown drain keeps the source its packets came from). Handlers can
+    /// branch on `ctx.source` if per-interface behaviour is needed.
     ///
     /// All interfaces share the same driver, dispatcher, state,
     /// and sink — multi-interface is fan-in, not fan-out. For

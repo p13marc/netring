@@ -35,6 +35,7 @@ use crate::ctx::{CounterRegistry, Ctx, SourceIdx, StateMap};
 use crate::error::Result;
 use crate::monitor::backend::AnyBackend;
 use crate::monitor::dispatcher::Dispatcher;
+use crate::monitor::flow_ctx::{FlowCtx, Origin};
 use crate::monitor::subscription::PacketSubscription;
 use crate::monitor::subscription::packet::{PacketFields, packet_field_extractor};
 use crate::monitor::{BackendErrorPolicy, HandlerErrorPolicy, Monitor};
@@ -342,6 +343,8 @@ pub(crate) async fn run_loop(monitor: Monitor, stop: StopCondition) -> Result<()
     let ready = health.ready_while_running();
 
     let mut events: Vec<FsEvent<FlowKey>> = Vec::with_capacity(64);
+    // #216: the flows a dispatched batch ends (reused across batches).
+    let mut flow_ctx_scratch: Vec<(FlowKey, FlowCtx)> = Vec::new();
     let mut shutdown = ShutdownSignal::new(stop);
     // Periodic sweep: idle flows end (FlowEnded), parsers' `on_tick`
     // runs, out-of-order holes expire, per-flow state is released.
@@ -439,7 +442,8 @@ pub(crate) async fn run_loop(monitor: Monitor, stop: StopCondition) -> Result<()
                             &mut state_map,
                             &mut counters,
                             &mut events,
-                            SourceIdx(0),
+                            Origin::Housekeeping,
+                            &mut flow_ctx_scratch,
                             monitor_name_borrow,
                             &mut flow_states,
                             &label_table,
@@ -619,6 +623,7 @@ pub(crate) async fn run_loop(monitor: Monitor, stop: StopCondition) -> Result<()
             let mut packet_err: Option<crate::error::Error> = None;
             // #178: the source's dedup ring, checked first for every frame.
             let mut dedup_i = dedups[i].as_mut();
+            let leg = crate::monitor::flow_ctx::leg_tag(i);
             let drained = caps[i]
                 .drain_batch(|view, direction| {
                     if let Some(d) = dedup_i.as_deref_mut()
@@ -626,6 +631,10 @@ pub(crate) async fn run_loop(monitor: Monitor, stop: StopCondition) -> Result<()
                     {
                         return;
                     }
+                    // #216: tag the capture leg (1-based), so flowscope binds
+                    // it into the flow's stats (`source_idx_forward` /
+                    // `_reverse`) and events no packet drives can name it.
+                    let view = view.with_source_idx(leg);
                     if !packet_subs.is_empty()
                         && packet_err.is_none()
                         && let Err(e) = dispatch_packet_subs(
@@ -831,7 +840,8 @@ pub(crate) async fn run_loop(monitor: Monitor, stop: StopCondition) -> Result<()
                 &mut state_map,
                 &mut counters,
                 &mut events,
-                source,
+                Origin::Packet(source),
+                &mut flow_ctx_scratch,
                 monitor_name_borrow,
                 &mut flow_states,
                 &label_table,
@@ -1010,6 +1020,8 @@ pub(crate) async fn replay_loop(
 
     let mut source = crate::pcap_source::AsyncPcapSource::open_with_config(&path, config).await?;
     let mut events: Vec<FsEvent<FlowKey>> = Vec::with_capacity(64);
+    // #216: the flows a dispatched batch ends (reused across batches).
+    let mut flow_ctx_scratch: Vec<(FlowKey, FlowCtx)> = Vec::new();
     // Replay sweeps on packet time, every `sweep_interval` of it.
     let sweep_interval = driver.tracker().config().sweep_interval;
     let mut last_sweep: Option<flowscope::Timestamp> = None;
@@ -1054,7 +1066,8 @@ pub(crate) async fn replay_loop(
                     &mut state_map,
                     &mut counters,
                     &mut events,
-                    SourceIdx(0),
+                    Origin::Housekeeping,
+                    &mut flow_ctx_scratch,
                     monitor_name_borrow,
                     &mut flow_states,
                     &label_table,
@@ -1115,7 +1128,9 @@ pub(crate) async fn replay_loop(
             {
                 continue;
             }
-            let view = flowscope::PacketView::new(&pkt.data, pkt.timestamp);
+            // A replay is capture source 0: leg 1 (#216).
+            let view = flowscope::PacketView::new(&pkt.data, pkt.timestamp)
+                .with_source_idx(crate::monitor::flow_ctx::leg_tag(0));
 
             // 0.25 A1: packet-tier subs fire before tracking, as on the live path.
             if !packet_subs.is_empty() {
@@ -1272,7 +1287,8 @@ pub(crate) async fn replay_loop(
                 &mut state_map,
                 &mut counters,
                 &mut events,
-                SourceIdx(0),
+                Origin::Packet(SourceIdx(0)),
+                &mut flow_ctx_scratch,
                 monitor_name_borrow,
                 &mut flow_states,
                 &label_table,
@@ -1370,7 +1386,8 @@ async fn drain_phase(
         state_map,
         counters,
         &mut leftover,
-        SourceIdx(0),
+        Origin::Housekeeping,
+        &mut Vec::new(),
         monitor_name,
         flow_states,
         label_table,
@@ -1804,7 +1821,7 @@ fn sample_and_fire_capture_stats(
         let mut ctx = Ctx::new(
             None,
             now,
-            SourceIdx(i as u8),
+            Some(SourceIdx(i as u8)),
             state_map,
             sink,
             counters,
@@ -1850,7 +1867,8 @@ async fn dispatch_batch(
     state_map: &mut StateMap,
     counters: &mut CounterRegistry,
     events: &mut Vec<FsEvent<FlowKey>>,
-    source: SourceIdx,
+    origin: Origin,
+    ended: &mut Vec<(FlowKey, FlowCtx)>,
     monitor_name: Option<&str>,
     flow_states: &mut crate::ctx::FlowStateRegistry,
     label_table: &flowscope::well_known::LabelTable,
@@ -1866,6 +1884,10 @@ async fn dispatch_batch(
     for slot in protocol_slots.iter_mut() {
         slot.fetch();
     }
+    // #216: the flows this batch ends, for the events and messages of
+    // theirs dispatched once the tracker has let them go.
+    crate::monitor::flow_ctx::scan_ended(events, ended);
+    let ended: &[(FlowKey, FlowCtx)] = ended;
     let mut batch = std::mem::take(events);
     for (i, evt) in batch.drain(..).enumerate() {
         if deadline.is_some_and(|d| Instant::now() >= d) {
@@ -1879,7 +1901,8 @@ async fn dispatch_batch(
             state_map,
             counters,
             flow_states,
-            source,
+            origin,
+            ended,
             monitor_name,
             label_table,
             policy,
@@ -1888,6 +1911,9 @@ async fn dispatch_batch(
             base + i as u64,
         )
         .await?;
+        let fctx = crate::monitor::flow_ctx::resolve(&evt, origin, &|key| {
+            crate::monitor::flow_ctx::lookup(driver.tracker(), ended, key)
+        });
         dispatch_tracked_event(
             dispatcher,
             protocol_slots,
@@ -1895,7 +1921,7 @@ async fn dispatch_batch(
             state_map,
             counters,
             evt,
-            source,
+            fctx,
             monitor_name,
             flow_states,
             label_table,
@@ -1918,7 +1944,8 @@ async fn dispatch_batch(
         state_map,
         counters,
         flow_states,
-        source,
+        origin,
+        ended,
         monitor_name,
         label_table,
         policy,
@@ -1941,7 +1968,8 @@ async fn dispatch_slot_messages(
     state_map: &mut StateMap,
     counters: &mut CounterRegistry,
     flow_states: &mut crate::ctx::FlowStateRegistry,
-    source: SourceIdx,
+    origin: Origin,
+    ended: &[(FlowKey, FlowCtx)],
     monitor_name: Option<&str>,
     label_table: &flowscope::well_known::LabelTable,
     policy: HandlerErrorPolicy,
@@ -1962,15 +1990,22 @@ async fn dispatch_slot_messages(
         let Some((i, _)) = next else {
             return Ok(());
         };
+        // #216: the message's flow decides its source when no packet does.
+        let fctx = crate::monitor::flow_ctx::resolve_key(
+            protocol_slots[i].next_key().as_ref(),
+            origin,
+            &|key| crate::monitor::flow_ctx::lookup(driver.tracker(), ended, key),
+        );
         let mut ctx = Ctx::new(
             None,
             flowscope::Timestamp::default(),
-            source,
+            fctx.source,
             state_map,
             sink,
             counters,
             flow_states,
         );
+        ctx.initiator = fctx.initiator;
         ctx.monitor_name = monitor_name;
         ctx.label_table = label_table;
         ctx.tracker = Some(driver.tracker());
@@ -2013,7 +2048,7 @@ async fn dispatch_tracked_event(
     state_map: &mut StateMap,
     counters: &mut CounterRegistry,
     evt: FsEvent<FlowKey>,
-    source: SourceIdx,
+    fctx: FlowCtx,
     monitor_name: Option<&str>,
     flow_states: &mut crate::ctx::FlowStateRegistry,
     label_table: &flowscope::well_known::LabelTable,
@@ -2130,12 +2165,13 @@ async fn dispatch_tracked_event(
             let mut ctx = Ctx::new(
                 Some(key),
                 ts,
-                source,
+                fctx.source,
                 state_map,
                 sink,
                 counters,
                 flow_states,
             );
+            ctx.initiator = fctx.initiator;
             ctx.monitor_name = monitor_name;
             ctx.label_table = label_table;
             let mut res = owner.dispatch_parser_event(dispatcher, &mut ctx, &pe);
@@ -2183,7 +2219,7 @@ async fn dispatch_tracked_event(
             state_map,
             counters,
             e,
-            source,
+            fctx,
             monitor_name,
             flow_states,
             label_table,
@@ -2209,7 +2245,7 @@ async fn dispatch_tracked_event(
                     state_map,
                     counters,
                     e,
-                    source,
+                    fctx,
                     monitor_name,
                     flow_states,
                     label_table,
@@ -2272,15 +2308,7 @@ async fn fire_tick(
         period: reg.period,
     };
     let res = {
-        let mut ctx = Ctx::new(
-            None,
-            tick.now,
-            SourceIdx(0),
-            state_map,
-            sink,
-            counters,
-            flow_states,
-        );
+        let mut ctx = Ctx::new(None, tick.now, None, state_map, sink, counters, flow_states);
         ctx.monitor_name = monitor_name;
         ctx.label_table = label_table;
         if dispatcher.catch_panics() {
@@ -2290,15 +2318,7 @@ async fn fire_tick(
         }
     };
     apply_handler_error_policy(res, policy, health, "tick")?;
-    let mut ctx = Ctx::new(
-        None,
-        tick.now,
-        SourceIdx(0),
-        state_map,
-        sink,
-        counters,
-        flow_states,
-    );
+    let mut ctx = Ctx::new(None, tick.now, None, state_map, sink, counters, flow_states);
     ctx.monitor_name = monitor_name;
     ctx.label_table = label_table;
     let mut res = dispatcher.dispatch::<Tick>(&tick, &mut ctx);
@@ -2715,7 +2735,7 @@ fn dispatch_packet_subs(
     let mut ctx = Ctx {
         flow: Some(key),
         ts: view.timestamp,
-        source,
+        source: Some(source),
         monitor_name,
         state_map,
         sink,
@@ -2726,6 +2746,7 @@ fn dispatch_packet_subs(
         arp_table: None,
         side: None,
         orientation: None,
+        initiator: None,
     };
     for sub in subs {
         if sub.predicate.load().eval(&fields)
@@ -2778,7 +2799,7 @@ fn dispatch_arp(
     let mut ctx = Ctx {
         flow: None, // ARP is L2 — no 5-tuple flow key.
         ts: view.timestamp,
-        source,
+        source: Some(source),
         monitor_name,
         state_map,
         sink,
@@ -2792,6 +2813,7 @@ fn dispatch_arp(
         arp_table: Some(&watch.table),
         side: None,
         orientation: None,
+        initiator: None,
     };
 
     // Helper: apply the error policy uniformly to one handler result.
@@ -2855,7 +2877,7 @@ fn dispatch_ndp(
     let mut ctx = Ctx {
         flow: None, // NDP is L3 control plane — no 5-tuple flow key.
         ts: view.timestamp,
-        source,
+        source: Some(source),
         monitor_name,
         state_map,
         sink,
@@ -2866,6 +2888,7 @@ fn dispatch_ndp(
         arp_table: None, // the ARP (IPv4) table; NDP's IPv6 table isn't exposed on Ctx.
         side: None,
         orientation: None,
+        initiator: None,
     };
 
     macro_rules! guard {
@@ -2921,7 +2944,7 @@ fn dispatch_lldp(
     let mut ctx = Ctx {
         flow: None, // LLDP is L2 — no 5-tuple flow key.
         ts: view.timestamp,
-        source,
+        source: Some(source),
         monitor_name,
         state_map,
         sink,
@@ -2932,6 +2955,7 @@ fn dispatch_lldp(
         arp_table: None,
         side: None,
         orientation: None,
+        initiator: None,
     };
 
     macro_rules! guard {
@@ -2980,7 +3004,7 @@ fn dispatch_cdp(
     let mut ctx = Ctx {
         flow: None, // CDP is L2 — no 5-tuple flow key.
         ts: view.timestamp,
-        source,
+        source: Some(source),
         monitor_name,
         state_map,
         sink,
@@ -2991,6 +3015,7 @@ fn dispatch_cdp(
         arp_table: None,
         side: None,
         orientation: None,
+        initiator: None,
     };
 
     macro_rules! guard {
@@ -3037,7 +3062,7 @@ fn absorb_frame_assets(
     let mut ctx = Ctx {
         flow: None, // asset records are L2-keyed — no 5-tuple flow key.
         ts: view.timestamp,
-        source,
+        source: Some(source),
         monitor_name,
         state_map,
         sink,
@@ -3048,6 +3073,7 @@ fn absorb_frame_assets(
         arp_table: None,
         side: None,
         orientation: None,
+        initiator: None,
     };
 
     macro_rules! guard {
@@ -3192,7 +3218,7 @@ fn dispatch_p0f(
     let mut ctx = Ctx {
         flow: None, // p0f is a per-packet artifact — no 5-tuple flow key.
         ts: view.timestamp,
-        source,
+        source: Some(source),
         monitor_name,
         state_map,
         sink,
@@ -3203,6 +3229,7 @@ fn dispatch_p0f(
         arp_table: None,
         side: None,
         orientation: None,
+        initiator: None,
     };
 
     macro_rules! guard {
@@ -3232,7 +3259,7 @@ fn dispatch_lifecycle(
     state_map: &mut StateMap,
     counters: &mut CounterRegistry,
     evt: FsEvent<FlowKey>,
-    source: SourceIdx,
+    fctx: FlowCtx,
     monitor_name: Option<&str>,
     flow_states: &mut crate::ctx::FlowStateRegistry,
     label_table: &flowscope::well_known::LabelTable,
@@ -3247,7 +3274,7 @@ fn dispatch_lifecycle(
             let mut ctx = Ctx {
                 flow: $flow,
                 ts: $ts,
-                source,
+                source: fctx.source,
                 monitor_name,
                 state_map: &mut *state_map,
                 sink: &mut *sink,
@@ -3259,6 +3286,7 @@ fn dispatch_lifecycle(
                 arp_table,
                 side: None,
                 orientation: None,
+                initiator: fctx.initiator,
             };
             dispatcher.dispatch::<$ty>(&$payload, &mut ctx)?;
         }};
@@ -3510,7 +3538,7 @@ async fn dispatch_lifecycle_effects(
     state_map: &mut StateMap,
     counters: &mut CounterRegistry,
     evt: FsEvent<FlowKey>,
-    source: SourceIdx,
+    fctx: FlowCtx,
     monitor_name: Option<&str>,
     flow_states: &mut crate::ctx::FlowStateRegistry,
     label_table: &flowscope::well_known::LabelTable,
@@ -3524,7 +3552,7 @@ async fn dispatch_lifecycle_effects(
             let mut ctx = Ctx {
                 flow: $flow,
                 ts: $ts,
-                source,
+                source: fctx.source,
                 monitor_name,
                 state_map: &mut *state_map,
                 sink: &mut *sink,
@@ -3535,6 +3563,7 @@ async fn dispatch_lifecycle_effects(
                 arp_table: None,
                 side: None,
                 orientation: None,
+                initiator: fctx.initiator,
             };
             dispatcher
                 .dispatch_effects::<$ty>(&$payload, &mut ctx)

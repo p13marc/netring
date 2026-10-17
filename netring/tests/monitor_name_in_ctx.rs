@@ -53,7 +53,7 @@ fn handler_sees_monitor_name_through_ctx() {
     let mut ctx = Ctx::new(
         None,
         Timestamp::new(0, 0),
-        SourceIdx(0),
+        Some(SourceIdx(0)),
         &mut state,
         &mut sink,
         &mut counters,

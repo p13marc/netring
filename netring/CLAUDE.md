@@ -634,7 +634,7 @@ the existing 0.19 `ProtocolMonitor` / `AnomalyMonitor` surface
   starve quiet ones.
 - `dispatch_lifecycle` gains a `SourceIdx` parameter; the per-arm
   `Ctx` construction macro stamps the real source so handlers
-  see `ctx.source.0 == i` for interface index `i`.
+  see `ctx.source == Some(SourceIdx(i))` for interface index `i` (0.32: `None` for ticks; housekeeping events keep their flow's source).
 - Root-gated integration test in `tests/monitor_lo_dispatch.rs`
   (`monitor_lo_with_two_interfaces_tags_source`) opens lo twice
   + asserts both `SourceIdx` values reach the handler.

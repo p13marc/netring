@@ -56,7 +56,7 @@ fn tcp_rst_dispatches_to_handler() {
     let mut ctx = Ctx::new(
         None,
         Timestamp::new(0, 0),
-        SourceIdx(0),
+        Some(SourceIdx(0)),
         &mut state,
         &mut sink,
         &mut counters,

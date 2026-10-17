@@ -24,7 +24,7 @@ fn state_read_is_none_before_touch_then_some_after() {
     let mut ctx = Ctx::new(
         None,
         flowscope::Timestamp::new(0, 0),
-        netring::ctx::SourceIdx(0),
+        Some(netring::ctx::SourceIdx(0)),
         &mut state,
         &mut sink,
         &mut counters,
@@ -48,7 +48,7 @@ fn label_table_defaults_to_builtin_and_resolves_well_known_ports() {
     let ctx = Ctx::new(
         None,
         flowscope::Timestamp::new(0, 0),
-        netring::ctx::SourceIdx(0),
+        Some(netring::ctx::SourceIdx(0)),
         &mut state,
         &mut sink,
         &mut counters,

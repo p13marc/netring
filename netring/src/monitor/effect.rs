@@ -198,7 +198,7 @@ mod tests {
     use super::*;
     use crate::anomaly::Severity;
     use crate::anomaly::sink::NoopSink;
-    use crate::ctx::{CounterRegistry, SourceIdx, StateMap};
+    use crate::ctx::{CounterRegistry, StateMap};
     use crate::protocol::builtin::Tcp;
     use crate::protocol::event_typed::FlowStarted;
     use flowscope::Timestamp;
@@ -226,7 +226,7 @@ mod tests {
                 "10.0.0.2:80".parse().unwrap(),
             )),
             ts: Timestamp::new(0, 0),
-            source: SourceIdx(0),
+            source: None,
             monitor_name: None,
             state_map: state,
             sink,
@@ -237,6 +237,7 @@ mod tests {
             arp_table: None,
             side: None,
             orientation: None,
+            initiator: None,
         }
     }
 

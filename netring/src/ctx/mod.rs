@@ -56,9 +56,9 @@ pub(crate) fn default_label_table() -> &'static LabelTable {
     &DEFAULT_LABEL_TABLE
 }
 
-/// Tag for which capture source this event came from.
-/// `SourceIdx(0)` for single-interface monitors; multi-interface
-/// (Phase E) increments per registered iface.
+/// A capture source of a monitor: its index in registration order —
+/// `SourceIdx(0)` for a single-interface monitor or a pcap replay. Read
+/// from [`Ctx::source`].
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct SourceIdx(pub u8);
 
@@ -99,8 +99,17 @@ pub struct Ctx<'a> {
     /// [`Self::orientation`].
     pub(crate) orientation: Option<flowscope::Orientation>,
 
-    /// Source-interface index.
-    pub source: SourceIdx,
+    /// The capture source the event's packets came from (#216). For an
+    /// event a packet drove, that packet's source; for one the idle sweep
+    /// or the shutdown drain produced, the source the flow was captured on
+    /// (flowscope's bound capture leg). `None` for ticks, tracker-wide
+    /// anomalies, and a housekeeping event whose flow has no known source.
+    pub source: Option<SourceIdx>,
+
+    /// The flow's initiator orientation (`Forward`: `key.a` opened it),
+    /// when the dispatch knows it. Read through [`Self::initiator`], which
+    /// falls back to the message side.
+    pub(crate) initiator: Option<flowscope::Orientation>,
 
     /// 0.21 D.4: optional human-readable name set on the parent
     /// monitor via [`crate::monitor::MonitorBuilder::name`].
@@ -172,7 +181,7 @@ impl<'a> Ctx<'a> {
         Self {
             flow: None,
             ts,
-            source: SourceIdx(0),
+            source: None,
             monitor_name: None,
             state_map,
             sink,
@@ -183,6 +192,7 @@ impl<'a> Ctx<'a> {
             arp_table: None,
             side: None,
             orientation: None,
+            initiator: None,
         }
     }
 
@@ -197,7 +207,7 @@ impl<'a> Ctx<'a> {
     pub fn new(
         flow: Option<FlowKey>,
         ts: Timestamp,
-        source: SourceIdx,
+        source: Option<SourceIdx>,
         state_map: &'a mut StateMap,
         sink: &'a mut dyn crate::anomaly::sink::AnomalySink,
         counters: &'a mut CounterRegistry,
@@ -217,6 +227,7 @@ impl<'a> Ctx<'a> {
             arp_table: None,
             side: None,
             orientation: None,
+            initiator: None,
         }
     }
 
@@ -234,6 +245,31 @@ impl<'a> Ctx<'a> {
     #[inline]
     pub fn orientation(&self) -> Option<flowscope::Orientation> {
         self.orientation
+    }
+
+    /// Which way round the current flow is: the orientation of its
+    /// initiator — `Forward` when `key.a` opened it, `Reverse` when
+    /// `key.b` did. Known for flow events and L7 messages (from the
+    /// message's side and orientation); `None` for ticks and anomalies
+    /// without a flow. New in 0.32.0.
+    #[inline]
+    pub fn initiator(&self) -> Option<flowscope::Orientation> {
+        self.initiator
+            .or_else(|| match (self.side?, self.orientation?) {
+                (flowscope::FlowSide::Initiator, o) => Some(o),
+                (flowscope::FlowSide::Responder, o) => Some(o.flipped()),
+            })
+    }
+
+    /// The current flow's endpoints as `(initiator, responder)` — the
+    /// address-sorted key turned the way the flow was opened. `None` when
+    /// there is no flow or [`Self::initiator`] is unknown. New in 0.32.0.
+    pub fn endpoints(&self) -> Option<(std::net::SocketAddr, std::net::SocketAddr)> {
+        let key = self.flow?;
+        Some(match self.initiator()? {
+            flowscope::Orientation::Forward => (key.a, key.b),
+            flowscope::Orientation::Reverse => (key.b, key.a),
+        })
     }
 
     /// The [Community ID](https://github.com/corelight/community-id-spec) v1
@@ -481,7 +517,7 @@ mod tests {
         Ctx {
             flow: None,
             ts: Timestamp::new(0, 0),
-            source: SourceIdx(0),
+            source: None,
             monitor_name: None,
             state_map: state,
             sink,
@@ -492,7 +528,37 @@ mod tests {
             arp_table: None,
             side: None,
             orientation: None,
+            initiator: None,
         }
+    }
+
+    /// #216: the initiator comes from the dispatch, else from the message
+    /// side; `endpoints()` turns the address-sorted key that way round.
+    #[test]
+    fn initiator_and_endpoints() {
+        use flowscope::{FlowSide, Orientation};
+        let mut state = StateMap::default();
+        let mut counters = CounterRegistry::default();
+        let mut sink = NoopSink;
+        let mut flow_states = FlowStateRegistry::default();
+        let mut ctx = make_ctx(&mut state, &mut sink, &mut counters, &mut flow_states);
+        let (a, b) = (
+            "10.0.0.1:443".parse().unwrap(),
+            "10.0.0.9:50000".parse().unwrap(),
+        );
+        ctx.flow = Some(FlowKey::new(flowscope::L4Proto::Tcp, a, b));
+        assert_eq!(ctx.initiator(), None);
+        assert_eq!(ctx.endpoints(), None);
+        // A responder's bytes going a → b: the initiator is b.
+        ctx.side = Some(FlowSide::Responder);
+        ctx.orientation = Some(Orientation::Forward);
+        assert_eq!(ctx.initiator(), Some(Orientation::Reverse));
+        assert_eq!(ctx.endpoints(), Some((b, a)));
+        // What the dispatch knew wins.
+        ctx.initiator = Some(Orientation::Forward);
+        assert_eq!(ctx.endpoints(), Some((a, b)));
+        ctx.flow = None;
+        assert_eq!(ctx.endpoints(), None);
     }
 
     #[test]

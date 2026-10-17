@@ -180,7 +180,7 @@ mod tests {
             let mut ctx = Ctx::new(
                 None,
                 now,
-                SourceIdx(0),
+                Some(SourceIdx(0)),
                 &mut state_map,
                 sink.as_mut(),
                 &mut counters,
@@ -206,7 +206,7 @@ mod tests {
         let ctx = Ctx::new(
             None,
             now,
-            SourceIdx(0),
+            Some(SourceIdx(0)),
             &mut state_map,
             sink.as_mut(),
             &mut counters,

@@ -114,7 +114,7 @@ fn pattern_detector_macro_threads_through_publish_owned() {
     let mut ctx = Ctx::new(
         None,
         Timestamp::new(0, 0),
-        SourceIdx(0),
+        Some(SourceIdx(0)),
         &mut state,
         &mut sink,
         &mut counters,

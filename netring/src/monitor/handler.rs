@@ -87,7 +87,7 @@ mod tests {
     use super::*;
     use crate::anomaly::sink::NoopSink;
     use crate::correlate::TimeBucketedCounter;
-    use crate::ctx::{CounterRegistry, SourceIdx, StateMap};
+    use crate::ctx::{CounterRegistry, StateMap};
     use crate::protocol::builtin::Tcp;
     use crate::protocol::event_typed::FlowStarted;
 
@@ -105,7 +105,7 @@ mod tests {
         Ctx {
             flow: None,
             ts: Timestamp::new(0, 0),
-            source: SourceIdx(0),
+            source: None,
             monitor_name: None,
             state_map: state,
             sink,
@@ -116,6 +116,7 @@ mod tests {
             arp_table: None,
             side: None,
             orientation: None,
+            initiator: None,
         }
     }
 

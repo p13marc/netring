@@ -121,12 +121,15 @@ impl AsyncPcapSource {
         let task_yielded = packets_yielded.clone();
 
         let task = tokio::task::spawn_blocking(move || {
-            if let Err(e) = run_reader(&path, config, tx, task_yielded) {
+            if let Err(e) = run_reader(&path, config, &tx, task_yielded) {
                 tracing::warn!(
                     target: "netring::pcap_source",
                     error = ?e,
                     "pcap reader task ended with error"
                 );
+                // An unreadable capture is an error item, not a clean
+                // end of stream.
+                let _ = tx.blocking_send(Err(e));
             }
         });
 
@@ -202,7 +205,7 @@ fn sniff_format(path: &Path) -> Result<PcapFormat, Error> {
 fn run_reader(
     path: &Path,
     config: AsyncPcapConfig,
-    tx: mpsc::Sender<Result<OwnedPacket, Error>>,
+    tx: &mpsc::Sender<Result<OwnedPacket, Error>>,
     packets_yielded: Arc<AtomicU64>,
 ) -> Result<(), Error> {
     let mut shift = Duration::ZERO;
@@ -604,5 +607,20 @@ mod tests {
         assert_eq!(p.original_len, 74);
         let mut out = crate::pcap::CaptureWriter::create(Vec::new()).unwrap();
         out.write_owned(&p).expect("caplen <= orig_len");
+    }
+
+    /// A header the reader rejects (here: a truncated one behind a
+    /// valid magic) is an error item, not a clean end of stream.
+    #[tokio::test]
+    async fn unreadable_header_is_an_error_not_eof() {
+        use futures::StreamExt;
+        let mut f = NamedTempFile::new().expect("tempfile");
+        f.write_all(&0xa1b2_c3d4u32.to_le_bytes()).unwrap();
+        let mut src = AsyncPcapSource::open(f.path()).await.expect("magic ok");
+        let item = tokio::time::timeout(Duration::from_secs(5), src.next())
+            .await
+            .expect("the reader answers");
+        assert!(matches!(item, Some(Err(_))), "{item:?}");
+        assert!(src.next().await.is_none());
     }
 }

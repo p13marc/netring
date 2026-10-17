@@ -227,7 +227,7 @@ fn run_reader(
                 Some((lo, hi)) => (lo.min(raw), hi.max(raw)),
             });
             let ts = duration_to_timestamp(raw + shift);
-            let orig_len = p.original_len;
+            let (orig_len, raw_len) = (p.original_len as usize, p.data.len());
             let direction = match p.direction {
                 Some(flowscope::pcap::CaptureDirection::Outbound) => PacketDirection::Outgoing,
                 // Inbound, or not recorded: the benign default.
@@ -247,6 +247,12 @@ fn run_reader(
                     continue;
                 }
             };
+            // The Ethernet header changes the frame length (raw IP +14,
+            // NULL / LOOP +10, SLL −2, SLL2 −6): the wire length follows,
+            // so the captured length never exceeds it.
+            let orig_len = (orig_len + frame.len())
+                .saturating_sub(raw_len)
+                .max(frame.len());
             if config.replay_speed > 0.0 {
                 pace(ts, &mut start_wall, &mut first_ts, config.replay_speed);
             }
@@ -300,7 +306,7 @@ fn duration_to_timestamp(d: Duration) -> Timestamp {
 
 fn owned_packet(
     data: Vec<u8>,
-    orig_len: u32,
+    orig_len: usize,
     timestamp: Timestamp,
     direction: PacketDirection,
 ) -> OwnedPacket {
@@ -309,7 +315,7 @@ fn owned_packet(
         timestamp,
         // Pcap files carry a timestamp but not its clock source.
         timestamp_clock: crate::packet::TimestampClock::None,
-        original_len: orig_len as usize,
+        original_len: orig_len,
         status: PacketStatus::default(),
         // From the pcapng EPB flags or a cooked header; `Host` when
         // the capture did not record it.
@@ -568,5 +574,35 @@ mod tests {
         assert_eq!(&p.data[12..14], &[0x08, 0x00]);
         assert_eq!(&p.data[14..], &ip);
         assert_eq!(p.direction, PacketDirection::Outgoing);
+        // The 16-byte cooked header became a 14-byte Ethernet one.
+        assert_eq!(p.original_len, p.data.len());
+    }
+
+    /// A raw-IP capture gains a 14-byte Ethernet header; the wire
+    /// length follows, so the packet can be written back out.
+    #[tokio::test]
+    async fn raw_ip_capture_keeps_original_len_consistent() {
+        use futures::StreamExt;
+        use pcap_file::pcap::{PcapHeader, PcapPacket, PcapWriter};
+        let mut ip = vec![0u8; 60];
+        ip[..20].copy_from_slice(&[
+            0x45, 0, 0, 60, 0, 0, 0, 0, 64, 17, 0, 0, 10, 0, 0, 1, 10, 0, 0, 2,
+        ]);
+        let file = NamedTempFile::new().unwrap();
+        let header = PcapHeader {
+            datalink: pcap_file::DataLink::RAW,
+            ..Default::default()
+        };
+        let mut w = PcapWriter::with_header(file.reopen().unwrap(), header).unwrap();
+        w.write_packet(&PcapPacket::new(Duration::from_secs(1), 60, &ip))
+            .unwrap();
+        drop(w);
+
+        let mut src = AsyncPcapSource::open(file.path()).await.unwrap();
+        let p = src.next().await.unwrap().unwrap();
+        assert_eq!(p.data.len(), 74);
+        assert_eq!(p.original_len, 74);
+        let mut out = crate::pcap::CaptureWriter::create(Vec::new()).unwrap();
+        out.write_owned(&p).expect("caplen <= orig_len");
     }
 }

@@ -1,6 +1,6 @@
 # Changelog
 
-## 0.31.3 — unreleased — dependency refresh
+## 0.31.3 — 2026-10-17 — dependency refresh
 
 Patch release: every netring dependency onto its latest release (#220),
 which 0.31.2 should already have had — it shipped with the lockfile its

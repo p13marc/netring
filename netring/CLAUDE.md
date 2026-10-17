@@ -20,7 +20,8 @@ built on AF_PACKET with TPACKET_V3 (block-based mmap ring buffers) and AF_XDP.
 
 ## Implementation Status
 
-**0.31.3 — unreleased** (dependency refresh, #220, milestone "0.31.3 —
+**0.31.3 — RELEASED 2026-10-17** (published to crates.io, tag `0.31.3`, with
+netring-exporters 0.8.0; PR #221; dependency refresh, #220, milestone "0.31.3 —
 dependency refresh"; patch, CHANGELOG `## 0.31.3`; ships with
 **flowscope 0.25.3** and **netring-exporters 0.8.0** — arrow / parquet 60,
 breaking for exporters because `ParquetFlowExporter::new` returns

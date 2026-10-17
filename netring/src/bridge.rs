@@ -65,9 +65,11 @@ fn liveness_probe() -> Result<crate::async_adapters::registered::ProbeTimer, Err
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 #[non_exhaustive]
 pub struct BridgeStats {
-    /// Statistics for A→B direction.
+    /// Ring statistics of the capture on A (the A→B direction): totals
+    /// since the bridge was created.
     pub a_to_b: CaptureStats,
-    /// Statistics for B→A direction.
+    /// Ring statistics of the capture on B (the B→A direction): totals
+    /// since the bridge was created.
     pub b_to_a: CaptureStats,
     /// A→B packets dropped because the TX frame was too small.
     pub a_to_b_dropped_too_large: u64,
@@ -113,6 +115,12 @@ impl std::fmt::Display for BridgeStats {
 /// the bridge's own forwards and anything the host itself sends there — are
 /// skipped (and not shown to the filter), so the two directions cannot
 /// bounce a frame back and forth.
+///
+/// VLAN tags are forwarded (0.32, #209): the receiving kernel strips a
+/// frame's outer 802.1Q / 802.1ad tag before the capture sees it, and the
+/// RX captures re-insert it ([`CaptureBuilder::vlan_reinsert`], on by
+/// default), so the frame leaves the other side tagged, as it arrived.
+/// Before 0.32 the bridge forwarded every tagged frame untagged.
 #[must_use]
 pub struct Bridge {
     rx_a: Capture,
@@ -121,7 +129,7 @@ pub struct Bridge {
     tx_a: Injector,
     poll_timeout: Duration,
     /// Per-direction drop counters maintained by the bridge itself
-    /// (kernel-side drops live in stats() / cumulative_stats()).
+    /// (kernel-side drops live in stats()).
     drops: DropCounters,
 }
 
@@ -483,14 +491,13 @@ impl Bridge {
         Ok(false)
     }
 
-    /// Get forwarding statistics for both directions.
+    /// Forwarding statistics for both directions: each side's ring totals
+    /// since the bridge was created, plus the bridge's own drop counters.
     ///
-    /// # Reads are destructive
-    ///
-    /// Each call invokes [`Capture::stats()`] on both RX sockets, which
-    /// performs a `getsockopt(PACKET_STATISTICS)` — a destructive read that
-    /// resets kernel counters. To accumulate over time, sum the result of
-    /// periodic calls.
+    /// `a_to_b` is the capture on interface A (what was received for
+    /// forwarding to B), `b_to_a` the one on B. Reading never resets
+    /// anything — see [`Capture::stats`]; the counts of a window are
+    /// `later.a_to_b.delta_since(&earlier.a_to_b)`.
     ///
     /// # Errors
     ///
@@ -499,23 +506,6 @@ impl Bridge {
         Ok(BridgeStats {
             a_to_b: self.rx_a.stats()?,
             b_to_a: self.rx_b.stats()?,
-            a_to_b_dropped_too_large: self.drops.a_to_b_too_large,
-            a_to_b_dropped_ring_full: self.drops.a_to_b_ring_full,
-            b_to_a_dropped_too_large: self.drops.b_to_a_too_large,
-            b_to_a_dropped_ring_full: self.drops.b_to_a_ring_full,
-        })
-    }
-
-    /// Accumulated forwarding statistics since this bridge was created.
-    ///
-    /// Each direction's counters are monotonically non-decreasing across
-    /// calls (deltas accumulated via the underlying [`Capture::cumulative_stats`]).
-    /// **Do not mix with [`stats()`](Self::stats)** — see that method's
-    /// docstring for the reason.
-    pub fn cumulative_stats(&self) -> Result<BridgeStats, Error> {
-        Ok(BridgeStats {
-            a_to_b: self.rx_a.cumulative_stats()?,
-            b_to_a: self.rx_b.cumulative_stats()?,
             a_to_b_dropped_too_large: self.drops.a_to_b_too_large,
             a_to_b_dropped_ring_full: self.drops.a_to_b_ring_full,
             b_to_a_dropped_too_large: self.drops.b_to_a_too_large,

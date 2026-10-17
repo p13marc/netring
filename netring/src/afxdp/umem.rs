@@ -24,6 +24,8 @@ use crate::error::Error;
 pub(crate) struct Umem {
     base: NonNull<u8>,
     size: usize,
+    /// Where the pages actually ended up.
+    placement: UmemPlacement,
     frame_size: usize,
     #[allow(dead_code)]
     frame_count: usize,
@@ -52,7 +54,47 @@ pub(crate) struct UmemOptions {
     pub(crate) headroom: u32,
 }
 
+/// Where a UMEM's pages actually ended up (#213) — what
+/// [`XdpSocketBuilder::hugepages`](crate::XdpSocketBuilder::hugepages) /
+/// [`numa_node`](crate::XdpSocketBuilder::numa_node) achieved, since both
+/// are best-effort. Returned by
+/// [`XdpSocket::umem_placement`](crate::XdpSocket::umem_placement).
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Hash)]
+#[non_exhaustive]
+pub struct UmemPlacement {
+    /// The UMEM is backed by 2 MiB hugepages (`MAP_HUGETLB`). `false` when
+    /// none were requested, none were reserved, or the requested NUMA node
+    /// had none free (the UMEM then fell back to regular pages).
+    pub hugepages: bool,
+    /// The NUMA node the UMEM's pages are bound to (`MPOL_BIND`) and were
+    /// faulted in on. `Some` only if the `mbind` succeeded; `None` when no
+    /// node was requested or binding failed (logged at `warn`).
+    pub numa_node: Option<u32>,
+}
+
 const HUGEPAGE_2MB: usize = 2 * 1024 * 1024;
+
+/// `mbind` flags (uapi/linux/mempolicy.h): fail if existing pages don't
+/// follow the policy, after moving the ones that can be moved.
+const MPOL_MF_STRICT: libc::c_uint = 1 << 0;
+const MPOL_MF_MOVE: libc::c_uint = 1 << 1;
+
+/// The `mmap` flags of a UMEM. Never `MAP_POPULATE`: the pages are faulted
+/// in only after the NUMA policy is set (#213) — `MAP_POPULATE` placed them
+/// on the allocating CPU's node before `mbind` could act, and `mbind`
+/// without `MPOL_MF_MOVE` only governs later faults.
+fn map_flags(opts: &UmemOptions) -> MapFlags {
+    let flags = MapFlags::MAP_PRIVATE;
+    if opts.hugepages {
+        // MAP_HUGE_2MB pins the page size `alloc_size` is rounded to: bare
+        // MAP_HUGETLB takes the host's *default* hugepage size, and with a
+        // 1 GiB default the kernel would map (and charge) a whole 1 GiB page
+        // that the 2 MiB-sized munmap in Drop cannot unmap (EINVAL) — a leak.
+        flags | MapFlags::MAP_HUGETLB | MapFlags::MAP_HUGE_2MB
+    } else {
+        flags
+    }
+}
 
 impl Umem {
     /// Allocate a new UMEM region with `frame_count` frames of `frame_size`
@@ -89,54 +131,64 @@ impl Umem {
         let nz_size =
             NonZeroUsize::new(alloc_size).ok_or_else(|| Error::Config("umem size is 0".into()))?;
 
-        // MAP_PRIVATE | MAP_ANONYMOUS — kernel pins pages via GUP regardless.
-        // MAP_POPULATE faults pages in up front. MAP_HUGETLB (0.25 W4) backs the
-        // region with hugepages; if that fails (none reserved) retry without it.
-        // MAP_HUGE_2MB pins the page size `alloc_size` was rounded to: bare
-        // MAP_HUGETLB takes the host's *default* hugepage size, and with a
-        // 1 GiB default the kernel would map (and charge) a whole 1 GiB page
-        // that the 2 MiB-sized munmap in Drop cannot unmap (EINVAL) — a leak.
-        // `mapped_len` tracks the ACTUAL mapping length so Drop's `munmap` never
-        // exceeds it (a too-large munmap would unmap adjacent allocations →
-        // memory corruption / SIGSEGV).
-        let base_flags = MapFlags::MAP_PRIVATE | MapFlags::MAP_POPULATE;
-        let regular = |len: usize| -> Result<NonNull<libc::c_void>, Error> {
-            let nz = NonZeroUsize::new(len).unwrap();
+        // Map without populating (map_flags), bind the region to the NUMA
+        // node, then fault the pages in under that policy (#213).
+        // `mapped_len` tracks the ACTUAL mapping length so Drop's `munmap`
+        // never exceeds it (a too-large munmap would unmap adjacent
+        // allocations → memory corruption / SIGSEGV).
+        let map = |len: usize, opts: &UmemOptions| -> Result<NonNull<libc::c_void>, nix::Error> {
+            let nz = NonZeroUsize::new(len).expect("non-zero umem size");
             // SAFETY: anonymous mmap, no aliasing of existing memory.
             unsafe {
                 nix::sys::mman::mmap_anonymous(
                     None,
                     nz,
                     ProtFlags::PROT_READ | ProtFlags::PROT_WRITE,
-                    base_flags,
+                    map_flags(opts),
                 )
-                .map_err(|e| Error::Mmap(e.into()))
             }
         };
-        let (base, mapped_len) = if opts.hugepages {
-            // SAFETY: anonymous mmap, no aliasing of existing memory.
-            match unsafe {
-                nix::sys::mman::mmap_anonymous(
-                    None,
-                    nz_size,
-                    ProtFlags::PROT_READ | ProtFlags::PROT_WRITE,
-                    base_flags | MapFlags::MAP_HUGETLB | MapFlags::MAP_HUGE_2MB,
-                )
-            } {
-                Ok(b) => (b, alloc_size),
+        let regular_opts = UmemOptions {
+            hugepages: false,
+            ..*opts
+        };
+        let mut mapping = None;
+        if opts.hugepages {
+            match map(nz_size.get(), opts) {
+                Ok(b) => match place(b, alloc_size, opts.numa_node, true) {
+                    Ok(node) => mapping = Some((b, alloc_size, true, node)),
+                    Err(e) => {
+                        // No free hugepage (on the bound node): the fault
+                        // would SIGBUS later. Use regular pages instead.
+                        tracing::warn!(
+                            error = %e,
+                            numa_node = ?opts.numa_node,
+                            "UMEM hugepages could not be faulted in (none free on the node?); \
+                             falling back to regular pages"
+                        );
+                        // SAFETY: `b` is our own `alloc_size` mapping, unused.
+                        let _ = unsafe { nix::sys::mman::munmap(b, alloc_size) };
+                    }
+                },
                 Err(e) => {
                     tracing::warn!(error = %e, "UMEM hugepage mmap failed (no hugepages reserved?); falling back to regular pages");
-                    (regular(size)?, size)
                 }
             }
-        } else {
-            (regular(size)?, size)
-        };
-
-        // 0.25 W4: best-effort NUMA binding of the just-mapped region.
-        if let Some(node) = opts.numa_node {
-            bind_numa(base.as_ptr() as usize, mapped_len, node);
         }
+        let (base, mapped_len, hugepages, numa_node) = match mapping {
+            Some(m) => m,
+            None => {
+                let b = map(size, &regular_opts).map_err(|e| Error::Mmap(e.into()))?;
+                match place(b, size, opts.numa_node, false) {
+                    Ok(node) => (b, size, false, node),
+                    Err(e) => {
+                        // SAFETY: `b` is our own `size` mapping, unused.
+                        let _ = unsafe { nix::sys::mman::munmap(b, size) };
+                        return Err(Error::Mmap(e));
+                    }
+                }
+            }
+        };
 
         // Initialize free list: [0, frame_size, 2*frame_size, ...]
         let free_list: VecDeque<u64> = (0..frame_count).map(|i| (i * frame_size) as u64).collect();
@@ -147,12 +199,22 @@ impl Umem {
             // kernel via `as_reg`). On hugepage fallback this is `size`, not the
             // rounded-up `alloc_size`.
             size: mapped_len,
+            placement: UmemPlacement {
+                hugepages,
+                numa_node,
+            },
             frame_size,
             frame_count,
             headroom: opts.headroom,
             free_list,
             rx_free: Vec::with_capacity(frame_count),
         })
+    }
+
+    /// Where the UMEM's pages ended up (hugepages, NUMA node).
+    #[inline]
+    pub(crate) fn placement(&self) -> UmemPlacement {
+        self.placement
     }
 
     /// Allocate a frame, returning its byte offset within UMEM.
@@ -293,38 +355,140 @@ impl Umem {
     }
 }
 
-/// 0.25 W4: best-effort `mbind` of `[addr, addr+len)` to NUMA `node` with
-/// `MPOL_BIND`. Logs a `warn` on failure (single-node host, no CAP_SYS_NICE
-/// for strict binding, …) — never fatal.
-fn bind_numa(addr: usize, len: usize, node: u32) {
-    if node >= 64 {
-        tracing::warn!(
-            node,
-            "NUMA node out of range for the 64-bit nodemask; skipping mbind"
-        );
-        return;
+/// Bind (best-effort) and fault in a fresh mapping: `mbind` to `node` when
+/// one is requested — a failure is logged and the mapping stays unbound —
+/// then populate it under that policy. Returns the node the pages are bound
+/// to. A population failure is an error (the caller unmaps); on regular
+/// pages a bound mapping that cannot be populated (the node is out of
+/// memory) is unbound and populated again first.
+fn place(
+    base: NonNull<libc::c_void>,
+    len: usize,
+    node: Option<u32>,
+    hugetlb: bool,
+) -> std::io::Result<Option<u32>> {
+    let addr = base.as_ptr() as usize;
+    let bound = node.and_then(|node| match bind_numa(addr, len, node) {
+        Ok(()) => Some(node),
+        Err(e) => {
+            tracing::warn!(error = %e, node, "mbind(UMEM, MPOL_BIND) failed; UMEM not NUMA-bound");
+            None
+        }
+    });
+    match populate(base, len, hugetlb) {
+        Ok(()) => Ok(bound),
+        Err(e) if hugetlb => Err(e),
+        Err(e) if bound.is_some() => {
+            tracing::warn!(
+                error = %e,
+                node = ?bound,
+                "UMEM could not be faulted in on its NUMA node; unbinding"
+            );
+            unbind_numa(addr, len)?;
+            populate(base, len, false)?;
+            Ok(None)
+        }
+        Err(e) => Err(e),
     }
-    let nodemask: u64 = 1u64 << node;
-    // `maxnode` is the number of bits in the mask; it must exceed the highest
-    // node index we set (here always < 64).
-    let maxnode: libc::c_ulong = 64;
-    // SAFETY: `mbind` over our own freshly-mapped region; `nodemask` outlives
-    // the call. A failure is reported, not acted on.
+}
+
+/// `mbind(MPOL_BIND, MPOL_MF_STRICT | MPOL_MF_MOVE)` of `[addr, addr+len)`
+/// to NUMA `node`.
+///
+/// The nodemask holds `node / 64 + 1` words and `maxnode` is one more than
+/// its bit count: the kernel reads `maxnode - 1` bits (v6.12
+/// mm/mempolicy.c get_nodes(): `--maxnode;`), so the old `maxnode = 64`
+/// silently dropped node 63.
+fn bind_numa(addr: usize, len: usize, node: u32) -> std::io::Result<()> {
+    let (nodemask, maxnode) = nodemask(node);
+    mbind(
+        addr,
+        len,
+        libc::MPOL_BIND,
+        &nodemask,
+        maxnode,
+        MPOL_MF_STRICT | MPOL_MF_MOVE,
+    )
+}
+
+/// The `mbind` nodemask selecting `node` alone, and its `maxnode` (bit
+/// count + 1).
+fn nodemask(node: u32) -> (Vec<libc::c_ulong>, libc::c_ulong) {
+    let words = node as usize / 64 + 1;
+    let mut mask: Vec<libc::c_ulong> = vec![0; words];
+    mask[node as usize / 64] = 1 << (node % 64);
+    (mask, (words * 64 + 1) as libc::c_ulong)
+}
+
+/// Drop the NUMA policy of `[addr, addr+len)` (`MPOL_DEFAULT`).
+fn unbind_numa(addr: usize, len: usize) -> std::io::Result<()> {
+    mbind(addr, len, libc::MPOL_DEFAULT, &[], 0, 0)
+}
+
+fn mbind(
+    addr: usize,
+    len: usize,
+    mode: libc::c_int,
+    nodemask: &[libc::c_ulong],
+    maxnode: libc::c_ulong,
+    flags: libc::c_uint,
+) -> std::io::Result<()> {
+    let mask = if nodemask.is_empty() {
+        std::ptr::null()
+    } else {
+        nodemask.as_ptr()
+    };
+    // SAFETY: `mbind` over our own mapping; `nodemask` (when non-null) holds
+    // `maxnode - 1` bits and outlives the call.
     let rc = unsafe {
         libc::syscall(
             libc::SYS_mbind,
             addr as *mut libc::c_void,
             len as libc::c_ulong,
-            libc::MPOL_BIND as libc::c_int,
-            &nodemask as *const u64,
+            mode,
+            mask,
             maxnode,
-            0 as libc::c_uint,
+            flags,
         )
     };
-    if rc != 0 {
-        let e = std::io::Error::last_os_error();
-        tracing::warn!(error = %e, node, "mbind(UMEM, MPOL_BIND) failed; UMEM not NUMA-bound");
+    if rc == 0 {
+        Ok(())
+    } else {
+        Err(std::io::Error::last_os_error())
     }
+}
+
+/// Fault the pages of `[base, base+len)` in, writable, under the region's
+/// NUMA policy: `madvise(MADV_POPULATE_WRITE)` (Linux ≥ 5.14). On an older
+/// kernel (`EINVAL`) regular pages are touched one byte per page; hugetlb
+/// pages are left to `XDP_UMEM_REG`, which pins — and faults — them under
+/// the policy.
+fn populate(base: NonNull<libc::c_void>, len: usize, hugetlb: bool) -> std::io::Result<()> {
+    // SAFETY: madvise over our own mapping.
+    let rc = unsafe { libc::madvise(base.as_ptr(), len, libc::MADV_POPULATE_WRITE) };
+    if rc == 0 {
+        return Ok(());
+    }
+    let e = std::io::Error::last_os_error();
+    if e.raw_os_error() != Some(libc::EINVAL) {
+        return Err(e);
+    }
+    if !hugetlb {
+        // SAFETY: `page_size()` divides the mapping's start; every byte
+        // written lies inside our own fresh, writable, private mapping.
+        let page = page_size();
+        let p = base.as_ptr().cast::<u8>();
+        for off in (0..len).step_by(page) {
+            unsafe { p.add(off).write_volatile(0) };
+        }
+    }
+    Ok(())
+}
+
+fn page_size() -> usize {
+    // SAFETY: plain sysconf query.
+    let n = unsafe { libc::sysconf(libc::_SC_PAGESIZE) };
+    if n > 0 { n as usize } else { 4096 }
 }
 
 impl Drop for Umem {
@@ -361,6 +525,141 @@ mod tests {
         let umem = Umem::new_with_options(4096, 64, &opts).expect("hugepage UMEM or fallback");
         assert_eq!(umem.available(), 64);
         assert_eq!(umem.frame_size(), 4096);
+        // The placement says which one it got.
+        let huge = umem.placement().hugepages;
+        assert_eq!(umem.size, if huge { HUGEPAGE_2MB } else { 4096 * 64 });
+    }
+
+    /// #213: the UMEM is never pre-faulted by `mmap` — pages are faulted in
+    /// only after the NUMA policy is set.
+    #[test]
+    fn map_flags_never_prefault() {
+        for hugepages in [false, true] {
+            for numa_node in [None, Some(0)] {
+                let f = map_flags(&UmemOptions {
+                    hugepages,
+                    numa_node,
+                    headroom: 0,
+                });
+                assert!(!f.contains(MapFlags::MAP_POPULATE), "{f:?}");
+                assert!(f.contains(MapFlags::MAP_PRIVATE));
+                assert_eq!(f.contains(MapFlags::MAP_HUGETLB), hugepages);
+                assert_eq!(f.contains(MapFlags::MAP_HUGE_2MB), hugepages);
+            }
+        }
+    }
+
+    const MPOL_F_NODE: libc::c_ulong = 1 << 0;
+    const MPOL_F_ADDR: libc::c_ulong = 1 << 1;
+
+    /// `get_mempolicy(mode, nodemask[1], 65, addr, flags)`.
+    fn get_mempolicy(addr: *const u8, flags: libc::c_ulong) -> (libc::c_int, libc::c_ulong) {
+        let mut mode: libc::c_int = -1;
+        let mut mask: libc::c_ulong = 0;
+        // SAFETY: valid out-pointers; `addr` lies in a live mapping.
+        let rc = unsafe {
+            libc::syscall(
+                libc::SYS_get_mempolicy,
+                &mut mode as *mut libc::c_int,
+                &mut mask as *mut libc::c_ulong,
+                65 as libc::c_ulong,
+                addr,
+                flags,
+            )
+        };
+        assert_eq!(rc, 0, "get_mempolicy: {}", std::io::Error::last_os_error());
+        (mode, mask)
+    }
+
+    /// #213: a NUMA request binds the region (`MPOL_BIND`, node 0) and
+    /// faults every page in on that node before the socket registers it.
+    /// 0.31 faulted the pages in with `MAP_POPULATE` first and called `mbind`
+    /// without `MPOL_MF_MOVE`, so the pages stayed wherever the allocating
+    /// CPU's node was. Runs on any host with node 0 (every Linux host has
+    /// it); skips where `mbind` is not permitted (seccomp sandbox).
+    #[test]
+    fn numa_bind_sets_policy_and_populates() {
+        let opts = UmemOptions {
+            hugepages: false,
+            numa_node: Some(0),
+            headroom: 0,
+        };
+        let umem = Umem::new_with_options(4096, 16, &opts).expect("UMEM");
+        let placement = umem.placement();
+        if placement.numa_node.is_none() {
+            eprintln!("skipping: mbind is not permitted here");
+            return;
+        }
+        assert_eq!(
+            placement,
+            UmemPlacement {
+                hugepages: false,
+                numa_node: Some(0)
+            }
+        );
+
+        let base = umem.base.as_ptr();
+        let (mode, mask) = get_mempolicy(base, MPOL_F_ADDR);
+        assert_eq!(mode, libc::MPOL_BIND, "the VMA's policy");
+        assert_eq!(mask, 1, "node 0 only");
+
+        // Every page is resident before anything touched it.
+        let page = page_size();
+        let pages = umem.size.div_ceil(page);
+        let mut vec = vec![0u8; pages];
+        // SAFETY: our own mapping; `vec` holds one byte per page.
+        let rc = unsafe { libc::mincore(base.cast(), umem.size, vec.as_mut_ptr()) };
+        assert_eq!(rc, 0, "mincore: {}", std::io::Error::last_os_error());
+        assert!(
+            vec.iter().all(|b| b & 1 == 1),
+            "all pages resident: {vec:?}"
+        );
+        for i in 0..pages {
+            let (node, _) = get_mempolicy(base.wrapping_add(i * page), MPOL_F_NODE | MPOL_F_ADDR);
+            assert_eq!(node, 0, "page {i} is on node 0");
+        }
+    }
+
+    /// A node that does not exist: the bind fails (logged), the UMEM is
+    /// still usable, and its placement says it is not bound.
+    #[test]
+    fn numa_bind_failure_is_reported() {
+        let opts = UmemOptions {
+            hugepages: false,
+            numa_node: Some(70),
+            headroom: 0,
+        };
+        let umem = Umem::new_with_options(4096, 16, &opts).expect("UMEM despite the failed bind");
+        assert_eq!(umem.placement().numa_node, None);
+        assert!(!umem.placement().hugepages);
+        assert_eq!(umem.available(), 16);
+    }
+
+    /// The node-63 off-by-one (#213): the kernel reads `maxnode - 1` bits
+    /// of the mask, so a 64-bit mask needs `maxnode = 65`; 0.31 passed 64
+    /// and silently dropped node 63 (an empty mask → `EINVAL`).
+    #[test]
+    fn nodemask_maxnode_counts_one_past_the_bits() {
+        assert_eq!(nodemask(0), (vec![1], 65));
+        assert_eq!(nodemask(63), (vec![1 << 63], 65));
+        assert_eq!(nodemask(64), (vec![0, 1], 129));
+        assert_eq!(nodemask(70), (vec![0, 1 << 6], 129));
+
+        // The kernel's side of the contract, observable with node 0: a
+        // one-bit mask needs maxnode 2; maxnode 1 reads no bit at all.
+        let umem = Umem::new_with_options(4096, 4, &UmemOptions::default()).expect("UMEM");
+        let addr = umem.base.as_ptr() as usize;
+        match mbind(addr, umem.size, libc::MPOL_BIND, &[1], 2, 0) {
+            Ok(()) => {}
+            Err(e) if matches!(e.raw_os_error(), Some(libc::EPERM | libc::ENOSYS)) => {
+                eprintln!("skipping: mbind is not permitted here ({e})");
+                return;
+            }
+            Err(e) => panic!("binding node 0 with maxnode 2: {e}"),
+        }
+        let e = mbind(addr, umem.size, libc::MPOL_BIND, &[1], 1, 0)
+            .expect_err("maxnode 1 carries no node");
+        assert_eq!(e.raw_os_error(), Some(libc::EINVAL), "{e}");
     }
 
     #[test]

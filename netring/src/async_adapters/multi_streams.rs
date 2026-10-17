@@ -273,20 +273,14 @@ where
     ) -> Vec<(String, Option<Result<CaptureStats, Error>>)> {
         self.streams()
             .enumerate()
-            .map(|(i, s)| (labels[i].clone(), s.as_dyn().capture_stats()))
+            .map(|(i, s)| (labels[i].clone(), s.as_dyn().ring_stats()))
             .collect()
     }
 
     fn capture_stats(&self) -> CaptureStats {
-        let mut acc = CaptureStats::default();
-        for s in self.streams() {
-            if let Some(Ok(stats)) = s.as_dyn().capture_stats() {
-                acc.packets = acc.packets.saturating_add(stats.packets);
-                acc.drops = acc.drops.saturating_add(stats.drops);
-                acc.freeze_count = acc.freeze_count.saturating_add(stats.freeze_count);
-            }
-        }
-        acc
+        self.streams()
+            .filter_map(|s| s.as_dyn().ring_stats().and_then(Result::ok))
+            .fold(CaptureStats::default(), CaptureStats::saturating_add)
     }
 
     fn per_source_tracker_stats(
@@ -405,9 +399,9 @@ macro_rules! multi_source_api {
         /// `Some(Ok(..))` for a live source, `Some(Err(..))` when its
         /// `getsockopt` failed, `None` for a source without a kernel
         /// ring (a replay source — see
-        /// [`MultiSource::packets_read`]). Reading resets an AF_PACKET
-        /// source's kernel counters (a delta); an AF_XDP source reports
-        /// its monotonic totals. (Before 0.31.1 `None` meant "ended";
+        /// [`MultiSource::packets_read`]). Each entry is that source's
+        /// totals since it was opened, on either backend; reading never
+        /// resets them (#186). (Before 0.31.1 `None` meant "ended";
         /// finished sources are now kept and report normally.)
         pub fn per_source_capture_stats(
             &self,
@@ -415,8 +409,9 @@ macro_rules! multi_source_api {
             self.select.per_source_capture_stats(&self.labels)
         }
 
-        /// Aggregate kernel ring stats across all live sources. `Err`
-        /// from any individual source is silently skipped — use
+        /// Aggregate kernel ring stats: the per-source lifetime totals
+        /// summed (saturating). `Err` from any individual source is
+        /// silently skipped — use
         /// [`per_source_capture_stats`](Self::per_source_capture_stats)
         /// for fine-grained inspection.
         pub fn capture_stats(&self) -> CaptureStats {
@@ -980,7 +975,8 @@ where
     E: FlowExtractor + Unpin + Send + 'static,
     E::Key: Clone + Unpin + Send + 'static,
 {
-    /// Per-source kernel ring stats, in registration order.
+    /// Per-source kernel ring stats, in registration order: each source's
+    /// totals since it was opened.
     pub fn per_source_capture_stats(&self) -> Vec<(String, Result<CaptureStats, Error>)> {
         self.caps
             .iter()
@@ -989,18 +985,10 @@ where
             .collect()
     }
 
-    /// Aggregate kernel ring stats across all sources. `Err` from any
-    /// one source is skipped.
+    /// Aggregate kernel ring stats: the per-source lifetime totals summed
+    /// (saturating). `Err` from any one source is skipped.
     pub fn capture_stats(&self) -> CaptureStats {
-        let mut acc = CaptureStats::default();
-        for c in &self.caps {
-            if let Ok(s) = c.stats() {
-                acc.packets = acc.packets.saturating_add(s.packets);
-                acc.drops = acc.drops.saturating_add(s.drops);
-                acc.freeze_count = acc.freeze_count.saturating_add(s.freeze_count);
-            }
-        }
-        acc
+        self.caps.iter().filter_map(|c| c.stats().ok()).sum()
     }
 }
 
@@ -1010,7 +998,8 @@ where
     E: FlowExtractor + Unpin + Send + 'static,
     E::Key: Clone + Unpin + Send + 'static,
 {
-    /// Per-source AF_XDP ring stats, in registration order.
+    /// Per-source AF_XDP ring stats, in registration order: each source's
+    /// totals since it was opened.
     pub fn per_source_capture_stats(&self) -> Vec<(String, Result<CaptureStats, Error>)> {
         self.caps
             .iter()
@@ -1019,18 +1008,13 @@ where
             .collect()
     }
 
-    /// Aggregate AF_XDP ring stats across all sources. `Err` from any one
-    /// source is skipped.
+    /// Aggregate AF_XDP ring stats: the per-source lifetime totals summed
+    /// (saturating). `Err` from any one source is skipped.
     pub fn capture_stats(&self) -> CaptureStats {
-        let mut acc = CaptureStats::default();
-        for c in &self.caps {
-            if let Ok(s) = c.capture_stats() {
-                acc.packets = acc.packets.saturating_add(s.packets);
-                acc.drops = acc.drops.saturating_add(s.drops);
-                acc.freeze_count = acc.freeze_count.saturating_add(s.freeze_count);
-            }
-        }
-        acc
+        self.caps
+            .iter()
+            .filter_map(|c| c.capture_stats().ok())
+            .sum()
     }
 }
 
@@ -2010,12 +1994,12 @@ mod mixed_source_tests {
         assert_eq!(s1.active_flows(), 0);
         assert_eq!(s1.packets_read(), Some(frames.len() as u64));
         assert_eq!(s1.dedup().unwrap().dropped(), frames.len() as u64 / 2);
-        assert!(s1.capture_stats().is_none());
+        assert!(s1.ring_stats().is_none());
         let s0 = m.source(0).unwrap();
         assert_eq!(s0.active_flows(), 1);
         assert!(s0.dedup().is_none());
         assert!(
-            s0.capture_stats().is_none(),
+            s0.ring_stats().is_none(),
             "no kernel ring behind a VecSource"
         );
         assert_eq!(s0.packets_read(), None);

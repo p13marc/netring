@@ -59,6 +59,20 @@ pub(crate) fn set_packet_version(fd: BorrowedFd<'_>, version: libc::c_int) -> Re
     )
 }
 
+/// Reserve `bytes` of headroom in front of every packet in the ring
+/// (`PACKET_RESERVE`). Must precede `PACKET_RX_RING`: the kernel refuses it
+/// with `EBUSY` once a ring exists.
+pub(crate) fn set_packet_reserve(fd: BorrowedFd<'_>, bytes: u32) -> Result<(), Error> {
+    let val: libc::c_uint = bytes;
+    raw_setsockopt(
+        fd,
+        ffi::SOL_PACKET,
+        ffi::PACKET_RESERVE,
+        &val,
+        "PACKET_RESERVE",
+    )
+}
+
 /// Set up the RX ring via `PACKET_RX_RING`.
 pub(crate) fn set_rx_ring(fd: BorrowedFd<'_>, req: &ffi::tpacket_req3) -> Result<(), Error> {
     raw_setsockopt(

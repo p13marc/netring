@@ -13,12 +13,22 @@
 //! 8. `BpfFilter::new(builder.instructions().to_vec())`
 //!    round-trips (escape hatch consumes builder output cleanly).
 //!
+//! 9. (#208) A frame whose outer VLAN tag the kernel stripped gets the
+//!    same verdict whether the interpreter sees the stripped frame plus the
+//!    tag as metadata, or the tag re-inserted (`BpfAncillary::reinserted`).
+//! 10. (#208) For a chain starting with `.vlan()`, matching the frame with
+//!     the tag in-band offline equals the kernel's verdict on the stripped
+//!     frame — the metadata block and the in-frame block agree.
+//!
+//! 11. (#217) `pass_ip_fragments()` only widens: anything the plain filter
+//!     accepts it accepts, and adding a fragment still narrows with it.
+//!
 //! Each property runs at proptest's default 256 cases. Run with
 //! `PROPTEST_CASES=10000 cargo test ...` to stress.
 
 use std::net::IpAddr;
 
-use netring::{BpfFilter, BpfFilterBuilder, IpNet};
+use netring::{BpfAncillary, BpfFilter, BpfFilterBuilder, IpNet, VlanProto, VlanTag};
 use proptest::prelude::*;
 
 // ── Strategies ───────────────────────────────────────────────
@@ -87,6 +97,66 @@ fn arb_tcp_packet() -> impl Strategy<Value = Vec<u8>> {
         arb_port(),
     )
         .prop_map(|(s, d, sp, dp)| synth_eth_ipv4_tcp(s, d, sp, dp))
+}
+
+/// A VLAN tag Linux strips into the metadata: 802.1Q or 802.1ad, any TCI.
+fn arb_stripped_tag() -> impl Strategy<Value = VlanTag> {
+    (any::<u16>(), any::<bool>()).prop_map(|(tci, ad)| {
+        VlanTag::new(
+            tci,
+            if ad {
+                VlanProto::Dot1Ad
+            } else {
+                VlanProto::Dot1Q
+            },
+        )
+    })
+}
+
+fn tpid_of(tag: &VlanTag) -> u16 {
+    if tag.proto == VlanProto::Dot1Ad {
+        0x88a8
+    } else {
+        0x8100
+    }
+}
+
+/// `frame` with `tag` inserted at bytes 12..16.
+fn reinsert(frame: &[u8], tag: &VlanTag) -> Vec<u8> {
+    let mut f = frame[..12].to_vec();
+    f.extend_from_slice(&tpid_of(tag).to_be_bytes());
+    f.extend_from_slice(&tag.tci.to_be_bytes());
+    f.extend_from_slice(&frame[12..]);
+    f
+}
+
+/// A small builder chain over the strategies above: `(vlan?, vlan_id?,
+/// l4 port?, host?, negate?)`.
+fn arb_chain() -> impl Strategy<Value = BpfFilterBuilder> {
+    (
+        any::<bool>(),
+        prop::option::of(0u16..4096),
+        prop::option::of(arb_port()),
+        prop::option::of(arb_ipv4_addr()),
+        any::<bool>(),
+    )
+        .prop_map(|(vlan, vid, port, host, negate)| {
+            let mut b = BpfFilter::builder();
+            if vlan || vid.is_some() {
+                b = b.vlan();
+            }
+            if let Some(v) = vid {
+                b = b.vlan_id(v);
+            }
+            b = b.tcp();
+            if let Some(p) = port {
+                b = b.dst_port(p);
+            }
+            if let Some(h) = host {
+                b = b.host(h);
+            }
+            if negate { b.negate() } else { b }
+        })
 }
 
 // ── Properties ───────────────────────────────────────────────
@@ -326,6 +396,86 @@ proptest! {
             .build()
             .unwrap();
         prop_assert_eq!(g.matches(&pkt), [3, 4].contains(&dp) || sp == 1);
+    }
+
+    /// 15. (#208) Stripped and re-inserted views of the same frame agree.
+    #[test]
+    fn stripped_and_reinserted_tags_agree(
+        chain in arb_chain(),
+        pkt in arb_tcp_packet(),
+        tag in arb_stripped_tag(),
+    ) {
+        let f = chain.build().unwrap();
+        prop_assert_eq!(
+            f.matches_with(&pkt, &BpfAncillary::stripped(tag)),
+            f.matches_with(&reinsert(&pkt, &tag), &BpfAncillary::reinserted(tag))
+        );
+    }
+
+    /// 16. (#208) For a `.vlan()` chain, the offline verdict on the tagged
+    /// frame equals the kernel's on the stripped one.
+    #[test]
+    fn vlan_chain_offline_equals_kernel_stripped(
+        vid in prop::option::of(0u16..4096),
+        port in prop::option::of(arb_port()),
+        pkt in arb_tcp_packet(),
+        tag in arb_stripped_tag(),
+    ) {
+        let mut b = BpfFilter::builder().vlan();
+        if let Some(v) = vid {
+            b = b.vlan_id(v);
+        }
+        b = b.tcp();
+        if let Some(p) = port {
+            b = b.dst_port(p);
+        }
+        let f = b.build().unwrap();
+        prop_assert_eq!(
+            f.matches(&reinsert(&pkt, &tag)),
+            f.matches_with(&pkt, &BpfAncillary::stripped(tag))
+        );
+    }
+
+    /// 17. (#217) `pass_ip_fragments` only widens, and stays monotonic in
+    /// the fragments (a finer chain never accepts more), on fragmented and
+    /// unfragmented IPv4 alike.
+    #[test]
+    fn pass_ip_fragments_widens_and_stays_monotonic(
+        port in arb_port(),
+        host in arb_ipv4_addr(),
+        pkt in arb_tcp_packet(),
+        frag_off in 0u16..0x2000,
+        more in any::<bool>(),
+    ) {
+        let mut pkt = pkt;
+        let flags = if more { 0x2000 } else { 0 };
+        pkt[20..22].copy_from_slice(&(flags | frag_off).to_be_bytes());
+
+        let plain = BpfFilter::builder().tcp().dst_port(port).build().unwrap();
+        let wide = BpfFilter::builder().tcp().dst_port(port).pass_ip_fragments().build().unwrap();
+        if plain.matches(&pkt) {
+            prop_assert!(wide.matches(&pkt));
+        }
+        // Non-first fragments pass the port; first ones and unfragmented
+        // packets see the same port check as before.
+        if frag_off != 0 {
+            prop_assert!(wide.matches(&pkt));
+        } else {
+            prop_assert_eq!(wide.matches(&pkt), plain.matches(&pkt));
+        }
+
+        let coarse = BpfFilter::builder().tcp().pass_ip_fragments().build().unwrap();
+        let fine = BpfFilter::builder()
+            .tcp()
+            .dst_port(port)
+            .host(host)
+            .pass_ip_fragments()
+            .build()
+            .unwrap();
+        if fine.matches(&pkt) {
+            prop_assert!(wide.matches(&pkt));
+            prop_assert!(coarse.matches(&pkt));
+        }
     }
 }
 

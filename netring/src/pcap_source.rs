@@ -154,8 +154,8 @@ impl AsyncPcapSource {
     }
 
     /// Number of packets yielded so far (analog to
-    /// [`CaptureStats::packets`](crate::stats::CaptureStats) for live
-    /// captures).
+    /// [`CaptureStats::delivered`](crate::stats::CaptureStats::delivered)
+    /// for live captures).
     pub fn packets_yielded(&self) -> u64 {
         self.packets_yielded.load(Ordering::Relaxed)
     }
@@ -366,8 +366,8 @@ fn owned_packet(
         // the capture did not record it.
         direction,
         rxhash: 0,
-        vlan_tci: 0,
-        vlan_tpid: 0,
+        // A pcap file keeps VLAN tags in the frame.
+        vlan: None,
         // EtherType is encoded in the frame itself; the wrapper
         // doesn't need a separate ll_protocol for parsing.
         ll_protocol: 0x0800,

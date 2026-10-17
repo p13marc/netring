@@ -1,8 +1,8 @@
 //! Metrics integration via the `metrics` façade (feature: `metrics`).
 //!
-//! Records packet counts and drops as monotonic counters tagged with the
-//! interface label. The actual export (Prometheus, statsd, OTel, ...) is
-//! whatever metrics-recorder the host application installs.
+//! Records a capture's packet counts and drops as monotonic counters tagged
+//! with the interface label. The actual export (Prometheus, statsd, OTel,
+//! ...) is whatever metrics-recorder the host application installs.
 //!
 //! # Examples
 //!
@@ -10,12 +10,11 @@
 //! # #[cfg(feature = "metrics")]
 //! # fn _ex() -> Result<(), netring::Error> {
 //! use netring::Capture;
-//! use netring::metrics::record_capture_delta;
+//! use netring::metrics::record_capture_stats;
 //!
 //! let cap = Capture::open("eth0")?;
-//! // ... capture some packets ...
-//! let delta = cap.stats()?;
-//! record_capture_delta("eth0", &delta);
+//! // ... capture some packets; then, periodically:
+//! record_capture_stats("eth0", &cap.stats()?);
 //! # Ok(()) }
 //! ```
 //!
@@ -25,15 +24,17 @@
 
 use crate::stats::CaptureStats;
 
-/// Counter name: total packets received past kernel filter, **including**
-/// the dropped ones (the [`CaptureStats::packets`] convention): the loss
-/// fraction is `…_drops_total / …_packets_total`.
+/// Counter name: total packets that reached the socket (passed the kernel
+/// filter), **including** the dropped ones —
+/// [`CaptureStats::received`]. The loss fraction is
+/// `…_drops_total / …_packets_total`.
 pub const COUNTER_PACKETS: &str = "netring_capture_packets_total";
 
-/// Counter name: total packets dropped due to ring exhaustion.
+/// Counter name: total packets dropped due to ring exhaustion
+/// ([`CaptureStats::drops`]).
 pub const COUNTER_DROPS: &str = "netring_capture_drops_total";
 
-/// Counter name: total ring freeze events.
+/// Counter name: total ring freeze events ([`CaptureStats::freezes`]).
 pub const COUNTER_FREEZES: &str = "netring_capture_freezes_total";
 
 /// Gauge name: cumulative packets delivered to userspace (excluding drops),
@@ -68,26 +69,32 @@ pub const GAUGE_BACKEND_ERRORS: &str = "netring_monitor_backend_errors";
 /// Gauge name: active flows in the central tracker (last event).
 pub const GAUGE_ACTIVE_FLOWS: &str = "netring_monitor_active_flows";
 
-/// Record a capture-stats delta as `metrics` counters.
+/// Publish a capture's lifetime totals as `metrics` counters.
 ///
-/// Best paired with [`crate::Capture::stats`] (which returns the delta
-/// since the last read). Calls
-/// [`metrics::counter!`](https://docs.rs/metrics/latest/metrics/macro.counter.html)
-/// three times — packets / drops / freezes — each tagged with `iface`.
+/// `totals` is what every netring stats accessor returns — totals since
+/// the source was opened (e.g. [`Capture::stats`](crate::Capture::stats)).
+/// The three counters — [`COUNTER_PACKETS`] (= [`CaptureStats::received`]),
+/// [`COUNTER_DROPS`], [`COUNTER_FREEZES`], each tagged with `iface` — are set
+/// to those **absolute** values
+/// ([`Counter::absolute`](metrics::Counter::absolute)), not incremented, so
+/// calling this on every scrape or timer tick never double counts, however
+/// often it runs.
 ///
 /// All three counters use the standard `netring_capture_*_total` naming
 /// (Prometheus convention: `_total` suffix on monotonic counters).
-pub fn record_capture_delta(iface: &str, delta: &CaptureStats) {
+pub fn record_capture_stats(iface: &str, totals: &CaptureStats) {
     let iface_label = iface.to_string();
-    metrics::counter!(COUNTER_PACKETS, "iface" => iface_label.clone())
-        .increment(delta.packets as u64);
-    metrics::counter!(COUNTER_DROPS, "iface" => iface_label.clone()).increment(delta.drops as u64);
-    metrics::counter!(COUNTER_FREEZES, "iface" => iface_label).increment(delta.freeze_count as u64);
+    metrics::counter!(COUNTER_PACKETS, "iface" => iface_label.clone()).absolute(totals.received());
+    metrics::counter!(COUNTER_DROPS, "iface" => iface_label.clone()).absolute(totals.drops);
+    metrics::counter!(COUNTER_FREEZES, "iface" => iface_label).absolute(totals.freezes);
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::collections::HashMap;
+    use std::sync::atomic::{AtomicU64, Ordering};
+    use std::sync::{Arc, Mutex};
 
     #[test]
     fn counter_names_have_total_suffix() {
@@ -100,11 +107,105 @@ mod tests {
     fn record_does_not_panic_with_no_recorder() {
         // Without a recorder installed the metrics! macros are no-ops —
         // the call should succeed regardless.
-        let delta = CaptureStats {
-            packets: 1234,
-            drops: 5,
-            freeze_count: 0,
-        };
-        record_capture_delta("test_iface", &delta);
+        record_capture_stats("test_iface", &CaptureStats::new(1234, 5, 0));
+    }
+
+    /// A counter that applies `increment` as an add and `absolute` as a
+    /// store — what a Prometheus-style recorder does.
+    #[derive(Default)]
+    struct TestCounter(AtomicU64);
+
+    impl metrics::CounterFn for TestCounter {
+        fn increment(&self, value: u64) {
+            self.0.fetch_add(value, Ordering::Relaxed);
+        }
+        fn absolute(&self, value: u64) {
+            self.0.store(value, Ordering::Relaxed);
+        }
+    }
+
+    /// Records every counter by `name{labels}`.
+    #[derive(Default)]
+    struct TestRecorder(Mutex<HashMap<String, Arc<TestCounter>>>);
+
+    impl TestRecorder {
+        fn value(&self, name: &str) -> u64 {
+            let key = format!("{name}{{iface=eth9}}");
+            self.0.lock().unwrap()[&key].0.load(Ordering::Relaxed)
+        }
+    }
+
+    impl metrics::Recorder for TestRecorder {
+        fn describe_counter(
+            &self,
+            _: metrics::KeyName,
+            _: Option<metrics::Unit>,
+            _: metrics::SharedString,
+        ) {
+        }
+        fn describe_gauge(
+            &self,
+            _: metrics::KeyName,
+            _: Option<metrics::Unit>,
+            _: metrics::SharedString,
+        ) {
+        }
+        fn describe_histogram(
+            &self,
+            _: metrics::KeyName,
+            _: Option<metrics::Unit>,
+            _: metrics::SharedString,
+        ) {
+        }
+
+        fn register_counter(
+            &self,
+            key: &metrics::Key,
+            _: &metrics::Metadata<'_>,
+        ) -> metrics::Counter {
+            let labels: Vec<String> = key
+                .labels()
+                .map(|l| format!("{}={}", l.key(), l.value()))
+                .collect();
+            let name = format!("{}{{{}}}", key.name(), labels.join(","));
+            let c = Arc::clone(self.0.lock().unwrap().entry(name).or_default());
+            metrics::Counter::from_arc(c)
+        }
+
+        fn register_gauge(&self, _: &metrics::Key, _: &metrics::Metadata<'_>) -> metrics::Gauge {
+            metrics::Gauge::noop()
+        }
+
+        fn register_histogram(
+            &self,
+            _: &metrics::Key,
+            _: &metrics::Metadata<'_>,
+        ) -> metrics::Histogram {
+            metrics::Histogram::noop()
+        }
+    }
+
+    /// #186: the totals are published as absolute values, so recording the
+    /// same totals twice (two scrapes with no traffic in between) leaves the
+    /// counters at the totals. The 0.31 `record_capture_delta` incremented,
+    /// which double counted as soon as it was fed anything but a delta.
+    #[test]
+    fn record_capture_stats_is_absolute() {
+        let rec = TestRecorder::default();
+        let totals = CaptureStats::new(1_000, 25, 2);
+        metrics::with_local_recorder(&rec, || {
+            record_capture_stats("eth9", &totals);
+            record_capture_stats("eth9", &totals);
+        });
+        assert_eq!(rec.value(COUNTER_PACKETS), 1_025, "received()");
+        assert_eq!(rec.value(COUNTER_DROPS), 25);
+        assert_eq!(rec.value(COUNTER_FREEZES), 2);
+
+        // Later totals move the counters to the new totals.
+        metrics::with_local_recorder(&rec, || {
+            record_capture_stats("eth9", &CaptureStats::new(1_500, 30, 2));
+        });
+        assert_eq!(rec.value(COUNTER_PACKETS), 1_530);
+        assert_eq!(rec.value(COUNTER_DROPS), 30);
     }
 }

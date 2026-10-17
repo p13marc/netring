@@ -19,10 +19,17 @@ use super::ipnet::IpNet;
 pub(crate) enum MatchFrag {
     /// Ethertype check at offset 12 (or 16 if VLAN-shifted).
     EthType(u16),
-    /// Marker fragment — adjusts subsequent offsets by +4 to
-    /// account for the 802.1Q VLAN tag.
+    /// "Has a VLAN tag" — the builder's `.vlan()`. The compiler splits a
+    /// chain holding it into a [`Self::VlanMeta`] chain and a
+    /// [`Self::VlanInFrame`] chain (OR blocks).
     Vlan,
-    /// VLAN ID match (low 12 bits of offset 14, post-shift).
+    /// Compiler-internal: the outer tag the kernel stripped into the skb
+    /// metadata (`SKF_AD_VLAN_TAG_PRESENT`); later loads stay unshifted.
+    VlanMeta,
+    /// Compiler-internal: no stripped tag, an 802.1Q / 802.1ad / `0x9100`
+    /// tag in the frame; later loads are shifted by +4.
+    VlanInFrame,
+    /// VLAN ID match (low 12 bits of the outermost tag's TCI).
     /// Only meaningful after [`Self::Vlan`].
     VlanId(u16),
     /// IP protocol byte match. Caller composes with `EthType`.
@@ -63,11 +70,13 @@ pub struct BpfFilterBuilder {
     pub(crate) fragments: Vec<MatchFrag>,
     pub(crate) or_branches: Vec<BpfFilterBuilder>,
     pub(crate) negated: bool,
+    pub(crate) pass_ip_fragments: bool,
 }
 
 impl BpfFilterBuilder {
-    /// Empty builder — accepts every packet (compiles to a single
-    /// `ret #65535`).
+    /// Empty builder — accepts every packet, whole (compiles to a single
+    /// `ret #4294967295`: a socket filter's return value is the number of
+    /// bytes to keep, so this never truncates).
     pub fn new() -> Self {
         Self::default()
     }
@@ -75,8 +84,13 @@ impl BpfFilterBuilder {
     // ── Ethertype / link layer ──────────────────────────────
 
     /// Match a specific ethertype. Common values:
-    /// `0x0800` (IPv4), `0x86dd` (IPv6), `0x0806` (ARP),
-    /// `0x8100` (802.1Q VLAN).
+    /// `0x0800` (IPv4), `0x86dd` (IPv6), `0x0806` (ARP).
+    ///
+    /// The EtherType is read from the frame, so `eth_type(0x8100)` matches
+    /// only a tag that is **in the frame** — on a live capture Linux strips
+    /// the outer 802.1Q / 802.1ad tag before the socket filter runs (it
+    /// matches a QinQ inner tag, or a tag sent by a device without VLAN TX
+    /// offload). Use [`vlan`](Self::vlan) to match tagged traffic.
     pub fn eth_type(mut self, ty: u16) -> Self {
         self.fragments.push(MatchFrag::EthType(ty));
         self
@@ -97,14 +111,29 @@ impl BpfFilterBuilder {
         self.eth_type(0x0806)
     }
 
-    /// Match 802.1Q VLAN-tagged traffic. Subsequent IP/L4 fragments
-    /// emit bytecode shifted by +4 bytes to step over the VLAN tag.
+    /// Match VLAN-tagged traffic — libpcap's `vlan`, outermost tag.
+    ///
+    /// On a live capture Linux strips the outer 802.1Q / 802.1ad tag before
+    /// the socket filter runs and keeps it in the packet metadata, so the
+    /// compiled program checks two cases (#208):
+    ///
+    /// - a stripped tag (`SKF_AD_VLAN_TAG_PRESENT`): the rest of the chain
+    ///   reads the frame at untagged offsets;
+    /// - no stripped tag, but an 802.1Q / 802.1ad / `0x9100` tag in the
+    ///   frame (a pcap file, a `0x9100` tag, a frame sent by a device
+    ///   without VLAN TX offload): the rest of the chain reads past it (+4).
+    ///
+    /// With a stripped tag present the in-frame case is not tried, so on a
+    /// QinQ frame `vlan` / `vlan_id` look at the outer (stripped) tag, as
+    /// libpcap does. Offline ([`BpfFilter::matches`]) only the in-frame
+    /// case can match; [`BpfFilter::matches_with`] supplies the metadata.
     pub fn vlan(mut self) -> Self {
         self.fragments.push(MatchFrag::Vlan);
         self
     }
 
-    /// Match a specific VLAN ID. Only meaningful after [`Self::vlan`].
+    /// Match a specific VLAN ID (the low 12 bits of the outermost tag's
+    /// TCI). Only meaningful after [`Self::vlan`].
     pub fn vlan_id(mut self, id: u16) -> Self {
         self.fragments.push(MatchFrag::VlanId(id));
         self
@@ -283,6 +312,26 @@ impl BpfFilterBuilder {
         self
     }
 
+    /// Let IPv4 fragments other than the first pass the **port** terms.
+    ///
+    /// Only an IPv4 datagram's first fragment carries the TCP / UDP header,
+    /// so a port check cannot judge the others; by default (libpcap's
+    /// `port` semantics) they fail it. With this flag a non-first fragment
+    /// (`frag_off & 0x1fff != 0`) skips the port check instead, while the
+    /// address-family, protocol and host / net terms still apply — what an
+    /// IP-fragment reassembler behind the filter needs: every fragment of
+    /// the datagrams it may want (#217). A first fragment is still checked
+    /// against the ports.
+    ///
+    /// Applies to the whole filter, every [`or`](Self::or) branch included.
+    /// IPv6 fragments carry a Fragment extension header the IPv6 templates
+    /// do not walk; the flag does not change them. `to_human` renders each
+    /// port term as `(port … or ip[6:2] & 0x1fff != 0)`.
+    pub fn pass_ip_fragments(mut self) -> Self {
+        self.pass_ip_fragments = true;
+        self
+    }
+
     /// Compose with another sub-filter via OR. Either branch
     /// matches independently; the compiled bytecode evaluates the
     /// branches in order and accepts the packet on the first match.
@@ -305,7 +354,7 @@ mod tests {
     fn empty_builder_compiles() {
         // The empty builder accepts every packet — see compile() docs.
         let f = BpfFilterBuilder::new().build().unwrap();
-        assert!(!f.is_empty()); // at minimum a `ret #65535`
+        assert!(!f.is_empty()); // at minimum a `ret #4294967295`
     }
 
     #[test]

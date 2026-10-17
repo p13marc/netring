@@ -26,6 +26,7 @@ use flowscope::L4Proto;
 use super::predicate::{Atom, Predicate};
 use crate::config::bpf::BpfFilter;
 use crate::config::bpf_builder::BpfFilterBuilder;
+use crate::config::bpf_compile::VLAN_TPIDS;
 use crate::protocol::{Dispatch, TrafficClass};
 
 /// Map a consumer's [`TrafficClass`] to its [`Predicate`] traffic interest
@@ -90,12 +91,14 @@ const ETH_IPV4: u16 = 0x0800;
 const ETH_IPV6: u16 = 0x86dd;
 
 /// VLAN TPIDs userspace parses through (etherparse: 802.1Q, 802.1ad, the
-/// legacy QinQ 0x9100; flowscope's ARP parser: 802.1Q). Linux strips only the
-/// *outer* 802.1Q / 802.1ad tag before packet taps, so a QinQ inner tag — or
-/// a 0x9100 one, or a tag a non-offloading NIC got in-band on transmit — is
-/// still in the frame when the socket filter runs, where every template reads
-/// at untagged offsets. Frames with one of these at the EtherType slot pass.
-const IN_FRAME_VLAN_TPIDS: [u16; 3] = [0x8100, 0x88a8, 0x9100];
+/// legacy QinQ 0x9100; flowscope's ARP parser: 802.1Q) — the compiler's
+/// [`VLAN_TPIDS`]. Linux strips only the *outer* 802.1Q / 802.1ad tag before
+/// packet taps (the cBPF `vlan` fragments read it from the metadata), so a
+/// QinQ inner tag — or a 0x9100 one, or a tag a non-offloading NIC got
+/// in-band on transmit — is still in the frame when the socket filter runs,
+/// where every template reads at untagged offsets. Frames with one of these
+/// at the EtherType slot pass.
+const IN_FRAME_VLAN_TPIDS: [u16; 3] = VLAN_TPIDS;
 
 /// How [`split_families`] lowers the IPv6 copy of a conjunction.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -110,6 +113,17 @@ enum V6Lowering {
     Coarse,
 }
 
+/// How [`compile_union`] lowers the union.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub(crate) struct KernelOpts {
+    /// Let non-first IPv4 fragments pass the port terms
+    /// ([`BpfFilterBuilder::pass_ip_fragments`]) — set when the Monitor's
+    /// IP-fragment reassembler is armed: it needs every fragment of the
+    /// datagrams it reassembles, and only the first carries the ports
+    /// (#217).
+    pub(crate) pass_ip_fragments: bool,
+}
+
 /// Compile the conservative kernel prefilter for an arbitrary set of consumer
 /// **traffic-interest** predicates (0.25 S2): the OR-union of each interest's
 /// [`kernel_approx`](Predicate::kernel_approx). Returns `None` — meaning
@@ -117,7 +131,10 @@ enum V6Lowering {
 /// interest wants everything (`Always`), or the union can't be expressed within
 /// budget. The union is a superset of every interest, so **no consumer is ever
 /// starved**, and `None` is always safe (fail-open).
-pub(crate) fn compile_union(interests: impl IntoIterator<Item = Predicate>) -> Option<BpfFilter> {
+pub(crate) fn compile_union(
+    interests: impl IntoIterator<Item = Predicate>,
+    opts: KernelOpts,
+) -> Option<BpfFilter> {
     let mut union: Option<Predicate> = None;
     for p in interests {
         let k = p.kernel_approx();
@@ -128,7 +145,7 @@ pub(crate) fn compile_union(interests: impl IntoIterator<Item = Predicate>) -> O
     }
     match union {
         Some(Predicate::Always) | None => None,
-        Some(p) => predicate_to_bpf(&p),
+        Some(p) => predicate_to_bpf(&p, opts),
     }
 }
 
@@ -136,7 +153,7 @@ pub(crate) fn compile_union(interests: impl IntoIterator<Item = Predicate>) -> O
 /// [`BpfFilter`]. `None` if the shape can't be expressed (contains a `Not`,
 /// is `Always`, exceeds [`MAX_KERNEL_CLAUSES`], or the bytecode build fails) —
 /// a safe "pass all" fallback.
-pub(crate) fn predicate_to_bpf(pred: &Predicate) -> Option<BpfFilter> {
+pub(crate) fn predicate_to_bpf(pred: &Predicate, opts: KernelOpts) -> Option<BpfFilter> {
     let dnf = to_dnf(pred, MAX_KERNEL_CLAUSES)?;
     if dnf.is_empty() {
         return None;
@@ -177,6 +194,9 @@ pub(crate) fn predicate_to_bpf(pred: &Predicate) -> Option<BpfFilter> {
         if !ok {
             return None;
         }
+    }
+    if opts.pass_ip_fragments {
+        builder = builder.pass_ip_fragments();
     }
     builder.build().ok()
 }
@@ -401,6 +421,11 @@ mod tests {
     use super::super::builder::packet;
     use super::*;
 
+    /// The union with the default lowering.
+    fn union(interests: impl IntoIterator<Item = Predicate>) -> Option<BpfFilter> {
+        compile_union(interests, KernelOpts::default())
+    }
+
     /// Build a minimal Ethernet/IPv4 frame for the given L4 proto + dst port.
     fn frame(proto: u8, dst_port: u16) -> Vec<u8> {
         let mut f = Vec::new();
@@ -441,7 +466,8 @@ mod tests {
         // Issue #20: an ARP-only interest compiles to a real cBPF filter that
         // passes ARP and sheds IP traffic — the alternative to capture-all.
         let pred = packet().arp().into_predicate();
-        let bpf = predicate_to_bpf(&pred.kernel_approx()).expect("ethertype compiles");
+        let bpf = predicate_to_bpf(&pred.kernel_approx(), KernelOpts::default())
+            .expect("ethertype compiles");
         assert!(bpf.matches(&arp_frame()), "ARP frame should pass");
         assert!(!bpf.matches(&frame(17, 53)), "UDP frame should be shed");
         assert!(!bpf.matches(&frame(6, 80)), "TCP frame should be shed");
@@ -451,7 +477,7 @@ mod tests {
     fn ethertype_unions_with_ip_interests() {
         // ARP OR (tcp/443): an ARP-watching monitor that also subscribes to
         // HTTPS captures both — not capture-all.
-        let bpf = compile_union([
+        let bpf = union([
             packet().arp().into_predicate(),
             packet().tcp().dst_port(443).into_predicate(),
         ])
@@ -465,7 +491,7 @@ mod tests {
     fn compiles_conjunction_and_matches_only_target() {
         // udp AND dst_port 53.
         let pred = packet().udp().dst_port(53).into_predicate();
-        let bpf = predicate_to_bpf(&pred.kernel_approx()).expect("compiles");
+        let bpf = predicate_to_bpf(&pred.kernel_approx(), KernelOpts::default()).expect("compiles");
         assert!(bpf.matches(&frame(17, 53)), "udp/53 should pass");
         assert!(!bpf.matches(&frame(17, 80)), "udp/80 should not pass");
         assert!(!bpf.matches(&frame(6, 53)), "tcp/53 should not pass");
@@ -474,7 +500,7 @@ mod tests {
     #[test]
     fn compiles_or_union_of_two_interests() {
         // interest A: udp/53 ; interest B: tcp/80 → union matches either.
-        let bpf = compile_union([
+        let bpf = union([
             packet().udp().dst_port(53).into_predicate(),
             packet().tcp().dst_port(80).into_predicate(),
         ])
@@ -488,7 +514,7 @@ mod tests {
     #[test]
     fn unfiltered_interest_yields_no_kernel_filter() {
         // An Always interest → union is Always → None (capture everything).
-        assert!(compile_union([packet().into_predicate()]).is_none());
+        assert!(union([packet().into_predicate()]).is_none());
     }
 
     #[test]
@@ -496,7 +522,7 @@ mod tests {
         // One narrow interest + one match-everything interest ⇒ union is
         // everything ⇒ capture all (a consumer can only widen).
         assert!(
-            compile_union([
+            union([
                 packet().tcp().dst_port(443).into_predicate(),
                 packet().into_predicate(),
             ])
@@ -508,12 +534,12 @@ mod tests {
     fn negation_falls_back_to_none() {
         // not(tcp) is kernel-pushable as a predicate but not lowerable here.
         let pred = packet().tcp().into_predicate().negate();
-        assert!(predicate_to_bpf(&pred.kernel_approx()).is_none());
+        assert!(predicate_to_bpf(&pred.kernel_approx(), KernelOpts::default()).is_none());
     }
 
     #[test]
     fn empty_interests_is_none() {
-        assert!(compile_union(Vec::<Predicate>::new()).is_none());
+        assert!(union(Vec::<Predicate>::new()).is_none());
     }
 
     /// `(port 1 or port 2) and …` repeated `pairs` times, then `and tcp`.
@@ -534,7 +560,7 @@ mod tests {
         let pred = or_pair_chain(30);
         let (tx, rx) = std::sync::mpsc::channel();
         std::thread::spawn(move || {
-            let _ = tx.send(compile_union([pred]).is_none());
+            let _ = tx.send(union([pred]).is_none());
         });
         let widened = rx
             .recv_timeout(std::time::Duration::from_secs(10))
@@ -577,7 +603,7 @@ mod tests {
         // whatever else is registered, the kernel prefilter disappears.
         let narrow = [dispatch_interest(&Dispatch::Tcp(vec![443]))];
         assert!(
-            compile_union(narrow.clone()).is_some(),
+            union(narrow.clone()).is_some(),
             "a port dispatch alone still compiles to a BPF filter"
         );
 
@@ -586,7 +612,7 @@ mod tests {
             dispatch_interest(&Dispatch::Signature(never_matches)),
         ];
         assert!(
-            compile_union(widened).is_none(),
+            union(widened).is_none(),
             "a signature in the union must collapse it to capture-all",
         );
     }
@@ -664,14 +690,15 @@ mod tests {
         f
     }
 
-    /// `frame` with VLAN tags (`tpid`, VID 100 each) inserted after the MACs,
+    /// `frame` with VLAN tags (`tpid`, VID) inserted after the MACs,
     /// outermost first — what a packet tap sees of a frame whose tags the
-    /// kernel left in the data (a QinQ inner tag, a 0x9100 tag, …).
-    fn tagged(frame: &[u8], tpids: &[u16]) -> Vec<u8> {
+    /// kernel left in the data (a QinQ inner tag, a 0x9100 tag, …), and
+    /// what userspace sees once a stripped tag was re-inserted.
+    fn tagged(frame: &[u8], tags: &[(u16, u16)]) -> Vec<u8> {
         let mut f = frame[..12].to_vec();
-        for tpid in tpids {
+        for (tpid, vid) in tags {
             f.extend_from_slice(&tpid.to_be_bytes());
-            f.extend_from_slice(&100u16.to_be_bytes());
+            f.extend_from_slice(&vid.to_be_bytes());
         }
         f.extend_from_slice(&frame[12..]);
         f
@@ -681,14 +708,38 @@ mod tests {
     /// and without a Hop-by-Hop header, TCP / UDP / ICMP / ICMPv6 (including
     /// the cross-family proto numbers userspace also accepts), a handful of
     /// well-known and ephemeral ports in both directions; each untagged and
-    /// with in-frame VLAN tags (single 802.1Q, QinQ, 0x9100).
+    /// with VLAN tags (single 802.1Q VID 100 and 300, QinQ 100 / 200,
+    /// 0x9100).
     fn frame_corpus() -> Vec<Vec<u8>> {
         let untagged = untagged_corpus();
         let mut out = untagged.clone();
-        for tpids in [&[0x8100][..], &[0x88a8, 0x8100], &[0x9100]] {
-            out.extend(untagged.iter().map(|f| tagged(f, tpids)));
+        for tags in [
+            &[(0x8100, 100)][..],
+            &[(0x8100, 300)],
+            &[(0x88a8, 100), (0x8100, 200)],
+            &[(0x9100, 100)],
+        ] {
+            out.extend(untagged.iter().map(|f| tagged(f, tags)));
         }
         out
+    }
+
+    /// What the socket filter sees of `frame` on a live capture: Linux
+    /// strips an outer 802.1Q / 802.1ad tag before packet taps run (#208)
+    /// and hands it to the filter as metadata. `None` when `frame` has no
+    /// such outer tag (the filter then sees the frame as is).
+    fn kernel_stripped(frame: &[u8]) -> Option<(Vec<u8>, crate::config::BpfAncillary)> {
+        use crate::config::{BpfAncillary, VlanProto, VlanTag};
+        let tpid = u16::from_be_bytes([frame[12], frame[13]]);
+        let proto = match tpid {
+            0x8100 => VlanProto::Dot1Q,
+            0x88a8 => VlanProto::Dot1Ad,
+            _ => return None,
+        };
+        let tci = u16::from_be_bytes([frame[14], frame[15]]);
+        let mut f = frame[..12].to_vec();
+        f.extend_from_slice(&frame[16..]);
+        Some((f, BpfAncillary::stripped(VlanTag::new(tci, proto))))
     }
 
     fn untagged_corpus() -> Vec<Vec<u8>> {
@@ -717,9 +768,12 @@ mod tests {
     }
 
     /// The prefilter's contract: a frame any interest accepts in userspace
-    /// must pass the kernel filter (`None` = no filter = passes everything).
+    /// must pass the kernel filter (`None` = no filter = passes everything)
+    /// — both when its tags reach the filter in the frame and when the
+    /// kernel stripped the outer one (the filter sees the untagged rest plus
+    /// the tag as metadata; userspace sees the re-inserted frame).
     fn assert_superset(name: &str, interests: &[Predicate]) {
-        let bpf = compile_union(interests.to_vec());
+        let bpf = union(interests.to_vec());
         assert!(
             bpf.is_some(),
             "{name}: expected a real filter, not capture-all"
@@ -739,6 +793,15 @@ mod tests {
                      drops it\n  frame: {f:02x?}\n  filter: {:?}",
                     bpf.as_ref().map(|b| b.to_human()),
                 );
+                if let Some((seen, anc)) = kernel_stripped(&f) {
+                    assert!(
+                        bpf.as_ref().is_none_or(|b| b.matches_with(&seen, &anc)),
+                        "{name}: userspace wants this frame but the kernel prefilter \
+                         drops it once the kernel stripped its outer tag\n  \
+                         frame: {f:02x?}\n  filter: {:?}",
+                        bpf.as_ref().map(|b| b.to_human()),
+                    );
+                }
             }
         }
         assert!(wanted > 0, "{name}: corpus exercises nothing");
@@ -763,6 +826,15 @@ mod tests {
             ),
             ("icmp", vec![dispatch_interest(&Dispatch::Icmp)]),
             ("tcp dst 443", vec![p(packet().tcp().dst_port(443))]),
+            ("vlan 100", vec![p(packet().vlan(100))]),
+            (
+                "vlan 100 + udp 53",
+                vec![p(packet().vlan(100).udp().port(53))],
+            ),
+            (
+                "vlan 100 or tcp 443",
+                vec![p(packet().vlan(100)), p(packet().tcp().dst_port(443))],
+            ),
             ("udp port 53", vec![p(packet().udp().port(53))]),
             ("v6 host", vec![p(packet().host(ip(V6_A)))]),
             ("tcp + v6 host", vec![p(packet().tcp().host(ip(V6_A)))]),
@@ -789,7 +861,7 @@ mod tests {
 
     #[test]
     fn ipv6_tls_and_dns_pass_including_behind_extension_headers() {
-        let bpf = compile_union([
+        let bpf = union([
             dispatch_interest(&Dispatch::Tcp(vec![443, 8443])),
             dispatch_interest(&Dispatch::Udp(vec![53])),
         ])
@@ -838,7 +910,7 @@ mod tests {
         // MAX_KERNEL_CLAUSES, so IPv6 widens to "all of ip6" — IPv4 stays
         // filtered rather than the whole prefilter collapsing to capture-all.
         let ports: Vec<u16> = (1000..1030).collect();
-        let bpf = compile_union([dispatch_interest(&Dispatch::Tcp(ports))])
+        let bpf = union([dispatch_interest(&Dispatch::Tcp(ports))])
             .expect("the coarse IPv6 lowering fits the budget");
         let (a, b) = (ip(V6_A), ip(V6_B));
         assert!(bpf.matches(&ip_frame(a, b, false, 6, 40000, 1000)));
@@ -854,8 +926,8 @@ mod tests {
     #[test]
     fn host_pins_the_family_and_keeps_the_other_one_out() {
         // A v4-host interest stays IPv4-only, a v6-host one IPv6-only.
-        let v4 = compile_union([packet().udp().src_host(ip(V4_A)).into_predicate()]).unwrap();
-        let v6 = compile_union([packet().udp().src_host(ip(V6_A)).into_predicate()]).unwrap();
+        let v4 = union([packet().udp().src_host(ip(V4_A)).into_predicate()]).unwrap();
+        let v6 = union([packet().udp().src_host(ip(V6_A)).into_predicate()]).unwrap();
         let f4 = ip_frame(ip(V4_A), ip(V4_B), false, 17, 1, 2);
         let f6 = ip_frame(ip(V6_A), ip(V6_B), false, 17, 1, 2);
         assert!(v4.matches(&f4) && !v4.matches(&f6));
@@ -866,7 +938,7 @@ mod tests {
     fn contradictory_family_clause_is_dropped_not_fatal() {
         // `host v4 and host v6` matches no frame; the other interest must still
         // get a real filter rather than a build error → capture-all.
-        let bpf = compile_union([
+        let bpf = union([
             packet().host(ip(V4_A)).host(ip(V6_A)).into_predicate(),
             packet().tcp().dst_port(443).into_predicate(),
         ])

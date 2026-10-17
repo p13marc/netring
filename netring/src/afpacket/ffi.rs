@@ -32,6 +32,7 @@ pub use libc::PACKET_FANOUT;
 pub use libc::PACKET_IGNORE_OUTGOING;
 pub use libc::PACKET_MR_PROMISC;
 pub use libc::PACKET_QDISC_BYPASS;
+pub use libc::PACKET_RESERVE;
 pub use libc::PACKET_RX_RING;
 pub use libc::PACKET_STATISTICS;
 pub use libc::PACKET_TIMESTAMP;
@@ -155,6 +156,22 @@ pub use libc::PACKET_FANOUT_FLAG_IGNORE_OUTGOING;
 pub use libc::PACKET_FANOUT_FLAG_ROLLOVER;
 pub use libc::PACKET_FANOUT_FLAG_UNIQUEID;
 
+// ── VLAN re-insertion (#209) ───────────────────────────────────────────────
+
+/// `sll_hatype` of an Ethernet device (`ARPHRD_ETHER`).
+pub const ARPHRD_ETHER: u16 = libc::ARPHRD_ETHER;
+
+/// Bytes of an 802.1Q / 802.1ad tag (TPID + TCI).
+pub const VLAN_TAG_LEN: usize = 4;
+
+/// Marker netring writes into `tpacket3_hdr.hv1.tp_padding` once it has
+/// re-inserted a packet's stripped VLAN tag into the frame, so the rewrite
+/// happens once per packet however often the packet is iterated. The kernel
+/// zeroes the field for every packet it writes (v6.12 af_packet.c
+/// `prb_run_all_ft_ops`: `ppd->hv1.tp_padding = 0;`, called from
+/// `prb_fill_curr_block` for each TPACKET_V3 packet).
+pub const NETRING_VLAN_REINSERTED: u16 = 1;
+
 // ── Packet direction (sll_pkttype) ─────────────────────────────────────────
 
 pub use libc::PACKET_BROADCAST;
@@ -202,9 +219,13 @@ mod tests {
 
     #[test]
     fn tpacket_hdr_variant1_layout() {
-        let s = size_of::<tpacket_hdr_variant1>();
-        // rxhash(4) + vlan_tci(4) + vlan_tpid(2) + padding(2) = 12
-        assert!(s >= 8, "tpacket_hdr_variant1 too small: {s}");
+        // rxhash(4) + vlan_tci(4) + vlan_tpid(2) + padding(2) = 12; the
+        // re-insertion marker lives in `tp_padding` (uapi/linux/if_packet.h).
+        assert_eq!(size_of::<tpacket_hdr_variant1>(), 12);
+        assert_eq!(offset_of!(tpacket_hdr_variant1, tp_vlan_tci), 4);
+        assert_eq!(offset_of!(tpacket_hdr_variant1, tp_vlan_tpid), 8);
+        assert_eq!(offset_of!(tpacket_hdr_variant1, tp_padding), 10);
+        assert_eq!(offset_of!(tpacket3_hdr, hv1), 28);
     }
 
     #[test]
@@ -240,6 +261,8 @@ mod tests {
         assert_eq!(PACKET_QDISC_BYPASS, 20);
         assert_eq!(PACKET_IGNORE_OUTGOING, 23);
         assert_eq!(PACKET_TIMESTAMP, 17);
+        assert_eq!(PACKET_RESERVE, 12);
+        assert_eq!(ARPHRD_ETHER, 1);
         // Busy-poll trio per asm-generic/socket.h.
         assert_eq!(SO_BUSY_POLL, 46);
         assert_eq!(SO_PREFER_BUSY_POLL, 69);

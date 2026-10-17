@@ -44,7 +44,7 @@ The async API surface. Use these as templates for the typical
 | `async_pipeline` | tokio `mpsc` pipeline with worker pool |
 | `async_signal` | Ctrl-C graceful shutdown |
 | `async_lo_dedup` | `Dedup::loopback()` for `lo` capture |
-| `async_stats_monitor` | `StreamCapture::capture_stats()` (plan 20) |
+| `async_stats_monitor` | `StreamCapture::capture_stats()` lifetime ring totals (plan 20, #186) |
 | `async_metrics` | `metrics` crate counters |
 
 ## filter/ — BPF and eBPF filtering

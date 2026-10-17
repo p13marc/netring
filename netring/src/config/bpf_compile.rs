@@ -43,9 +43,37 @@ pub(crate) const BPF_JMP_JSET_K: u16 = 0x45;
 pub(crate) const BPF_JMP_JA: u16 = 0x05;
 // `RET | K` — return constant `k` (0 = drop, non-zero = accept).
 pub(crate) const BPF_RET_K: u16 = 0x06;
+// `RET | A` — return the accumulator.
+pub(crate) const BPF_RET_A: u16 = 0x16;
+// `RET | X` — return the index register.
+pub(crate) const BPF_RET_X: u16 = 0x0e;
+// `MISC | TXA` — A = X.
+pub(crate) const BPF_MISC_TXA: u16 = 0x87;
+// `JMP | JGT | K` — pc += jt if A > k else pc += jf.
+pub(crate) const BPF_JMP_JGT_K: u16 = 0x25;
 
-/// Accept verdict. `0xFFFF` matches libpcap's default snap length.
-pub(crate) const ACCEPT_RETVAL: u32 = 0xFFFF;
+/// `SKF_AD_OFF` (`-0x1000` as `u32`): `LD | ABS` loads at `SKF_AD_OFF + n`
+/// read ancillary data instead of packet bytes (uapi/linux/filter.h).
+pub(crate) const SKF_AD_OFF: u32 = 0xFFFF_F000;
+/// `SKF_AD_VLAN_TAG`: the stripped tag's TCI (0 without one).
+pub(crate) const SKF_AD_VLAN_TAG: u32 = 44;
+/// `SKF_AD_VLAN_TAG_PRESENT`: 1 when a tag was stripped, else 0.
+pub(crate) const SKF_AD_VLAN_TAG_PRESENT: u32 = 48;
+/// `SKF_AD_VLAN_TPID`: the stripped tag's TPID (0 without one).
+pub(crate) const SKF_AD_VLAN_TPID: u32 = 60;
+
+/// VLAN TPIDs recognised as an in-frame tag: 802.1Q, 802.1ad and the legacy
+/// QinQ `0x9100` (libpcap's set). Linux strips only an outer 802.1Q /
+/// 802.1ad tag into the skb metadata; any other tag stays in the frame.
+pub(crate) const VLAN_TPIDS: [u16; 3] = [0x8100, 0x88a8, 0x9100];
+
+/// Accept verdict: the **whole packet**. A socket filter's return value is
+/// the number of bytes to keep (v6.12 net/packet/af_packet.c tpacket_rcv():
+/// `if (snaplen > res) snaplen = res;`), so libpcap's `0xFFFF` truncated
+/// every frame longer than 65535 bytes — `lo`'s 65536-byte MTU makes
+/// 65549-byte frames (#222). The snap length is a separate, explicit
+/// clamp: [`BpfFilter::with_snap_len`](super::BpfFilter::with_snap_len).
+pub(crate) const ACCEPT_RETVAL: u32 = u32::MAX;
 /// Drop verdict. The kernel discards the packet.
 #[allow(dead_code)]
 pub(crate) const DROP_RETVAL: u32 = 0;
@@ -105,12 +133,28 @@ enum L3Family {
     Ipv6,
 }
 
+/// Where a block's VLAN tag is, once its VLAN fragment is compiled.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum VlanCtx {
+    /// No VLAN fragment (yet).
+    None,
+    /// The tag the kernel stripped into the metadata.
+    Meta,
+    /// An in-frame tag at bytes 12..16.
+    InFrame,
+}
+
 /// Compiler context, carries the offset shift introduced by the
 /// VLAN marker plus the inferred L3 family for IP/L4 fragments.
 #[derive(Debug, Clone, Copy)]
 struct CompileCtx {
+    vlan: VlanCtx,
+    /// +4 behind an in-frame tag, else 0.
     vlan_offset: u8,
     l3: L3Family,
+    /// Non-first IPv4 fragments skip the port terms
+    /// ([`BpfFilterBuilder::pass_ip_fragments`]).
+    pass_ip_fragments: bool,
 }
 
 // ── Public entry point ────────────────────────────────────────
@@ -125,7 +169,10 @@ pub(crate) fn compile(builder: BpfFilterBuilder) -> Result<BpfFilter, BpfBuildEr
         fragments,
         or_branches,
         negated,
+        pass_ip_fragments,
     } = builder;
+    // A whole-filter setting, like `negate`.
+    let pass_ip_fragments = pass_ip_fragments || or_branches.iter().any(|b| b.pass_ip_fragments);
 
     // Special case: empty builder with no branches → accept-all.
     if fragments.is_empty() && or_branches.is_empty() {
@@ -146,7 +193,7 @@ pub(crate) fn compile(builder: BpfFilterBuilder) -> Result<BpfFilter, BpfBuildEr
     // Within each block, fragments use `Label::Drop` to mean "fail
     // this block"; the linker rewrites this to either the next
     // branch's start or the global Drop tail (last branch).
-    let mut chains = expand_any_of(&fragments)?;
+    let mut chains = expand_vlan(expand_any_of(&fragments)?)?;
     for branch in &or_branches {
         if branch.fragments.is_empty() {
             return Err(BpfBuildError::EmptyOr);
@@ -157,7 +204,7 @@ pub(crate) fn compile(builder: BpfFilterBuilder) -> Result<BpfFilter, BpfBuildEr
         if !branch.or_branches.is_empty() || branch.negated {
             return Err(BpfBuildError::NestedOr);
         }
-        chains.extend(expand_any_of(&branch.fragments)?);
+        chains.extend(expand_vlan(expand_any_of(&branch.fragments)?)?);
         if chains.len() > BpfFilter::MAX_INSNS {
             return Err(BpfBuildError::TooManyInstructions {
                 count: chains.len(),
@@ -166,7 +213,7 @@ pub(crate) fn compile(builder: BpfFilterBuilder) -> Result<BpfFilter, BpfBuildEr
     }
     let mut blocks: Vec<Vec<SymInsn>> = Vec::with_capacity(chains.len());
     for chain in &chains {
-        blocks.push(compile_block(chain)?);
+        blocks.push(compile_block(chain, pass_ip_fragments)?);
     }
 
     // Stitch blocks: each block's body, followed by `JA Accept`
@@ -269,9 +316,49 @@ fn expand_any_of(fragments: &[MatchFrag]) -> Result<Vec<Vec<MatchFrag>>, BpfBuil
     Ok(chains)
 }
 
-fn compile_block(fragments: &[MatchFrag]) -> Result<Vec<SymInsn>, BpfBuildError> {
+/// Split every chain holding the builder's `Vlan` into two (#208): one
+/// for a tag the kernel stripped into the packet metadata
+/// ([`MatchFrag::VlanMeta`]) and one for a tag in the frame
+/// ([`MatchFrag::VlanInFrame`]). The two become OR blocks.
+///
+/// Bounded like [`expand_any_of`]: more blocks than
+/// [`BpfFilter::MAX_INSNS`] can never load.
+fn expand_vlan(chains: Vec<Vec<MatchFrag>>) -> Result<Vec<Vec<MatchFrag>>, BpfBuildError> {
+    let has_vlan = |c: &[MatchFrag]| c.contains(&MatchFrag::Vlan);
+    let n: usize = chains.iter().map(|c| if has_vlan(c) { 2 } else { 1 }).sum();
+    if n > BpfFilter::MAX_INSNS {
+        return Err(BpfBuildError::TooManyInstructions { count: n });
+    }
+    let mut out = Vec::with_capacity(n);
+    for chain in chains {
+        if !has_vlan(&chain) {
+            out.push(chain);
+            continue;
+        }
+        for marker in [MatchFrag::VlanMeta, MatchFrag::VlanInFrame] {
+            out.push(
+                chain
+                    .iter()
+                    .map(|f| match f {
+                        MatchFrag::Vlan => marker.clone(),
+                        other => other.clone(),
+                    })
+                    .collect(),
+            );
+        }
+    }
+    Ok(out)
+}
+
+fn compile_block(
+    fragments: &[MatchFrag],
+    pass_ip_fragments: bool,
+) -> Result<Vec<SymInsn>, BpfBuildError> {
     let normalized = normalize(fragments.to_vec())?;
-    let mut ctx = infer_ctx(&normalized);
+    let mut ctx = CompileCtx {
+        pass_ip_fragments,
+        ..infer_ctx(&normalized)
+    };
     let mut sym = Vec::with_capacity(normalized.len() * 6);
     for frag in &normalized {
         compile_fragment(frag, &mut ctx, &mut sym)?;
@@ -372,21 +459,26 @@ fn normalize(fragments: Vec<MatchFrag>) -> Result<Vec<MatchFrag>, BpfBuildError>
 
     let mut out: Vec<MatchFrag> = Vec::with_capacity(fragments.len() + 2);
 
-    // VLAN bucket — must come first so the +4 offset shift is in
-    // effect when subsequent EthType/IpProto/host/port fragments
-    // emit their loads.
-    let has_vlan = fragments
+    // VLAN bucket — must come first so the +4 offset shift (in-frame
+    // tag) is in effect when subsequent EthType/IpProto/host/port
+    // fragments emit their loads.
+    let vlans: Vec<&MatchFrag> = fragments
         .iter()
-        .filter(|f| matches!(f, MatchFrag::Vlan))
-        .count();
-    if has_vlan > 1 {
+        .filter(|f| {
+            matches!(
+                f,
+                MatchFrag::Vlan | MatchFrag::VlanMeta | MatchFrag::VlanInFrame
+            )
+        })
+        .collect();
+    if vlans.len() > 1 {
         return Err(BpfBuildError::ConflictingProtocols {
             a: "vlan",
             b: "vlan (Q-in-Q not supported)",
         });
     }
-    if has_vlan == 1 {
-        out.push(MatchFrag::Vlan);
+    if let Some(v) = vlans.first() {
+        out.push((*v).clone());
     }
     // VlanId fragments come immediately after the VLAN marker so
     // the TCI load is at the right offset (14, fixed; doesn't
@@ -483,7 +575,12 @@ fn infer_ctx(fragments: &[MatchFrag]) -> CompileCtx {
     } else {
         L3Family::Ipv4
     };
-    CompileCtx { vlan_offset: 0, l3 }
+    CompileCtx {
+        vlan: VlanCtx::None,
+        vlan_offset: 0,
+        l3,
+        pass_ip_fragments: false,
+    }
 }
 
 // ── Per-fragment templates ────────────────────────────────────
@@ -495,29 +592,10 @@ fn compile_fragment(
 ) -> Result<(), BpfBuildError> {
     match frag {
         MatchFrag::EthType(t) => emit_eth_type(*t, ctx, out),
-        MatchFrag::Vlan => {
-            // Two effects: (1) ethertype check at offset 12
-            // against 0x8100, and (2) shift subsequent loads
-            // by +4 bytes for the rest of this block.
-            if ctx.vlan_offset != 0 {
-                // Q-in-Q (.vlan().vlan()) is intentionally out
-                // of scope; surface the conflict early.
-                return Err(BpfBuildError::ConflictingProtocols {
-                    a: "vlan",
-                    b: "vlan (Q-in-Q not supported)",
-                });
-            }
-            // Outer 802.1Q ethertype.
-            out.push(SymInsn::straight(BPF_LD_H_ABS, 12));
-            out.push(SymInsn::jump(
-                BPF_JMP_JEQ_K,
-                Label::Fallthrough,
-                Label::Drop,
-                0x8100,
-            ));
-            ctx.vlan_offset = 4;
-            Ok(())
-        }
+        // `compile` splits `Vlan` into the two variants below; a lone `Vlan`
+        // here (unreachable through `compile`) gets the in-frame lowering.
+        MatchFrag::Vlan | MatchFrag::VlanInFrame => emit_vlan_in_frame(ctx, out),
+        MatchFrag::VlanMeta => emit_vlan_meta(ctx, out),
         MatchFrag::VlanId(id) => emit_vlan_id(*id, ctx, out),
         MatchFrag::IpProto(p) => emit_ip_proto(*p, ctx, out),
         MatchFrag::SrcHost(IpAddr::V4(a)) => {
@@ -557,16 +635,83 @@ fn compile_fragment(
     }
 }
 
-fn emit_vlan_id(id: u16, ctx: &CompileCtx, out: &mut Vec<SymInsn>) -> Result<(), BpfBuildError> {
-    if ctx.vlan_offset == 0 {
+/// Reject a second VLAN fragment in one block (Q-in-Q).
+fn check_single_vlan(ctx: &CompileCtx) -> Result<(), BpfBuildError> {
+    if ctx.vlan != VlanCtx::None {
         return Err(BpfBuildError::ConflictingProtocols {
-            a: "vlan_id",
-            b: "<requires .vlan() earlier in the chain>",
+            a: "vlan",
+            b: "vlan (Q-in-Q not supported)",
         });
     }
-    // VLAN TCI is at offset 14 (the start of the 802.1Q tag).
-    // VLAN ID is the low 12 bits of the TCI.
-    out.push(SymInsn::straight(BPF_LD_H_ABS, 14));
+    Ok(())
+}
+
+/// The block for a tag the kernel stripped into the packet metadata:
+/// `ld [SKF_AD_OFF + SKF_AD_VLAN_TAG_PRESENT]; jeq #0 → fail`. The frame no
+/// longer holds the tag, so later loads stay at untagged offsets.
+fn emit_vlan_meta(ctx: &mut CompileCtx, out: &mut Vec<SymInsn>) -> Result<(), BpfBuildError> {
+    check_single_vlan(ctx)?;
+    out.push(SymInsn::straight(
+        BPF_LD_W_ABS,
+        SKF_AD_OFF + SKF_AD_VLAN_TAG_PRESENT,
+    ));
+    out.push(SymInsn::jump(
+        BPF_JMP_JEQ_K,
+        Label::Drop,
+        Label::Fallthrough,
+        0,
+    ));
+    ctx.vlan = VlanCtx::Meta;
+    Ok(())
+}
+
+/// The block for an in-frame tag: only when the kernel stripped none
+/// (libpcap's outermost-tag semantics — on QinQ the stripped outer tag is
+/// the one `vlan` looks at), the EtherType slot holds one of
+/// [`VLAN_TPIDS`]; later loads are shifted past the tag (+4).
+fn emit_vlan_in_frame(ctx: &mut CompileCtx, out: &mut Vec<SymInsn>) -> Result<(), BpfBuildError> {
+    check_single_vlan(ctx)?;
+    out.push(SymInsn::straight(
+        BPF_LD_W_ABS,
+        SKF_AD_OFF + SKF_AD_VLAN_TAG_PRESENT,
+    ));
+    out.push(SymInsn::jump(
+        BPF_JMP_JEQ_K,
+        Label::Fallthrough,
+        Label::Drop,
+        0,
+    ));
+    out.push(SymInsn::straight(BPF_LD_H_ABS, 12));
+    let last = VLAN_TPIDS.len() - 1;
+    for (i, tpid) in VLAN_TPIDS.iter().enumerate() {
+        // A match skips the remaining TPID checks; the last one fails the
+        // block on a mismatch.
+        let (jt, jf) = if i == last {
+            (Label::Fallthrough, Label::Drop)
+        } else {
+            (Label::SkipNextN((last - i) as u8), Label::Fallthrough)
+        };
+        out.push(SymInsn::jump(BPF_JMP_JEQ_K, jt, jf, u32::from(*tpid)));
+    }
+    ctx.vlan = VlanCtx::InFrame;
+    ctx.vlan_offset = 4;
+    Ok(())
+}
+
+fn emit_vlan_id(id: u16, ctx: &CompileCtx, out: &mut Vec<SymInsn>) -> Result<(), BpfBuildError> {
+    // VLAN ID is the low 12 bits of the TCI: from the metadata
+    // (`SKF_AD_VLAN_TAG`) or the in-frame tag at offset 14.
+    let tci = match ctx.vlan {
+        VlanCtx::Meta => SymInsn::straight(BPF_LD_W_ABS, SKF_AD_OFF + SKF_AD_VLAN_TAG),
+        VlanCtx::InFrame => SymInsn::straight(BPF_LD_H_ABS, 14),
+        VlanCtx::None => {
+            return Err(BpfBuildError::ConflictingProtocols {
+                a: "vlan_id",
+                b: "<requires .vlan() earlier in the chain>",
+            });
+        }
+    };
+    out.push(tci);
     out.push(SymInsn::straight(BPF_ALU_AND_K, 0x0FFF));
     out.push(SymInsn::jump(
         BPF_JMP_JEQ_K,
@@ -771,12 +916,23 @@ fn emit_ipv4_port(
     let ihl_off = 14u32 + u32::from(ctx.vlan_offset); // start of IPv4 header
     let l4_base = 14u32 + u32::from(ctx.vlan_offset); // bytes preceding L4 (before adding X = IHL)
 
-    // Common preamble: reject IPv4 fragments (ports valid only
-    // in the first fragment), then load IHL into X.
+    // Common preamble: a non-first IPv4 fragment (ports valid only in the
+    // first fragment) fails the term — or, with `pass_ip_fragments`, skips
+    // it: the IHL load plus the port check below (2 instructions for one
+    // direction, 4 for either). Then load IHL into X.
+    let non_first_fragment = if ctx.pass_ip_fragments {
+        let port_insns = match sd {
+            SrcDst::Src | SrcDst::Dst => 2,
+            SrcDst::Any => 4,
+        };
+        Label::SkipNextN(1 + port_insns)
+    } else {
+        Label::Drop
+    };
     out.push(SymInsn::straight(BPF_LD_H_ABS, frag_off));
     out.push(SymInsn::jump(
         BPF_JMP_JSET_K,
-        Label::Drop,
+        non_first_fragment,
         Label::Fallthrough,
         0x1FFF,
     ));
@@ -1353,5 +1509,300 @@ mod tests {
             .or(|b| b.udp())
             .or(|b| b.icmp());
         assert!(compile(b).is_ok(), "flat OR-of-AND compiles");
+    }
+
+    // ── VLAN: stripped (metadata) and in-frame tags (#208) ─────────────
+
+    use crate::config::{BpfAncillary, VlanProto, VlanTag};
+
+    fn i(code: u16, jt: u8, jf: u8, k: u32) -> BpfInsn {
+        BpfInsn { code, jt, jf, k }
+    }
+
+    /// `frame` with tags (`tpid`, `tci`) inserted after the MACs, outermost
+    /// first.
+    fn tagged(frame: &[u8], tags: &[(u16, u16)]) -> Vec<u8> {
+        let mut f = frame[..12].to_vec();
+        for (tpid, tci) in tags {
+            f.extend_from_slice(&tpid.to_be_bytes());
+            f.extend_from_slice(&tci.to_be_bytes());
+        }
+        f.extend_from_slice(&frame[12..]);
+        f
+    }
+
+    fn stripped(tci: u16) -> BpfAncillary {
+        BpfAncillary::stripped(VlanTag::new(tci, VlanProto::Dot1Q))
+    }
+
+    #[test]
+    fn vlan_id_compiles_to_a_metadata_and_an_in_frame_block() {
+        let f = BpfFilterBuilder::new().vlan().vlan_id(100).build().unwrap();
+        let present = SKF_AD_OFF + SKF_AD_VLAN_TAG_PRESENT;
+        let tci = SKF_AD_OFF + SKF_AD_VLAN_TAG;
+        assert_eq!(
+            f.instructions(),
+            &[
+                // Block 0 — the tag the kernel stripped:
+                i(BPF_LD_W_ABS, 0, 0, present), //  0
+                i(BPF_JMP_JEQ_K, 4, 0, 0),      //  1: no tag → block 1 (6)
+                i(BPF_LD_W_ABS, 0, 0, tci),     //  2
+                i(BPF_ALU_AND_K, 0, 0, 0x0fff), //  3
+                i(BPF_JMP_JEQ_K, 0, 1, 100),    //  4: else → block 1
+                i(BPF_JMP_JA, 0, 0, 9),         //  5: → accept (15)
+                // Block 1 — no stripped tag, one in the frame:
+                i(BPF_LD_W_ABS, 0, 0, present), //  6
+                i(BPF_JMP_JEQ_K, 0, 8, 0),      //  7: stripped tag → drop (16)
+                i(BPF_LD_H_ABS, 0, 0, 12),      //  8
+                i(BPF_JMP_JEQ_K, 2, 0, 0x8100), //  9
+                i(BPF_JMP_JEQ_K, 1, 0, 0x88a8), // 10
+                i(BPF_JMP_JEQ_K, 0, 4, 0x9100), // 11: not a tag → drop
+                i(BPF_LD_H_ABS, 0, 0, 14),      // 12
+                i(BPF_ALU_AND_K, 0, 0, 0x0fff), // 13
+                i(BPF_JMP_JEQ_K, 0, 1, 100),    // 14
+                // Tails:
+                i(BPF_RET_K, 0, 0, ACCEPT_RETVAL), // 15
+                i(BPF_RET_K, 0, 0, DROP_RETVAL),   // 16
+            ][..]
+        );
+    }
+
+    #[test]
+    fn vlan_metadata_block_reads_untagged_offsets() {
+        let f = BpfFilterBuilder::new()
+            .vlan()
+            .vlan_id(100)
+            .udp()
+            .dst_port(2)
+            .build()
+            .unwrap();
+        let untagged = ipv4_frame([10, 0, 0, 1], [10, 0, 0, 2]);
+        // Live capture: the kernel stripped the tag; the frame is untagged.
+        assert!(f.matches_with(&untagged, &stripped(100)));
+        assert!(
+            f.matches_with(&untagged, &stripped(0xe000 | 100)),
+            "PCP bits"
+        );
+        assert!(!f.matches_with(&untagged, &stripped(101)));
+        assert!(!f.matches_with(&untagged, &BpfAncillary::NONE));
+        // Offline / in-band tag: read past it.
+        assert!(f.matches(&tagged(&untagged, &[(0x8100, 100)])));
+        assert!(!f.matches(&tagged(&untagged, &[(0x8100, 101)])));
+        assert!(!f.matches(&untagged));
+        // 0.31 compiled only the in-frame shape: a stripped tag never matched.
+    }
+
+    #[test]
+    fn all_three_tpids_match_in_frame() {
+        let f = BpfFilterBuilder::new().vlan().vlan_id(7).build().unwrap();
+        let untagged = ipv4_frame([10, 0, 0, 1], [10, 0, 0, 2]);
+        for tpid in VLAN_TPIDS {
+            assert!(f.matches(&tagged(&untagged, &[(tpid, 7)])), "{tpid:#06x}");
+        }
+        assert!(!f.matches(&tagged(&untagged, &[(0x8a88, 7)])));
+        // Each TPID is spelled out in the in-frame block.
+        let ks: Vec<u32> = f.instructions().iter().map(|i| i.k).collect();
+        for tpid in VLAN_TPIDS {
+            assert!(ks.contains(&u32::from(tpid)));
+        }
+    }
+
+    #[test]
+    fn not_vlan_rejects_stripped_and_in_frame_tags() {
+        let f = BpfFilterBuilder::new().vlan().negate().build().unwrap();
+        let untagged = ipv4_frame([10, 0, 0, 1], [10, 0, 0, 2]);
+        assert!(f.matches(&untagged));
+        assert!(!f.matches_with(&untagged, &stripped(5)));
+        assert!(!f.matches(&tagged(&untagged, &[(0x88a8, 5)])));
+        assert_eq!(f.to_human(), "not vlan");
+    }
+
+    /// QinQ on a live capture: the kernel strips the outer tag (100) and
+    /// the inner one (200) stays in the frame. Like libpcap, `vlan` looks at
+    /// the outermost tag only.
+    #[test]
+    fn qinq_matches_the_outer_stripped_tag_only() {
+        let inner = tagged(&ipv4_frame([10, 0, 0, 1], [10, 0, 0, 2]), &[(0x8100, 200)]);
+        let outer = stripped(100);
+        let id = |v| BpfFilterBuilder::new().vlan().vlan_id(v).build().unwrap();
+        assert!(id(100).matches_with(&inner, &outer));
+        assert!(!id(200).matches_with(&inner, &outer));
+        // Offline, the same frame with both tags in-band: the outer one.
+        let both = tagged(
+            &ipv4_frame([10, 0, 0, 1], [10, 0, 0, 2]),
+            &[(0x88a8, 100), (0x8100, 200)],
+        );
+        assert!(id(100).matches(&both));
+        assert!(!id(200).matches(&both));
+        // `eth_type(0x8100)` reads the frame: it sees the inner tag.
+        let et = BpfFilterBuilder::new().eth_type(0x8100).build().unwrap();
+        assert!(et.matches_with(&inner, &outer));
+    }
+
+    #[test]
+    fn vlan_in_an_or_branch_and_a_port_set_expand_together() {
+        // (vlan && udp port {1, 2}) or tcp: 2 (vlan) × 2 (ports) + 1 blocks.
+        let f = BpfFilterBuilder::new()
+            .vlan()
+            .udp()
+            .ports([1, 2])
+            .or(|b| b.tcp())
+            .build()
+            .unwrap();
+        let udp = ipv4_frame([10, 0, 0, 1], [10, 0, 0, 2]); // udp 1 → 2
+        assert!(f.matches_with(&udp, &stripped(3)));
+        assert!(f.matches(&tagged(&udp, &[(0x8100, 3)])));
+        assert!(!f.matches(&udp), "untagged udp is not in the first branch");
+        let mut tcp = udp.clone();
+        tcp[23] = 6;
+        assert!(f.matches(&tcp));
+        assert_eq!(f.to_human(), "(vlan and udp and (port 1 or port 2)) or tcp");
+    }
+
+    #[test]
+    fn vlan_id_without_vlan_is_still_an_error() {
+        let err = compile(BpfFilterBuilder::new().vlan_id(5)).unwrap_err();
+        assert!(matches!(
+            err,
+            BpfBuildError::ConflictingProtocols { a: "vlan_id", .. }
+        ));
+        let err = compile(BpfFilterBuilder::new().vlan().vlan()).unwrap_err();
+        assert!(matches!(
+            err,
+            BpfBuildError::ConflictingProtocols { a: "vlan", .. }
+        ));
+    }
+
+    // ── pass_ip_fragments (#217) ──────────────────────────────────────
+
+    /// `ipv4_frame` (UDP 1 → 2) as a fragment: `offset8` in 8-byte units,
+    /// More Fragments set when `more`. A non-first fragment carries payload
+    /// where the ports would be.
+    fn fragment(offset8: u16, more: bool, proto: u8) -> Vec<u8> {
+        let mut f = ipv4_frame([10, 0, 0, 1], [10, 0, 0, 2]);
+        let flags = if more { 0x2000 } else { 0 };
+        f[20..22].copy_from_slice(&(flags | offset8).to_be_bytes());
+        f[23] = proto;
+        if offset8 != 0 {
+            f[34..42].copy_from_slice(&[0xab; 8]); // payload, not a UDP header
+        }
+        f
+    }
+
+    #[test]
+    fn pass_ip_fragments_lets_non_first_fragments_skip_the_port_term() {
+        let strict = BpfFilterBuilder::new().udp().dst_port(53).build().unwrap();
+        let lenient = BpfFilterBuilder::new()
+            .udp()
+            .dst_port(53)
+            .pass_ip_fragments()
+            .build()
+            .unwrap();
+        let trailing = fragment(185, false, 17);
+        assert!(!strict.matches(&trailing), "libpcap `port` sheds it");
+        assert!(lenient.matches(&trailing), "the reassembler needs it");
+        assert!(
+            lenient.matches(&fragment(185, true, 17)),
+            "a middle fragment"
+        );
+        // The protocol term still applies to a non-first fragment.
+        assert!(!lenient.matches(&fragment(185, false, 6)));
+        // A first fragment (offset 0, MF) is still checked against the port.
+        let mut first = fragment(0, true, 17);
+        assert!(!lenient.matches(&first), "dst port 2, not 53");
+        first[36..38].copy_from_slice(&53u16.to_be_bytes());
+        assert!(lenient.matches(&first));
+        // Unfragmented traffic is unchanged.
+        let plain = ipv4_frame([10, 0, 0, 1], [10, 0, 0, 2]);
+        assert_eq!(lenient.matches(&plain), strict.matches(&plain));
+    }
+
+    #[test]
+    fn pass_ip_fragments_keeps_host_terms_and_covers_every_port_form() {
+        let trailing = fragment(185, false, 17);
+        let src_host = |a: [u8; 4]| IpAddr::from(a);
+        let host_ok = BpfFilterBuilder::new()
+            .udp()
+            .src_host(src_host([10, 0, 0, 1]))
+            .port(53)
+            .pass_ip_fragments()
+            .build()
+            .unwrap();
+        assert!(host_ok.matches(&trailing));
+        let host_other = BpfFilterBuilder::new()
+            .udp()
+            .src_host(src_host([10, 0, 0, 9]))
+            .port(53)
+            .pass_ip_fragments()
+            .build()
+            .unwrap();
+        assert!(
+            !host_other.matches(&trailing),
+            "the host term still applies"
+        );
+
+        for b in [
+            BpfFilterBuilder::new().udp().src_port(53),
+            BpfFilterBuilder::new().udp().dst_port(53),
+            BpfFilterBuilder::new().udp().port(53),
+            BpfFilterBuilder::new().udp().ports([53, 5353]),
+            BpfFilterBuilder::new()
+                .tcp()
+                .dst_port(80)
+                .or(|b| b.udp().dst_port(53)),
+        ] {
+            let f = b.clone().pass_ip_fragments().build().unwrap();
+            assert!(f.matches(&trailing), "{}", f.to_human());
+            assert!(!b.build().unwrap().matches(&trailing));
+        }
+        // Set inside an `or` branch, it applies to the whole filter.
+        let f = BpfFilterBuilder::new()
+            .tcp()
+            .dst_port(80)
+            .or(|b| b.udp().dst_port(53).pass_ip_fragments())
+            .build()
+            .unwrap();
+        assert!(f.matches(&trailing));
+    }
+
+    #[test]
+    fn pass_ip_fragments_jumps_over_exactly_the_port_template() {
+        let jset_jt = |b: BpfFilterBuilder| {
+            let f = b.pass_ip_fragments().build().unwrap();
+            f.instructions()
+                .iter()
+                .find(|i| i.code == BPF_JMP_JSET_K && i.k == 0x1fff)
+                .expect("the fragment check")
+                .jt
+        };
+        // ldxb + (ldh + jeq) for one direction, ldxb + 2 × (ldh + jeq) for
+        // either.
+        assert_eq!(jset_jt(BpfFilterBuilder::new().udp().src_port(1)), 3);
+        assert_eq!(jset_jt(BpfFilterBuilder::new().udp().dst_port(1)), 3);
+        assert_eq!(jset_jt(BpfFilterBuilder::new().udp().port(1)), 5);
+    }
+
+    #[test]
+    fn pass_ip_fragments_renders_in_to_human() {
+        let f = BpfFilterBuilder::new()
+            .udp()
+            .dst_port(53)
+            .pass_ip_fragments()
+            .build()
+            .unwrap();
+        assert_eq!(
+            f.to_human(),
+            "udp and (dst port 53 or ip[6:2] & 0x1fff != 0)"
+        );
+        let f = BpfFilterBuilder::new()
+            .tcp()
+            .ports([80, 443])
+            .pass_ip_fragments()
+            .build()
+            .unwrap();
+        assert_eq!(
+            f.to_human(),
+            "tcp and ((port 80 or ip[6:2] & 0x1fff != 0) or (port 443 or ip[6:2] & 0x1fff != 0))"
+        );
     }
 }

@@ -434,11 +434,15 @@ impl<'a> Packet<'a> {
     /// RX flow hash (requires `fill_rxhash` — enabled by default).
     pub fn rxhash(&self) -> u32;
 
-    /// Raw VLAN TCI from kernel header. Check `status().vlan_valid` first.
-    pub fn vlan_tci(&self) -> u16;
+    /// The outer VLAN tag the kernel stripped (0.32; re-inserted into
+    /// `data()` by default — `status().vlan_reinserted`).
+    pub fn vlan(&self) -> Option<VlanTag>;
 
-    /// Raw VLAN TPID from kernel header. Check `status().vlan_tpid_valid` first.
-    pub fn vlan_tpid(&self) -> u16;
+    /// That tag when it is *not* in `data()`.
+    pub fn stripped_vlan(&self) -> Option<VlanTag>;
+
+    /// What the socket filter saw: `filter.matches_with(data, &anc)`.
+    pub fn bpf_ancillary(&self) -> BpfAncillary;
 
     /// Copy packet data out of the ring for long-lived storage.
     pub fn to_owned(&self) -> OwnedPacket;
@@ -470,8 +474,8 @@ impl From<Timestamp> for Duration { /* ... */ }
 /// Decoded per-packet status flags.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct PacketStatus {
-    pub truncated: bool,
-    pub losing: bool,
+    pub truncated: bool, // tp_snaplen < tp_len (0.32; V3 never sets TP_STATUS_COPY)
+    // `losing` moved to PacketBatch::losing() in 0.32: V3 reports loss per block
     pub vlan_valid: bool,
     pub vlan_tpid_valid: bool,
     pub csum_valid: bool,
@@ -514,6 +518,10 @@ impl<'a> PacketBatch<'a> {
 
     /// Whether the block was retired via timeout (partially filled).
     pub fn timed_out(&self) -> bool;
+
+    /// TP_STATUS_LOSING on the block: drops since the previous kernel
+    /// stats read (0.32).
+    pub fn losing(&self) -> bool;
 
     /// Monotonic block sequence number. Gaps indicate dropped blocks.
     pub fn seq_num(&self) -> u64;
@@ -810,13 +818,17 @@ pub enum TimestampSource {
     SysHardware,
 }
 
-/// Capture statistics. Reading resets kernel counters.
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+/// Capture statistics: totals since the source was opened (0.32, #186).
+/// Reading never resets them — AF_PACKET's destructive
+/// `PACKET_STATISTICS` reads are folded into a running total.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Hash)]
+#[non_exhaustive]
 pub struct CaptureStats {
-    pub packets: u32,
-    pub drops: u32,
-    pub freeze_count: u32,
+    pub delivered: u64, // placed in the ring (passed filter, not dropped)
+    pub drops: u64,     // passed filter, dropped for lack of ring space
+    pub freezes: u64,   // AF_PACKET only
 }
+// received() = delivered + drops; drop_ratio(); delta_since(&earlier)
 ```
 
 ### 7.4 Errors
@@ -1276,7 +1288,9 @@ while let Some(pkt) = pkts.next_packet() {
 
 9. **TX now**: frame-ring TX through `Injector` — imperfect but usable without waiting for AF_XDP.
 
-10. **Raw VLAN fields**: Users decode `vlan_tci()` / `vlan_tpid()` themselves.
+10. **VLAN tags re-inserted** (0.32): the kernel strips the outer tag before
+    the tap; the ring re-inserts it in front of the EtherType, libpcap-style
+    (`CaptureBuilder::vlan_reinsert`, default on).
 
 11. **No auto huge pages**: Users call `madvise` on `ring_ptr()` if they want THP.
 

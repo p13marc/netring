@@ -161,7 +161,7 @@ macro_rules! replay_builders {
         }
 
         /// Number of packets the upstream source has yielded so far.
-        /// Analogue of `capture_stats().packets` for offline replay.
+        /// Analogue of `capture_stats().delivered` for offline replay.
         pub fn packets_read(&self) -> u64 {
             self.replay.source.packets_yielded()
         }
@@ -244,7 +244,7 @@ where
 impl<E> crate::async_adapters::multi_source::Sealed for PcapFlowStream<E> where E: FlowExtractor {}
 
 /// A replay source for [`MultiFlowStream`](crate::MultiFlowStream)
-/// (`push_source`): no kernel ring, so `capture_stats()` is `None` and
+/// (`push_source`): no kernel ring, so `ring_stats()` is `None` and
 /// `packets_read()` counts the frames read from the file.
 impl<E> crate::async_adapters::multi_source::MultiSource<E> for PcapFlowStream<E>
 where
@@ -271,7 +271,7 @@ where
         self.replay.dedup.as_mut()
     }
 
-    fn capture_stats(&self) -> Option<Result<crate::stats::CaptureStats, Error>> {
+    fn ring_stats(&self) -> Option<Result<crate::stats::CaptureStats, Error>> {
         None
     }
 
@@ -513,7 +513,7 @@ macro_rules! pcap_l7_stream {
         }
 
         /// A replay source for the matching `Multi*Stream` fan-in
-        /// (`push_source`): no kernel ring, so `capture_stats()` is
+        /// (`push_source`): no kernel ring, so `ring_stats()` is
         /// `None` and `packets_read()` counts the frames read from the
         /// file.
         impl<E, P> crate::async_adapters::multi_source::MultiSource<E> for $name<E, P>
@@ -538,7 +538,7 @@ macro_rules! pcap_l7_stream {
                 self.replay.dedup.as_mut()
             }
 
-            fn capture_stats(&self) -> Option<Result<crate::stats::CaptureStats, Error>> {
+            fn ring_stats(&self) -> Option<Result<crate::stats::CaptureStats, Error>> {
                 None
             }
 

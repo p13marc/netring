@@ -20,6 +20,7 @@ use flowscope::extract::{FiveTuple, FiveTupleKey};
 use flowscope::{FlowExtractor, L4Proto, PacketView};
 
 use super::predicate::{FieldSource, Predicate};
+use crate::config::bpf_compile::VLAN_TPIDS;
 use crate::ctx::Ctx;
 use crate::error::Result;
 
@@ -57,12 +58,30 @@ impl std::fmt::Debug for PacketSubscription {
 /// [`FiveTuple::directional`] extraction so `key.a` is the wire source and
 /// `key.b` the destination — no orientation juggling.
 ///
-/// VLAN id is not surfaced by the extractor, so `vlan()` filters evaluate to
-/// `false` here; they are kernel-side (Phase A3) where the tag is visible.
+/// The VLAN id is the frame's outermost tag (#208): the in-frame one at
+/// bytes 12..16 (the capture re-inserts the tag the kernel stripped), else a
+/// tag reported only in [`RxMetadata::vlan`](flowscope::RxMetadata) (the
+/// kernel stripped it and it was not re-inserted; AF_XDP hardware metadata).
+/// That is what the kernel prefilter's `vlan` blocks match too.
 pub(crate) struct PacketFields {
     proto: L4Proto,
     src: SocketAddr,
     dst: SocketAddr,
+    vlan: Option<u16>,
+}
+
+/// The VLAN id of `view`'s outermost tag: in the frame, else in the
+/// metadata.
+fn outer_vlan_id(view: &PacketView<'_>) -> Option<u16> {
+    let f = view.frame;
+    if let Some(tpid) = f.get(12..14) {
+        let tpid = u16::from_be_bytes([tpid[0], tpid[1]]);
+        if VLAN_TPIDS.contains(&tpid) {
+            let tci = f.get(14..16)?;
+            return Some(u16::from_be_bytes([tci[0], tci[1]]) & 0x0fff);
+        }
+    }
+    view.rx_metadata.vlan.map(|t| t.vid())
 }
 
 impl PacketFields {
@@ -72,6 +91,7 @@ impl PacketFields {
         view: PacketView<'_>,
         extractor: &FiveTuple,
     ) -> Option<(FiveTupleKey, Self)> {
+        let vlan = outer_vlan_id(&view);
         let ex = extractor.extract(view)?;
         let key = ex.key;
         Some((
@@ -80,6 +100,7 @@ impl PacketFields {
                 proto: ex.l4.unwrap_or(key.proto),
                 src: key.a,
                 dst: key.b,
+                vlan,
             },
         ))
     }
@@ -100,6 +121,9 @@ impl FieldSource for PacketFields {
     }
     fn dst_ip(&self) -> Option<IpAddr> {
         Some(self.dst.ip())
+    }
+    fn vlan_id(&self) -> Option<u16> {
+        self.vlan
     }
 }
 
@@ -161,5 +185,53 @@ mod tests {
             Predicate::Atom(Atom::Proto(L4Proto::Udp)).and(Predicate::Atom(Atom::DstPort(53)));
         assert!(dns.eval(&fields));
         assert!(!Predicate::Atom(Atom::Proto(L4Proto::Tcp)).eval(&fields));
+    }
+
+    /// `frame` with a VLAN tag (`tpid`, `tci`) inserted after the MACs.
+    fn tag(frame: &[u8], tpid: u16, tci: u16) -> Vec<u8> {
+        let mut f = frame[..12].to_vec();
+        f.extend_from_slice(&tpid.to_be_bytes());
+        f.extend_from_slice(&tci.to_be_bytes());
+        f.extend_from_slice(&frame[12..]);
+        f
+    }
+
+    /// #208: a `vlan 100` packet sub matches a frame tagged 100 — in the
+    /// frame (re-inserted / offline) or only in the metadata — and nothing
+    /// else. It used to evaluate to `false` on every frame.
+    #[test]
+    fn vlan_sub_matches_tagged_and_metadata_only_frames() {
+        use flowscope::{RxMetadata, VlanProto, VlanTag};
+        let sub = Predicate::Atom(Atom::VlanId(100));
+        let ex = packet_field_extractor();
+        let eval = |view: PacketView<'_>| {
+            let (_k, fields) = PacketFields::extract(view, &ex).expect("udp frame extracts");
+            sub.eval(&fields)
+        };
+        let ts = flowscope::Timestamp::new(0, 0);
+        let plain = udp_frame(54321, 53);
+
+        for tpid in VLAN_TPIDS {
+            let f = tag(&plain, tpid, 0x2000 | 100); // PCP bits set
+            assert!(eval(PacketView::new(&f, ts)), "in-frame {tpid:#06x}");
+        }
+        let other = tag(&plain, 0x8100, 101);
+        assert!(!eval(PacketView::new(&other, ts)));
+        assert!(!eval(PacketView::new(&plain, ts)), "untagged");
+
+        let mut meta = RxMetadata::default();
+        meta.vlan = Some(VlanTag::new(100, VlanProto::Dot1Q));
+        assert!(
+            eval(PacketView::new(&plain, ts).with_rx_metadata(meta)),
+            "tag only in the metadata"
+        );
+        // QinQ in the frame: the outermost tag is the VLAN.
+        let qinq = tag(&tag(&plain, 0x8100, 200), 0x88a8, 100);
+        assert!(eval(PacketView::new(&qinq, ts)), "outer 802.1ad tag 100");
+        let inner_100 = tag(&tag(&plain, 0x8100, 100), 0x88a8, 300);
+        assert!(
+            !eval(PacketView::new(&inner_100, ts)),
+            "inner tag is not the VLAN"
+        );
     }
 }

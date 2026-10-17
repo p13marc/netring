@@ -663,8 +663,8 @@ where
         self.dedup.as_mut()
     }
 
-    fn capture_stats(&self) -> Option<Result<crate::stats::CaptureStats, Error>> {
-        self.cap.capture_stats()
+    fn ring_stats(&self) -> Option<Result<crate::stats::CaptureStats, Error>> {
+        self.cap.ring_stats()
     }
 
     fn packets_read(&self) -> Option<u64> {

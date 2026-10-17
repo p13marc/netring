@@ -203,10 +203,10 @@ fn live_and_replay_share_one_multi_session_stream() {
         assert_eq!(idx, 1);
         assert_eq!(m.alive_sources(), 2);
         assert!(
-            m.source(0).unwrap().capture_stats().is_some(),
+            m.source(0).unwrap().ring_stats().is_some(),
             "the live source has a kernel ring"
         );
-        assert!(m.source(idx).unwrap().capture_stats().is_none());
+        assert!(m.source(idx).unwrap().ring_stats().is_none());
         assert_eq!(m.source(idx).unwrap().packets_read(), Some(0));
 
         let deadline = tokio::time::Instant::now() + Duration::from_secs(5);

@@ -38,3 +38,32 @@ fn xdp_open_tx_only_or_skip() {
         }
     }
 }
+
+/// #213: `RssConfig::set_symmetric` on an interface without configurable
+/// RSS (a veth has no `get_rxfh`) is an error and changes nothing. Needs
+/// `CAP_NET_ADMIN` for the veth; skips without it.
+#[test]
+fn symmetric_rss_on_a_veth_is_an_error_and_changes_nothing() {
+    use netring::xdp::rss::RssConfig;
+    use std::process::Command;
+
+    let pid = std::process::id() % 100_000;
+    let (a, b) = (format!("nrr{pid}a"), format!("nrr{pid}b"));
+    let created = Command::new("ip")
+        .args(["link", "add", &a, "type", "veth", "peer", "name", &b])
+        .status()
+        .is_ok_and(|s| s.success());
+    if !created {
+        eprintln!("skipping: needs CAP_NET_ADMIN to create veth");
+        return;
+    }
+    let rss = RssConfig::new(&a);
+    let before = rss.state().map_err(|e| e.to_string());
+    let result = rss.set_symmetric();
+    let after = rss.state().map_err(|e| e.to_string());
+    let _ = Command::new("ip").args(["link", "delete", &a]).output();
+
+    let err = result.expect_err("a veth has no configurable RSS");
+    eprintln!("set_symmetric on a veth: {err}");
+    assert_eq!(before, after, "the configuration is unchanged");
+}

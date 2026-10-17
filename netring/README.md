@@ -223,7 +223,9 @@ Vocabulary: `ipv4`/`ipv6`/`arp`, `vlan`/`vlan_id`, `tcp`/`udp`/`icmp`,
 `src_host`/`dst_host`/`host`, `src_net`/`dst_net`/`net`,
 `src_port`/`dst_port`/`port`, `negate()`, `or(|b| …)`.
 `AsyncCapture::set_filter` swaps the filter atomically on a running ring;
-`BpfFilter::matches(&[u8])` runs the bytecode in pure Rust for offline testing.
+`BpfFilter::matches(&[u8])` runs the bytecode in pure Rust for offline testing,
+`matches_with(&[u8], &BpfAncillary)` with the VLAN tag the kernel stripped
+(`vlan` matches that tag or an in-frame one, like libpcap).
 
 ## Performance & scaling
 

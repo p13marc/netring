@@ -7,15 +7,24 @@
 //! (fail-closed) — same shape as the kernel verifier rejecting
 //! unknown opcodes at attach time.
 
-use super::bpf::BpfFilter;
+use super::bpf::{BpfAncillary, BpfFilter, vlan_tpid};
 use super::bpf_compile::{
-    BPF_ALU_AND_K, BPF_JMP_JA, BPF_JMP_JEQ_K, BPF_JMP_JSET_K, BPF_LD_B_ABS, BPF_LD_H_ABS,
-    BPF_LD_H_IND, BPF_LD_W_ABS, BPF_LDX_B_MSH, BPF_RET_K,
+    BPF_ALU_AND_K, BPF_JMP_JA, BPF_JMP_JEQ_K, BPF_JMP_JGT_K, BPF_JMP_JSET_K, BPF_LD_B_ABS,
+    BPF_LD_H_ABS, BPF_LD_H_IND, BPF_LD_W_ABS, BPF_LDX_B_MSH, BPF_MISC_TXA, BPF_RET_A, BPF_RET_K,
+    BPF_RET_X, SKF_AD_OFF, SKF_AD_VLAN_TAG, SKF_AD_VLAN_TAG_PRESENT, SKF_AD_VLAN_TPID,
 };
 
 impl BpfFilter {
-    /// Run this filter against `frame` in software. Returns true
-    /// iff the program would `ret #non-zero`.
+    /// Run this filter against `frame` in software, with **no** ancillary
+    /// data: every VLAN tag is taken to be in the frame — tcpdump's
+    /// semantics on a pcap file. Returns true iff the program would return
+    /// a non-zero verdict (accept). Same as
+    /// [`matches_with(frame, &BpfAncillary::NONE)`](Self::matches_with).
+    ///
+    /// On a live capture the kernel strips the outer VLAN tag before the
+    /// socket filter runs; use [`matches_with`](Self::matches_with) with
+    /// [`Packet::bpf_ancillary`](crate::Packet) to get the verdict the
+    /// kernel gave a captured packet.
     ///
     /// Out-of-bounds loads, instruction-counter overruns, and
     /// opcodes outside the supported subset return `false`
@@ -24,28 +33,64 @@ impl BpfFilter {
     /// rejects the program before it ever runs.
     ///
     /// Supported opcodes (exactly what
-    /// [`BpfFilterBuilder`](crate::config::BpfFilterBuilder)
-    /// emits, plus a few forward-compatible additions):
+    /// [`BpfFilterBuilder`](crate::config::BpfFilterBuilder) and
+    /// [`with_snap_len`](Self::with_snap_len) emit, plus a few
+    /// forward-compatible additions):
     ///
     /// - `BPF_LD | BPF_W | BPF_ABS` (0x20) — load 32-bit at offset k
     /// - `BPF_LD | BPF_H | BPF_ABS` (0x28) — load 16-bit at offset k
     /// - `BPF_LD | BPF_B | BPF_ABS` (0x30) — load 8-bit at offset k
+    /// - the same loads with `k = SKF_AD_OFF + SKF_AD_VLAN_TAG` (44),
+    ///   `SKF_AD_VLAN_TAG_PRESENT` (48) or `SKF_AD_VLAN_TPID` (60) read the
+    ///   ancillary VLAN data; any other `k ≥ SKF_AD_OFF` fails closed
     /// - `BPF_LD | BPF_H | BPF_IND` (0x48) — load 16-bit at X+k
     /// - `BPF_LDX | BPF_B | BPF_MSH` (0xb1) — X = 4 * (mem\[k\] & 0xf)
     /// - `BPF_ALU | BPF_AND | BPF_K` (0x54) — A &= k
+    /// - `BPF_MISC | BPF_TXA` (0x87) — A = X
     /// - `BPF_JMP | BPF_JEQ | BPF_K` (0x15) — pc += jt if A==k else pc += jf
+    /// - `BPF_JMP | BPF_JGT | BPF_K` (0x25) — pc += jt if A>k else pc += jf
     /// - `BPF_JMP | BPF_JSET | BPF_K` (0x45) — pc += jt if A&k!=0 else pc += jf
     /// - `BPF_JMP | BPF_JA` (0x05) — pc += k (32-bit relative)
     /// - `BPF_RET | BPF_K` (0x06) — return k (0 = drop, non-zero = accept)
+    /// - `BPF_RET | BPF_A` (0x16), `BPF_RET | BPF_X` (0x0e) — return A / X
     ///
     /// Hand-rolled programs from [`BpfFilter::new`] that use
     /// opcodes outside this set will match nothing under
     /// `matches`; the kernel remains the source of truth.
     pub fn matches(&self, frame: &[u8]) -> bool {
+        self.matches_with(frame, &BpfAncillary::NONE)
+    }
+
+    /// Run this filter the way the kernel ran it on a captured packet:
+    /// `frame` plus the ancillary data `anc` (see [`BpfAncillary`]).
+    ///
+    /// `SKF_AD_VLAN_TAG` / `_PRESENT` / `_TPID` loads read `anc.vlan`
+    /// (as the kernel's `convert_bpf_extensions` does: the TCI or 0, 1 or
+    /// 0, the TPID or 0). With [`BpfAncillary::reinserted`], packet loads
+    /// see `frame` without its bytes 12..16 — the frame the kernel's filter
+    /// ran on before the tag was put back. So for a packet `p` from a
+    /// [`Capture`](crate::Capture),
+    /// `filter.matches_with(p.data(), &p.bpf_ancillary())` is the verdict
+    /// the socket filter gave it.
+    pub fn matches_with(&self, frame: &[u8], anc: &BpfAncillary) -> bool {
+        self.verdict_with(frame, anc) != 0
+    }
+
+    /// The program's return value for `frame` with no ancillary data: what
+    /// the kernel uses as the number of bytes to capture (`0` drops).
+    /// Fail-closed paths return `0`.
+    #[cfg_attr(not(test), allow(dead_code))]
+    pub(crate) fn verdict(&self, frame: &[u8]) -> u32 {
+        self.verdict_with(frame, &BpfAncillary::NONE)
+    }
+
+    /// [`verdict`](Self::verdict) with ancillary data.
+    pub(crate) fn verdict_with(&self, frame: &[u8], anc: &BpfAncillary) -> u32 {
         let insns = self.instructions();
         if insns.is_empty() {
-            return false;
+            return 0;
         }
+        let mem = Frame::new(frame, anc);
         // cBPF programs are bounded by BPF_MAXINSNS (4096); we
         // cap iteration at 2× that to be safe against malformed
         // hand-rolled programs that loop. (Forward-only jumps
@@ -57,59 +102,66 @@ impl BpfFilter {
         let mut x: u32 = 0;
         let mut steps: usize = 0;
 
+        // Conditional jump: `jt` when `taken`, else `jf`.
+        let branch = |pc: usize, taken: bool, jt: u8, jf: u8| -> Option<usize> {
+            let off = usize::from(if taken { jt } else { jf });
+            pc.checked_add(off + 1)
+        };
+
         while steps < max_steps {
             steps += 1;
             let Some(insn) = insns.get(pc) else {
-                return false; // ran off the end without RET
+                return 0; // ran off the end without RET
             };
             match insn.code {
-                BPF_LD_W_ABS => match load_word(frame, insn.k as usize) {
+                BPF_LD_W_ABS | BPF_LD_H_ABS | BPF_LD_B_ABS if insn.k >= SKF_AD_OFF => {
+                    // Ancillary data (the kernel converts these whatever the
+                    // load size). Unknown extensions fail closed.
+                    a = match insn.k - SKF_AD_OFF {
+                        SKF_AD_VLAN_TAG => anc.vlan.map_or(0, |t| u32::from(t.tci)),
+                        SKF_AD_VLAN_TAG_PRESENT => u32::from(anc.vlan.is_some()),
+                        SKF_AD_VLAN_TPID => anc.vlan.map_or(0, |t| u32::from(vlan_tpid(t.proto))),
+                        _ => return 0,
+                    };
+                }
+                BPF_LD_W_ABS => match mem.word(insn.k as usize) {
                     Some(v) => a = v,
-                    None => return false,
+                    None => return 0,
                 },
-                BPF_LD_H_ABS => match load_half(frame, insn.k as usize) {
+                BPF_LD_H_ABS => match mem.half(insn.k as usize) {
                     Some(v) => a = u32::from(v),
-                    None => return false,
+                    None => return 0,
                 },
-                BPF_LD_B_ABS => match load_byte(frame, insn.k as usize) {
+                BPF_LD_B_ABS => match mem.byte(insn.k as usize) {
                     Some(v) => a = u32::from(v),
-                    None => return false,
+                    None => return 0,
                 },
                 BPF_LD_H_IND => {
                     let off = (x as usize).checked_add(insn.k as usize);
-                    match off.and_then(|o| load_half(frame, o)) {
+                    match off.and_then(|o| mem.half(o)) {
                         Some(v) => a = u32::from(v),
-                        None => return false,
+                        None => return 0,
                     }
                 }
-                BPF_LDX_B_MSH => match load_byte(frame, insn.k as usize) {
+                BPF_LDX_B_MSH => match mem.byte(insn.k as usize) {
                     Some(b) => x = 4 * u32::from(b & 0x0F),
-                    None => return false,
+                    None => return 0,
                 },
                 BPF_ALU_AND_K => {
                     a &= insn.k;
                 }
-                BPF_JMP_JEQ_K => {
-                    let off = if a == insn.k {
-                        usize::from(insn.jt)
-                    } else {
-                        usize::from(insn.jf)
-                    };
-                    pc = match pc.checked_add(off + 1) {
-                        Some(p) => p,
-                        None => return false,
-                    };
-                    continue;
+                BPF_MISC_TXA => {
+                    a = x;
                 }
-                BPF_JMP_JSET_K => {
-                    let off = if (a & insn.k) != 0 {
-                        usize::from(insn.jt)
-                    } else {
-                        usize::from(insn.jf)
+                BPF_JMP_JEQ_K | BPF_JMP_JGT_K | BPF_JMP_JSET_K => {
+                    let taken = match insn.code {
+                        BPF_JMP_JEQ_K => a == insn.k,
+                        BPF_JMP_JGT_K => a > insn.k,
+                        _ => (a & insn.k) != 0,
                     };
-                    pc = match pc.checked_add(off + 1) {
+                    pc = match branch(pc, taken, insn.jt, insn.jf) {
                         Some(p) => p,
-                        None => return false,
+                        None => return 0,
                     };
                     continue;
                 }
@@ -117,36 +169,72 @@ impl BpfFilter {
                     // Unconditional 32-bit relative offset (k).
                     pc = match pc.checked_add(insn.k as usize + 1) {
                         Some(p) => p,
-                        None => return false,
+                        None => return 0,
                     };
                     continue;
                 }
-                BPF_RET_K => {
-                    return insn.k != 0;
-                }
-                _ => return false, // unknown opcode → fail-closed
+                BPF_RET_K => return insn.k,
+                BPF_RET_A => return a,
+                BPF_RET_X => return x,
+                _ => return 0, // unknown opcode → fail-closed
             }
             pc += 1;
         }
-        false
+        0
     }
 }
 
-#[inline]
-fn load_word(frame: &[u8], offset: usize) -> Option<u32> {
-    let bytes = frame.get(offset..offset.checked_add(4)?)?;
-    Some(u32::from_be_bytes(bytes.try_into().ok()?))
+/// The packet bytes the filter reads: `frame` as is, or — when a stripped
+/// VLAN tag was re-inserted at bytes 12..16 — the frame without those four
+/// bytes (logical offset `o` reads `o` below 12, `o + 4` from 12 on).
+struct Frame<'a> {
+    data: &'a [u8],
+    /// Skip bytes 12..16 (the re-inserted tag).
+    skip_tag: bool,
 }
 
-#[inline]
-fn load_half(frame: &[u8], offset: usize) -> Option<u16> {
-    let bytes = frame.get(offset..offset.checked_add(2)?)?;
-    Some(u16::from_be_bytes(bytes.try_into().ok()?))
-}
+impl<'a> Frame<'a> {
+    fn new(data: &'a [u8], anc: &BpfAncillary) -> Self {
+        Self {
+            data,
+            skip_tag: anc.vlan_in_frame && anc.vlan.is_some() && data.len() >= 16,
+        }
+    }
 
-#[inline]
-fn load_byte(frame: &[u8], offset: usize) -> Option<u8> {
-    frame.get(offset).copied()
+    #[inline]
+    fn byte(&self, o: usize) -> Option<u8> {
+        if !self.skip_tag {
+            return self.data.get(o).copied();
+        }
+        let phys = if o < 12 { o } else { o.checked_add(4)? };
+        self.data.get(phys).copied()
+    }
+
+    #[inline]
+    fn half(&self, o: usize) -> Option<u16> {
+        if !self.skip_tag {
+            let b = self.data.get(o..o.checked_add(2)?)?;
+            return Some(u16::from_be_bytes([b[0], b[1]]));
+        }
+        Some(u16::from_be_bytes([
+            self.byte(o)?,
+            self.byte(o.checked_add(1)?)?,
+        ]))
+    }
+
+    #[inline]
+    fn word(&self, o: usize) -> Option<u32> {
+        if !self.skip_tag {
+            let b = self.data.get(o..o.checked_add(4)?)?;
+            return Some(u32::from_be_bytes([b[0], b[1], b[2], b[3]]));
+        }
+        Some(u32::from_be_bytes([
+            self.byte(o)?,
+            self.byte(o.checked_add(1)?)?,
+            self.byte(o.checked_add(2)?)?,
+            self.byte(o.checked_add(3)?)?,
+        ]))
+    }
 }
 
 #[cfg(test)]
@@ -199,7 +287,7 @@ mod tests {
             code: BPF_RET_K,
             jt: 0,
             jf: 0,
-            k: 0xFFFF,
+            k: u32::MAX,
         }])
         .unwrap();
         assert!(f.matches(&[0u8; 64]));
@@ -520,10 +608,175 @@ mod tests {
                 code: BPF_RET_K,
                 jt: 0,
                 jf: 0,
-                k: 0xFFFF,
+                k: u32::MAX,
             },
         ])
         .unwrap();
         assert!(!f.matches(&[0u8; 64]));
+    }
+
+    // ── Ancillary data / stripped VLAN tags (#208) ─────────────────────
+
+    use crate::config::{BpfAncillary, VlanProto, VlanTag};
+
+    fn ins(code: u16, k: u32) -> BpfInsn {
+        BpfInsn {
+            code,
+            jt: 0,
+            jf: 0,
+            k,
+        }
+    }
+
+    /// `ld [SKF_AD_OFF + ext]; ret a` — returns the ancillary word.
+    fn load_ext(ext: u32) -> Filter {
+        Filter::new(vec![ins(BPF_LD_W_ABS, SKF_AD_OFF + ext), ins(BPF_RET_A, 0)]).unwrap()
+    }
+
+    /// `frame` with a tag (`tpid`, `tci`) inserted at bytes 12..16.
+    fn reinsert(frame: &[u8], tpid: u16, tci: u16) -> Vec<u8> {
+        let mut f = frame[..12].to_vec();
+        f.extend_from_slice(&tpid.to_be_bytes());
+        f.extend_from_slice(&tci.to_be_bytes());
+        f.extend_from_slice(&frame[12..]);
+        f
+    }
+
+    #[test]
+    fn ancillary_vlan_loads_read_the_stripped_tag() {
+        let frame = synth_eth_ipv4_tcp([1, 1, 1, 1], [2, 2, 2, 2], 1234, 80);
+        let tag = VlanTag::new(0x2064, VlanProto::Dot1Ad);
+        let anc = BpfAncillary::stripped(tag);
+        assert_eq!(load_ext(SKF_AD_VLAN_TAG).verdict_with(&frame, &anc), 0x2064);
+        assert_eq!(
+            load_ext(SKF_AD_VLAN_TAG_PRESENT).verdict_with(&frame, &anc),
+            1
+        );
+        assert_eq!(
+            load_ext(SKF_AD_VLAN_TPID).verdict_with(&frame, &anc),
+            0x88a8
+        );
+        // Any load size reads the extension, as the kernel converts it.
+        let half = Filter::new(vec![
+            ins(BPF_LD_H_ABS, SKF_AD_OFF + SKF_AD_VLAN_TAG),
+            ins(BPF_RET_A, 0),
+        ])
+        .unwrap();
+        assert_eq!(half.verdict_with(&frame, &anc), 0x2064);
+        let other = BpfAncillary::stripped(VlanTag::new(5, VlanProto::Other(0x9100)));
+        assert_eq!(
+            load_ext(SKF_AD_VLAN_TPID).verdict_with(&frame, &other),
+            0x9100
+        );
+    }
+
+    #[test]
+    fn ancillary_vlan_loads_without_a_tag_are_zero() {
+        let frame = synth_eth_ipv4_tcp([1, 1, 1, 1], [2, 2, 2, 2], 1234, 80);
+        for ext in [SKF_AD_VLAN_TAG, SKF_AD_VLAN_TAG_PRESENT, SKF_AD_VLAN_TPID] {
+            assert_eq!(load_ext(ext).verdict_with(&frame, &BpfAncillary::NONE), 0);
+            assert_eq!(load_ext(ext).verdict(&frame), 0);
+        }
+    }
+
+    #[test]
+    fn unknown_ancillary_offset_fails_closed() {
+        // SKF_AD_PROTOCOL (0) and anything else netring does not model:
+        // `false`, never a guess.
+        let frame = synth_eth_ipv4_tcp([1, 1, 1, 1], [2, 2, 2, 2], 1234, 80);
+        let tag = BpfAncillary::stripped(VlanTag::new(100, VlanProto::Dot1Q));
+        for ext in [0u32, 4, 8, 40, 52, 56, 0xfff] {
+            let f =
+                Filter::new(vec![ins(BPF_LD_W_ABS, SKF_AD_OFF + ext), ins(BPF_RET_K, 1)]).unwrap();
+            assert!(!f.matches_with(&frame, &tag), "SKF_AD_OFF + {ext}");
+            assert!(!f.matches(&frame), "SKF_AD_OFF + {ext}");
+        }
+    }
+
+    #[test]
+    fn reinserted_tag_is_skipped_by_packet_loads() {
+        let untagged = synth_eth_ipv4_tcp([1, 1, 1, 1], [2, 2, 2, 2], 1234, 80);
+        let tagged = reinsert(&untagged, 0x8100, 100);
+        let anc = BpfAncillary::reinserted(VlanTag::new(100, VlanProto::Dot1Q));
+        // ldh [12] sees the inner EtherType, not the TPID.
+        let ethertype = Filter::new(vec![ins(BPF_LD_H_ABS, 12), ins(BPF_RET_A, 0)]).unwrap();
+        assert_eq!(ethertype.verdict_with(&tagged, &anc), 0x0800);
+        assert_eq!(ethertype.verdict(&tagged), 0x8100);
+        // A word straddling the hole and the IHL-relative port loads agree.
+        let tcp80 = Filter::builder().tcp().dst_port(80).build().unwrap();
+        assert!(tcp80.matches_with(&tagged, &anc));
+        assert!(!tcp80.matches(&tagged), "offline: the tag is in the frame");
+        let word = Filter::new(vec![ins(BPF_LD_W_ABS, 10), ins(BPF_RET_A, 0)]).unwrap();
+        assert_eq!(word.verdict_with(&tagged, &anc), word.verdict(&untagged));
+        // The logical frame is 4 bytes shorter.
+        let last = Filter::new(vec![
+            ins(BPF_LD_B_ABS, (untagged.len() - 1) as u32),
+            ins(BPF_RET_K, 1),
+        ])
+        .unwrap();
+        assert!(last.matches_with(&tagged, &anc));
+        let past = Filter::new(vec![
+            ins(BPF_LD_B_ABS, untagged.len() as u32),
+            ins(BPF_RET_K, 1),
+        ])
+        .unwrap();
+        assert!(!past.matches_with(&tagged, &anc));
+        assert!(past.matches(&tagged));
+    }
+
+    /// The kernel's verdict on a frame whose outer tag it stripped is the
+    /// same whether we hand the interpreter the stripped frame or the
+    /// re-inserted one.
+    #[test]
+    fn stripped_and_reinserted_agree() {
+        let filters = [
+            Filter::builder()
+                .vlan()
+                .vlan_id(100)
+                .tcp()
+                .dst_port(80)
+                .build()
+                .unwrap(),
+            Filter::builder().vlan().vlan_id(200).build().unwrap(),
+            Filter::builder().vlan().build().unwrap(),
+            Filter::builder().vlan().negate().build().unwrap(),
+            Filter::builder().tcp().dst_port(80).build().unwrap(),
+            Filter::builder()
+                .tcp()
+                .dst_port(80)
+                .or(|b| b.vlan().udp())
+                .build()
+                .unwrap(),
+            Filter::builder().eth_type(0x8100).build().unwrap(),
+        ];
+        let inner = [
+            synth_eth_ipv4_tcp([1, 1, 1, 1], [2, 2, 2, 2], 1234, 80),
+            synth_eth_ipv4_tcp([1, 1, 1, 1], [2, 2, 2, 2], 1234, 443),
+            synth_eth_ipv4_udp([1, 1, 1, 1], [2, 2, 2, 2], 1234, 53),
+            synth_vlan_eth_ipv4_tcp(200, [1, 1, 1, 1], [2, 2, 2, 2], 1234, 80), // QinQ inner
+        ];
+        let tags = [
+            VlanTag::new(100, VlanProto::Dot1Q),
+            VlanTag::new(0x2000 | 200, VlanProto::Dot1Q),
+            VlanTag::new(100, VlanProto::Dot1Ad),
+        ];
+        for f in &filters {
+            for frame in &inner {
+                for tag in tags {
+                    let tpid = vlan_tpid(tag.proto);
+                    let stripped = f.matches_with(frame, &BpfAncillary::stripped(tag));
+                    let reinserted = f.matches_with(
+                        &reinsert(frame, tpid, tag.tci),
+                        &BpfAncillary::reinserted(tag),
+                    );
+                    assert_eq!(
+                        stripped,
+                        reinserted,
+                        "{} on {frame:02x?} with {tag:?}",
+                        f.to_human()
+                    );
+                }
+            }
+        }
     }
 }

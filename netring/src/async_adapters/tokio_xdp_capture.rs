@@ -145,13 +145,14 @@ impl AsyncXdpCapture {
     }
 
     /// Unified [`CaptureStats`](crate::stats::CaptureStats) summed across all
-    /// per-queue sockets (issue #104): `packets` = received + dropped,
-    /// `drops` = `rx_dropped + rx_ring_full` — see
+    /// per-queue sockets (issue #104): totals since the capture was opened
+    /// — `delivered` = packets placed in the RX rings, `drops` =
+    /// `rx_dropped + rx_ring_full` — see
     /// [`XdpSocket::capture_stats`](crate::XdpSocket::capture_stats).
-    /// Monotonic (AF_XDP counters are not reset by a read).
+    /// Never resets (AF_XDP counters are not reset by a read).
     pub fn capture_stats(&self) -> Result<crate::stats::CaptureStats> {
         let (stats, received) = self.summed()?;
-        Ok(stats.to_capture_stats(received))
+        Ok(stats.capture_stats(received))
     }
 
     fn summed(&self) -> Result<(crate::XdpStats, u64)> {
@@ -248,14 +249,14 @@ impl AsyncXdpCapture {
         Poll::Pending
     }
 
-    /// The Monitor's `u64` counters **and** the un-collapsed
+    /// The unified [`CaptureStats`](crate::stats::CaptureStats) **and** the un-collapsed
     /// [`DropBreakdown`](crate::stats::DropBreakdown), summed across the
     /// per-queue sockets in one pass (issues #39, #183). `XDP_STATISTICS`
     /// is non-destructive, so summing is monotonic and repeatable.
     pub(crate) fn counters(
         &self,
-    ) -> Result<(crate::stats::SourceCounters, crate::stats::DropBreakdown)> {
+    ) -> Result<(crate::stats::CaptureStats, crate::stats::DropBreakdown)> {
         let (stats, received) = self.summed()?;
-        Ok((stats.counters(received), stats.into()))
+        Ok((stats.capture_stats(received), stats.into()))
     }
 }

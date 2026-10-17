@@ -259,8 +259,8 @@ let src = fanin.source(idx).unwrap();
 println!("{:?} live, {} ended, dedup dropped {:?}, {}",
     src.active_flows(), src.tracker_stats().flows_ended,
     src.dedup().map(|d| d.dropped()),
-    match (src.capture_stats(), src.packets_read()) {
-        (Some(Ok(s)), _) => format!("ring {} pkts / {} drops", s.packets, s.drops),
+    match (src.ring_stats(), src.packets_read()) {
+        (Some(Ok(s)), _) => format!("ring {} pkts / {} drops", s.delivered, s.drops),
         (None, Some(n)) => format!("file: {n} frames"),
         _ => String::new(),
     });
@@ -273,10 +273,10 @@ These accessors need only the struct bounds, so a fan-in assembled with
 ## Aggregating stats across sources
 
 ```rust
-// One snapshot, all sources summed:
+// One snapshot, all sources' lifetime totals summed:
 let agg = stream.capture_stats();
-println!("packets={} drops={} freeze={}",
-         agg.packets, agg.drops, agg.freeze_count);
+println!("delivered={} drops={} freezes={} loss={:.2}%",
+         agg.delivered, agg.drops, agg.freezes, agg.drop_ratio() * 100.0);
 
 // Per-source breakdown:
 for (label, stats) in stream.per_source_capture_stats() {
@@ -379,7 +379,7 @@ If your NIC has 4 RX queues and you spin up 16 workers with
 `FanoutMode::Cpu`, 12 of them will see zero traffic — `Cpu` routes
 by the RX CPU, and only 4 CPUs are receiving anything.
 
-**Symptom**: `capture_stats().packets` near zero on most workers.
+**Symptom**: `capture_stats().delivered` near zero on most workers.
 
 **Fix**: either reduce worker count to RX-queue count, or
 `ethtool -L eth0 combined 16` (driver permitting).

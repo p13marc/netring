@@ -109,17 +109,20 @@ fn aggregate_capture_stats_combines_per_source() {
             .expect("AsyncMultiCapture::open");
         let stream = multi.flow_stream(FiveTuple::bidirectional());
 
-        // Counts depend on whatever else talks on `lo` (and each read
-        // resets the kernel counters), so check the shape: one entry
-        // per source, each readable, and the aggregate readable too.
-        let _agg = stream.capture_stats();
-
+        // Counts depend on whatever else talks on `lo`, so check the
+        // shape: one entry per source, each readable, and the aggregate
+        // at least the sum of the per-source totals read before it (#186:
+        // every read is a lifetime total, so later reads never go back).
         let per = stream.per_source_capture_stats();
         assert_eq!(per.len(), 2);
+        let mut sum = netring::CaptureStats::default();
         for (label, stats) in per {
             assert!(label == helpers::LOOPBACK);
-            let _s = stats.expect("alive").expect("stats");
+            sum += stats.expect("alive").expect("stats");
         }
+        let agg = stream.capture_stats();
+        assert!(agg.delivered >= sum.delivered, "{agg} vs {sum}");
+        assert!(agg.drops >= sum.drops, "{agg} vs {sum}");
     });
 }
 

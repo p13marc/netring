@@ -680,10 +680,9 @@ fn afxdp_lo_capture_stats_counts_each_drop_once() {
     let raw = sock.statistics().expect("statistics");
     let cs = sock.capture_stats().expect("capture_stats");
     eprintln!("raw: {raw}; capture_stats: {cs}");
-    let (packets, drops) = (cs.packets as usize, cs.drops as usize);
+    let (delivered, drops) = (cs.delivered as usize, cs.drops as usize);
     assert!(drops >= N / 2, "the socket should have overflowed: {cs}");
     assert!(drops <= N + 256, "drops counted twice? {cs} for {N} sent");
-    let delivered = packets - drops;
     assert!(
         delivered > 0 && delivered <= 64,
         "only the 64 prefilled frames can hold packets: {cs}"
@@ -701,7 +700,7 @@ fn afxdp_lo_capture_stats_counts_each_drop_once() {
     }
     assert!(drained <= 64, "drained {drained}");
     let after = sock.capture_stats().expect("capture_stats");
-    assert!(after.packets >= cs.packets, "{after} < {cs}");
+    assert!(after.received() >= cs.received(), "{after} < {cs}");
     drop(sock);
     std::thread::sleep(Duration::from_millis(300));
 }
@@ -997,4 +996,51 @@ fn xdp_attach_netlink_fallback_keeps_and_detaches_the_link() {
         (Ok(()), true, false),
         "(attach result, attached while held, still attached after drop)"
     );
+}
+
+/// #213: the socket reports where its UMEM ended up. On `lo` (single NUMA
+/// node 0, no hugepages reserved on a CI host) a hugepage + node-0 request
+/// gets regular pages bound to node 0; `numa_auto` on a virtual interface
+/// (no NIC node) binds nothing.
+#[test]
+fn afxdp_lo_umem_placement_reports_the_binding() {
+    use netring::xdp::{Queues, XdpCapture};
+
+    wait_lo_free();
+    let sock = build_with_retry("rx socket on lo", || {
+        XdpSocket::builder()
+            .interface("lo")
+            .queue_id(0)
+            .frame_size(2048)
+            .frame_count(64)
+            .numa_node(0)
+            .build()
+    });
+    let p = sock.umem_placement();
+    assert!(!p.hugepages);
+    // `None` only where mbind is not permitted (seccomp sandbox).
+    if p.numa_node.is_none() {
+        eprintln!("mbind refused here; placement {p:?}");
+    } else {
+        assert_eq!(p.numa_node, Some(0), "{p:?}");
+    }
+    drop(sock);
+    std::thread::sleep(Duration::from_millis(300));
+
+    let cap = XdpCapture::builder()
+        .interface("lo")
+        .queues(Queues::Auto)
+        .frame_size(2048)
+        .frame_count(64)
+        .numa_auto(true)
+        .build()
+        .expect("build XdpCapture on lo");
+    let placements = cap.umem_placements();
+    assert_eq!(placements.len(), cap.socket_count());
+    assert!(
+        placements.iter().all(|p| p.numa_node.is_none()),
+        "{placements:?}"
+    );
+    drop(cap);
+    std::thread::sleep(Duration::from_millis(300));
 }

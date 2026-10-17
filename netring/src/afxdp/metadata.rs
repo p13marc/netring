@@ -17,7 +17,9 @@
 //! codes below (rather than the raw kernel `xdp_rss_hash_type` bitfield), so the
 //! Rust-side translation stays a trivial, kernel-version-independent match.
 
-use flowscope::{RssHashType, RxHash, RxMetadata, Timestamp, VlanProto, VlanTag};
+use flowscope::{RssHashType, RxHash, RxMetadata, Timestamp, VlanTag};
+
+use crate::packet::vlan_proto;
 
 bitflags::bitflags! {
     /// Per-field validity bitmask. The BPF program sets a bit only when the
@@ -127,15 +129,6 @@ fn rss_hash_type(code: u32) -> RssHashType {
     }
 }
 
-/// Map a VLAN TPID EtherType to [`VlanProto`].
-fn vlan_proto(tpid: u16) -> VlanProto {
-    match tpid {
-        0x8100 => VlanProto::Dot1Q,
-        0x88A8 => VlanProto::Dot1Ad,
-        other => VlanProto::Other(other),
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -179,7 +172,7 @@ mod tests {
         assert_eq!(h.ty, RssHashType::L4TcpIpv4);
         let v = m.vlan.expect("vlan flagged");
         assert_eq!(v.vid(), 100);
-        assert_eq!(v.proto, VlanProto::Dot1Q);
+        assert_eq!(v.proto, flowscope::VlanProto::Dot1Q);
     }
 
     #[test]
@@ -234,6 +227,7 @@ mod tests {
 
     #[test]
     fn maps_vlan_protocols() {
+        use flowscope::VlanProto;
         assert_eq!(vlan_proto(0x8100), VlanProto::Dot1Q);
         assert_eq!(vlan_proto(0x88A8), VlanProto::Dot1Ad);
         assert_eq!(vlan_proto(0x9100), VlanProto::Other(0x9100));

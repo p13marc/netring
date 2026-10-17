@@ -37,6 +37,8 @@ fn main() -> Result<(), netring::Error> {
     eprintln!("Capturing 50 matching packets... (Ctrl-C to stop early)");
 
     {
+        // Stopping after N keeps the unread rest of the current ring block: a
+        // later `packets()` loop (or `next_batch`) starts with it.
         let mut pkts = cap.packets();
         let mut seen = 0;
         while seen < 50 {

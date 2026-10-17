@@ -41,7 +41,7 @@ fn capture_stats_on_fresh_flow_stream_is_zero() {
         let stream = cap.flow_stream(FiveTuple::bidirectional());
         let stats = stream.capture_stats().expect("capture_stats");
         // Fresh `lo` capture; we haven't polled yet.
-        assert_eq!(stats.packets, 0, "no packets on a freshly-built stream");
+        assert_eq!(stats.delivered, 0, "no packets on a freshly-built stream");
         assert_eq!(stats.drops, 0);
     });
 }
@@ -81,8 +81,10 @@ fn capture_stats_survives_session_stream_conversion() {
     });
 }
 
+/// #186: `capture_stats()` returns lifetime totals, so it never goes
+/// backwards (it used to reset the kernel counters on every read).
 #[test]
-fn capture_cumulative_stats_is_monotonic() {
+fn capture_stats_is_monotonic() {
     let rt = tokio::runtime::Builder::new_current_thread()
         .enable_all()
         .build()
@@ -91,16 +93,13 @@ fn capture_cumulative_stats_is_monotonic() {
         let cap = build_async_capture();
         let stream = cap.dedup_stream(Dedup::loopback());
 
-        let a = stream
-            .capture_cumulative_stats()
-            .expect("first cumulative_stats");
+        let a = stream.capture_stats().expect("first capture_stats");
         tokio::time::sleep(Duration::from_millis(50)).await;
-        let b = stream
-            .capture_cumulative_stats()
-            .expect("second cumulative_stats");
+        let b = stream.capture_stats().expect("second capture_stats");
 
-        assert!(b.packets >= a.packets);
+        assert!(b.delivered >= a.delivered);
         assert!(b.drops >= a.drops);
+        assert_eq!(b.delta_since(&a).received(), b.received() - a.received());
     });
 }
 

@@ -22,6 +22,8 @@
 //!     writer.write_packet(&pkt)?;
 //!     n += 1;
 //! }
+//! // Packets past the 1000th stay in the ring: a later `cap.packets()`
+//! // loop starts with them.
 //! # Ok(()) }
 //! ```
 //!
@@ -313,8 +315,7 @@ mod tests {
             status: PacketStatus::default(),
             direction: PacketDirection::Host,
             rxhash: 0,
-            vlan_tci: 0,
-            vlan_tpid: 0,
+            vlan: None,
             ll_protocol: 0x0800,
             source_ll_addr: [0; 8],
             source_ll_addr_len: 0,

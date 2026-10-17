@@ -528,7 +528,11 @@ pub(crate) fn clamp_view<'a>(
 /// most every millisecond: a zero interval (valid for the pcap streams,
 /// which sweep on packet time) would panic `tokio::time::interval`.
 pub(crate) fn sweep_timer(sweep_interval: Duration) -> tokio::time::Interval {
-    tokio::time::interval(sweep_interval.max(Duration::from_millis(1)))
+    let mut timer = tokio::time::interval(sweep_interval.max(Duration::from_millis(1)));
+    // After a stall (a starved task, a stopped process) sweep once, not
+    // once per missed period: `poll_sweep` drains every ready tick.
+    timer.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+    timer
 }
 
 /// Poll the sweep timer: `true` when a sweep is due.

@@ -103,8 +103,8 @@ use crate::packet::OwnedPacket;
 /// either RX (kernel can't enqueue packets — `rx_dropped` counter rises) or TX
 /// (`send()` can never allocate a frame).
 ///
-/// Pick the mode that matches your traffic direction. For asymmetric splits or
-/// shared-UMEM setups, use [`XdpMode::Custom`].
+/// Pick the mode that matches your traffic direction. For asymmetric splits,
+/// use [`XdpMode::Custom`].
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
 #[non_exhaustive]
 pub enum XdpMode {
@@ -165,10 +165,9 @@ pub struct XdpSocketBuilder {
     frame_count: usize,
     need_wakeup: bool,
     mode: XdpMode,
-    /// Raw fd of an already-bound XDP socket whose UMEM we want to share.
-    /// `0` means "no sharing". When non-zero, build() skips
-    /// `XDP_UMEM_REG` and sets `XDP_SHARED_UMEM` in the bind flags.
-    shared_umem_fd: u32,
+    /// Fd of the socket passed to [`shared_umem`](Self::shared_umem), if
+    /// any. Shared UMEM is unsupported, so `Some` makes `validate()` fail.
+    shared_umem_fd: Option<std::os::fd::RawFd>,
     busy_poll_us: Option<u32>,
     prefer_busy_poll: Option<bool>,
     busy_poll_budget: Option<u16>,
@@ -204,7 +203,7 @@ impl Default for XdpSocketBuilder {
             frame_count: 4096,
             need_wakeup: true,
             mode: XdpMode::default(),
-            shared_umem_fd: 0,
+            shared_umem_fd: None,
             busy_poll_us: None,
             prefer_busy_poll: None,
             busy_poll_budget: None,
@@ -465,42 +464,25 @@ impl XdpSocketBuilder {
     /// Bind this socket as a secondary that **shares the UMEM** of an
     /// existing AF_XDP socket.
     ///
-    /// Pass an `AsFd` for an already-bound `XdpSocket` that owns the
-    /// UMEM you want to reuse. The kernel skips per-socket UMEM
-    /// registration and threads packets through *this* socket's RX/TX
-    /// rings while addressing the same shared frame pool.
+    /// # Not supported
     ///
-    /// # Manual partitioning
+    /// Shared UMEM is unsupported until it is redesigned:
+    /// [`validate`](Self::validate) and [`build`](Self::build) return
+    /// [`Error::Config`] when this was called.
     ///
-    /// netring does **not** synchronize allocation between the primary
-    /// and secondary sockets. Each socket's allocator hands out frame
-    /// addresses independently — if both pick the same address, the
-    /// kernel will overwrite one with the other's data. You're
-    /// responsible for partitioning the UMEM range across sockets.
-    /// The simplest scheme is: primary uses the first half, secondary
-    /// uses the second half; configure each via `frame_count` and
-    /// arrange for them to land at disjoint frame indices.
+    /// A secondary socket has to bind without any other bind flag, must not
+    /// create its own FILL / COMPLETION rings when it shares the primary's
+    /// device and queue, and must read and write the *primary's* UMEM
+    /// (`xsk_bind()`, `net/xdp/xsk.c`). The implementation shipped up to
+    /// 0.31.1 did none of that: the bind failed with `EINVAL`, or — on another
+    /// queue — the secondary received into the primary's UMEM while reading
+    /// its own private, never-registered region, and handed the kernel FILL
+    /// addresses that index frames the primary owns.
     ///
-    /// # Expert-only — prefer per-socket UMEM for multi-queue capture
-    ///
-    /// Issue #6 F1: the high-level [`XdpCapture`] gives
-    /// each per-queue socket its **own** UMEM and is the blessed multi-queue
-    /// path. Shared UMEM is a *memory* optimization with two sharp edges, so it
-    /// stays low-level and opt-in:
-    /// 1. **Manual frame-space partitioning** (above) — netring won't do it for
-    ///    you, and a mistake silently corrupts frames.
-    /// 2. **A per-CPU FILL-queue race** — when sockets on different cores share
-    ///    one UMEM, the kernel's shared `xsk_buff_pool` FILL queue can race
-    ///    ([kernel AF_XDP docs] / LKML 2025). Only share a UMEM across sockets
-    ///    you drive from a **single thread**, or accept the partitioning + FILL
-    ///    discipline yourself.
-    ///
-    /// Reach for this only to cut UMEM memory on a single-threaded multi-queue
-    /// drain; otherwise use `XdpCapture` (own UMEM per queue).
-    ///
-    /// [kernel AF_XDP docs]: https://docs.kernel.org/networking/af_xdp.html
+    /// For multi-queue capture use [`XdpCapture`], which gives each per-queue
+    /// socket its own UMEM.
     pub fn shared_umem<F: AsFd>(mut self, primary: F) -> Self {
-        self.shared_umem_fd = primary.as_fd().as_raw_fd() as u32;
+        self.shared_umem_fd = Some(primary.as_fd().as_raw_fd());
         self
     }
 
@@ -517,6 +499,12 @@ impl XdpSocketBuilder {
         }
         if self.frame_count == 0 {
             return Err(Error::Config("frame_count must be > 0".into()));
+        }
+        if let Some(fd) = self.shared_umem_fd {
+            return Err(Error::Config(format!(
+                "shared UMEM (shared_umem, primary fd {fd}) is not supported; \
+                 give each socket its own UMEM"
+            )));
         }
         Ok(iface)
     }
@@ -569,11 +557,7 @@ impl XdpSocketBuilder {
         }
 
         // 3. Register UMEM with kernel.
-        //    Skipped when this socket is binding as a XDP_SHARED_UMEM secondary —
-        //    the kernel inherits the UMEM from the primary socket fd.
-        if self.shared_umem_fd == 0 {
-            socket::register_umem(fd.as_fd(), &umem.as_reg())?;
-        }
+        socket::register_umem(fd.as_fd(), &umem.as_reg())?;
 
         // 4. Configure ring sizes (each power of 2, independent)
         let ring_size = (self.frame_count as u32).next_power_of_two();
@@ -672,22 +656,11 @@ impl XdpSocketBuilder {
         // 8. Bind to interface + queue
         // flags=0: auto-negotiate (kernel tries zero-copy, falls back to copy)
         // XDP_USE_NEED_WAKEUP enables wakeup optimization
-        // XDP_SHARED_UMEM tells the kernel to attach this socket to the
-        //   UMEM owned by `shared_umem_fd` instead of the one we registered.
         let mut bind_flags: u16 = 0;
         if self.need_wakeup {
             bind_flags |= ffi::XDP_USE_NEED_WAKEUP;
         }
-        if self.shared_umem_fd != 0 {
-            bind_flags |= ffi::XDP_SHARED_UMEM;
-        }
-        socket::bind_xdp(
-            fd.as_fd(),
-            ifindex,
-            self.queue_id,
-            bind_flags,
-            self.shared_umem_fd,
-        )?;
+        socket::bind_xdp(fd.as_fd(), ifindex, self.queue_id, bind_flags)?;
 
         // 0.25 W4 / issue #6 F2: read the bind mode. On a fast NIC the per-frame
         // copy of COPY mode dominates; the operator should know to switch to a
@@ -708,7 +681,7 @@ impl XdpSocketBuilder {
                 )
             };
             let zc = rc == 0 && opts & libc::XDP_OPTIONS_ZEROCOPY != 0;
-            if self.shared_umem_fd == 0 && !zc {
+            if !zc {
                 tracing::warn!(
                     "AF_XDP bound in COPY mode (not zero-copy); for line-rate use a \
                      native-XDP-capable driver with XdpFlags::DRV_MODE"
@@ -1044,8 +1017,7 @@ impl XdpSocket {
                     source_ll_addr_len: 0,
                 }),
                 None => {
-                    // Defense in depth: a kernel that's misbehaving (or a
-                    // shared-UMEM peer that wrote a corrupt desc) shouldn't
+                    // Defense in depth: a misbehaving kernel shouldn't
                     // panic the consumer.
                     tracing::warn!(
                         addr = desc.addr,
@@ -1351,6 +1323,26 @@ mod tests {
         // Idempotent / re-settable.
         let b = b.promiscuous(false);
         assert!(!b.promiscuous);
+    }
+
+    /// Shared UMEM is refused up front (`Error::Config`, before any syscall)
+    /// — including for a primary on fd 0, which used to mean "not shared".
+    #[test]
+    fn builder_refuses_shared_umem() {
+        let primary = std::net::UdpSocket::bind("127.0.0.1:0").unwrap();
+        for b in [
+            XdpSocketBuilder::default()
+                .interface("lo")
+                .shared_umem(&primary),
+            // fd 0
+            XdpSocketBuilder::default()
+                .interface("lo")
+                .shared_umem(std::io::stdin()),
+        ] {
+            assert!(matches!(b.validate(), Err(Error::Config(_))));
+            let err = b.build().unwrap_err();
+            assert!(matches!(err, Error::Config(_)), "{err:?}");
+        }
     }
 
     #[cfg(feature = "xdp-loader")]

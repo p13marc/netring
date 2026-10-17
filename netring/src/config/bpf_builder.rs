@@ -115,7 +115,8 @@ impl BpfFilterBuilder {
     }
 
     /// Match TCP. Defaults to IPv4 if neither `.ipv4()` nor
-    /// `.ipv6()` was called; chain after `.ipv6()` for IPv6 TCP.
+    /// `.ipv6()` was called and no IPv6 host/net is in the chain;
+    /// chain after `.ipv6()` for IPv6 TCP.
     pub fn tcp(self) -> Self {
         self.ip_proto(6)
     }
@@ -131,6 +132,13 @@ impl BpfFilterBuilder {
     }
 
     /// Match a specific source host.
+    ///
+    /// The address picks the family when neither `.ipv4()` nor
+    /// `.ipv6()` is in the chain (an IPv6 address implies `.ipv6()`).
+    /// Mixing IPv4 and IPv6 addresses, or contradicting an explicit
+    /// `.ipv4()` / `.ipv6()`, fails [`build`](Self::build) with
+    /// [`BpfBuildError::ConflictingProtocols`]. The same holds for
+    /// every host / net method.
     pub fn src_host(mut self, addr: IpAddr) -> Self {
         self.fragments.push(MatchFrag::SrcHost(addr));
         self

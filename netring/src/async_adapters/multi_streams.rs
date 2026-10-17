@@ -30,7 +30,9 @@ use flowscope::SessionEvent;
 use crate::Capture;
 use crate::async_adapters::datagram_stream::DatagramStream;
 use crate::async_adapters::flow_source::{AsyncFlowSource, DrainOutcome, SourcePacket};
-use crate::async_adapters::flow_stream::{FlowStream, clamp_now, clamp_view, current_timestamp};
+use crate::async_adapters::flow_stream::{
+    FlowStream, clamp_now, clamp_view, current_timestamp, poll_sweep, sweep_timer,
+};
 use crate::async_adapters::multi_source::MultiSource;
 use crate::async_adapters::session_stream::SessionStream;
 use crate::async_adapters::tokio_adapter::AsyncCapture;
@@ -403,9 +405,10 @@ macro_rules! multi_source_api {
         /// `Some(Ok(..))` for a live source, `Some(Err(..))` when its
         /// `getsockopt` failed, `None` for a source without a kernel
         /// ring (a replay source — see
-        /// [`MultiSource::packets_read`]). Reading resets the kernel
-        /// counters. (Before 0.31.1 `None` meant "ended"; finished
-        /// sources are now kept and report normally.)
+        /// [`MultiSource::packets_read`]). Reading resets an AF_PACKET
+        /// source's kernel counters (a delta); an AF_XDP source reports
+        /// its monotonic totals. (Before 0.31.1 `None` meant "ended";
+        /// finished sources are now kept and report normally.)
         pub fn per_source_capture_stats(
             &self,
         ) -> Vec<(String, Option<Result<CaptureStats, Error>>)> {
@@ -901,7 +904,7 @@ where
         if let Some(f) = config.idle_timeout_fn.clone() {
             tracker.set_idle_timeout_fn(move |k, l4| f(k, l4));
         }
-        let sweep = tokio::time::interval(config.tracker_config.sweep_interval);
+        let sweep = sweep_timer(config.tracker_config.sweep_interval);
         Self {
             caps: captures,
             labels,
@@ -1053,7 +1056,7 @@ where
 
             // One shared sweep timer drives idle/active timeouts on the
             // merged tracker.
-            if this.sweep.poll_tick(cx).is_ready() {
+            if poll_sweep(&mut this.sweep, cx) {
                 let now = clamp_now(current_timestamp(), &mut this.monotonic_ts);
                 for ev in this.tracker.sweep(now) {
                     this.pending.push_back(ev);
@@ -1802,6 +1805,48 @@ mod merged_tests {
                 .capture_leg_inconsistent,
             "a second, different leg for a bound direction must trip the flag",
         );
+    }
+
+    /// The merged stream's sweep timer stays armed after a tick
+    /// that ends nothing, so an idle flow ends on quiet sources.
+    #[tokio::test(flavor = "current_thread")]
+    async fn idle_flow_ends_on_quiet_sources() {
+        use crate::async_adapters::flow_stream::monotonic_tests::{
+            next_until, one_udp_datagram, quick_idle_config,
+        };
+        let config = super::super::multi_config::MultiStreamConfig {
+            tracker_config: quick_idle_config(),
+            ..Default::default()
+        };
+        let mut merged = super::MergedFlowStream::new_with_config(
+            vec![one_udp_datagram(), one_udp_datagram()],
+            vec!["a".into(), "b".into()],
+            FiveTuple::bidirectional(),
+            config,
+        );
+        next_until(&mut merged, |ev| matches!(ev, FlowEvent::Ended { .. })).await;
+    }
+
+    /// A zero `sweep_interval` is not a panic in the merged stream's
+    /// sweep timer.
+    #[tokio::test(flavor = "current_thread")]
+    async fn zero_sweep_interval_does_not_panic() {
+        use crate::async_adapters::flow_stream::monotonic_tests::{
+            next_until, one_udp_datagram, quick_idle_config,
+        };
+        let mut tracker_config = quick_idle_config();
+        tracker_config.sweep_interval = std::time::Duration::ZERO;
+        let config = super::super::multi_config::MultiStreamConfig {
+            tracker_config,
+            ..Default::default()
+        };
+        let mut merged = super::MergedFlowStream::new_with_config(
+            vec![one_udp_datagram()],
+            vec!["a".into()],
+            FiveTuple::bidirectional(),
+            config,
+        );
+        next_until(&mut merged, |ev| matches!(ev, FlowEvent::Ended { .. })).await;
     }
 }
 

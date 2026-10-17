@@ -6,16 +6,26 @@ all-features = true
 [advisories]
 version = 2
 ignore = [
-    # Two wasmtime advisories, both pulled in by yara-x for compiled-rule
+    # wasmtime advisories, all pulled in by yara-x for compiled-rule
     # execution, behind netring's opt-in `yara` feature. Re-checked
-    # 2026-09-02 against yara-x 1.20.0 (the latest), which requires
-    # wasmtime ^45.0.3 — the 1.18 → 1.20 bump moved us from wasmtime 43 to
-    # 45, but no fixed version is reachable through any published yara-x:
+    # 2026-10-17 against yara-x 1.21.0 (the latest), which still requires
+    # wasmtime ^45.0.3 — no fixed version is reachable through any published
+    # yara-x:
     #   RUSTSEC-2026-0222 fixed in 24.0.12 / 36.0.13 / 46.0.2 / 47.0.3
     #   RUSTSEC-2026-0269 fixed in 24.0.13 / 36.0.14 / 46.0.3 / 47.0.4
+    #   RUSTSEC-2026-0316 fixed in 36.0.16 / 48.0.3 / 49.0.1
+    #   RUSTSEC-2026-0327 fixed in 48.0.4 / 49.0.2
+    #   RUSTSEC-2026-0359 fixed in 48.0.6 / 49.0.3
+    #   RUSTSEC-2026-0362 fixed in 48.0.6 / 49.0.3
+    #   RUSTSEC-2026-0363 fixed in 36.0.18 / 48.0.6 / 49.0.3
     # 45.x is outside every one of those ranges. Re-check on yara-x upgrades.
     { id = "RUSTSEC-2026-0222", reason = "no reachable fixed wasmtime through yara-x; yara feature is opt-in" },
     { id = "RUSTSEC-2026-0269", reason = "no reachable fixed wasmtime through yara-x; yara feature is opt-in" },
+    { id = "RUSTSEC-2026-0316", reason = "no reachable fixed wasmtime through yara-x; yara feature is opt-in" },
+    { id = "RUSTSEC-2026-0327", reason = "no reachable fixed wasmtime through yara-x; yara feature is opt-in" },
+    { id = "RUSTSEC-2026-0359", reason = "no reachable fixed wasmtime through yara-x; yara feature is opt-in" },
+    { id = "RUSTSEC-2026-0362", reason = "no reachable fixed wasmtime through yara-x; yara feature is opt-in" },
+    { id = "RUSTSEC-2026-0363", reason = "no reachable fixed wasmtime through yara-x; yara feature is opt-in" },
     # bincode is unmaintained; pulled in by yara-x (same opt-in `yara`
     # feature). No replacement available upstream — re-check on yara-x
     # upgrades.

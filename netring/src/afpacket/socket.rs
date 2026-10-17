@@ -34,11 +34,6 @@ pub(crate) fn create_packet_socket_proto(protocol: u16) -> Result<OwnedFd, Error
     Ok(unsafe { OwnedFd::from_raw_fd(fd) })
 }
 
-/// Create an AF_PACKET raw socket with `SOCK_CLOEXEC`, bound to `ETH_P_ALL`.
-pub(crate) fn create_packet_socket() -> Result<OwnedFd, Error> {
-    create_packet_socket_proto(ffi::ETH_P_ALL as u16)
-}
-
 // ── Interface resolution ───────────────────────────────────────────────────
 
 /// Resolve an interface name to its index.
@@ -51,13 +46,15 @@ pub(crate) fn resolve_interface(name: &str) -> Result<i32, Error> {
 
 // ── setsockopt wrappers ────────────────────────────────────────────────────
 
-/// Set `PACKET_VERSION` to `TPACKET_V3`.
-pub(crate) fn set_packet_version(fd: BorrowedFd<'_>) -> Result<(), Error> {
+/// Set `PACKET_VERSION` (`ffi::TPACKET_V3_INT` for RX, `ffi::TPACKET_V2_INT`
+/// for TX). The version decides the frame-header layout the kernel reads and
+/// writes, so it must match the header type the ring code uses.
+pub(crate) fn set_packet_version(fd: BorrowedFd<'_>, version: libc::c_int) -> Result<(), Error> {
     raw_setsockopt(
         fd,
         ffi::SOL_PACKET,
         ffi::PACKET_VERSION,
-        &ffi::TPACKET_V3_INT,
+        &version,
         "PACKET_VERSION",
     )
 }
@@ -84,11 +81,22 @@ pub(crate) fn set_tx_ring(fd: BorrowedFd<'_>, req: &ffi::tpacket_req3) -> Result
     )
 }
 
-/// Bind the socket to a specific interface.
+/// Bind the socket to a specific interface, receiving every protocol
+/// (`ETH_P_ALL`). Reception starts here.
 pub(crate) fn bind_to_interface(fd: BorrowedFd<'_>, ifindex: i32) -> Result<(), Error> {
+    bind_to_interface_proto(fd, ifindex, ffi::ETH_P_ALL as u16)
+}
+
+/// Bind the socket to a specific interface and `protocol` (host order);
+/// `0` sets the interface for sending without receiving anything.
+pub(crate) fn bind_to_interface_proto(
+    fd: BorrowedFd<'_>,
+    ifindex: i32,
+    protocol: u16,
+) -> Result<(), Error> {
     let mut sll: ffi::sockaddr_ll = unsafe { std::mem::zeroed() };
     sll.sll_family = libc::AF_PACKET as u16;
-    sll.sll_protocol = (ffi::ETH_P_ALL as u16).to_be();
+    sll.sll_protocol = protocol.to_be();
     sll.sll_ifindex = ifindex;
 
     let ret = unsafe {
@@ -264,6 +272,99 @@ pub(crate) fn set_timestamp_source(
         &val,
         "PACKET_TIMESTAMP",
     )
+}
+
+/// Handle a packet socket's exceptional `poll(2)` events.
+///
+/// `POLLERR` means `sk_err` is set — `ENETDOWN` when the interface went
+/// down (packet_notifier()) or was down at bind() (packet_do_bind()). The
+/// kernel keeps reporting it on every poll until `SO_ERROR` is read, so a
+/// caller that ignores it polls in a tight loop. It is read (and so
+/// cleared) here:
+///
+/// - `ENETDOWN` with the device still registered is **transient**: the
+///   kernel re-arms the socket when the interface comes back up
+///   (NETDEV_UP), so it is logged and the read reports "no batch" — the
+///   next poll waits normally instead of spinning.
+/// - `ENETDOWN` after the device was unregistered (`getsockname` reports
+///   ifindex -1) is permanent and returned, like any other socket error.
+///   An interface deleted while already down raises no new `POLLERR` (the
+///   socket was no longer running), so an idle poll checks the binding too.
+///
+/// `POLLHUP` / `POLLNVAL` are errors too.
+pub(crate) fn poll_error(
+    fd: BorrowedFd<'_>,
+    revents: Option<nix::poll::PollFlags>,
+) -> Result<(), Error> {
+    use nix::poll::PollFlags;
+
+    let Some(revents) = revents.filter(|r| !r.is_empty()) else {
+        // Nothing happened on this socket (timeout, or a stop wake-up).
+        return if bound_ifindex(fd)? < 0 {
+            Err(Error::Io(std::io::Error::from_raw_os_error(libc::ENETDOWN)))
+        } else {
+            Ok(())
+        };
+    };
+    if revents.contains(PollFlags::POLLNVAL) {
+        return Err(Error::Io(std::io::Error::from_raw_os_error(libc::EBADF)));
+    }
+    if revents.contains(PollFlags::POLLERR) {
+        let err = take_socket_error(fd)?;
+        if err == libc::ENETDOWN && bound_ifindex(fd)? >= 0 {
+            tracing::warn!("capture interface is down; waiting for it to come back up");
+        } else if err != 0 {
+            return Err(Error::Io(std::io::Error::from_raw_os_error(err)));
+        }
+    }
+    if revents.contains(PollFlags::POLLHUP) {
+        return Err(Error::Io(std::io::Error::other("hangup on packet socket")));
+    }
+    Ok(())
+}
+
+/// The ifindex a packet socket is bound to: -1 once the device was
+/// unregistered (packet_notifier() resets it), as packet_getname() reports.
+fn bound_ifindex(fd: BorrowedFd<'_>) -> Result<i32, Error> {
+    // SAFETY: zeroed sockaddr_ll is a valid out-buffer for getsockname.
+    let mut sll: libc::sockaddr_ll = unsafe { std::mem::zeroed() };
+    let mut len = std::mem::size_of::<libc::sockaddr_ll>() as libc::socklen_t;
+    // SAFETY: fd is valid; `sll` / `len` describe a sockaddr_ll-sized buffer.
+    let ret = unsafe {
+        libc::getsockname(
+            fd.as_raw_fd(),
+            (&mut sll as *mut libc::sockaddr_ll).cast(),
+            &mut len,
+        )
+    };
+    if ret == -1 {
+        return Err(Error::Socket(std::io::Error::last_os_error()));
+    }
+    Ok(sll.sll_ifindex)
+}
+
+/// Read and clear the socket's pending error (`SO_ERROR`).
+fn take_socket_error(fd: BorrowedFd<'_>) -> Result<libc::c_int, Error> {
+    let mut err: libc::c_int = 0;
+    let mut len = std::mem::size_of::<libc::c_int>() as libc::socklen_t;
+    // SAFETY: fd is valid; `err` / `len` are an int-sized out-buffer.
+    let ret = unsafe {
+        libc::getsockopt(
+            fd.as_raw_fd(),
+            libc::SOL_SOCKET,
+            libc::SO_ERROR,
+            (&mut err as *mut libc::c_int).cast(),
+            &mut len,
+        )
+    };
+    if ret == -1 {
+        Err(Error::SockOpt {
+            option: "SO_ERROR",
+            source: std::io::Error::last_os_error(),
+        })
+    } else {
+        Ok(err)
+    }
 }
 
 /// Get `PACKET_STATISTICS` (tpacket_stats_v3). Resets kernel counters.

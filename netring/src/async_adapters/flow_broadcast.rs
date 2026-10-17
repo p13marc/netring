@@ -123,7 +123,8 @@ where
 {
     /// Convert this stream into a broadcast handle. `buffer` is the
     /// per-subscriber lag tolerance — a slow subscriber missing this
-    /// many events gets a [`BroadcastRecvError::Lagged`].
+    /// many events gets a [`BroadcastRecvError::Lagged`]. At least 1
+    /// (`0` is taken as `1`).
     ///
     /// Internally spawns a tokio task that drains the underlying
     /// capture and re-publishes events to the broadcast channel. The
@@ -136,7 +137,8 @@ where
     pub fn broadcast(self, buffer: usize) -> FlowBroadcast<E::Key> {
         // Use the futures_core trait + the local poll_fn pattern.
         // We don't pull `futures` to keep the dep tree thin.
-        let (sender, _initial_rx) = broadcast::channel(buffer);
+        // tokio's broadcast channel panics on a zero capacity.
+        let (sender, _initial_rx) = broadcast::channel(buffer.max(1));
         let publisher = sender.clone();
         let task = tokio::spawn(async move {
             let mut stream = self;
@@ -239,6 +241,49 @@ mod tests {
         // subscribers see independent streams — is what matters.)
         assert!(count_a > 0, "subscriber A saw no events");
         assert!(count_b > 0, "subscriber B saw no events");
+    }
+
+    /// A source that never has a packet, behind a real (never readable)
+    /// fd so `AsyncCapture` can register it.
+    struct Idle(std::os::unix::net::UnixDatagram);
+
+    impl std::os::unix::io::AsFd for Idle {
+        fn as_fd(&self) -> std::os::unix::io::BorrowedFd<'_> {
+            self.0.as_fd()
+        }
+    }
+
+    impl std::os::unix::io::AsRawFd for Idle {
+        fn as_raw_fd(&self) -> std::os::unix::io::RawFd {
+            self.0.as_raw_fd()
+        }
+    }
+
+    impl PacketSource for Idle {
+        fn next_batch(&mut self) -> Option<crate::packet::PacketBatch<'_>> {
+            None
+        }
+        fn next_batch_blocking(
+            &mut self,
+            _: std::time::Duration,
+        ) -> Result<Option<crate::packet::PacketBatch<'_>>, crate::error::Error> {
+            Ok(None)
+        }
+        fn stats(&self) -> Result<crate::stats::CaptureStats, crate::error::Error> {
+            Ok(Default::default())
+        }
+    }
+
+    /// `broadcast(0)` is a one-event buffer, not a panic.
+    #[tokio::test(flavor = "current_thread")]
+    async fn zero_buffer_does_not_panic() {
+        let (a, _b) = std::os::unix::net::UnixDatagram::pair().unwrap();
+        let cap = crate::AsyncCapture::new(Idle(a)).unwrap();
+        let bc = cap
+            .flow_stream(flowscope::extract::FiveTuple::bidirectional())
+            .broadcast(0);
+        let _sub = bc.subscribe();
+        assert_eq!(bc.receiver_count(), 1);
     }
 
     #[test]

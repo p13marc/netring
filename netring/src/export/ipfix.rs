@@ -29,6 +29,13 @@
 //!   counts (IE 85/86) carry initiator + responder. A collector that wants
 //!   per-direction (biflow, RFC 5103) responder counts needs a reverse-IE
 //!   template — out of scope for the default templates.
+//! - The delta counts are **since the flow's previous record**: a flow
+//!   exported on the active timeout
+//!   ([`MonitorBuilder::export_active_timeout`](crate::monitor::MonitorBuilder::export_active_timeout))
+//!   reports only what is new in each interim and final record, so a
+//!   collector summing deltas gets the flow's total; IE 85/86 stay running
+//!   totals. The exporter keeps the last exported counters of each ongoing
+//!   flow until its final record (an hour without a record drops them).
 //! - `tcpControlBits` (IE 6) is emitted as `0`: flowscope's `FlowStats` does
 //!   not accumulate per-flow TCP control flags, so there is no source to fill
 //!   it (a flowscope dependency, not a netring gap). The IE stays in the
@@ -50,8 +57,9 @@
 //! [RFC 7011]: https://www.rfc-editor.org/rfc/rfc7011
 //! [issue #33]: https://github.com/p13marc/netring/issues/33
 
+use std::collections::HashMap;
 use std::io::Write;
-use std::net::IpAddr;
+use std::net::{IpAddr, SocketAddr};
 
 use flowscope::event::EndReason;
 use flowscope::ipfix::wire::{
@@ -72,18 +80,10 @@ fn flow_end_reason(reason: Option<EndReason>) -> FlowEndReason {
     }
 }
 
-/// L4 protocol number for the IP `protocolIdentifier` field.
+/// L4 protocol number for the IP `protocolIdentifier` field — flowscope's
+/// own mapping, which covers SCTP (132) and `Other(n)` (`n`) too.
 fn protocol_number(proto: flowscope::L4Proto) -> u8 {
-    use flowscope::L4Proto::*;
-    match proto {
-        Tcp => 6,
-        Udp => 17,
-        Icmp => 1,
-        IcmpV6 => 58,
-        // Unknown / future variants: 0 (HOPOPT / reserved) is the least
-        // wrong choice for "no specific protocol".
-        _ => 0,
-    }
+    proto.as_u8()
 }
 
 /// Milliseconds since the Unix epoch for a flowscope `Timestamp`.
@@ -159,6 +159,11 @@ impl FlowRecord {
     }
 }
 
+/// The flow a record belongs to.
+fn flow_id(record: &FlowRecord) -> FlowId {
+    (record.proto, record.a, record.b, record.start)
+}
+
 /// The flowscope template ID for a record, chosen by IP family.
 fn template_id(record: &FlowRecord) -> u16 {
     match record.a.ip() {
@@ -166,6 +171,37 @@ fn template_id(record: &FlowRecord) -> u16 {
         IpAddr::V6(_) => TEMPLATE_ID_FLOW_IPV6,
     }
 }
+
+/// One flow across its records: the tuple and its start (a later flow on
+/// the same tuple starts afresh).
+type FlowId = (
+    flowscope::L4Proto,
+    SocketAddr,
+    SocketAddr,
+    flowscope::Timestamp,
+);
+
+/// The counters an ongoing flow's last exported (active-timeout) record
+/// carried — the baseline of its next delta counts.
+#[derive(Debug, Clone, Copy)]
+struct Exported {
+    bytes_initiator: u64,
+    bytes_responder: u64,
+    packets_initiator: u64,
+    packets_responder: u64,
+    /// The record's `end`, to forget flows that never get a final record.
+    at: flowscope::Timestamp,
+}
+
+/// A baseline not refreshed for this long (record time) is dropped — its
+/// flow is long gone without a final record. A floor: the threshold also
+/// grows to 3× the longest interval seen between two records of a flow,
+/// so a long active timeout keeps its baselines. (Final records remove
+/// theirs, so this only catches flows that never got one.)
+const BASELINE_STALE: std::time::Duration = std::time::Duration::from_secs(24 * 3600);
+
+/// Baselines kept before the first stale-entry sweep.
+const BASELINE_PRUNE_MIN: usize = 1024;
 
 /// An IPFIX flow exporter. See the [module docs](self).
 pub struct IpfixExporter<W: Write + Send> {
@@ -182,6 +218,14 @@ pub struct IpfixExporter<W: Write + Send> {
     since_template: u32,
     /// Whether templates have been sent at least once.
     template_sent: bool,
+    /// Ongoing flows → the counters their last record carried. Removed
+    /// with the final record; stale ones are swept.
+    exported: HashMap<FlowId, Exported>,
+    /// Map size that triggers the next stale-baseline sweep.
+    prune_at: usize,
+    /// Longest interval seen between two records of one flow (record
+    /// time) — the sweep keeps baselines at least 3× this old.
+    longest_interval: std::time::Duration,
 }
 
 impl<W: Write + Send> IpfixExporter<W> {
@@ -198,6 +242,9 @@ impl<W: Write + Send> IpfixExporter<W> {
             resend_every: 0,
             since_template: 0,
             template_sent: false,
+            exported: HashMap::new(),
+            prune_at: BASELINE_PRUNE_MIN,
+            longest_interval: std::time::Duration::ZERO,
         }
     }
 
@@ -219,6 +266,60 @@ impl<W: Write + Send> IpfixExporter<W> {
         !self.template_sent || (self.resend_every != 0 && self.since_template >= self.resend_every)
     }
 
+    /// The IE record for `record`, its delta counts (IE 1/2) relative to
+    /// the flow's previous record: IANA's `octetDeltaCount` /
+    /// `packetDeltaCount` count "since the previous report for this Flow".
+    /// Active-timeout records carry cumulative counters, so without this a
+    /// collector summing deltas would count a long flow once per interim
+    /// record. The totals (IE 85/86) stay cumulative.
+    fn delta_record(&self, record: &FlowRecord) -> IeFlowRecord {
+        let mut rec = to_ie_record(record);
+        if let Some(prev) = self.exported.get(&flow_id(record)) {
+            rec.octet_delta_count_initiator =
+                record.bytes_initiator.saturating_sub(prev.bytes_initiator);
+            rec.octet_delta_count_responder =
+                record.bytes_responder.saturating_sub(prev.bytes_responder);
+            rec.packet_delta_count_initiator = record
+                .packets_initiator
+                .saturating_sub(prev.packets_initiator);
+            rec.packet_delta_count_responder = record
+                .packets_responder
+                .saturating_sub(prev.packets_responder);
+        }
+        rec
+    }
+
+    /// Track `record` (just sent) as the baseline of its flow's next
+    /// record: kept for an ongoing flow, dropped with the final record.
+    fn remember(&mut self, record: &FlowRecord) {
+        let id = flow_id(record);
+        if !record.is_ongoing() {
+            self.exported.remove(&id);
+            return;
+        }
+        if let Some(prev) = self.exported.get(&id) {
+            let interval = record.end.saturating_sub(prev.at);
+            self.longest_interval = self.longest_interval.max(interval);
+        }
+        if self.exported.len() >= self.prune_at {
+            let now = record.end;
+            let stale = BASELINE_STALE.max(self.longest_interval.saturating_mul(3));
+            self.exported
+                .retain(|_, e| now.saturating_sub(e.at) <= stale);
+            self.prune_at = (self.exported.len() * 2).max(BASELINE_PRUNE_MIN);
+        }
+        self.exported.insert(
+            id,
+            Exported {
+                bytes_initiator: record.bytes_initiator,
+                bytes_responder: record.bytes_responder,
+                packets_initiator: record.packets_initiator,
+                packets_responder: record.packets_responder,
+                at: record.end,
+            },
+        );
+    }
+
     /// Encode one flow record into a complete RFC 7011 message, delegating
     /// the wire format to flowscope. `None` on an encode error (logged; the
     /// fixed templates make this unreachable in practice).
@@ -231,7 +332,7 @@ impl<W: Write + Send> IpfixExporter<W> {
             eprintln!("IpfixExporter: template set encode failed: {e}");
             return None;
         }
-        let ie_record = to_ie_record(record);
+        let ie_record = self.delta_record(record);
         if let Err(e) = msg.add_data_record(&ie_record, template_id(record)) {
             eprintln!("IpfixExporter: data record encode failed: {e}");
             return None;
@@ -266,6 +367,8 @@ impl<W: Write + Send> FlowExporter for IpfixExporter<W> {
             } else {
                 self.since_template = self.since_template.wrapping_add(1);
             }
+            // Only a record the collector got moves the delta baseline.
+            self.remember(record);
         }
     }
 
@@ -318,6 +421,15 @@ mod tests {
         );
         assert_eq!(protocol_number(L4Proto::Tcp), 6);
         assert_eq!(protocol_number(L4Proto::Udp), 17);
+    }
+
+    /// `protocolIdentifier` is the IP protocol number for every L4
+    /// protocol, not 0 for the ones without a named arm.
+    #[test]
+    fn protocol_identifier_covers_sctp_and_other() {
+        assert_eq!(protocol_number(L4Proto::Sctp), 132);
+        assert_eq!(protocol_number(L4Proto::Other(47)), 47);
+        assert_eq!(protocol_number(L4Proto::IcmpV6), 58);
     }
 
     #[test]
@@ -439,6 +551,143 @@ mod tests {
         assert_eq!(
             opens,
             vec![SET_ID_TEMPLATE, TEMPLATE_ID_FLOW_IPV4, SET_ID_TEMPLATE]
+        );
+    }
+
+    /// Split concatenated IPFIX messages by their length fields.
+    fn messages(bytes: &[u8]) -> Vec<&[u8]> {
+        let mut out = Vec::new();
+        let mut off = 0;
+        while off < bytes.len() {
+            let len = be16(bytes, off + 2) as usize;
+            out.push(&bytes[off..off + len]);
+            off += len;
+        }
+        out
+    }
+
+    /// `(octetDeltaCount, packetDeltaCount, octetTotalCount)` of the
+    /// message's (IPv4) data record.
+    fn counts(msg: &[u8]) -> (u64, u64, u64) {
+        let be64 = |off: usize| u64::from_be_bytes(msg[off..off + 8].try_into().unwrap());
+        let mut set = MESSAGE_HEADER_LEN;
+        while be16(msg, set) == SET_ID_TEMPLATE {
+            set += be16(msg, set + 2) as usize;
+        }
+        // proto(1) sport(2) src(4) dport(2) dst(4), then IE 1 / 2 / 85.
+        let rec = set + 4;
+        (be64(rec + 13), be64(rec + 21), be64(rec + 29))
+    }
+
+    /// IE 1/2 are delta counts: an active-timeout record and the final
+    /// one each carry what is new since the flow's previous record, so
+    /// a collector summing them gets the flow's total; IE 85 keeps the
+    /// running total. A later flow on the same tuple starts afresh.
+    #[test]
+    fn interim_records_carry_deltas_since_the_previous_record() {
+        let key = FlowKey::new(
+            L4Proto::Tcp,
+            SocketAddr::new(IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1)), 1234),
+            SocketAddr::new(IpAddr::V4(Ipv4Addr::new(10, 0, 0, 2)), 80),
+        );
+        let mut s = FlowStats::default();
+        s.started = Timestamp::from_unix_f64(1000.0);
+        s.last_seen = Timestamp::from_unix_f64(1060.0);
+        s.bytes_initiator = 100;
+        s.packets_initiator = 2;
+        let mut exporter = IpfixExporter::new(Vec::<u8>::new(), 1);
+        exporter.export(&FlowRecord::from_active(&key, &s));
+        s.bytes_initiator = 150;
+        s.packets_initiator = 3;
+        s.last_seen = Timestamp::from_unix_f64(1090.0);
+        exporter.export(&FlowRecord::from_ended(&key, &s, EndReason::Fin));
+        let mut next = FlowStats::default();
+        next.started = Timestamp::from_unix_f64(2000.0);
+        next.last_seen = next.started;
+        next.bytes_initiator = 40;
+        next.packets_initiator = 1;
+        exporter.export(&FlowRecord::from_ended(&key, &next, EndReason::Fin));
+
+        let bytes = exporter.into_inner();
+        let msgs = messages(&bytes);
+        assert_eq!(counts(msgs[0]), (100, 2, 100));
+        assert_eq!(counts(msgs[1]), (50, 1, 150));
+        assert_eq!(counts(msgs[2]), (40, 1, 40));
+    }
+
+    /// A long active timeout (interim records 2 h apart) with many
+    /// concurrent flows must keep every flow's baseline: a pruned one
+    /// would make the next interim delta the flow's cumulative count.
+    #[test]
+    fn a_long_active_timeout_keeps_its_baselines() {
+        let key = |port| {
+            FlowKey::new(
+                L4Proto::Udp,
+                SocketAddr::new(IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1)), port),
+                SocketAddr::new(IpAddr::V4(Ipv4Addr::new(10, 0, 0, 2)), 53),
+            )
+        };
+        let mut exporter = IpfixExporter::new(std::io::sink(), 1);
+        let mut records = vec![0u64; 4500];
+        let mut export = |exporter: &mut IpfixExporter<std::io::Sink>, port: u16, round: u32| {
+            records[usize::from(port)] += 1;
+            let mut s = FlowStats::default();
+            s.started = Timestamp::from_unix_f64(1000.0);
+            s.last_seen = Timestamp::from_unix_f64(1000.0 + 7200.0 * f64::from(round));
+            s.bytes_initiator = 100 * records[usize::from(port)];
+            let rec = FlowRecord::from_active(&key(port), &s);
+            let delta = exporter.delta_record(&rec).octet_delta_count_initiator;
+            exporter.export(&rec);
+            delta
+        };
+        // Each round (2 h of record time apart) new flows arrive first —
+        // growing the map past its sweep threshold — then the earlier
+        // flows send their next interim record.
+        for round in 0..3u32 {
+            let new = (round as u16 * 1500)..((round as u16 + 1) * 1500);
+            for port in new.clone() {
+                export(&mut exporter, port, round);
+            }
+            for port in 0..new.start {
+                let delta = export(&mut exporter, port, round);
+                assert_eq!(delta, 100, "round {round} port {port}: baseline lost");
+            }
+        }
+    }
+
+    /// The per-flow baselines go with the final record, and those of
+    /// flows that never get one are dropped once stale.
+    #[test]
+    fn delta_baselines_are_bounded() {
+        let key = |port| {
+            FlowKey::new(
+                L4Proto::Udp,
+                SocketAddr::new(IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1)), port),
+                SocketAddr::new(IpAddr::V4(Ipv4Addr::new(10, 0, 0, 2)), 53),
+            )
+        };
+        let mut s = FlowStats::default();
+        s.started = Timestamp::from_unix_f64(1000.0);
+        s.last_seen = s.started;
+        let mut exporter = IpfixExporter::new(std::io::sink(), 1);
+        exporter.export(&FlowRecord::from_active(&key(1), &s));
+        exporter.export(&FlowRecord::from_ended(&key(1), &s, EndReason::IdleTimeout));
+        assert!(exporter.exported.is_empty());
+
+        for port in 0..2000 {
+            exporter.export(&FlowRecord::from_active(&key(port), &s));
+        }
+        assert!(exporter.exported.len() <= 2000);
+        // Two days later the old interim baselines are pruned.
+        s.started = Timestamp::from_unix_f64(1000.0 + 2.0 * 86_400.0);
+        s.last_seen = s.started;
+        for port in 0..2000 {
+            exporter.export(&FlowRecord::from_active(&key(port), &s));
+        }
+        assert!(
+            exporter.exported.len() <= 2000,
+            "{}",
+            exporter.exported.len()
         );
     }
 

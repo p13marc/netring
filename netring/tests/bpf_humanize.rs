@@ -30,10 +30,34 @@ fn http_or_dns() {
         .or(|b| b.udp().dst_port(53))
         .build()
         .unwrap();
+    // Audit A8: the branches are alternatives — this used to render as
+    // "tcp and dst port 80 and (udp and dst port 53)", which matches nothing.
     assert_eq!(
         f.to_human(),
-        "tcp and dst port 80 and (udp and dst port 53)"
+        "(tcp and dst port 80) or (udp and dst port 53)"
     );
+}
+
+#[test]
+fn three_way_or_with_single_term_branches() {
+    let f = BpfFilter::builder()
+        .tcp()
+        .or(|b| b.udp())
+        .or(|b| b.icmp().src_host("10.0.0.1".parse().unwrap()))
+        .build()
+        .unwrap();
+    assert_eq!(f.to_human(), "tcp or udp or (icmp and src host 10.0.0.1)");
+}
+
+#[test]
+fn negated_and_chain_wraps_in_parens() {
+    let f = BpfFilter::builder()
+        .tcp()
+        .dst_port(80)
+        .negate()
+        .build()
+        .unwrap();
+    assert_eq!(f.to_human(), "not (tcp and dst port 80)");
 }
 
 #[test]
@@ -129,6 +153,20 @@ fn ip6_keyword() {
 }
 
 #[test]
+fn port_set_renders_as_one_and_term() {
+    let f = BpfFilter::builder()
+        .tcp()
+        .dst_ports([80, 443])
+        .src_host("10.0.0.1".parse().unwrap())
+        .build()
+        .unwrap();
+    assert_eq!(
+        f.to_human(),
+        "tcp and (dst port 80 or dst port 443) and src host 10.0.0.1"
+    );
+}
+
+#[test]
 fn display_impl_matches_to_human() {
     let f = BpfFilter::builder().tcp().dst_port(22).build().unwrap();
     assert_eq!(format!("{f}"), f.to_human());
@@ -142,7 +180,7 @@ fn negated_or_chain_wraps_in_parens() {
         .negate()
         .build()
         .unwrap();
-    // not (tcp and (udp))  — parens wrap the OR branch, then the
-    // full composite body is wrapped by negation.
-    assert_eq!(f.to_human(), "not (tcp and (udp))");
+    // `negate()` applies to the whole filter, OR branches included, and the
+    // composite body is parenthesised (was "not (tcp and (udp))").
+    assert_eq!(f.to_human(), "not (tcp or udp)");
 }

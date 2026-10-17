@@ -14,21 +14,32 @@
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 #[non_exhaustive]
 pub struct XdpStats {
-    /// RX descriptors dropped because the fill ring was empty.
-    ///
-    /// Indicates the user-side fill cadence is too slow — increase
-    /// `frame_count` or refill more aggressively.
+    /// Packets dropped for any reason other than a full RX ring (the
+    /// kernel's "dropped for other reasons"). In copy mode that is chiefly
+    /// "no free buffer in the fill ring" — the user-side refill is too slow:
+    /// increase `frame_count` or drain more often — and also frames larger
+    /// than the UMEM frame. In zero-copy mode a fill-ring shortfall drops
+    /// the packet in the NIC instead, so it is not counted here (see the
+    /// NIC's `ethtool -S` counters).
     pub rx_dropped: u64,
-    /// RX descriptors the kernel rejected as invalid.
+    /// RX descriptors the kernel counted as invalid
+    /// (`xskq_nb_invalid_descs(xs->rx)`). Current mainline kernels never
+    /// increment it on the RX side (invalid fill-ring addresses are counted
+    /// on the fill queue, which `XDP_STATISTICS` does not export).
     pub rx_invalid_descs: u64,
     /// TX descriptors the kernel rejected as invalid (bad addr / len).
     pub tx_invalid_descs: u64,
-    /// RX drops attributed to the RX ring being full (slow consumer).
+    /// Packets dropped because the RX ring was full (slow consumer).
+    /// Disjoint from `rx_dropped`.
     pub rx_ring_full: u64,
-    /// RX descriptors the kernel could not produce because the fill ring
-    /// became empty in mid-batch.
+    /// Times the kernel found the fill ring empty when it needed a buffer —
+    /// a refill-starvation signal, **not** a packet count. In copy mode each
+    /// packet lost this way is already counted in `rx_dropped`; in zero-copy
+    /// mode the driver counts failed refill *batches*, which can rise with
+    /// no loss at all. Per buffer pool: sockets sharing a UMEM report the
+    /// same value.
     pub rx_fill_ring_empty_descs: u64,
-    /// TX kicks issued while the TX ring was empty (no-ops).
+    /// Times the kernel found the TX ring empty when it went to send.
     pub tx_ring_empty_descs: u64,
 }
 
@@ -70,31 +81,36 @@ impl XdpStats {
         }
     }
 
-    /// The queue-pressure drop total: descriptors lost because the
-    /// consumer/refill cadence couldn't keep up (`rx_dropped` +
-    /// `rx_ring_full` + `rx_fill_ring_empty_descs`). This is what gets
-    /// surfaced as the unified [`CaptureStats::drops`] so the windowed
-    /// drop rate stays a "consumer too slow" signal — it deliberately
-    /// **excludes** `rx_invalid_descs` (a driver/descriptor fault, not
-    /// backpressure), which remains visible via [`DropBreakdown`].
+    /// Packets the socket lost: `rx_dropped + rx_ring_full` (disjoint
+    /// counters). This is what gets surfaced as the unified
+    /// [`CaptureStats::drops`]. `rx_fill_ring_empty_descs` is **not** added
+    /// — it counts failed fill-ring reads, and in copy mode the packets they
+    /// cost are already in `rx_dropped` (#182). `rx_invalid_descs` stays
+    /// visible via [`DropBreakdown`].
     ///
     /// [`CaptureStats::drops`]: crate::stats::CaptureStats::drops
     /// [`DropBreakdown`]: crate::stats::DropBreakdown
-    pub(crate) fn queue_pressure_drops(&self) -> u64 {
-        self.rx_dropped
-            .saturating_add(self.rx_ring_full)
-            .saturating_add(self.rx_fill_ring_empty_descs)
+    pub(crate) fn rx_packet_drops(&self) -> u64 {
+        self.rx_dropped.saturating_add(self.rx_ring_full)
     }
 
-    /// Project to the unified [`CaptureStats`](crate::stats::CaptureStats).
-    /// `packets` is 0 (`XDP_STATISTICS` exposes no RX packet count) and
-    /// `drops` is the [queue-pressure](Self::queue_pressure_drops) total.
-    pub(crate) fn to_capture_stats(self) -> crate::stats::CaptureStats {
-        crate::stats::CaptureStats {
-            packets: 0,
-            drops: self.queue_pressure_drops().min(u32::MAX as u64) as u32,
-            freeze_count: 0,
+    /// The Monitor's `u64` counters for a socket that has `received`
+    /// packets placed in its RX ring (`XDP_STATISTICS` has no RX count; the
+    /// RX ring keeps one, see `XdpRing::received_total`).
+    pub(crate) fn counters(self, received: u64) -> crate::stats::SourceCounters {
+        crate::stats::SourceCounters {
+            delivered: received,
+            drops: self.rx_packet_drops(),
+            freezes: 0,
         }
+    }
+
+    /// Project to the unified [`CaptureStats`](crate::stats::CaptureStats):
+    /// `packets = received + drops` (every packet the socket got, as on
+    /// AF_PACKET) and `drops` = [`rx_packet_drops`](Self::rx_packet_drops),
+    /// each clamped at `u32::MAX`.
+    pub(crate) fn to_capture_stats(self, received: u64) -> crate::stats::CaptureStats {
+        self.counters(received).to_capture_stats()
     }
 }
 
@@ -161,10 +177,9 @@ mod tests {
     }
 
     #[test]
-    fn to_capture_stats_drops_are_queue_pressure_only() {
-        // A large invalid-desc count (driver fault) must NOT inflate the
-        // unified `drops` — that counter stays a "consumer too slow"
-        // signal. Only rx_dropped + rx_ring_full + rx_fill_ring_empty.
+    fn to_capture_stats_drops_are_lost_packets_only() {
+        // Neither the invalid-desc count nor the fill-ring starvation count
+        // is a lost packet of its own: drops = rx_dropped + rx_ring_full.
         let s = XdpStats {
             rx_dropped: 1,
             rx_invalid_descs: 1000,
@@ -173,13 +188,53 @@ mod tests {
             tx_invalid_descs: 9,
             tx_ring_empty_descs: 9,
         };
-        let cs = s.to_capture_stats();
-        assert_eq!(cs.packets, 0, "XDP_STATISTICS has no RX packet count");
-        assert_eq!(cs.drops, 7, "1 + 2 + 4 — invalid_descs excluded");
+        let cs = s.to_capture_stats(10);
+        assert_eq!(cs.drops, 3, "1 + 2");
+        assert_eq!(cs.packets, 13, "10 received + 3 dropped");
         assert_eq!(cs.freeze_count, 0);
         // The full picture is still reachable via the breakdown.
         let b = crate::stats::DropBreakdown::from(s);
-        assert_eq!(b.total_rx_drops(), 1007);
+        assert_eq!(b.total_rx_drops(), 1003);
+    }
+
+    /// #182, copy mode: the reporter's numbers. 4,092 packets fit the
+    /// prefilled buffers; every other one bumped both rx_dropped and
+    /// rx_fill_ring_empty_descs. drops must equal the real loss.
+    #[test]
+    fn copy_mode_fill_ring_starvation_is_counted_once() {
+        let s = XdpStats {
+            rx_dropped: 2_110_908,
+            rx_fill_ring_empty_descs: 2_110_908,
+            ..XdpStats::default()
+        };
+        let cs = s.to_capture_stats(4_092);
+        assert_eq!(cs.drops, 2_110_908);
+        assert_eq!(cs.packets, 2_115_000);
+    }
+
+    /// Zero-copy: failed refill batches bump the fill-ring counter with no
+    /// packet lost in the socket — no drops.
+    #[test]
+    fn zero_copy_refill_attempts_are_not_drops() {
+        let s = XdpStats {
+            rx_fill_ring_empty_descs: 50_000,
+            ..XdpStats::default()
+        };
+        let cs = s.to_capture_stats(1_000);
+        assert_eq!((cs.packets, cs.drops), (1_000, 0));
+    }
+
+    /// The Monitor's counters are not clamped; the public view is, and
+    /// keeps `drops <= packets`.
+    #[test]
+    fn counters_are_u64_and_the_public_view_clamps() {
+        let s = XdpStats {
+            rx_dropped: 5_000_000_000,
+            ..XdpStats::default()
+        };
+        assert_eq!(s.counters(7).drops, 5_000_000_000);
+        let cs = s.to_capture_stats(7);
+        assert_eq!((cs.packets, cs.drops), (u32::MAX, u32::MAX));
     }
 
     #[test]

@@ -127,6 +127,15 @@ where
                 return Poll::Ready(Some(Ok(pkt)));
             }
 
+            // `TapErrorPolicy::FailStream`: the recorded packets are out;
+            // yield the write error once, then end.
+            #[cfg(feature = "pcap")]
+            if let Some(tap) = this.tap.as_mut()
+                && tap.has_failed()
+            {
+                return Poll::Ready(tap.take_failure().map(Err));
+            }
+
             let mut guard = match this.cap.poll_read_ready_mut(cx) {
                 Poll::Ready(Ok(g)) => g,
                 Poll::Ready(Err(e)) => return Poll::Ready(Some(Err(Error::Io(e)))),
@@ -136,26 +145,21 @@ where
             let got_batch = {
                 let inner = guard.get_inner_mut();
                 if let Some(batch) = inner.next_batch() {
-                    #[cfg(feature = "pcap")]
-                    let mut tap_error: Option<Error> = None;
                     for pkt in &batch {
                         if this.dedup.keep(&pkt) {
                             // Plan 20: pcap tap — record before yielding.
+                            // After a `FailStream` error nothing more is
+                            // yielded.
                             #[cfg(feature = "pcap")]
                             if let Some(tap) = this.tap.as_mut()
-                                && let Some(err) = tap.write_or_handle(&pkt)
+                                && !tap.write_or_handle(&pkt)
                             {
-                                tap_error = Some(err);
                                 break;
                             }
                             this.pending.push_back(pkt.to_owned());
                         }
                     }
                     drop(batch);
-                    #[cfg(feature = "pcap")]
-                    if let Some(err) = tap_error {
-                        return Poll::Ready(Some(Err(err)));
-                    }
                     true
                 } else {
                     false

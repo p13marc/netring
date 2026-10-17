@@ -187,6 +187,26 @@ pub enum BuildError {
     /// [`crate::monitor::MonitorBuilder::pcap_source`] declared.
     #[error("Monitor::replay requires `MonitorBuilder::pcap_source(path)` to be set")]
     PcapSourceRequired,
+
+    /// A periodic handler was given a zero period — `tick` (and the
+    /// sugar over it: `report`, `on_bandwidth`, `on_aggregate`, …),
+    /// `on_capture_stats` (`capture_health`, `capture_metrics`) or
+    /// `export_active_timeout`. A zero period has no next firing time.
+    #[error("`{what}` needs a non-zero period")]
+    ZeroPeriod {
+        /// The builder method the zero period was passed to.
+        what: &'static str,
+    },
+
+    /// More capture sources (AF_PACKET + AF_XDP interfaces) than the
+    /// monitor's `SourceIdx` — a `u8` — can number.
+    #[error("too many capture sources: limit {limit}, found {actual}")]
+    TooManyCaptureSources {
+        /// Maximum number of capture sources per monitor.
+        limit: usize,
+        /// Capture sources on the builder.
+        actual: usize,
+    },
 }
 
 #[cfg(test)]

@@ -83,7 +83,10 @@ impl AsyncInjector {
     /// Equivalent to repeatedly trying [`Injector::allocate`] +
     /// `slot.set_len(len) + slot.send()` and awaiting `POLLOUT` between
     /// failed attempts. Returns once the frame is queued — call
-    /// [`flush`](Self::flush) to actually kick the kernel.
+    /// [`flush`](Self::flush) to actually kick the kernel. When the ring is
+    /// full of frames queued by earlier `send`s, `send` kicks the kernel
+    /// itself (as `flush` would): queued frames are only transmitted on a
+    /// kick, so no slot would ever free up otherwise.
     ///
     /// # Errors
     ///
@@ -106,6 +109,12 @@ impl AsyncInjector {
                 slot.set_len(data.len());
                 slot.send();
                 return Ok(());
+            }
+            // Ring full. Frames queued since the last flush leave the ring
+            // only on a kick (tpacket_snd() runs from sendto()): kick, and
+            // retry before waiting for a slot that would never come.
+            if self.inner.get_mut().flush()? > 0 {
+                continue;
             }
             // Ring full: wait for kernel to reclaim a slot via POLLOUT.
             let mut guard = self.inner.writable_mut().await.map_err(Error::Io)?;

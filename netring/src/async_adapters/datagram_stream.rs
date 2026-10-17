@@ -52,7 +52,9 @@ use flowscope::{
 use futures_core::Stream;
 
 use crate::async_adapters::flow_source::{AsyncFlowSource, DrainOutcome, SourcePacket};
-use crate::async_adapters::flow_stream::{clamp_now, clamp_view, current_timestamp};
+use crate::async_adapters::flow_stream::{
+    clamp_now, clamp_view, current_timestamp, poll_sweep, sweep_timer,
+};
 use crate::async_adapters::tokio_adapter::AsyncCapture;
 use crate::dedup::Dedup;
 use crate::error::Error;
@@ -102,7 +104,7 @@ where
         monotonic_ts: Option<Timestamp>,
         #[cfg(feature = "pcap")] tap: Option<crate::pcap_tap::PcapTap>,
     ) -> Self {
-        let sweep = tokio::time::interval(tracker.config().sweep_interval);
+        let sweep = sweep_timer(tracker.config().sweep_interval);
         Self {
             cap,
             driver: DatagramDriver::from_tracker(tracker, parser_factory),
@@ -125,7 +127,7 @@ where
     /// if `sweep_interval` changed. (Reassembly limits don't apply to
     /// datagrams.)
     pub fn with_config(mut self, config: FlowTrackerConfig) -> Self {
-        self.sweep = tokio::time::interval(config.sweep_interval);
+        self.sweep = sweep_timer(config.sweep_interval);
         self.driver.set_config(config);
         self
     }
@@ -285,7 +287,16 @@ where
                 return Poll::Ready(Some(Ok(ev)));
             }
 
-            if this.sweep.poll_tick(cx).is_ready() {
+            // `TapErrorPolicy::FailStream`: the queued events are out;
+            // yield the write error once, then end.
+            #[cfg(feature = "pcap")]
+            if let Some(t) = this.tap.as_mut()
+                && t.has_failed()
+            {
+                return Poll::Ready(t.take_failure().map(Err));
+            }
+
+            if poll_sweep(&mut this.sweep, cx) {
                 let now = clamp_now(current_timestamp(), &mut this.monotonic_ts);
                 this.driver.sweep_into(now, &mut this.scratch);
                 this.pending.extend(this.scratch.drain(..));
@@ -303,8 +314,6 @@ where
             let monotonic_ts = &mut this.monotonic_ts;
             #[cfg(feature = "pcap")]
             let tap = &mut this.tap;
-            #[cfg(feature = "pcap")]
-            let mut tap_error: Option<Error> = None;
 
             let outcome = cap.poll_drain(cx, &mut |sp: SourcePacket<'_>| {
                 // Optional pre-tracking dedup (on the unclamped ts).
@@ -314,17 +323,12 @@ where
                     return;
                 }
 
+                // After a `FailStream` error nothing more is tracked.
                 #[cfg(feature = "pcap")]
-                if let Some(t) = tap.as_mut() {
-                    if tap_error.is_some() {
-                        return;
-                    }
-                    if let Some(err) =
-                        t.write_raw_or_handle(sp.data, sp.view.timestamp, sp.original_len)
-                    {
-                        tap_error = Some(err);
-                        return;
-                    }
+                if let Some(t) = tap.as_mut()
+                    && !t.write_raw_or_handle(sp.data, sp.view.timestamp, sp.original_len)
+                {
+                    return;
                 }
 
                 driver.track_into(clamp_view(sp.view, monotonic_ts), scratch);
@@ -339,14 +343,7 @@ where
                     return Poll::Pending;
                 }
                 Poll::Ready(Err(e)) => return Poll::Ready(Some(Err(Error::Io(e)))),
-                Poll::Ready(Ok(DrainOutcome::Drained)) =>
-                {
-                    #[cfg(feature = "pcap")]
-                    if let Some(err) = tap_error {
-                        return Poll::Ready(Some(Err(err)));
-                    }
-                }
-                Poll::Ready(Ok(DrainOutcome::Idle)) => {}
+                Poll::Ready(Ok(DrainOutcome::Drained | DrainOutcome::Idle)) => {}
             }
         }
     }

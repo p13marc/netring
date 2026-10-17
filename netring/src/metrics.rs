@@ -25,7 +25,9 @@
 
 use crate::stats::CaptureStats;
 
-/// Counter name: total packets received past kernel filter.
+/// Counter name: total packets received past kernel filter, **including**
+/// the dropped ones (the [`CaptureStats::packets`] convention): the loss
+/// fraction is `…_drops_total / …_packets_total`.
 pub const COUNTER_PACKETS: &str = "netring_capture_packets_total";
 
 /// Counter name: total packets dropped due to ring exhaustion.
@@ -34,11 +36,13 @@ pub const COUNTER_DROPS: &str = "netring_capture_drops_total";
 /// Counter name: total ring freeze events.
 pub const COUNTER_FREEZES: &str = "netring_capture_freezes_total";
 
-/// Gauge name: cumulative packets delivered, per capture source. Emitted
-/// by [`CaptureTelemetry::record_metrics`](crate::monitor::CaptureTelemetry::record_metrics).
+/// Gauge name: cumulative packets delivered to userspace (excluding drops),
+/// per capture source. Emitted by
+/// [`CaptureTelemetry::record_metrics`](crate::monitor::CaptureTelemetry::record_metrics).
 pub const GAUGE_PACKETS: &str = "netring_capture_packets";
 
-/// Gauge name: cumulative kernel drops, per capture source.
+/// Gauge name: cumulative kernel drops (no room in the ring), per capture
+/// source.
 pub const GAUGE_DROPS: &str = "netring_capture_drops";
 
 /// Gauge name: cumulative ring freezes, per capture source.

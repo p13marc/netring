@@ -130,6 +130,8 @@ impl XdpShardedRunner {
         }
         let capture = b.build()?;
         let n = capture.socket_count();
+        // Socket `i` serves `queue_ids[i]` — what `build_shard` is given.
+        let queue_ids = capture.queue_ids().to_vec();
         // The guard (attached program + promiscuous) stays on *this* thread for
         // the whole run, so it outlives every shard's socket.
         let (sockets, _guard) = capture.into_parts();
@@ -137,7 +139,7 @@ impl XdpShardedRunner {
         let build_shard = self.build_shard;
         let pin_cpus = self.pin_cpus;
         let mut handles = Vec::with_capacity(n);
-        for (i, socket) in sockets.into_iter().enumerate() {
+        for (i, (socket, queue)) in sockets.into_iter().zip(queue_ids).enumerate() {
             let build = Arc::clone(&build_shard);
             let handle = std::thread::Builder::new()
                 .name(format!("netring-xdp-shard-{i}"))
@@ -152,7 +154,7 @@ impl XdpShardedRunner {
                     rt.block_on(async move {
                         // AsyncFd must be created inside the runtime context.
                         let async_sock = crate::AsyncXdpSocket::new(socket)?;
-                        let monitor = build(i, Monitor::builder())
+                        let monitor = build(queue as usize, Monitor::builder())
                             .inject_xdp_backend(async_sock)
                             .build()?;
                         let dur = deadline.saturating_duration_since(Instant::now());
@@ -192,8 +194,7 @@ impl XdpShardedRunner {
 
     /// Run every shard for `duration` (shared deadline).
     pub fn run_for(self, duration: Duration) -> Result<()> {
-        let deadline = Instant::now() + duration;
-        self.run_until(deadline)
+        self.run_until(crate::monitor::shard::deadline_after(duration))
     }
 
     /// Number of queues (shards) this runner will resolve `queues` to is

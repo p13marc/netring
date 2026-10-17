@@ -5,8 +5,10 @@
 //! equivalent of ARP. Like ARP it has no 5-tuple, so the Monitor parses each
 //! frame for NDP *inside the zero-copy drain*: it walks the L2/L3 layers to
 //! the ICMPv6 message and hands it to flowscope's
-//! [`flowscope::ndp::parse_icmpv6`], feeds every `target → MAC` binding into a
-//! [`flowscope::correlate::NeighborTable`]`<Ipv6Addr, MacAddr>`,
+//! [`flowscope::ndp::parse_icmpv6`], feeds every Neighbor Advertisement's
+//! `target → MAC` binding into a
+//! [`flowscope::correlate::NeighborTable`]`<Ipv6Addr, MacAddr>` (a
+//! solicitation's target is the address being resolved, not the sender's),
 //! and derives [`NdpAnomaly`]s from the resulting [`NeighborEvent`] plus
 //! [`NdpMessage::is_likely_spoof`].
 //!
@@ -31,7 +33,7 @@ use std::net::Ipv6Addr;
 use std::time::Duration;
 
 use flowscope::correlate::{NeighborEvent, NeighborTable};
-use flowscope::{MacAddr, NdpMessage, Timestamp};
+use flowscope::{MacAddr, NdpKind, NdpMessage, Timestamp};
 
 use crate::anomaly::Severity;
 use crate::ctx::Ctx;
@@ -185,13 +187,20 @@ impl NdpWatch {
 
     /// Feed one parsed NDP message into the table and derive an anomaly.
     ///
-    /// Only messages carrying a link-layer address teach a binding (`target →
-    /// lladdr`); an NS/NA without one can't update the table and yields no
-    /// anomaly. Mutates the table; the run loop invokes the handlers.
+    /// Only Neighbor Advertisements carrying a link-layer address teach a
+    /// binding (`target → lladdr`). A Neighbor Solicitation's target is the
+    /// address being *resolved* and its link-layer option the *sender's* MAC
+    /// (RFC 4861 §4.3), so an NS teaches nothing and yields no anomaly —
+    /// learning it would bind the target to the asker and flag every answer
+    /// as a binding change. Mutates the table; the run loop invokes the
+    /// handlers.
     pub(crate) fn observe(&mut self, msg: &NdpMessage, ts: Timestamp) -> Option<NdpAnomaly> {
         let first = *self.first_seen.get_or_insert(ts);
         let in_warmup = ts.saturating_sub(first) < self.config.warmup;
 
+        if !matches!(msg.kind, NdpKind::Advertisement) {
+            return None;
+        }
         // Nothing to learn or alert on without an advertised MAC.
         let mac = msg.lladdr?;
         let allowed = self.config.allow.contains(&(msg.target, mac));
@@ -245,10 +254,25 @@ impl NdpWatch {
     }
 }
 
+/// The `IPv6 → MAC` binding an NDP message proves about its *sender*
+/// (RFC 4861): an NA binds its target to its Target Link-Layer Address; an
+/// NS binds its IPv6 source `src` to its Source Link-Layer Address — never
+/// its target, the address being resolved (§4.3). `None` without a
+/// link-layer address, or for an NS from the unspecified address (DAD).
+// The asset inventory's NDP leg; without `asset` it is unused.
+#[cfg_attr(not(feature = "asset"), allow(dead_code))]
+pub(crate) fn sender_binding(msg: &NdpMessage, src: Ipv6Addr) -> Option<(Ipv6Addr, MacAddr)> {
+    let mac = msg.lladdr?;
+    match msg.kind {
+        NdpKind::Advertisement => Some((msg.target, mac)),
+        NdpKind::Solicitation if !src.is_unspecified() => Some((src, mac)),
+        _ => None,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
-    use flowscope::NdpKind;
 
     fn mac(b: u8) -> MacAddr {
         MacAddr([b, b, b, b, b, b])
@@ -320,6 +344,34 @@ mod tests {
             w.observe(&na(ip(3), mac(1), true, false), ts(100))
                 .is_none()
         );
+    }
+
+    /// A Neighbor Solicitation (type 135) for `target` carrying the
+    /// *sender's* link-layer address (SLLA option).
+    fn ns(target: Ipv6Addr, sender_mac: MacAddr) -> NdpMessage {
+        let mut m = vec![135, 0, 0, 0, 0, 0, 0, 0];
+        m.extend_from_slice(&target.octets());
+        m.extend_from_slice(&[1, 1]); // option type=Source LL Addr, len=1
+        m.extend_from_slice(sender_mac.as_bytes());
+        flowscope::ndp::parse_icmpv6(&m).expect("valid NS")
+    }
+
+    /// RFC 4861 §4.3: an NS's target is the address being resolved, and its
+    /// SLLA is the *sender's* MAC — not a binding of the target. Ordinary
+    /// address resolution (A asks for B, B answers) is silent.
+    #[test]
+    fn address_resolution_is_not_a_binding_change() {
+        let mut w = NdpWatch::new(NdpConfig::default());
+        // Past warm-up: the first NDP frame anchors it.
+        assert!(w.observe(&na(ip(9), mac(9), true, false), ts(0)).is_none());
+        let (b, mac_a, mac_b) = (ip(2), mac(0xa), mac(0xb));
+        let solicit = ns(b, mac_a);
+        assert_eq!(solicit.kind, NdpKind::Solicitation);
+        assert!(w.observe(&solicit, ts(10)).is_none());
+        assert!(w.observe(&na(b, mac_b, true, true), ts(10)).is_none());
+        // Every later resolution too.
+        assert!(w.observe(&ns(b, mac_a), ts(20)).is_none());
+        assert!(w.observe(&na(b, mac_b, true, true), ts(20)).is_none());
     }
 
     #[test]

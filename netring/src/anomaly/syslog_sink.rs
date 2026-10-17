@@ -15,12 +15,17 @@
 //! - `PRI` = `facility * 8 + severity` (severity per the netring →
 //!   syslog map below).
 //! - `1` = the RFC 5424 version.
-//! - `TIMESTAMP` = the anomaly's timestamp as RFC 3339 (UTC, `…Z`).
+//! - `TIMESTAMP` = the anomaly's timestamp as RFC 3339 (UTC, `…Z`), to the
+//!   microsecond (RFC 5424 allows at most 6 fractional digits).
 //! - `MSGID` = the detector's `kind` slug.
 //! - `SD` = one structured-data element `[netring@<PEN> …]` carrying the
 //!   5-tuple key (when present) + observation/metric params, or `-` when
 //!   empty.
 //! - `MSG` = a short human-readable summary.
+//!
+//! Lines are newline-framed. Control characters in SD values and the MSG
+//! (observation values can come off the wire) are written as `\xNN`, so
+//! no value can end a record early.
 //!
 //! Severity map (netring → RFC 5424 numeric severity):
 //! `Critical → 2` (crit), `Error → 3` (err), `Warning → 4` (warning),
@@ -204,10 +209,11 @@ fn render_rfc5424(
     let pri = (facility.code() as u16) * 8 + syslog_severity(severity) as u16;
 
     // HEADER: <PRI>VERSION SP TIMESTAMP SP HOSTNAME SP APP-NAME SP PROCID SP MSGID
+    let _ = write!(out, "<{pri}>1 ");
+    push_timestamp(out, ts);
     let _ = write!(
         out,
-        "<{pri}>1 {ts} {host} {app} {procid} {msgid} ",
-        ts = ts.to_iso8601(),
+        " {host} {app} {procid} {msgid} ",
         host = nilable(hostname),
         app = nilable(app_name),
         procid = nilable(procid),
@@ -242,8 +248,19 @@ fn render_rfc5424(
     // MSG: a short human summary after a single space.
     let _ = write!(out, " {kind}");
     for (label, value) in observations {
-        let _ = write!(out, " {label}={value}");
+        let _ = write!(out, " {label}=");
+        push_control_escaped(out, value);
     }
+}
+
+/// Append `ts` as an RFC 5424 TIMESTAMP: RFC 3339 UTC with microseconds
+/// (TIME-SECFRAC is `1*6DIGIT`, §6.2.3) — the nanoseconds truncated.
+fn push_timestamp(out: &mut String, ts: Timestamp) {
+    use std::fmt::Write as _;
+    // `YYYY-MM-DDTHH:MM:SS.nnnnnnnnnZ`, fixed width for whole seconds.
+    let _ = Timestamp::new(ts.sec, 0).write_iso8601(out);
+    out.truncate(out.len() - ".000000000Z".len());
+    let _ = write!(out, ".{:06}Z", (ts.nsec / 1_000).min(999_999));
 }
 
 /// RFC 5424 NILVALUE substitution: an empty field becomes `-`.
@@ -252,12 +269,32 @@ fn nilable(s: &str) -> &str {
 }
 
 /// Append `s` to `out`, escaping the three characters RFC 5424 §6.3.3
-/// requires inside a PARAM-VALUE: `"`, `\`, and `]`.
+/// requires inside a PARAM-VALUE: `"`, `\`, and `]` — and control
+/// characters, as for the MSG ([`push_control_escaped`]).
 fn push_sd_escaped(out: &mut String, s: &str) {
     for ch in s.chars() {
         if matches!(ch, '"' | '\\' | ']') {
             out.push('\\');
         }
+        push_char_escaped(out, ch);
+    }
+}
+
+/// Append `s` to `out` with every control character (C0, DEL, C1) as
+/// `\xNN`. Records are newline-framed (RFC 6587), and observation values
+/// come off the wire (DNS names, HTTP hosts, …): a raw LF in one would end
+/// the record and let the rest of the value forge another.
+fn push_control_escaped(out: &mut String, s: &str) {
+    for ch in s.chars() {
+        push_char_escaped(out, ch);
+    }
+}
+
+fn push_char_escaped(out: &mut String, ch: char) {
+    use std::fmt::Write as _;
+    if ch.is_control() {
+        let _ = write!(out, "\\x{:02x}", ch as u32);
+    } else {
         out.push(ch);
     }
 }
@@ -301,7 +338,7 @@ mod tests {
     use super::*;
 
     fn ts_fixed() -> Timestamp {
-        // 2026-06-07T00:00:00.000000000Z
+        // 2026-06-07T00:00:00.000000Z
         Timestamp::from_unix_f64(1_780_790_400.0)
     }
 
@@ -345,7 +382,32 @@ mod tests {
         // <PRI>1 TIMESTAMP HOSTNAME APP PROCID MSGID SD MSG
         assert_eq!(
             line,
-            "<134>1 2026-06-07T00:00:00.000000000Z host1 netring - heartbeat - heartbeat"
+            "<134>1 2026-06-07T00:00:00.000000Z host1 netring - heartbeat - heartbeat"
+        );
+    }
+
+    /// RFC 5424 §6.2.3: TIME-SECFRAC is at most 6 digits (its example 5,
+    /// with 9, is invalid) — microseconds, truncated.
+    #[test]
+    fn timestamp_has_at_most_six_fractional_digits() {
+        let mut out = String::new();
+        render_rfc5424(
+            &mut out,
+            SyslogFacility::Local0,
+            Severity::Info,
+            "netring",
+            "-",
+            "-",
+            "32473",
+            "k",
+            Timestamp::new(1_780_790_400, 123_456_789),
+            None,
+            &[],
+            &[],
+        );
+        assert!(
+            out.starts_with("<134>1 2026-06-07T00:00:00.123456Z - "),
+            "{out}"
         );
     }
 
@@ -370,6 +432,33 @@ mod tests {
         let mut out = String::new();
         push_sd_escaped(&mut out, r#"a"b\c]d"#);
         assert_eq!(out, r#"a\"b\\c\]d"#);
+    }
+
+    /// Observation values come off the wire (DNS names, HTTP hosts, …):
+    /// a control character in one must not end the record and start a
+    /// forged one, in the SD params or in the MSG.
+    #[test]
+    fn control_characters_cannot_forge_a_record() {
+        let mut sink = SyslogSink::new(Vec::<u8>::new());
+        sink.write(
+            "dga",
+            Severity::Warning,
+            ts_fixed(),
+            None,
+            &[("qname", Cow::Borrowed("x\n<34>1 forged\r\0\u{85}é"))],
+            &[],
+        );
+        let out = String::from_utf8(sink.into_inner()).unwrap();
+        let line = out.strip_suffix('\n').expect("LF-framed");
+        assert!(!line.contains(char::is_control), "{out:?}");
+        assert!(
+            line.contains(r#"qname="x\x0a<34>1 forged\x0d\x00\x85é""#),
+            "{line}"
+        );
+        assert!(
+            line.ends_with(r" dga qname=x\x0a<34>1 forged\x0d\x00\x85é"),
+            "{line}"
+        );
     }
 
     #[test]

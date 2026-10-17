@@ -3,7 +3,8 @@
 //! Pipeline: see plan-18 §"Compiler pipeline".
 //!
 //! 1. `normalize(...)` reorders + dedups + auto-inserts the
-//!    implicit `EthType(0x0800)` for IPv4 ip_proto/host/port.
+//!    implicit `EthType` for ip_proto/host/port (`0x86dd` when an
+//!    IPv6 host/net names the family, else the IPv4 `0x0800`).
 //! 2. `compile_and_chain(...)` emits per-fragment [`SymInsn`]
 //!    streams with [`Label`] targets.
 //! 3. `link(...)` concatenates AND chain + OR branches and adds
@@ -140,12 +141,12 @@ pub(crate) fn compile(builder: BpfFilterBuilder) -> Result<BpfFilter, BpfBuildEr
     }
 
     // Compile each block (top-level AND chain + each OR branch)
-    // independently. Within each block, fragments use
-    // `Label::Drop` to mean "fail this block"; the linker
-    // rewrites this to either the next branch's start or the
-    // global Drop tail (last branch).
-    let mut blocks: Vec<Vec<SymInsn>> = Vec::with_capacity(1 + or_branches.len());
-    blocks.push(compile_block(&fragments)?);
+    // independently — after distributing any port-set (`AnyOf`)
+    // term, which turns one chain into one block per alternative.
+    // Within each block, fragments use `Label::Drop` to mean "fail
+    // this block"; the linker rewrites this to either the next
+    // branch's start or the global Drop tail (last branch).
+    let mut chains = expand_any_of(&fragments)?;
     for branch in &or_branches {
         if branch.fragments.is_empty() {
             return Err(BpfBuildError::EmptyOr);
@@ -156,7 +157,16 @@ pub(crate) fn compile(builder: BpfFilterBuilder) -> Result<BpfFilter, BpfBuildEr
         if !branch.or_branches.is_empty() || branch.negated {
             return Err(BpfBuildError::NestedOr);
         }
-        blocks.push(compile_block(&branch.fragments)?);
+        chains.extend(expand_any_of(&branch.fragments)?);
+        if chains.len() > BpfFilter::MAX_INSNS {
+            return Err(BpfBuildError::TooManyInstructions {
+                count: chains.len(),
+            });
+        }
+    }
+    let mut blocks: Vec<Vec<SymInsn>> = Vec::with_capacity(chains.len());
+    for chain in &chains {
+        blocks.push(compile_block(chain)?);
     }
 
     // Stitch blocks: each block's body, followed by `JA Accept`
@@ -227,6 +237,38 @@ pub(crate) fn compile(builder: BpfFilterBuilder) -> Result<BpfFilter, BpfBuildEr
 /// Compile a single block (an AND chain of fragments) into a
 /// symbolic instruction stream. Drop labels inside the stream
 /// mean "fail this block"; the linker rewrites them.
+/// Distribute the `AnyOf` (port-set) terms of one AND chain:
+/// `a ∧ (p1 ∨ p2) ∧ b` → `[a, p1, b]`, `[a, p2, b]`; several sets
+/// give their cross product. A chain without one is returned as is.
+///
+/// Every block costs at least one instruction, so more blocks than
+/// [`BpfFilter::MAX_INSNS`] can never load — refused before the
+/// product is built, so a chain of large sets can't exhaust memory.
+fn expand_any_of(fragments: &[MatchFrag]) -> Result<Vec<Vec<MatchFrag>>, BpfBuildError> {
+    let mut chains: Vec<Vec<MatchFrag>> = vec![Vec::with_capacity(fragments.len())];
+    for frag in fragments {
+        match frag {
+            MatchFrag::AnyOf(alts) => {
+                let n = chains.len().saturating_mul(alts.len());
+                if n > BpfFilter::MAX_INSNS {
+                    return Err(BpfBuildError::TooManyInstructions { count: n });
+                }
+                let mut next = Vec::with_capacity(n);
+                for chain in &chains {
+                    for alt in alts {
+                        let mut c = chain.clone();
+                        c.push(alt.clone());
+                        next.push(c);
+                    }
+                }
+                chains = next;
+            }
+            other => chains.iter_mut().for_each(|c| c.push(other.clone())),
+        }
+    }
+    Ok(chains)
+}
+
 fn compile_block(fragments: &[MatchFrag]) -> Result<Vec<SymInsn>, BpfBuildError> {
     let normalized = normalize(fragments.to_vec())?;
     let mut ctx = infer_ctx(&normalized);
@@ -240,8 +282,9 @@ fn compile_block(fragments: &[MatchFrag]) -> Result<Vec<SymInsn>, BpfBuildError>
 // ── Normaliser ────────────────────────────────────────────────
 
 /// Sort/dedupe fragments so user chain order doesn't matter for
-/// AND. Detect and reject conflicting protocol selections. Auto-
-/// insert `EthType(0x0800)` for IPv4 fragments that need it.
+/// AND. Detect and reject conflicting protocol / address-family
+/// selections. Auto-insert the implicit `EthType` for IP fragments
+/// that need it (IPv6 if an IPv6 host/net is present, else IPv4).
 fn normalize(fragments: Vec<MatchFrag>) -> Result<Vec<MatchFrag>, BpfBuildError> {
     // First pass: collect canonical EthType / IpProto choices and
     // detect conflicts.
@@ -271,6 +314,28 @@ fn normalize(fragments: Vec<MatchFrag>) -> Result<Vec<MatchFrag>, BpfBuildError>
         }
     }
 
+    // Address families named by host / net fragments. The host / net
+    // templates load at family-specific offsets, so a chain mixing
+    // families — or contradicting its explicit `ipv4()` / `ipv6()` —
+    // would read the wrong header bytes (e.g. `.ipv6().src_host(<v4>)`
+    // compared bytes 4..8 of the IPv6 source); reject it instead.
+    let addr_family = |f: &MatchFrag| match f {
+        MatchFrag::SrcHost(a) | MatchFrag::DstHost(a) | MatchFrag::AnyHost(a) => Some(a.is_ipv6()),
+        MatchFrag::SrcNet(n) | MatchFrag::DstNet(n) | MatchFrag::AnyNet(n) => Some(n.is_ipv6()),
+        _ => None,
+    };
+    let addr_v4 = fragments.iter().any(|f| addr_family(f) == Some(false));
+    let addr_v6 = fragments.iter().any(|f| addr_family(f) == Some(true));
+    let family_conflict = match chosen_eth {
+        _ if addr_v4 && addr_v6 => Some(("ipv4 address", "ipv6 address")),
+        Some(0x0800) if addr_v6 => Some(("ipv4", "ipv6 address")),
+        Some(0x86dd) if addr_v4 => Some(("ipv6", "ipv4 address")),
+        _ => None,
+    };
+    if let Some((a, b)) = family_conflict {
+        return Err(BpfBuildError::ConflictingProtocols { a, b });
+    }
+
     // Second pass: emit normalized fragments.
     //
     // Order: EthType → IpProto → IP host/net → L4 port. Within
@@ -278,9 +343,8 @@ fn normalize(fragments: Vec<MatchFrag>) -> Result<Vec<MatchFrag>, BpfBuildError>
     // port ANDs (uncommon) compile predictably.
     //
     // Auto-insertion: if any IP-aware fragment is present without
-    // an explicit EthType, we default to IPv4. Phase C will allow
-    // ipv6 inference; for phase B we default IPv4 because the IP
-    // proto / host / port templates below are IPv4-only.
+    // an explicit EthType, the family is IPv6 when an IPv6 host /
+    // net names it, IPv4 otherwise (the documented default).
 
     let needs_ip = chosen_eth.is_none()
         && fragments.iter().any(|f| {
@@ -337,7 +401,7 @@ fn normalize(fragments: Vec<MatchFrag>) -> Result<Vec<MatchFrag>, BpfBuildError>
     if let Some(t) = chosen_eth {
         out.push(MatchFrag::EthType(t));
     } else if needs_ip {
-        out.push(MatchFrag::EthType(0x0800));
+        out.push(MatchFrag::EthType(if addr_v6 { 0x86dd } else { 0x0800 }));
     }
 
     // IpProto bucket.
@@ -486,6 +550,10 @@ fn compile_fragment(
         MatchFrag::SrcPort(p) => emit_l4_port(SrcDst::Src, *p, ctx, out),
         MatchFrag::DstPort(p) => emit_l4_port(SrcDst::Dst, *p, ctx, out),
         MatchFrag::AnyPort(p) => emit_l4_port(SrcDst::Any, *p, ctx, out),
+        // `compile` distributes every port set into OR blocks before a
+        // block reaches here; an OR group inside one block isn't
+        // expressible by the flat AND template.
+        MatchFrag::AnyOf(_) => Err(BpfBuildError::NestedOr),
     }
 }
 
@@ -1153,6 +1221,127 @@ mod tests {
         // The message must tell the user to flatten.
         let msg = err.to_string();
         assert!(msg.contains("flatten"), "actionable message: {msg}");
+    }
+
+    /// Ethernet + IPv6 header + 8 bytes of UDP-shaped L4 (ports 1 → 2).
+    fn ipv6_frame(src: &str, dst: &str) -> Vec<u8> {
+        let src: std::net::Ipv6Addr = src.parse().unwrap();
+        let dst: std::net::Ipv6Addr = dst.parse().unwrap();
+        let mut f = vec![0u8; 12];
+        f.extend_from_slice(&[0x86, 0xdd, 0x60, 0, 0, 0, 0, 8, 17, 64]);
+        f.extend_from_slice(&src.octets());
+        f.extend_from_slice(&dst.octets());
+        f.extend_from_slice(&[0, 1, 0, 2, 0, 8, 0, 0]);
+        f
+    }
+
+    /// Ethernet + IPv4 header + 8 bytes of UDP-shaped L4 (ports 1 → 2).
+    fn ipv4_frame(src: [u8; 4], dst: [u8; 4]) -> Vec<u8> {
+        let mut f = vec![0u8; 12];
+        f.extend_from_slice(&[0x08, 0x00, 0x45, 0, 0, 28, 0, 0, 0, 0, 64, 17, 0, 0]);
+        f.extend_from_slice(&src);
+        f.extend_from_slice(&dst);
+        f.extend_from_slice(&[0, 1, 0, 2, 0, 8, 0, 0]);
+        f
+    }
+
+    fn v6(s: &str) -> IpAddr {
+        s.parse().unwrap()
+    }
+
+    #[test]
+    fn ipv6_host_without_ipv6_infers_the_ipv6_family() {
+        // Audit A6: an IPv6 address used to get the IPv4 default
+        // (`ether 0x0800 && [22..38] == addr`) and so never matched.
+        let f = BpfFilterBuilder::new()
+            .host(v6("2001:db8::1"))
+            .build()
+            .unwrap();
+        assert!(
+            f.matches(&ipv6_frame("2001:db8::1", "2001:db8::2")),
+            "as src"
+        );
+        assert!(
+            f.matches(&ipv6_frame("2001:db8::2", "2001:db8::1")),
+            "as dst"
+        );
+        assert!(!f.matches(&ipv6_frame("2001:db8::2", "2001:db8::3")));
+        assert!(!f.matches(&ipv4_frame([10, 0, 0, 1], [10, 0, 0, 2])));
+
+        let f = BpfFilterBuilder::new()
+            .udp()
+            .dst_host(v6("2001:db8::2"))
+            .dst_port(2)
+            .build()
+            .unwrap();
+        assert!(f.matches(&ipv6_frame("2001:db8::1", "2001:db8::2")));
+        assert!(!f.matches(&ipv6_frame("2001:db8::2", "2001:db8::1")));
+    }
+
+    #[test]
+    fn ipv4_host_keeps_the_ipv4_default() {
+        let f = BpfFilterBuilder::new()
+            .host(v6("10.0.0.1"))
+            .build()
+            .unwrap();
+        assert!(f.matches(&ipv4_frame([10, 0, 0, 1], [10, 0, 0, 2])));
+        assert!(!f.matches(&ipv4_frame([10, 0, 0, 3], [10, 0, 0, 2])));
+        assert!(!f.matches(&ipv6_frame("2001:db8::1", "2001:db8::2")));
+    }
+
+    #[test]
+    fn address_family_conflicts_are_rejected() {
+        // `.ipv6().src_host(<v4>)` loaded bytes 4..8 of the IPv6 source as the
+        // "IPv4 source" — e.g. it matched 2001:db8:a00:1:: as 10.0.0.1.
+        let conflicts = [
+            BpfFilterBuilder::new().ipv6().src_host(v6("10.0.0.1")),
+            BpfFilterBuilder::new().ipv4().host(v6("2001:db8::1")),
+            BpfFilterBuilder::new()
+                .host(v6("10.0.0.1"))
+                .host(v6("2001:db8::1")),
+            BpfFilterBuilder::new()
+                .ipv6()
+                .dst_net("10.0.0.0/8".parse().unwrap()),
+        ];
+        for b in conflicts {
+            let err = compile(b.clone()).unwrap_err();
+            assert!(
+                matches!(err, BpfBuildError::ConflictingProtocols { .. }),
+                "{b:?} → {err:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn port_set_inside_or_branch_compiles() {
+        // A port set is an AND term now, not an `or()` of its own, so it no
+        // longer trips the nested-OR rule inside a branch.
+        let b = BpfFilterBuilder::new()
+            .tcp()
+            .dst_port(80)
+            .or(|b| b.udp().dst_ports([53, 5353]));
+        let f = compile(b).expect("flat after expansion");
+        let mut udp_5353 = ipv4_frame([10, 0, 0, 1], [10, 0, 0, 2]);
+        udp_5353[36..38].copy_from_slice(&5353u16.to_be_bytes());
+        assert!(f.matches(&udp_5353));
+        assert!(
+            !f.matches(&ipv4_frame([10, 0, 0, 1], [10, 0, 0, 2])),
+            "udp/2"
+        );
+    }
+
+    #[test]
+    fn port_set_cross_product_is_bounded_before_it_is_built() {
+        // 2^20 blocks could never fit BPF_MAXINSNS; refuse without
+        // materialising them.
+        let mut b = BpfFilterBuilder::new().tcp();
+        for _ in 0..20 {
+            b = b.ports([1, 2]);
+        }
+        assert!(matches!(
+            compile(b),
+            Err(BpfBuildError::TooManyInstructions { .. })
+        ));
     }
 
     #[test]

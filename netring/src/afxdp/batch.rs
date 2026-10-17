@@ -192,10 +192,11 @@ impl std::fmt::Debug for XdpBatch<'_> {
 impl Drop for XdpBatch<'_> {
     fn drop(&mut self) {
         // Recycle UMEM frames before releasing RX descriptors. Recycling
-        // first makes the addresses available for refill() at the end.
+        // first makes the addresses available for refill() at the end (the
+        // RX pool, not the TX one — see `Umem`).
         for i in 0..self.tok.n {
             let desc: libc::xdp_desc = self.socket.rx.read_at(self.tok, i);
-            self.socket.umem.free_frame(desc.addr);
+            self.socket.umem.recycle_rx_frame(desc.addr);
         }
         self.socket.rx.consumer_release(self.tok);
         self.socket.refill();

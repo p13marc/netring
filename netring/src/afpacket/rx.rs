@@ -6,14 +6,14 @@ use std::mem::ManuallyDrop;
 use std::os::fd::{AsFd, AsRawFd, BorrowedFd, OwnedFd};
 use std::time::{Duration, Instant};
 
-use crate::afpacket::ring::MmapRing;
+use crate::afpacket::ring::{MmapRing, RingGeometry};
 use crate::afpacket::{fanout, ffi, filter, ring, socket};
 use crate::config::{
     BpfFilter, BpfInsn, BusyPollConfig, FanoutFlags, FanoutMode, RingProfile, TimestampSource,
 };
 use crate::error::Error;
 use crate::packet::{BatchIter, Packet, PacketBatch};
-use crate::stats::CaptureStats;
+use crate::stats::{CaptureStats, SourceCounters};
 use crate::traits::PacketSource;
 
 /// AF_PACKET TPACKET_V3 packet capture.
@@ -57,7 +57,7 @@ pub struct Capture {
     poll_timeout: Duration,
     /// Running totals across calls to [`cumulative_stats`](Self::cumulative_stats).
     /// `stats()` (the destructive variant) does not touch this.
-    cumulative: Cell<CaptureStats>,
+    cumulative: Cell<SourceCounters>,
     /// Busy-poll trio applied at build time. Inspected via
     /// [`busy_poll_config`](Self::busy_poll_config). Empty (all
     /// `None`) when no busy-poll knobs were set.
@@ -71,6 +71,10 @@ pub struct Capture {
 struct StopSignal {
     fd: OwnedFd,
     stopped: std::sync::atomic::AtomicBool,
+    /// Held across each update of `stopped` + the eventfd counter, so a
+    /// `raise` racing a `clear` cannot leave the flag clear while the
+    /// eventfd stays readable (every poll would then return at once).
+    update: std::sync::Mutex<()>,
 }
 
 impl StopSignal {
@@ -85,10 +89,12 @@ impl StopSignal {
         Ok(Self {
             fd,
             stopped: std::sync::atomic::AtomicBool::new(false),
+            update: std::sync::Mutex::new(()),
         })
     }
 
     fn raise(&self) {
+        let _update = self.update.lock().unwrap_or_else(|e| e.into_inner());
         self.stopped
             .store(true, std::sync::atomic::Ordering::SeqCst);
         let one: u64 = 1;
@@ -108,6 +114,7 @@ impl StopSignal {
     }
 
     fn clear(&self) {
+        let _update = self.update.lock().unwrap_or_else(|e| e.into_inner());
         let mut v: u64 = 0;
         // SAFETY: 8-byte read from a non-blocking eventfd we own.
         unsafe {
@@ -195,19 +202,23 @@ impl Capture {
     ///
     /// Internally calls `stats()` (which resets kernel counters) and adds
     /// the delta to a running total stored on `self`. Returned counters
-    /// are monotonically non-decreasing across calls. **Do not mix with
-    /// `stats()` on the same capture** — each `stats()` call also resets
-    /// the kernel counter and bypasses the running total.
+    /// are monotonically non-decreasing across calls (and saturate at
+    /// `u32::MAX`). **Do not mix with `stats()` on the same capture** — each
+    /// `stats()` call also resets the kernel counter and bypasses the
+    /// running total.
     pub fn cumulative_stats(&self) -> Result<CaptureStats, Error> {
+        self.cumulative_counters()
+            .map(SourceCounters::to_capture_stats)
+    }
+
+    /// The running totals behind [`cumulative_stats`](Self::cumulative_stats)
+    /// in `u64`, with delivered packets split from drops — what the Monitor
+    /// telemetry reads (#183, #184).
+    pub(crate) fn cumulative_counters(&self) -> Result<SourceCounters, Error> {
         let delta = socket::get_packet_stats(self.fd.as_fd())?;
-        let total = self.cumulative.get();
-        let new_total = CaptureStats {
-            packets: total.packets.saturating_add(delta.tp_packets),
-            drops: total.drops.saturating_add(delta.tp_drops),
-            freeze_count: total.freeze_count.saturating_add(delta.tp_freeze_q_cnt),
-        };
-        self.cumulative.set(new_total);
-        Ok(new_total)
+        let total = self.cumulative.get().add_tpacket_v3(delta);
+        self.cumulative.set(total);
+        Ok(total)
     }
 
     // ── Flat packet iterators ────────────────────────────────────────────
@@ -391,6 +402,14 @@ impl Capture {
     /// a spurious error from a signal interrupting the underlying `poll(2)`.
     /// Also returns `Ok(None)` right away once a stop was requested
     /// through a [`StopHandle`].
+    ///
+    /// # Errors
+    ///
+    /// [`Error::Io`] with `ENETDOWN` when the interface was removed, and
+    /// for a failed `poll(2)`. An interface that is merely down (or was
+    /// down when the capture was opened) is not an error: the read waits
+    /// out its timeout, logging a warning, and packets flow again once the
+    /// interface is back up.
     pub fn next_batch_blocking(
         &mut self,
         timeout: Duration,
@@ -407,13 +426,14 @@ impl Capture {
             }
         }
 
-        match self.stop.as_ref() {
+        let revents = match self.stop.as_ref() {
             None => {
                 let mut pfds = [nix::poll::PollFd::new(
                     self.fd.as_fd(),
                     nix::poll::PollFlags::POLLIN,
                 )];
                 crate::syscall::poll_eintr_safe(&mut pfds, timeout).map_err(Error::Io)?;
+                pfds[0].revents()
             }
             Some(stop) => {
                 let mut pfds = [
@@ -421,11 +441,13 @@ impl Capture {
                     nix::poll::PollFd::new(stop.fd.as_fd(), nix::poll::PollFlags::POLLIN),
                 ];
                 crate::syscall::poll_eintr_safe(&mut pfds, timeout).map_err(Error::Io)?;
+                pfds[0].revents()
             }
-        }
+        };
         if self.stop_requested() {
             return Ok(None);
         }
+        socket::poll_error(self.fd.as_fd(), revents)?;
         Ok(self.next_batch())
     }
 
@@ -1014,6 +1036,17 @@ fn is_enomem(e: &std::io::Error) -> bool {
     e.raw_os_error() == Some(libc::ENOMEM)
 }
 
+/// A classic BPF program that drops every packet (`ret #0`).
+fn reject_all_filter() -> BpfFilter {
+    let ret_0 = BpfInsn {
+        code: 0x06, // BPF_RET | BPF_K
+        jt: 0,
+        jf: 0,
+        k: 0,
+    };
+    BpfFilter::new(vec![ret_0]).expect("one instruction")
+}
+
 /// Single attempt at building a Capture with `block_count` blocks.
 fn build_inner(b: &CaptureBuilder, block_count: usize) -> Result<Capture, Error> {
     let interface = b
@@ -1049,20 +1082,25 @@ fn build_inner(b: &CaptureBuilder, block_count: usize) -> Result<Capture, Error>
         return Err(Error::Config("block_count must be > 0".into()));
     }
 
-    let frame_nr = (b.block_size / b.frame_size) * block_count;
+    let geometry = RingGeometry::new(b.block_size, block_count, b.frame_size)?;
 
-    // Create socket
-    let fd = socket::create_packet_socket()?;
+    // Create the socket with protocol 0: `socket(ETH_P_ALL)` hooks it into
+    // every interface at once (packet_create() registers the prot_hook,
+    // packet_set_ring() re-registers it), so whatever arrived while the ring
+    // was mapped landed in its first blocks — from any interface, before
+    // the BPF filter. Everything that shapes what the ring receives is set
+    // up first; bind() below is what starts reception.
+    let fd = socket::create_packet_socket_proto(0)?;
 
     // Set TPACKET_V3
-    socket::set_packet_version(fd.as_fd())?;
+    socket::set_packet_version(fd.as_fd(), ffi::TPACKET_V3_INT)?;
 
     // Configure RX ring
     let mut req: ffi::tpacket_req3 = unsafe { std::mem::zeroed() };
-    req.tp_block_size = b.block_size as u32;
-    req.tp_block_nr = block_count as u32;
-    req.tp_frame_size = b.frame_size as u32;
-    req.tp_frame_nr = frame_nr as u32;
+    req.tp_block_size = geometry.block_size;
+    req.tp_block_nr = geometry.block_nr;
+    req.tp_frame_size = geometry.frame_size;
+    req.tp_frame_nr = geometry.frame_nr;
     req.tp_retire_blk_tov = b.block_timeout_ms;
     req.tp_sizeof_priv = 0;
     req.tp_feature_req_word = if b.fill_rxhash {
@@ -1074,16 +1112,8 @@ fn build_inner(b: &CaptureBuilder, block_count: usize) -> Result<Capture, Error>
     socket::set_rx_ring(fd.as_fd(), &req)?;
 
     // mmap
-    let ring_size = b.block_size * block_count;
-    let ring = MmapRing::new(fd.as_fd(), ring_size, b.block_size, block_count)?;
+    let ring = MmapRing::new(fd.as_fd(), geometry.size, b.block_size, block_count)?;
 
-    // Bind to interface
-    let ifindex = socket::resolve_interface(interface)?;
-    socket::bind_to_interface(fd.as_fd(), ifindex)?;
-
-    if b.promiscuous {
-        socket::set_promiscuous(fd.as_fd(), ifindex)?;
-    }
     if b.ignore_outgoing {
         socket::set_ignore_outgoing(fd.as_fd())?;
     }
@@ -1109,12 +1139,33 @@ fn build_inner(b: &CaptureBuilder, block_count: usize) -> Result<Capture, Error>
     if b.timestamp_source != TimestampSource::Software {
         socket::set_timestamp_source(fd.as_fd(), b.timestamp_source)?;
     }
+    let bpf_filter = b
+        .bpf_filter
+        .as_ref()
+        .map(|insns| BpfFilter::new(insns.clone()))
+        .transpose()?;
+    if b.fanout.is_some() {
+        // PACKET_FANOUT needs a bound socket, and until it joins the group
+        // the socket gets every packet on the interface: drop them all
+        // until the group decides what this member sees.
+        filter::attach_bpf_filter(fd.as_fd(), &reject_all_filter())?;
+    } else if let Some(filt) = &bpf_filter {
+        filter::attach_bpf_filter(fd.as_fd(), filt)?;
+    }
+
+    // Bind to interface: the socket starts receiving here.
+    let ifindex = socket::resolve_interface(interface)?;
+    socket::bind_to_interface(fd.as_fd(), ifindex)?;
+
+    if b.promiscuous {
+        socket::set_promiscuous(fd.as_fd(), ifindex)?;
+    }
     if let Some((mode, group_id)) = b.fanout {
         fanout::join_fanout(fd.as_fd(), group_id, mode, b.fanout_flags)?;
-    }
-    if let Some(insns) = &b.bpf_filter {
-        let filt = BpfFilter::new(insns.clone())?;
-        filter::attach_bpf_filter(fd.as_fd(), &filt)?;
+        match &bpf_filter {
+            Some(filt) => filter::attach_bpf_filter(fd.as_fd(), filt)?,
+            None => filter::detach_bpf_filter(fd.as_fd())?,
+        }
     }
 
     let busy_poll = BusyPollConfig {
@@ -1139,7 +1190,7 @@ fn build_inner(b: &CaptureBuilder, block_count: usize) -> Result<Capture, Error>
         current_block: 0,
         expected_seq: 0,
         poll_timeout: b.poll_timeout,
-        cumulative: Cell::new(CaptureStats::default()),
+        cumulative: Cell::new(SourceCounters::default()),
         busy_poll,
         stop: None,
     })
@@ -1189,6 +1240,51 @@ mod tests {
         assert!(!readable(&sig, 0), "cleared");
     }
 
+    /// A `stop()` racing `clear_stop()` leaves the signal raised or
+    /// cleared, never the flag clear with the eventfd still readable —
+    /// which made every `next_batch_blocking` poll return at once (a spin).
+    #[test]
+    fn stop_signal_raise_racing_clear_stays_consistent() {
+        use std::sync::{Arc, Barrier};
+
+        const ROUNDS: usize = 20_000;
+        let sig = Arc::new(StopSignal::new().unwrap());
+        let barrier = Arc::new(Barrier::new(3));
+        let spawn = |raise: bool| {
+            let (sig, barrier) = (Arc::clone(&sig), Arc::clone(&barrier));
+            std::thread::spawn(move || {
+                for _ in 0..ROUNDS {
+                    barrier.wait();
+                    if raise {
+                        sig.raise();
+                    } else {
+                        sig.clear();
+                    }
+                    barrier.wait();
+                }
+            })
+        };
+        let (raiser, clearer) = (spawn(true), spawn(false));
+        let mut inconsistent = 0;
+        for round in 0..ROUNDS {
+            if round % 2 == 0 {
+                sig.raise(); // start half the rounds raised
+            }
+            barrier.wait();
+            barrier.wait();
+            if sig.is_raised() != readable(&sig, 0) {
+                inconsistent += 1;
+            }
+            sig.clear();
+        }
+        raiser.join().unwrap();
+        clearer.join().unwrap();
+        assert_eq!(
+            inconsistent, 0,
+            "flag and eventfd disagreed in {inconsistent} rounds"
+        );
+    }
+
     #[test]
     fn builder_rejects_missing_interface() {
         let err = CaptureBuilder::default().build().unwrap_err();
@@ -1233,6 +1329,21 @@ mod tests {
             .build()
             .unwrap_err();
         assert!(matches!(err, Error::Config(_)));
+    }
+
+    /// A block count whose ring size overflows `usize` (or whose block /
+    /// frame counts do not fit the kernel's `u32` fields) is a config error,
+    /// caught before the socket exists — it used to wrap into a one-block
+    /// kernel ring that `next_batch` walked past.
+    #[test]
+    fn builder_rejects_ring_geometry_overflow() {
+        let err = CaptureBuilder::default()
+            .interface("lo")
+            .block_size(1 << 22)
+            .block_count((1 << 42) + 1)
+            .build()
+            .unwrap_err();
+        assert!(matches!(err, Error::Config(_)), "{err:?}");
     }
 
     #[test]

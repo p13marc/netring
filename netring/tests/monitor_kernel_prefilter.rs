@@ -44,6 +44,83 @@ fn frame(proto: u8, dst_port: u16) -> Vec<u8> {
 const TCP: u8 = 6;
 const UDP: u8 = 17;
 
+/// Minimal Ethernet/IPv6 frame for `proto` to `dst_port`, optionally with an
+/// 8-byte Hop-by-Hop extension header between the IPv6 header and L4.
+fn frame6(proto: u8, dst_port: u16, hop_by_hop: bool) -> Vec<u8> {
+    let mut l4 = Vec::new();
+    l4.extend_from_slice(&54321u16.to_be_bytes());
+    l4.extend_from_slice(&dst_port.to_be_bytes());
+    if proto == TCP {
+        l4.extend_from_slice(&[0, 0, 0, 1, 0, 0, 0, 0, 0x50, 0x02, 0x20, 0, 0, 0, 0, 0]);
+    } else {
+        l4.extend_from_slice(&8u16.to_be_bytes());
+        l4.extend_from_slice(&[0, 0]);
+    }
+    let ext: &[u8] = if hop_by_hop {
+        &[proto, 0, 1, 4, 0, 0, 0, 0]
+    } else {
+        &[]
+    };
+    let mut f = Vec::new();
+    f.extend_from_slice(&[0x02, 0, 0, 0, 0, 1]); // dst mac
+    f.extend_from_slice(&[0x02, 0, 0, 0, 0, 2]); // src mac
+    f.extend_from_slice(&[0x86, 0xdd]); // ipv6
+    f.extend_from_slice(&[0x60, 0, 0, 0]);
+    f.extend_from_slice(&((ext.len() + l4.len()) as u16).to_be_bytes());
+    f.push(if hop_by_hop { 0 } else { proto });
+    f.push(64);
+    let src: std::net::Ipv6Addr = "2001:db8::1".parse().unwrap();
+    let dst: std::net::Ipv6Addr = "2001:db8::2".parse().unwrap();
+    f.extend_from_slice(&src.octets());
+    f.extend_from_slice(&dst.octets());
+    f.extend_from_slice(ext);
+    f.extend_from_slice(&l4);
+    f
+}
+
+// Audit A1: protocol interests are family-agnostic in userspace, so the
+// prefilter must not default them to IPv4 — IPv6 TLS / DNS (also behind an
+// extension header) has to reach the parsers on live capture.
+#[test]
+fn ipv6_reaches_protocol_parsers() {
+    let bpf = Monitor::builder()
+        .interface("lo")
+        .protocol::<Tls>()
+        .protocol::<Dns>()
+        .kernel_prefilter()
+        .expect("tls + dns is still a real filter");
+    assert!(bpf.matches(&frame6(TCP, 443, false)), "v6 tls");
+    assert!(
+        bpf.matches(&frame6(TCP, 443, true)),
+        "v6 tls behind hop-by-hop"
+    );
+    assert!(bpf.matches(&frame6(UDP, 53, false)), "v6 dns");
+    assert!(
+        bpf.matches(&frame6(UDP, 53, true)),
+        "v6 dns behind hop-by-hop"
+    );
+    assert!(
+        !bpf.matches(&frame6(TCP, 80, false)),
+        "v6 tcp/80 still shed"
+    );
+    assert!(bpf.matches(&frame(TCP, 443)), "v4 tls unchanged");
+    assert!(!bpf.matches(&frame(TCP, 80)), "v4 tcp/80 still shed");
+}
+
+#[test]
+fn all_l4_passes_ipv6_transport() {
+    let bpf = Monitor::builder()
+        .interface("lo")
+        .all_l4()
+        .kernel_prefilter()
+        .expect("all_l4 is a proto-only filter");
+    for hbh in [false, true] {
+        assert!(bpf.matches(&frame6(TCP, 12345, hbh)), "v6 tcp (hbh={hbh})");
+        assert!(bpf.matches(&frame6(UDP, 12345, hbh)), "v6 udp (hbh={hbh})");
+    }
+    assert!(bpf.matches(&frame(TCP, 1)) && bpf.matches(&frame(UDP, 1)));
+}
+
 /// A minimal broadcast ARP-request Ethernet frame (EtherType 0x0806).
 #[cfg(feature = "arp")]
 fn arp_frame() -> Vec<u8> {
@@ -214,4 +291,133 @@ fn pure_l4_protocol_keeps_all_of_that_l4() {
         !bpf.matches(&frame(UDP, 53)),
         "udp not wanted by Tcp marker"
     );
+}
+
+/// `f` with 802.1Q-style tags (`tpids`, VID 100 each) left in the frame data
+/// after the MACs. The kernel strips only the outer 802.1Q / 802.1ad tag
+/// before packet taps, so a QinQ inner tag (or a 0x9100 one) reaches the
+/// socket filter and userspace in-frame.
+fn tagged(f: &[u8], tpids: &[u16]) -> Vec<u8> {
+    let mut out = f[..12].to_vec();
+    for tpid in tpids {
+        out.extend_from_slice(&tpid.to_be_bytes());
+        out.extend_from_slice(&100u16.to_be_bytes());
+    }
+    out.extend_from_slice(&f[12..]);
+    out
+}
+
+// Audit A7 (in-frame VLAN tags): userspace (etherparse, the ARP parser)
+// reads through VLAN tags left in the frame; the prefilter's templates read
+// at untagged offsets, so such frames must pass rather than be shed.
+#[test]
+fn in_frame_vlan_tags_pass_the_prefilter() {
+    let bpf = Monitor::builder()
+        .interface("lo")
+        .protocol::<Dns>()
+        .kernel_prefilter()
+        .expect("dns narrows to udp/53");
+    assert!(bpf.matches(&tagged(&frame(UDP, 53), &[0x8100])), "802.1Q");
+    assert!(
+        bpf.matches(&tagged(&frame(UDP, 53), &[0x88a8, 0x8100])),
+        "QinQ"
+    );
+    assert!(bpf.matches(&tagged(&frame(UDP, 53), &[0x9100])), "0x9100");
+    assert!(!bpf.matches(&frame(TCP, 80)), "untagged tcp/80 still shed");
+}
+
+#[cfg(feature = "arp")]
+#[test]
+fn in_frame_vlan_tagged_arp_passes_an_arp_prefilter() {
+    let bpf = Monitor::builder()
+        .interface("lo")
+        .on_arp(|_m, _ctx| Ok(()))
+        .kernel_prefilter()
+        .expect("arp-only filter");
+    assert!(bpf.matches(&tagged(&arp_frame(), &[0x8100])));
+    assert!(!bpf.matches(&frame(UDP, 53)), "untagged udp still shed");
+}
+
+/// A non-first IPv4 fragment of a UDP datagram: fragment offset 1480 bytes,
+/// no UDP header (it lives in fragment 0), just payload.
+fn ipv4_udp_trailing_fragment() -> Vec<u8> {
+    let payload = [0xabu8; 16];
+    let mut f = Vec::new();
+    f.extend_from_slice(&[0x02, 0, 0, 0, 0, 1]); // dst mac
+    f.extend_from_slice(&[0x02, 0, 0, 0, 0, 2]); // src mac
+    f.extend_from_slice(&[0x08, 0x00]); // ipv4
+    f.extend_from_slice(&[0x45, 0]);
+    f.extend_from_slice(&(20 + payload.len() as u16).to_be_bytes());
+    f.extend_from_slice(&[0x12, 0x34]); // id
+    f.extend_from_slice(&(1480u16 / 8).to_be_bytes()); // MF clear, offset 185
+    f.extend_from_slice(&[64, UDP, 0, 0]);
+    f.extend_from_slice(&[10, 0, 0, 2]);
+    f.extend_from_slice(&[10, 0, 0, 1]);
+    f.extend_from_slice(&payload);
+    f
+}
+
+// Audit A3: the reassembler needs every fragment of a datagram, but only
+// fragment 0 carries the ports — a port-narrowed prefilter let the first
+// fragment through and shed the rest, so nothing ever reassembled on a live
+// capture (worse than not arming it).
+#[test]
+fn ip_fragment_reassembly_keeps_trailing_fragments() {
+    let narrow = Monitor::builder()
+        .interface("lo")
+        .protocol::<Dns>()
+        .kernel_prefilter()
+        .expect("dns alone narrows to udp/53");
+    assert!(
+        !narrow.matches(&ipv4_udp_trailing_fragment()),
+        "precondition: the port template sheds a trailing fragment"
+    );
+
+    let pf = Monitor::builder()
+        .interface("lo")
+        .protocol::<Dns>()
+        .reassemble_ip_fragments()
+        .kernel_prefilter();
+    assert!(
+        pf.is_none_or(|bpf| bpf.matches(&ipv4_udp_trailing_fragment())),
+        "an armed reassembler must see every fragment"
+    );
+}
+
+// Audit A4: the per-flow dataset / scanning consumers are documented over
+// every (each) flow and are fed every frame the capture delivers — a protocol
+// registered next to them must not narrow what they see.
+#[cfg(feature = "ml-features")]
+#[test]
+fn ml_features_force_capture_all() {
+    let pf = Monitor::builder()
+        .interface("lo")
+        .protocol::<Dns>()
+        .on_ml_features(|_f: &flowscope::CicFlowFeatures| {})
+        .kernel_prefilter();
+    assert!(pf.is_none(), "on_ml_features wants every flow");
+}
+
+#[cfg(feature = "nprint")]
+#[test]
+fn nprint_forces_capture_all() {
+    let pf = Monitor::builder()
+        .interface("lo")
+        .protocol::<Dns>()
+        .nprint(flowscope::nprint::NPrintConfig::default())
+        .kernel_prefilter();
+    assert!(pf.is_none(), "nprint accumulates every tracked flow");
+}
+
+#[cfg(feature = "yara")]
+#[test]
+fn yara_forces_capture_all() {
+    let rules = netring::monitor::yara::YaraRules::compile("rule never { condition: false }")
+        .expect("trivial rule compiles");
+    let pf = Monitor::builder()
+        .interface("lo")
+        .protocol::<Dns>()
+        .yara(rules)
+        .kernel_prefilter();
+    assert!(pf.is_none(), "yara scans each flow's payload");
 }

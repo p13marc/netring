@@ -94,6 +94,8 @@ pub mod yara;
 /// trailing payload is not scanned (bounds adversarial buffering).
 #[cfg(feature = "yara")]
 pub const DEFAULT_YARA_SCAN_BYTES: usize = 1024 * 1024;
+/// Capture sources a monitor can number with its `u8` [`SourceIdx`](crate::ctx::SourceIdx).
+const MAX_CAPTURE_SOURCES: usize = u8::MAX as usize + 1;
 #[cfg(feature = "ndp")]
 pub mod ndp;
 #[cfg(feature = "p0f")]
@@ -240,6 +242,19 @@ pub enum CaptureSourceBackend {
     AfXdpProvided,
 }
 
+/// Flushes one registered [`ReportSink`](crate::report::ReportSink).
+pub(crate) type ReportFlush = Box<dyn FnMut() -> std::io::Result<()> + Send>;
+
+/// The flush hook of a report sink shared with its tick handler.
+fn report_flush<R, S>(sink: &std::sync::Arc<std::sync::Mutex<S>>) -> ReportFlush
+where
+    R: crate::report::Report,
+    S: crate::report::ReportSink<R> + 'static,
+{
+    let sink = std::sync::Arc::clone(sink);
+    Box::new(move || sink.lock().map_or(Ok(()), |mut s| s.flush()))
+}
+
 /// The 0.20 top-level monitor — a fully-constructed graph of
 /// (driver, dispatcher, parser-slots, state) that runs to a
 /// stop condition.
@@ -318,6 +333,10 @@ pub struct Monitor {
     /// zero cost. Injected by `ShardedRunner::run_inner` via
     /// [`Self::set_merge_rx`].
     pub(crate) merge_rx: Option<tokio::sync::mpsc::UnboundedReceiver<merge::MergeRequest>>,
+    /// The [`ShardedRunner`]'s shared stop when this monitor runs as one of
+    /// its shards: the run loop also stops when a sibling's run ends.
+    /// Injected via [`Self::set_shard_stop`]; `None` otherwise.
+    pub(crate) shard_stop: Option<std::sync::Arc<shard::ShardStop>>,
     /// 0.24 Phase B: what to do when a handler returns `Err`. Default
     /// [`HandlerErrorPolicy::Propagate`] (tear down the monitor — the historic
     /// behavior); [`HandlerErrorPolicy::Isolate`] logs + counts and continues so
@@ -342,6 +361,11 @@ pub struct Monitor {
     /// [`crate::export::FlowRecord`] for every `FlowEnded` and hands it
     /// to each. Empty (the common case) is zero cost.
     pub(crate) flow_exporters: Vec<Box<dyn crate::export::FlowExporter>>,
+    /// Flush hooks of the [`ReportSink`](crate::report::ReportSink)s
+    /// registered via [`MonitorBuilder::report_to`] /
+    /// [`MonitorBuilder::capture_health`]; run with the other outputs'
+    /// flushes when the monitor exits.
+    pub(crate) report_flushers: Vec<ReportFlush>,
     /// Issue #32: flow-end ML-feature handlers registered via
     /// [`MonitorBuilder::on_ml_features`]. Each is called with the live
     /// `(key, stats, reason)` at flow end; the `CicFlowFeatures` construction
@@ -466,9 +490,13 @@ impl Monitor {
         run::run_loop(self, run::StopCondition::Deadline(deadline)).await
     }
 
-    /// Run for `duration`.
+    /// Run for `duration`. A duration too long to represent as an
+    /// [`Instant`] (e.g. `Duration::MAX`) means no deadline.
     pub async fn run_for(self, duration: Duration) -> Result<()> {
-        self.run_until(Instant::now() + duration).await
+        match Instant::now().checked_add(duration) {
+            Some(deadline) => self.run_until(deadline).await,
+            None => run::run_loop(self, run::StopCondition::Never).await,
+        }
     }
 
     /// Run until Ctrl-C (SIGINT) / SIGTERM.
@@ -485,11 +513,9 @@ impl Monitor {
     ///
     /// Single-source: pcap replay doesn't fan in across multiple
     /// files (use a small driver loop yourself if you need that).
-    /// Tick handlers registered on the builder are NOT fired —
-    /// pcap timestamps drift from wall-clock, so scheduling
-    /// ticks against them is ambiguous. Use `.on::<Tick>(...)`
-    /// for capture-time-based aggregation in live mode; for
-    /// pcap, hook the lifecycle events directly.
+    /// Time runs on the capture's packet timestamps (since 0.31):
+    /// flows sweep and tick handlers fire every period of packet
+    /// time, however fast the file is read.
     ///
     /// Returns
     /// [`crate::error::BuildError::PcapSourceRequired`] when
@@ -567,10 +593,10 @@ impl Monitor {
     /// 0.21 E.2: run until `window` of inactivity.
     ///
     /// The run loop resets a deadline each time a packet batch
-    /// arrives (or a tick fires); if the deadline expires before
-    /// the next event, the loop exits. The periodic flow sweep
-    /// (idle `FlowEnded`, parser ticks) is housekeeping and does not
-    /// reset it. Useful for:
+    /// arrives; if the deadline expires before the next batch, the
+    /// loop exits. Ticks (`.tick`, `.report`, `on_bandwidth`, …),
+    /// the periodic flow sweep (idle `FlowEnded`, parser ticks) and
+    /// telemetry are housekeeping and do not reset it. Useful for:
     ///
     /// - **live captures that go quiet** — stop once the source is
     ///   silent; flows still open are ended by the drain phase.
@@ -735,6 +761,12 @@ impl Monitor {
         rx: tokio::sync::mpsc::UnboundedReceiver<merge::MergeRequest>,
     ) {
         self.merge_rx = Some(rx);
+    }
+
+    /// Run as a [`ShardedRunner`] shard: stop with the siblings. Called by
+    /// `ShardedRunner::run_inner` after `build`.
+    pub(crate) fn set_shard_stop(&mut self, stop: std::sync::Arc<shard::ShardStop>) {
+        self.shard_stop = Some(stop);
     }
 }
 
@@ -961,6 +993,8 @@ pub struct MonitorBuilder {
     /// 0.24 Phase D1: flow exporters registered via
     /// [`Self::export_flows`]. Moved into [`Monitor::flow_exporters`].
     flow_exporters: Vec<Box<dyn crate::export::FlowExporter>>,
+    /// Report-sink flush hooks. Moved into [`Monitor::report_flushers`].
+    report_flushers: Vec<ReportFlush>,
     /// Issue #32: flow-end ML-feature handlers registered via
     /// [`Self::on_ml_features`]. Moved into [`Monitor::ml_feature_handlers`].
     ml_feature_handlers: Vec<ml_features::FlowEndHandler>,
@@ -1050,6 +1084,12 @@ pub struct MonitorBuilder {
     /// [`BuildError::HandlerForUnregisteredProtocol`] when a
     /// handler requires a slot that was never installed.
     declared_protocols: rustc_hash::FxHashMap<std::any::TypeId, &'static str>,
+    /// Protocol markers whose parser slot is installed (by
+    /// [`Self::protocol`] or a successful [`Self::with_broadcast`]):
+    /// `protocol::<P>()` is a no-op for these. Narrower than
+    /// `declared_protocols`, which a `with_broadcast` that installed
+    /// nothing also records.
+    slotted_protocols: rustc_hash::FxHashSet<std::any::TypeId>,
     /// 0.21 F: per-protocol broadcast handles keyed by
     /// `TypeId::of::<P>()`. Populated by [`Self::with_broadcast`],
     /// passed through to [`Monitor::broadcast_handles`] at
@@ -1622,7 +1662,8 @@ impl MonitorBuilder {
     }
 
     /// 0.25 W1e: catch panics from **synchronous** handlers (`on` / `on_ctx` /
-    /// detectors / sinks) and convert them into `Error::HandlerPanic`, then
+    /// detectors / sinks / `tick` / `on_capture_stats`) and convert them into
+    /// `Error::HandlerPanic`, then
     /// route that through the configured
     /// [`handler_error_policy`](Self::handler_error_policy) — so pairing this
     /// with [`HandlerErrorPolicy::Isolate`] means one panicking handler is
@@ -1740,12 +1781,17 @@ impl MonitorBuilder {
     /// # Ok(())
     /// # }
     /// ```
-    pub fn capture_health<S>(self, period: Duration, mut sink: S) -> Self
+    pub fn capture_health<S>(mut self, period: Duration, sink: S) -> Self
     where
         S: crate::report::ReportSink<CaptureHealth> + 'static,
     {
+        let sink = std::sync::Arc::new(std::sync::Mutex::new(sink));
+        self.report_flushers
+            .push(report_flush::<CaptureHealth, S>(&sink));
         self.on_capture_stats(period, move |t, _ctx| {
-            sink.record(&CaptureHealth::from(*t));
+            if let Ok(mut s) = sink.lock() {
+                s.record(&CaptureHealth::from(*t));
+            }
             Ok(())
         })
     }
@@ -1964,8 +2010,12 @@ impl MonitorBuilder {
     /// exporter. The final end-of-flow record (reason `Some(_)`) still fires on
     /// `FlowEnded` as before. No-op unless at least one exporter is registered.
     ///
-    /// Counters in interim records are cumulative-to-date (not per-interval
-    /// deltas), matching IPFIX active-timeout semantics.
+    /// Counters in [`FlowRecord`](crate::export::FlowRecord)s are
+    /// cumulative-to-date, interim and final alike.
+    /// `IpfixExporter` (feature `ipfix`) turns them into IPFIX
+    /// delta counts (IE 1/2: what is new since the flow's previous record,
+    /// so a collector's sum is the flow's total) and keeps the running totals
+    /// in IE 85/86; a custom exporter that reports deltas must do the same.
     pub fn export_active_timeout(mut self, period: std::time::Duration) -> Self {
         self.flow_active_timeout = Some(period);
         self
@@ -2034,7 +2084,15 @@ impl MonitorBuilder {
     /// `register` — the builder treats that as "no parser slot to
     /// stash; the central tracker covers lifecycle events" and
     /// silently moves on.
+    ///
+    /// Idempotent: declaring `P` again — directly, or through sugar
+    /// that declares it for you (`all_l4`, `on_icmp_error`, `on_dns`,
+    /// `flow_analysis`, …, or [`Self::with_broadcast`]) — keeps the one
+    /// slot. A second slot would deliver every message twice.
     pub fn protocol<P: Protocol>(mut self) -> Self {
+        if !self.slotted_protocols.insert(std::any::TypeId::of::<P>()) {
+            return self;
+        }
         let builder = self
             .driver_builder
             .get_or_insert_with(|| Driver::builder(FiveTuple::bidirectional()));
@@ -2226,7 +2284,7 @@ impl MonitorBuilder {
     /// `window` / `bucket`. See [`owner_bandwidth`](Self::owner_bandwidth).
     pub fn owner_bandwidth_windowed(mut self, window: Duration, bucket: Duration) -> Self {
         use crate::protocol::builtin::{Tcp, Udp};
-        use crate::protocol::event_typed::{FlowEnded, FlowPacket};
+        use crate::protocol::event_typed::FlowPacket;
 
         if self.owner_bandwidth_registered {
             return self;
@@ -2241,30 +2299,32 @@ impl MonitorBuilder {
         self = self
             .protocol::<Tcp>()
             .protocol::<Udp>()
+            // The per-flow owner cache: released by the run loop when the
+            // flow ends — whatever its protocol, not only TCP / UDP — or
+            // idles out.
+            .flow_state::<owner_bandwidth::CachedOwner>(owner_bandwidth::OWNER_CACHE_IDLE)
             .state_init::<owner_bandwidth::OwnerBandwidthState, _>(move || {
                 owner_bandwidth::OwnerBandwidthState::new(hook.clone(), window, bucket)
             });
-        self = self.on_ctx::<FlowPacket>(
+        self.on_ctx::<FlowPacket>(
             |evt: &crate::protocol::event_typed::FlowPacket, ctx: &mut Ctx<'_>| {
                 let key = evt.key;
                 let len = evt.len as u64;
                 let ts = ctx.ts;
-                ctx.state_mut::<owner_bandwidth::OwnerBandwidthState>()
-                    .record(&key, len, ts);
+                let cached = ctx
+                    .flow_state_mut::<owner_bandwidth::CachedOwner>()
+                    .and_then(|c| c.0);
+                let state = ctx.state_mut::<owner_bandwidth::OwnerBandwidthState>();
+                let owner = cached.unwrap_or_else(|| state.attribute(&key));
+                state.record(owner, len, ts);
+                if cached.is_none()
+                    && let Some(slot) = ctx.flow_state_mut::<owner_bandwidth::CachedOwner>()
+                {
+                    slot.0 = Some(owner);
+                }
                 Ok(())
             },
-        );
-        // Evict a flow's cached owner when it ends (Tcp + Udp).
-        self = self.on_ctx::<FlowEnded<Tcp>>(|evt: &FlowEnded<Tcp>, ctx: &mut Ctx<'_>| {
-            ctx.state_mut::<owner_bandwidth::OwnerBandwidthState>()
-                .forget(&evt.key);
-            Ok(())
-        });
-        self.on_ctx::<FlowEnded<Udp>>(|evt: &FlowEnded<Udp>, ctx: &mut Ctx<'_>| {
-            ctx.state_mut::<owner_bandwidth::OwnerBandwidthState>()
-                .forget(&evt.key);
-            Ok(())
-        })
+        )
     }
 
     /// Issue #130: arm [`owner_bandwidth`](Self::owner_bandwidth) and a periodic
@@ -2324,17 +2384,18 @@ impl MonitorBuilder {
                 .protocol::<Tcp>()
                 .protocol::<Udp>()
                 .on_ctx::<FlowPacket>(|evt: &FlowPacket, ctx: &mut Ctx<'_>| {
-                    use crate::flow::FlowSide;
+                    use flowscope::Orientation;
                     let key = evt.key;
                     let len = evt.len as u64;
                     let ts = ctx.ts;
                     let st = ctx.state_mut::<aggregate::AggregateState>();
                     if let Some(t) = st.talkers.as_mut() {
-                        // The sender is the initiator (`a`) or responder (`b`).
-                        let src = if evt.side == FlowSide::Initiator {
-                            key.a.ip()
-                        } else {
-                            key.b.ip()
+                        // The sender, from the packet's canonical direction:
+                        // the key is address-sorted, so `a` is the initiator
+                        // only when it has the lower address.
+                        let src = match evt.orientation {
+                            Orientation::Forward => key.a.ip(),
+                            Orientation::Reverse => key.b.ip(),
                         };
                         t.record_tx(src, len, ts);
                     }
@@ -2357,7 +2418,7 @@ impl MonitorBuilder {
             }
             self = self.on_ctx::<Dns>(|msg: &flowscope::dns::DnsMessage, ctx: &mut Ctx<'_>| {
                 if let flowscope::dns::DnsMessage::Query(q) = msg
-                    && let Some(name) = q.questions.first().map(|x| x.name.clone())
+                    && let Some(name) = q.questions.first().map(|x| aggregate::name_key(&x.name))
                 {
                     let ts = ctx.ts;
                     if let Some(d) = ctx
@@ -2383,7 +2444,7 @@ impl MonitorBuilder {
             }
             self = self.on_ctx::<TlsHandshake>(
                 |hs: &flowscope::tls::TlsHandshake, ctx: &mut Ctx<'_>| {
-                    if let Some(sni) = hs.sni.clone() {
+                    if let Some(sni) = hs.sni.as_deref().map(aggregate::name_key) {
                         let ts = ctx.ts;
                         if let Some(s) = ctx.state_mut::<aggregate::AggregateState>().sni.as_mut() {
                             s.record(sni, 1, ts);
@@ -2517,6 +2578,10 @@ impl MonitorBuilder {
     /// subscriptions, and p0f still see the raw wire fragments. Overlapping
     /// fragments (teardrop / RFC 5722) are dropped, so an evasion payload behind
     /// an overlap never reassembles.
+    ///
+    /// Arming reassembly turns the automatic kernel prefilter off (capture
+    /// everything): its port checks can't see the ports of a non-first
+    /// fragment, so they would drop the fragments the reassembler needs.
     pub fn reassemble_ip_fragments(self) -> Self {
         self.reassemble_ip_fragments_with(ip_frag::IpFragConfig::default())
     }
@@ -2938,6 +3003,7 @@ impl MonitorBuilder {
                     )));
                 self.broadcast_handles
                     .insert(std::any::TypeId::of::<P>(), Box::new(handle));
+                self.slotted_protocols.insert(std::any::TypeId::of::<P>());
             }
             Err(_) => {
                 // The default `register_broadcast` returns Err for
@@ -3047,7 +3113,15 @@ impl MonitorBuilder {
         }
         self.on_ctx::<TlsHandshake>(
             move |hs: &flowscope::tls::TlsHandshake, ctx: &mut Ctx<'_>| {
-                let fp = TlsFingerprint::from_handshake(hs, ctx.flow);
+                let fp = TlsFingerprint::from_handshake(
+                    hs,
+                    ctx.flow,
+                    crate::monitor::fingerprint::server_port(
+                        ctx.flow,
+                        ctx.side(),
+                        ctx.orientation(),
+                    ),
+                );
                 handler(&fp, ctx)
             },
         )
@@ -3144,7 +3218,11 @@ impl MonitorBuilder {
             self = self.protocol::<Quic>();
         }
         self.on_ctx::<Quic>(move |initial: &flowscope::QuicInitial, ctx: &mut Ctx<'_>| {
-            let fp = QuicFingerprint::from_initial(initial, ctx.flow);
+            let fp = QuicFingerprint::from_initial(
+                initial,
+                ctx.flow,
+                crate::monitor::fingerprint::server_port(ctx.flow, ctx.side(), ctx.orientation()),
+            );
             handler(&fp, ctx)
         })
     }
@@ -3243,7 +3321,15 @@ impl MonitorBuilder {
         let h = std::sync::Arc::clone(&handler);
         self = self.on_ctx::<TlsHandshake>(
             move |hs: &flowscope::tls::TlsHandshake, ctx: &mut Ctx<'_>| {
-                let fp = TlsFingerprint::from_handshake(hs, ctx.flow);
+                let fp = TlsFingerprint::from_handshake(
+                    hs,
+                    ctx.flow,
+                    crate::monitor::fingerprint::server_port(
+                        ctx.flow,
+                        ctx.side(),
+                        ctx.orientation(),
+                    ),
+                );
                 if !fp.app_protocol.is_encrypted_dns() {
                     return Ok(());
                 }
@@ -3271,7 +3357,15 @@ impl MonitorBuilder {
             }
             let h = std::sync::Arc::clone(&handler);
             self = self.on_ctx::<Quic>(move |qi: &flowscope::QuicInitial, ctx: &mut Ctx<'_>| {
-                let fp = QuicFingerprint::from_initial(qi, ctx.flow);
+                let fp = QuicFingerprint::from_initial(
+                    qi,
+                    ctx.flow,
+                    crate::monitor::fingerprint::server_port(
+                        ctx.flow,
+                        ctx.side(),
+                        ctx.orientation(),
+                    ),
+                );
                 if !fp.app_protocol.is_encrypted_dns() {
                     return Ok(());
                 }
@@ -3388,7 +3482,12 @@ impl MonitorBuilder {
                 std::mem::take(&mut st.scratch)
             };
             if !learned.is_empty() {
-                let hs = handlers.lock().expect("name handler list poisoned");
+                // Poison-tolerant: the list is read-only while the monitor
+                // runs, and a handler panic caught by `catch_handler_panics`
+                // (which poisons it) must not fail every later response.
+                let hs = handlers
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner);
                 if !hs.is_empty() {
                     for (ip, claim) in &learned {
                         for h in hs.iter() {
@@ -3759,9 +3858,11 @@ impl MonitorBuilder {
                 .state_mut::<analysis::AnalyzerCell>()
                 .analyzer
                 .finalize(&evt.key, evt.stats.clone());
+            // Poison-tolerant (read-only at run time): a caught handler
+            // panic must not fail every later flow.
             let hs = handlers_tcp
                 .lock()
-                .expect("analyzed-flow handler list poisoned");
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
             analysis::emit_analyzed_flow(af, emit_risk, min, ctx, &hs);
             Ok(())
         });
@@ -3774,7 +3875,7 @@ impl MonitorBuilder {
                 .finalize(&evt.key, evt.stats.clone());
             let hs = handlers_udp
                 .lock()
-                .expect("analyzed-flow handler list poisoned");
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
             analysis::emit_analyzed_flow(af, emit_risk, min, ctx, &hs);
             Ok(())
         });
@@ -4147,21 +4248,42 @@ impl MonitorBuilder {
     ///
     /// `None` means **capture everything** (filter in userspace): it's returned
     /// when any consumer wants all traffic (a broad handler, an exporter, a
-    /// tick/report, broadcast, bandwidth), the union is empty, or it can't be
-    /// expressed within the cBPF budget. Because the union is a *superset* of
-    /// every consumer's interest, the filter never drops a frame any consumer
-    /// wants — **fail-open and starvation-free by construction**, which is what
-    /// makes it safe to auto-apply (see [`Monitor::run_*`](Monitor)).
+    /// tick/report, broadcast, bandwidth, ML features / nPrint / YARA,
+    /// IP-fragment reassembly), the union
+    /// is empty, or it can't be expressed within the cBPF budget. Because the
+    /// union is a *superset* of every consumer's interest, the filter never
+    /// drops a frame any consumer wants — **fail-open and starvation-free by
+    /// construction**, which is what makes it safe to auto-apply (see
+    /// [`Monitor::run_*`](Monitor)).
     ///
     /// Also exposed for **inspection / debugging** (what STAGE-0 would shed).
     pub fn kernel_prefilter(&self) -> Option<crate::config::BpfFilter> {
         // Broad consumers that need every flow regardless of L4: an exporter,
         // a periodic tick/report, a broadcast subscriber, or bandwidth
         // accounting. Any one forces capture-all (fail-open).
+        //
+        // So do the per-flow dataset / scanning consumers, which are documented
+        // over every (each) flow and fed every delivered frame regardless of
+        // the registered protocols: ML features, nPrint, YARA.
+        #[cfg(feature = "nprint")]
+        let nprint_armed = self.nprint_config.is_some();
+        #[cfg(not(feature = "nprint"))]
+        let nprint_armed = false;
+        #[cfg(feature = "yara")]
+        let yara_armed = self.yara_rules.is_some();
+        #[cfg(not(feature = "yara"))]
+        let yara_armed = false;
         let wants_all = !self.flow_exporters.is_empty()
             || !self.tick_handlers.is_empty()
             || !self.broadcast_handles.is_empty()
-            || self.bandwidth_registered;
+            || self.bandwidth_registered
+            || !self.ml_feature_handlers.is_empty()
+            || nprint_armed
+            || yara_armed
+            // The IP-fragment reassembler needs every fragment of a datagram,
+            // but only fragment 0 carries the ports, and the port templates
+            // shed non-first fragments — a narrowed prefilter would starve it.
+            || self.ip_frag_config.is_some();
 
         let interests = self
             .handlers
@@ -4387,7 +4509,7 @@ impl MonitorBuilder {
     ///     |snap| snap.bandwidth().unwrap().to_snapshot(10),
     ///     JsonReportSink)
     /// ```
-    pub fn report_to<R, B, S>(self, period: Duration, build: B, sink: S) -> Self
+    pub fn report_to<R, B, S>(mut self, period: Duration, build: B, sink: S) -> Self
     where
         R: crate::report::Report,
         B: Fn(crate::report::ReportSnapshot<'_, '_>) -> R + Send + Sync + 'static,
@@ -4396,7 +4518,8 @@ impl MonitorBuilder {
         // Tick handlers are stored behind `Arc<dyn Fn + Send + Sync>`, so
         // the sink needs interior mutability. The lock is taken once per
         // cadence tick (seconds), never on the packet path.
-        let sink = std::sync::Mutex::new(sink);
+        let sink = std::sync::Arc::new(std::sync::Mutex::new(sink));
+        self.report_flushers.push(report_flush::<R, S>(&sink));
         self.tick(period, move |tick: &Tick, ctx: &mut Ctx<'_>| {
             let report = build(crate::report::ReportSnapshot { ctx, now: tick.now });
             if let Ok(mut s) = sink.lock() {
@@ -4418,6 +4541,24 @@ impl MonitorBuilder {
         if self.owner_bandwidth_needs_hook {
             return Err(BuildError::AttributionHookRequired.into());
         }
+        // A zero period has no next firing time (the live loop's interval
+        // would panic on it).
+        let zero_period = if self.tick_handlers.iter().any(|t| t.period.is_zero()) {
+            Some("tick")
+        } else if self
+            .capture_stats
+            .as_ref()
+            .is_some_and(|r| r.period.is_zero())
+        {
+            Some("on_capture_stats")
+        } else if self.flow_active_timeout.is_some_and(|p| p.is_zero()) {
+            Some("export_active_timeout")
+        } else {
+            None
+        };
+        if let Some(what) = zero_period {
+            return Err(BuildError::ZeroPeriod { what }.into());
+        }
         // 0.21 E.1: when a pcap source is declared, the
         // `NoInterface` check is relaxed — replay mode never
         // opens AF_PACKET.
@@ -4435,6 +4576,19 @@ impl MonitorBuilder {
         let no_capture_source = self.interfaces.is_empty();
         if interface_required && no_capture_source {
             return Err(BuildError::NoInterface.into());
+        }
+        // Every source is numbered by a `u8` `SourceIdx` — a 257th would wrap.
+        #[cfg(feature = "af-xdp")]
+        let source_count =
+            self.interfaces.len() + self.xdp_interfaces.len() + self.injected_xdp.len();
+        #[cfg(not(feature = "af-xdp"))]
+        let source_count = self.interfaces.len();
+        if source_count > MAX_CAPTURE_SOURCES {
+            return Err(BuildError::TooManyCaptureSources {
+                limit: MAX_CAPTURE_SOURCES,
+                actual: source_count,
+            }
+            .into());
         }
         // Issue #135: an explicit AF_XDP backend on a namespaced source. The
         // builder methods return `Self`, so this is the first place it can be
@@ -4582,11 +4736,13 @@ impl MonitorBuilder {
                 .label_table
                 .unwrap_or_else(flowscope::well_known::LabelTable::new),
             merge_rx: None,
+            shard_stop: None,
             handler_error_policy: self.handler_error_policy,
             backend_error_policy: self.backend_error_policy,
             capture_stats: self.capture_stats,
             health: health::HealthState::new(),
             flow_exporters: self.flow_exporters,
+            report_flushers: self.report_flushers,
             ml_feature_handlers: self.ml_feature_handlers,
             byte_accumulators,
             ip_frag_config: self.ip_frag_config,

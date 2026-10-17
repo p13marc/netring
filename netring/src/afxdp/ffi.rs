@@ -57,8 +57,9 @@ pub const SIOCETHTOOL: libc::c_ulong = 0x8946;
 /// ethtool sub-command: get channel (queue) counts. From `<linux/ethtool.h>`.
 pub const ETHTOOL_GCHANNELS: u32 = 0x0000_003c;
 
-/// `struct ethtool_channels` from `<linux/ethtool.h>`. The RSS queue count for
-/// AF_XDP capture is `combined_count` (or `rx_count` on rx/tx-split NICs).
+/// `struct ethtool_channels` from `<linux/ethtool.h>`. The RX queue count for
+/// AF_XDP capture is `combined_count + rx_count` (combined plus RX-only
+/// channels).
 #[repr(C)]
 #[derive(Debug, Default, Clone, Copy)]
 pub struct ethtool_channels {
@@ -73,13 +74,49 @@ pub struct ethtool_channels {
     pub combined_count: u32,
 }
 
-/// Minimal `struct ifreq` for the `SIOCETHTOOL` ioctl: interface name + a
-/// pointer to the ethtool command struct (the `ifr_data` union member). We
-/// vendor this rather than use `libc::ifreq` to avoid its `ifr_ifru` union.
+/// `struct ifreq` for the `SIOCETHTOOL` ioctl: interface name + a pointer to
+/// the ethtool command struct (the `ifr_data` union member). We vendor this
+/// rather than use `libc::ifreq` to avoid its `ifr_ifru` union.
+///
+/// It must be the full size of `struct ifreq`: `sock_do_ioctl()` copies
+/// `sizeof(struct ifreq)` (40 bytes on 64-bit) in *and back out* for
+/// `SIOCETHTOOL`, so a shorter struct has the kernel read and overwrite the
+/// stack bytes past it (#185). Build it with [`ethtool_ifreq::new`].
 #[repr(C)]
 pub struct ethtool_ifreq {
     pub ifr_name: [libc::c_char; libc::IFNAMSIZ],
     pub ifr_data: *mut libc::c_void,
+    /// The rest of the `ifr_ifru` union.
+    pub ifr_pad: [u8; IFREQ_PAD],
+}
+
+/// Bytes of `struct ifreq` past the name and the `ifr_data` pointer.
+pub const IFREQ_PAD: usize =
+    std::mem::size_of::<libc::ifreq>() - libc::IFNAMSIZ - std::mem::size_of::<*mut libc::c_void>();
+
+const _: () = assert!(std::mem::size_of::<ethtool_ifreq>() == std::mem::size_of::<libc::ifreq>());
+
+impl ethtool_ifreq {
+    /// An `ifreq` naming `iface` with `ifr_data` pointing at `data` (an
+    /// ethtool command struct / buffer). Rejects names that don't fit
+    /// `IFNAMSIZ` with their NUL terminator or contain a NUL — truncating
+    /// them could name a different interface.
+    pub fn new(iface: &str, data: *mut libc::c_void) -> Result<Self, crate::error::Error> {
+        if iface.len() >= libc::IFNAMSIZ || iface.as_bytes().contains(&0) {
+            return Err(crate::error::Error::Config(format!(
+                "invalid interface name for SIOCETHTOOL: {iface:?}"
+            )));
+        }
+        let mut ifr = Self {
+            ifr_name: [0; libc::IFNAMSIZ],
+            ifr_data: data,
+            ifr_pad: [0; IFREQ_PAD],
+        };
+        for (dst, &b) in ifr.ifr_name.iter_mut().zip(iface.as_bytes()) {
+            *dst = b as libc::c_char;
+        }
+        Ok(ifr)
+    }
 }
 
 // ── ethtool RSS hash configuration (symmetric RSS, issue #43) ────────────────
@@ -224,6 +261,21 @@ mod tests {
         assert_eq!(size_of::<ethtool_rxnfc>(), 192);
         assert_eq!(offset_of!(ethtool_rxnfc, fs), 16);
         assert_eq!(offset_of!(ethtool_rxnfc, rule_cnt), 184);
+    }
+
+    /// #185: the kernel copies a whole `struct ifreq` in and out.
+    #[test]
+    fn ethtool_ifreq_is_a_full_ifreq() {
+        assert_eq!(size_of::<ethtool_ifreq>(), size_of::<libc::ifreq>());
+        assert_eq!(size_of::<ethtool_ifreq>(), 40);
+        let ifr = ethtool_ifreq::new("eth0", std::ptr::null_mut()).unwrap();
+        assert_eq!(
+            ifr.ifr_name[..5],
+            [b'e' as libc::c_char, b't' as _, b'h' as _, b'0' as _, 0]
+        );
+        assert!(ethtool_ifreq::new("fifteen_chars__", std::ptr::null_mut()).is_ok());
+        assert!(ethtool_ifreq::new("sixteen_chars___", std::ptr::null_mut()).is_err());
+        assert!(ethtool_ifreq::new("eth\0x", std::ptr::null_mut()).is_err());
     }
 
     #[test]

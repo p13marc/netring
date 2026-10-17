@@ -191,16 +191,7 @@ fn ethtool_socket() -> Result<OwnedFd, Error> {
 /// Issue a `SIOCETHTOOL` ioctl pointing `ifr_data` at `cmd` (an ethtool command
 /// struct / buffer) for `iface`.
 fn ethtool_ioctl(fd: &OwnedFd, iface: &str, cmd: *mut libc::c_void) -> Result<(), Error> {
-    if iface.len() >= libc::IFNAMSIZ {
-        return Err(Error::Config(format!("interface name too long: {iface}")));
-    }
-    let mut ifr = ffi::ethtool_ifreq {
-        ifr_name: [0; libc::IFNAMSIZ],
-        ifr_data: cmd,
-    };
-    for (dst, &b) in ifr.ifr_name.iter_mut().zip(iface.as_bytes()) {
-        *dst = b as libc::c_char;
-    }
+    let mut ifr = ffi::ethtool_ifreq::new(iface, cmd)?;
     // SAFETY: `ifr` is a well-formed ifreq whose ifr_data points at a valid
     // ethtool command struct/buffer for the issued sub-command.
     let rc = unsafe { libc::ioctl(fd.as_raw_fd(), ffi::SIOCETHTOOL, &mut ifr as *mut _) };

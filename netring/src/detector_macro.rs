@@ -227,11 +227,12 @@ macro_rules! pattern_detector {
             move |__payload: &<$ev as $crate::protocol::event_typed::Event>::Payload,
                   __ctx: &mut $crate::ctx::Ctx<'_>|
                   -> $crate::error::Result<()> {
-                // The macro body could panic on a poisoned mutex — that's a
-                // user-detector bug, not a netring bug. Surface clearly.
+                // A body that panicked (caught by `catch_handler_panics`)
+                // poisoned the mutex; keep going with the state it left
+                // rather than failing every later event on the lock.
                 let mut guard = detector
                     .lock()
-                    .expect("pattern_detector! mutex poisoned by a panicking detector body");
+                    .unwrap_or_else(::std::sync::PoisonError::into_inner);
                 {
                     let $evt_pat = __payload;
                     let $det_pat = &mut *guard;

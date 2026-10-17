@@ -178,7 +178,7 @@ impl AsyncMultiCapture {
                 }
                 l
             }
-            None => (0..captures.len()).map(|i| format!("source-{i}")).collect(),
+            None => normalise_labels(Vec::new(), captures.len()),
         };
         Ok(Self { captures, labels })
     }
@@ -223,6 +223,15 @@ impl AsyncMultiCapture {
             Ok(())
         }
     }
+}
+
+/// Exactly `n` labels: `labels` truncated, padded with `source-{i}`.
+/// The multi-streams' per-source accessors index labels by source.
+fn normalise_labels(mut labels: Vec<String>, n: usize) -> Vec<String> {
+    labels.truncate(n);
+    let have = labels.len();
+    labels.extend((have..n).map(|i| format!("source-{i}")));
+    labels
 }
 
 // ── AsyncXdpMultiCapture (issue #104) ────────────────────────────────────
@@ -286,7 +295,11 @@ impl AsyncXdpMultiCapture {
 
     /// Build from already-opened captures + explicit labels (advanced
     /// composition; e.g. captures built with custom queue sets).
+    ///
+    /// Labels pair with captures by index: missing ones become
+    /// `source-{i}`, extra ones are dropped.
     pub fn from_captures(captures: Vec<crate::AsyncXdpCapture>, labels: Vec<String>) -> Self {
+        let labels = normalise_labels(labels, captures.len());
         Self { captures, labels }
     }
 
@@ -327,6 +340,22 @@ mod tests {
         // builder errors out earlier so we don't even try.
         let r = AsyncMultiCapture::open_workers("lo", 0, 0);
         assert!(r.is_err());
+    }
+
+    /// One label per source, whatever the caller passed: the
+    /// per-source accessors of the streams index labels by source.
+    #[test]
+    fn labels_are_normalised_to_the_source_count() {
+        let l = |v: &[&str]| v.iter().map(|s| s.to_string()).collect::<Vec<_>>();
+        assert_eq!(
+            normalise_labels(l(&["eth0"]), 3),
+            l(&["eth0", "source-1", "source-2"])
+        );
+        assert_eq!(normalise_labels(l(&["a", "b", "c"]), 2), l(&["a", "b"]));
+        assert_eq!(
+            normalise_labels(Vec::new(), 2),
+            l(&["source-0", "source-1"])
+        );
     }
 
     #[test]

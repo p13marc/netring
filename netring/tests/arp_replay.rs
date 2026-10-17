@@ -100,6 +100,75 @@ fn write_pcap(frames: &[Vec<u8>]) -> NamedTempFile {
     file
 }
 
+/// An RFC 5227 ARP probe: a request for `probed` from `mac` with sender IP
+/// 0.0.0.0.
+fn probe_frame(mac: [u8; 6], probed: [u8; 4]) -> Vec<u8> {
+    let mut f = vec![0u8; 60];
+    f[0..6].copy_from_slice(&[0xff; 6]);
+    f[6..12].copy_from_slice(&mac);
+    f[12..14].copy_from_slice(&0x0806u16.to_be_bytes());
+    f[14..16].copy_from_slice(&1u16.to_be_bytes());
+    f[16..18].copy_from_slice(&0x0800u16.to_be_bytes());
+    f[18] = 6;
+    f[19] = 4;
+    f[20..22].copy_from_slice(&1u16.to_be_bytes()); // oper: request
+    f[22..28].copy_from_slice(&mac); // sha
+    // spa 0.0.0.0, tha 0 — already zero.
+    f[38..42].copy_from_slice(&probed); // tpa
+    f
+}
+
+/// Two hosts probing (sender IP 0.0.0.0) are not "0.0.0.0 changed MAC".
+#[tokio::test(flavor = "current_thread")]
+async fn arp_probes_raise_no_anomaly() {
+    let pcap = write_pcap(&[
+        probe_frame(SENDER_MAC, [192, 0, 2, 7]),
+        probe_frame(TARGET_MAC, [192, 0, 2, 8]),
+        probe_frame(SENDER_MAC, [192, 0, 2, 7]),
+    ]);
+    let anomalies = Arc::new(AtomicU32::new(0));
+    let a = Arc::clone(&anomalies);
+    Monitor::builder()
+        .pcap_source(pcap.path())
+        .arp_warmup(Duration::from_millis(0))
+        .arp_report_new_binding(true)
+        .on_arp_anomaly(move |_, _ctx| {
+            a.fetch_add(1, Ordering::Relaxed);
+            Ok(())
+        })
+        .build()
+        .expect("build")
+        .replay()
+        .await
+        .expect("replay");
+    assert_eq!(anomalies.load(Ordering::Relaxed), 0);
+}
+
+/// The asset inventory doesn't record 0.0.0.0 as a probing host's address.
+#[cfg(feature = "asset")]
+#[tokio::test(flavor = "current_thread")]
+async fn arp_probes_add_no_unspecified_address_to_assets() {
+    let pcap = write_pcap(&[probe_frame(SENDER_MAC, [192, 0, 2, 7])]);
+    let assets = Arc::new(std::sync::Mutex::new(Vec::new()));
+    let log = Arc::clone(&assets);
+    Monitor::builder()
+        .pcap_source(pcap.path())
+        .on_asset(move |asset, _ctx| {
+            log.lock().unwrap().push(asset.ipv4.clone());
+            Ok(())
+        })
+        .build()
+        .expect("build")
+        .replay()
+        .await
+        .expect("replay");
+    let assets = assets.lock().unwrap();
+    assert!(
+        assets.iter().flatten().all(|ip| !ip.is_unspecified()),
+        "{assets:?}"
+    );
+}
+
 fn write_arp_pcap() -> NamedTempFile {
     write_pcap(&[spoof_arp_frame()])
 }

@@ -2,6 +2,15 @@
 //!
 //! UMEM is a contiguous memory region shared between userspace and the kernel.
 //! Frames are allocated from a free list and recycled after use.
+//!
+//! Two pools keep the RX/TX split chosen at build time
+//! ([`XdpMode`](super::XdpMode)): frames released by the RX path go to the
+//! RX pool, which only [`refill`](super::XdpSocket) draws from (back into the
+//! fill ring); TX frames (the initial non-prefilled frames and every TX
+//! completion) live in the TX pool that `send()` allocates from. Recycled
+//! addresses are reduced to their chunk start — an RX descriptor carries the
+//! packet's data address (`chunk + XDP_PACKET_HEADROOM + headroom` in aligned
+//! mode, `xp_get_handle()` in `include/net/xsk_buff_pool.h`), not the chunk.
 
 use std::collections::VecDeque;
 use std::num::NonZeroUsize;
@@ -19,13 +28,17 @@ pub(crate) struct Umem {
     #[allow(dead_code)]
     frame_count: usize,
     headroom: u32,
+    /// TX pool (and, at build time, every frame): `send()` allocates here.
     free_list: VecDeque<u64>,
+    /// RX pool: chunk addresses released by the RX path, waiting to go back
+    /// to the fill ring.
+    rx_free: Vec<u64>,
 }
 
 /// 0.25 W4: UMEM placement options for AF_XDP zero-copy tuning.
 #[derive(Debug, Clone, Copy, Default)]
 pub(crate) struct UmemOptions {
-    /// Back the UMEM with `MAP_HUGETLB` (default 2 MiB) hugepages to cut TLB
+    /// Back the UMEM with `MAP_HUGETLB` 2 MiB hugepages to cut TLB
     /// misses on the per-frame DMA path. Falls back to regular pages (with a
     /// `warn`) if hugepages aren't reserved.
     pub(crate) hugepages: bool,
@@ -79,6 +92,10 @@ impl Umem {
         // MAP_PRIVATE | MAP_ANONYMOUS — kernel pins pages via GUP regardless.
         // MAP_POPULATE faults pages in up front. MAP_HUGETLB (0.25 W4) backs the
         // region with hugepages; if that fails (none reserved) retry without it.
+        // MAP_HUGE_2MB pins the page size `alloc_size` was rounded to: bare
+        // MAP_HUGETLB takes the host's *default* hugepage size, and with a
+        // 1 GiB default the kernel would map (and charge) a whole 1 GiB page
+        // that the 2 MiB-sized munmap in Drop cannot unmap (EINVAL) — a leak.
         // `mapped_len` tracks the ACTUAL mapping length so Drop's `munmap` never
         // exceeds it (a too-large munmap would unmap adjacent allocations →
         // memory corruption / SIGSEGV).
@@ -103,7 +120,7 @@ impl Umem {
                     None,
                     nz_size,
                     ProtFlags::PROT_READ | ProtFlags::PROT_WRITE,
-                    base_flags | MapFlags::MAP_HUGETLB,
+                    base_flags | MapFlags::MAP_HUGETLB | MapFlags::MAP_HUGE_2MB,
                 )
             } {
                 Ok(b) => (b, alloc_size),
@@ -134,6 +151,7 @@ impl Umem {
             frame_count,
             headroom: opts.headroom,
             free_list,
+            rx_free: Vec::with_capacity(frame_count),
         })
     }
 
@@ -143,22 +161,51 @@ impl Umem {
         self.free_list.pop_front()
     }
 
-    /// Return a frame to the free list.
+    /// Start of the chunk containing `addr` (aligned mode: chunks are
+    /// `frame_size` apart from offset 0).
+    #[inline]
+    fn chunk_base(&self, addr: u64) -> u64 {
+        addr - addr % self.frame_size as u64
+    }
+
+    /// Return a frame to the TX pool.
     #[inline]
     pub(crate) fn free_frame(&mut self, addr: u64) {
-        self.free_list.push_back(addr);
+        self.free_list.push_back(self.chunk_base(addr));
     }
 
-    /// Return multiple frames to the free list.
+    /// Return multiple frames to the TX pool.
     #[inline]
     pub(crate) fn free_frames(&mut self, addrs: &[u64]) {
-        self.free_list.extend(addrs);
+        for &addr in addrs {
+            self.free_frame(addr);
+        }
     }
 
-    /// Number of frames currently available for allocation.
+    /// Number of frames currently available in the TX pool.
     #[inline]
     pub(crate) fn available(&self) -> usize {
         self.free_list.len()
+    }
+
+    /// Return a frame released by the RX path (an RX descriptor address) to
+    /// the RX pool.
+    #[inline]
+    pub(crate) fn recycle_rx_frame(&mut self, addr: u64) {
+        let base = self.chunk_base(addr);
+        self.rx_free.push(base);
+    }
+
+    /// Take a frame from the RX pool for the fill ring.
+    #[inline]
+    pub(crate) fn take_rx_frame(&mut self) -> Option<u64> {
+        self.rx_free.pop()
+    }
+
+    /// Number of frames waiting in the RX pool.
+    #[inline]
+    pub(crate) fn rx_available(&self) -> usize {
+        self.rx_free.len()
     }
 
     /// Frame size in bytes.
@@ -212,10 +259,16 @@ impl Umem {
 
     /// Mutable view into UMEM at the given byte offset, with bounds validation.
     ///
-    /// Same constraints as [`data_checked`](Self::data_checked).
+    /// Same constraints as [`data_checked`](Self::data_checked), and the range
+    /// must not cross the end of `addr`'s chunk (the kernel rejects a TX
+    /// descriptor that does, `xp_aligned_validate_desc()`).
     #[inline]
     pub(crate) fn data_mut_checked(&mut self, addr: u64, len: usize) -> Option<&mut [u8]> {
         if len > self.frame_size {
+            return None;
+        }
+        let offset_in_chunk = (addr % self.frame_size as u64) as usize;
+        if offset_in_chunk + len > self.frame_size {
             return None;
         }
         let end = (addr as usize).checked_add(len)?;
@@ -353,6 +406,49 @@ mod tests {
         // FIFO: returns a first
         assert_eq!(umem.alloc_frame(), Some(a));
         assert_eq!(umem.alloc_frame(), Some(b));
+    }
+
+    /// RX descriptors carry the data address inside the chunk; recycled
+    /// frames must come back as the chunk start, so a later full-frame
+    /// `send()` never crosses into the next chunk.
+    #[test]
+    fn recycled_rx_frames_return_to_chunk_start() {
+        let mut umem = Umem::new(2048, 4).unwrap();
+        let rx_desc_addr = 2 * 2048 + 256; // chunk 2 + XDP_PACKET_HEADROOM
+        umem.recycle_rx_frame(rx_desc_addr);
+        assert_eq!(umem.rx_available(), 1);
+        assert_eq!(umem.take_rx_frame(), Some(2 * 2048));
+        assert_eq!(umem.take_rx_frame(), None);
+
+        // The TX pool normalises too (completion addresses are already
+        // aligned; this keeps any offset address from leaking in).
+        while umem.alloc_frame().is_some() {}
+        umem.free_frame(3 * 2048 + 300);
+        assert_eq!(umem.alloc_frame(), Some(3 * 2048));
+    }
+
+    /// The RX pool is separate from the TX pool: recycling RX frames never
+    /// hands them to `send()`, and the TX pool never feeds the fill ring.
+    #[test]
+    fn rx_and_tx_pools_are_separate() {
+        let mut umem = Umem::new(2048, 4).unwrap();
+        let tx = umem.alloc_frame().unwrap();
+        assert_eq!(umem.available(), 3);
+        umem.recycle_rx_frame(tx + 256);
+        assert_eq!(
+            umem.available(),
+            3,
+            "RX recycling must not grow the TX pool"
+        );
+        assert_eq!(umem.rx_available(), 1);
+    }
+
+    #[test]
+    fn data_mut_checked_rejects_chunk_crossing() {
+        let mut umem = Umem::new(2048, 4).unwrap();
+        assert!(umem.data_mut_checked(2048, 2048).is_some());
+        assert!(umem.data_mut_checked(2048 + 256, 2048 - 256).is_some());
+        assert!(umem.data_mut_checked(2048 + 256, 2048 - 255).is_none());
     }
 
     #[test]

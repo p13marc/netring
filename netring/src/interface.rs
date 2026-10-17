@@ -56,7 +56,7 @@ pub fn interface_info(name: &str) -> Result<InterfaceInfo, Error> {
     });
     let speed = read_sysfs_u32(name, "speed").unwrap_or(0);
     let carrier = read_sysfs_u32(name, "carrier").unwrap_or(0) == 1;
-    let flags = read_sysfs_u32(name, "flags").unwrap_or(0);
+    let flags = read_sysfs_hex_u32(name, "flags").unwrap_or(0);
     let driver = read_sysfs_link_basename(name, "device/driver").unwrap_or_default();
     let num_queues = count_sysfs_queues(name).unwrap_or(1);
 
@@ -114,6 +114,13 @@ fn read_sysfs_u32(iface: &str, attr: &str) -> Option<u32> {
         .ok()
 }
 
+/// A hex sysfs attribute such as `flags` (`0x1003`).
+fn read_sysfs_hex_u32(iface: &str, attr: &str) -> Option<u32> {
+    let text = std::fs::read_to_string(format!("/sys/class/net/{iface}/{attr}")).ok()?;
+    let text = text.trim();
+    u32::from_str_radix(text.strip_prefix("0x").unwrap_or(text), 16).ok()
+}
+
 fn read_sysfs_link_basename(iface: &str, path: &str) -> Option<String> {
     let target = std::fs::read_link(format!("/sys/class/net/{iface}/{path}")).ok()?;
     target.file_name()?.to_str().map(String::from)
@@ -140,6 +147,19 @@ mod tests {
         assert!(info.mtu > 0);
         // loopback has no speed/driver
         assert_eq!(info.speed, 0);
+    }
+
+    /// sysfs `flags` is hex (`0x9` for an up loopback): IFF_UP | IFF_LOOPBACK.
+    #[test]
+    fn loopback_flags() {
+        let info = interface_info("lo").unwrap();
+        let up_loopback = (libc::IFF_UP | libc::IFF_LOOPBACK) as u32;
+        assert_eq!(
+            info.flags & up_loopback,
+            up_loopback,
+            "flags {:#x}",
+            info.flags
+        );
     }
 
     #[test]

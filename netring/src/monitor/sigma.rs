@@ -35,7 +35,6 @@ use sigma_rust::{Event, Rule, rule_from_yaml};
 
 use crate::anomaly::Severity;
 use crate::ctx::Ctx;
-use crate::protocol::FlowKey;
 
 /// Error loading a [`SigmaRuleSet`].
 #[derive(Debug)]
@@ -101,15 +100,20 @@ struct CompiledRule {
     /// `rule.id` if present, else the title — the stable handle for the alert.
     id: String,
     title: String,
-    /// The rule's Sigma level as text (`sigma-rust` doesn't export the enum).
-    level: String,
+    /// The rule's Sigma level as the rule spells it (`high`, …), if it has
+    /// one (`sigma-rust` doesn't export the enum, so this goes through its
+    /// `Debug` name).
+    level: Option<String>,
 }
 
 impl CompiledRule {
     fn new(rule: Rule) -> Self {
         let title = rule.title.clone();
         let id = rule.id.clone().unwrap_or_else(|| title.clone());
-        let level = format!("{:?}", rule.level);
+        let level = rule
+            .level
+            .as_ref()
+            .map(|l| format!("{l:?}").to_ascii_lowercase());
         Self {
             rule,
             id,
@@ -257,15 +261,29 @@ fn split_yaml_docs(yaml: &str) -> impl Iterator<Item = &str> {
 
 // ── Event construction ──────────────────────────────────────────────────────
 
-/// The 5-tuple fields shared by every event.
-fn base_event(flow: Option<FlowKey>) -> Event {
+/// The 5-tuple fields shared by every event, `src` the flow's initiator
+/// (the client) and `dst` its responder.
+fn base_event(ctx: &Ctx<'_>) -> Event {
     let mut e = Event::new();
-    if let Some(k) = flow {
+    if let Some(k) = ctx.flow {
+        // The key is address-sorted: `a` is the initiator only when it has
+        // the lower address. The message's side and canonical direction
+        // tell: sent by the initiator a→b, or by the responder b→a, means
+        // `a` initiated.
+        let (src, dst) = match (ctx.side(), ctx.orientation()) {
+            (Some(side), Some(orientation))
+                if (side == flowscope::FlowSide::Initiator)
+                    != (orientation == flowscope::Orientation::Forward) =>
+            {
+                (k.b, k.a)
+            }
+            _ => (k.a, k.b),
+        };
         let proto = format!("{:?}", k.proto).to_ascii_lowercase();
-        e.insert("src_ip", k.a.ip().to_string());
-        e.insert("dst_ip", k.b.ip().to_string());
-        e.insert("src_port", k.a.port() as i64);
-        e.insert("dst_port", k.b.port() as i64);
+        e.insert("src_ip", src.ip().to_string());
+        e.insert("dst_ip", dst.ip().to_string());
+        e.insert("src_port", src.port() as i64);
+        e.insert("dst_port", dst.port() as i64);
         e.insert("proto", proto.clone());
         e.insert("network_protocol", proto);
     }
@@ -275,16 +293,25 @@ fn base_event(flow: Option<FlowKey>) -> Event {
 // ── Match-and-emit helpers (used by `MonitorBuilder::sigma`) ─────────────────
 
 fn eval_bucket(rules: &[CompiledRule], event: &Event, severity: Severity, ctx: &mut Ctx<'_>) {
+    // The flow the message was seen on: the alert carries it (IPs, ports,
+    // Community ID downstream), like the event the rule matched.
+    let key = ctx.flow;
     for cr in rules {
         if cr.rule.is_match(event) {
             // Keep to <=8 observations (the AnomalyWriter inline cap). Owned
             // Strings (cheap, only on a match) — never `with_dynamic`, which
             // would leak the label.
-            ctx.emit("sigma_match", severity)
+            let mut w = ctx.emit("sigma_match", severity);
+            if let Some(k) = &key {
+                w = w.with_key(k);
+            }
+            w = w
                 .with("rule", cr.id.clone())
-                .with("title", cr.title.clone())
-                .with("sigma_level", cr.level.clone())
-                .emit();
+                .with("title", cr.title.clone());
+            if let Some(level) = &cr.level {
+                w = w.with("sigma_level", level.clone());
+            }
+            w.emit();
         }
     }
 }
@@ -299,8 +326,7 @@ pub(crate) fn eval_dns(set: &SigmaRuleSet, msg: &flowscope::dns::DnsMessage, ctx
     let Some(question) = q.questions.first() else {
         return;
     };
-    let flow = ctx.flow;
-    let mut event = base_event(flow);
+    let mut event = base_event(ctx);
     event.insert("query", question.name.clone());
     event.insert("dns.question.name", question.name.clone());
     event.insert("record_type", question.qtype as i64);
@@ -313,8 +339,7 @@ pub(crate) fn eval_http(set: &SigmaRuleSet, msg: &flowscope::http::HttpMessage, 
     let flowscope::http::HttpMessage::Request(req) = msg else {
         return;
     };
-    let flow = ctx.flow;
-    let mut event = base_event(flow);
+    let mut event = base_event(ctx);
     if let Some(host) = req.host() {
         event.insert("host", host);
         event.insert("cs-host", host);
@@ -341,8 +366,7 @@ pub(crate) fn eval_http(set: &SigmaRuleSet, msg: &flowscope::http::HttpMessage, 
 /// Evaluate the TLS-category rules against a TLS handshake.
 #[cfg(feature = "tls")]
 pub(crate) fn eval_tls(set: &SigmaRuleSet, hs: &flowscope::tls::TlsHandshake, ctx: &mut Ctx<'_>) {
-    let flow = ctx.flow;
-    let mut event = base_event(flow);
+    let mut event = base_event(ctx);
     if let Some(sni) = hs.sni.as_deref() {
         event.insert("server_name", sni);
         event.insert("sni", sni);

@@ -47,9 +47,12 @@ pub enum TapErrorPolicy {
     /// but keep the flow stream running. Subsequent packets pass
     /// through to the tracker unmodified.
     DropTap,
-    /// Fail the next stream poll with [`Error::Io`]. The flow stream
-    /// terminates. Recommended for evidence-recording pipelines
-    /// where partial captures are a defect.
+    /// End the stream on the first write error: the packet that failed
+    /// and every later one are neither recorded nor processed, the
+    /// stream yields what the recorded packets produced, then the error
+    /// once ([`Error::Io`]), then ends (`None`) — its output matches the
+    /// file. Recommended for evidence-recording pipelines where partial
+    /// captures are a defect.
     FailStream,
 }
 
@@ -137,6 +140,12 @@ pub struct PcapTap {
     snaplen: Option<u32>,
     /// Set when the tap was dropped under [`TapErrorPolicy::DropTap`].
     dropped: bool,
+    /// Set when a write failed under [`TapErrorPolicy::FailStream`]:
+    /// the stream processes nothing more and ends.
+    failed: bool,
+    /// The [`TapErrorPolicy::FailStream`] error, until the stream
+    /// yields it.
+    failure: Option<Error>,
 }
 
 impl PcapTap {
@@ -156,6 +165,8 @@ impl PcapTap {
             policy,
             snaplen: None,
             dropped: false,
+            failed: false,
+            failure: None,
         }
     }
 
@@ -167,16 +178,20 @@ impl PcapTap {
     }
 
     /// Write `pkt`, honouring the policy and any configured snaplen.
-    /// Returns `Some(Error)` **only** when the policy is
-    /// [`TapErrorPolicy::FailStream`] and the write fails; in all
-    /// other cases returns `None` and silently records / logs /
+    /// Returns `false` once a write failed under
+    /// [`TapErrorPolicy::FailStream`] — the packet must not be processed
+    /// and the stream ends (see [`has_failed`](Self::has_failed)); in
+    /// all other cases returns `true` and silently records / logs /
     /// drops as configured.
-    pub(crate) fn write_or_handle(&mut self, pkt: &Packet<'_>) -> Option<Error> {
+    pub(crate) fn write_or_handle(&mut self, pkt: &Packet<'_>) -> bool {
+        if self.failed {
+            return false;
+        }
         if self.dropped {
-            return None;
+            return true;
         }
         let result = self.inner.write(pkt, self.snaplen);
-        self.handle_result(result)
+        self.absorb(result)
     }
 
     /// `Packet`-free variant of [`write_or_handle`](Self::write_or_handle)
@@ -188,12 +203,41 @@ impl PcapTap {
         data: &[u8],
         ts: crate::packet::Timestamp,
         original_len: usize,
-    ) -> Option<Error> {
+    ) -> bool {
+        if self.failed {
+            return false;
+        }
         if self.dropped {
-            return None;
+            return true;
         }
         let result = self.inner.write_raw(data, ts, original_len, self.snaplen);
-        self.handle_result(result)
+        self.absorb(result)
+    }
+
+    /// Keep a [`TapErrorPolicy::FailStream`] error for the stream to
+    /// yield; `false` if there was one.
+    fn absorb(&mut self, result: Result<(), pcap_file::PcapError>) -> bool {
+        match self.handle_result(result) {
+            None => true,
+            Some(err) => {
+                self.failed = true;
+                self.failure = Some(err);
+                false
+            }
+        }
+    }
+
+    /// True once a write failed under [`TapErrorPolicy::FailStream`]:
+    /// after its queued output the stream yields
+    /// [`take_failure`](Self::take_failure) (the error, then `None`).
+    pub(crate) fn has_failed(&self) -> bool {
+        self.failed
+    }
+
+    /// The [`TapErrorPolicy::FailStream`] error the first time, `None`
+    /// (end of stream) after.
+    pub(crate) fn take_failure(&mut self) -> Option<Error> {
+        self.failure.take()
     }
 
     /// Policy-handling logic split out from [`write_or_handle`] so

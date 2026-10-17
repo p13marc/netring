@@ -89,6 +89,11 @@ fn afxdp_lo_redirect_all_captures_loopback_traffic() {
             .xdp_attach_flags(XdpFlags::SKB_MODE)
             .build()
     });
+    // A self-attached SKB-mode program binds the socket with XDP_COPY.
+    assert!(
+        !sock.is_zerocopy(),
+        "SKB-mode attach must bind in copy mode"
+    );
 
     // Generate loopback ingress: UDP to 127.0.0.1 is transmitted on `lo` and
     // received back on `lo`, where generic XDP redirects it to our socket
@@ -542,4 +547,454 @@ fn afxdp_lo_filter_program_redirects_configured_tuple() {
     drop(sock);
     // Settle so the next test in this binary finds queue 0 free.
     std::thread::sleep(Duration::from_millis(300));
+}
+
+/// Flood `lo` with `n` small UDP datagrams (redirected into the socket by
+/// the redirect-all program; no listener needed).
+fn flood_lo(n: usize) {
+    let tx = UdpSocket::bind("127.0.0.1:0").expect("bind udp tx");
+    for _ in 0..n {
+        let _ = tx.send_to(b"netring-afxdp-rxtx", "127.0.0.1:65112");
+    }
+}
+
+/// `XdpMode::RxTx` keeps half the UMEM for TX. Receiving must not hand
+/// those TX frames to the fill ring: after several RX batches, `send()`
+/// still finds a frame.
+#[test]
+fn afxdp_rxtx_send_still_allocates_after_rx() {
+    wait_lo_free();
+    let mut sock = build_with_retry("rxtx socket on lo", || {
+        XdpSocket::builder()
+            .interface("lo")
+            .queue_id(0)
+            .frame_size(2048)
+            .frame_count(128)
+            .mode(netring::XdpMode::RxTx)
+            .with_default_program()
+            .xdp_attach_flags(XdpFlags::SKB_MODE)
+            .build()
+    });
+
+    let mut batches = 0;
+    let deadline = Instant::now() + Duration::from_secs(10);
+    while batches < 4 && Instant::now() < deadline {
+        flood_lo(16);
+        std::thread::sleep(Duration::from_millis(20));
+        if !sock.recv().expect("recv").is_empty() {
+            batches += 1;
+        }
+    }
+    assert_eq!(batches, 4, "never received 4 RX batches");
+
+    let frame = [0x5au8; 64];
+    assert!(
+        sock.send(&frame).expect("send"),
+        "send() found no free UMEM frame after RX (the TX half was refilled into the fill ring)"
+    );
+    drop(sock);
+    std::thread::sleep(Duration::from_millis(300));
+}
+
+/// RX descriptors carry the packet's data address (chunk start +
+/// XDP_PACKET_HEADROOM), not the chunk start. Frames recycled from RX must
+/// go back to the free list as whole chunks, so a full-size `send()` that
+/// reuses one neither crosses into the next chunk (the kernel would reject
+/// the descriptor and never complete the frame) nor runs off the UMEM end.
+#[test]
+fn afxdp_send_full_frame_after_rx_recycles_whole_chunks() {
+    wait_lo_free();
+    let mut sock = build_with_retry("rxtx socket on lo", || {
+        XdpSocket::builder()
+            .interface("lo")
+            .queue_id(0)
+            .frame_size(2048)
+            .frame_count(128)
+            .mode(netring::XdpMode::RxTx)
+            .with_default_program()
+            .xdp_attach_flags(XdpFlags::SKB_MODE)
+            .build()
+    });
+
+    // Overfill the RX side (64 prefilled frames) so a single recv() drains a
+    // full batch and its frames are recycled.
+    let deadline = Instant::now() + Duration::from_secs(10);
+    let mut got = 0;
+    while got == 0 && Instant::now() < deadline {
+        flood_lo(200);
+        std::thread::sleep(Duration::from_millis(50));
+        got = sock.recv().expect("recv").len();
+    }
+    assert!(got > 0, "no RX traffic");
+
+    // Send full-size frames until the free list runs dry.
+    let frame = vec![0xa5u8; 2048];
+    let mut sent = 0;
+    while sent < 128 && sock.send(&frame).expect("send") {
+        sent += 1;
+    }
+    assert!(sent > 0, "send() found no free UMEM frame after RX");
+    sock.flush().expect("flush");
+    std::thread::sleep(Duration::from_millis(200));
+    let st = sock.statistics().expect("statistics");
+    assert_eq!(
+        st.tx_invalid_descs, 0,
+        "kernel rejected {} of {sent} full-size TX descriptors",
+        st.tx_invalid_descs
+    );
+    drop(sock);
+    std::thread::sleep(Duration::from_millis(300));
+}
+
+/// #182: an AF_XDP socket that is never read loses every packet beyond its
+/// prefilled buffers. In copy mode the kernel counts each of those losses
+/// in both `rx_dropped` and `rx_fill_ring_empty_descs`; `capture_stats()`
+/// must count it once (it used to report about twice the packets sent).
+#[test]
+fn afxdp_lo_capture_stats_counts_each_drop_once() {
+    wait_lo_free();
+    let mut sock = build_with_retry("rx socket on lo", || {
+        XdpSocket::builder()
+            .interface("lo")
+            .queue_id(0)
+            .frame_size(2048)
+            .frame_count(64)
+            .mode(netring::XdpMode::Rx)
+            .with_default_program()
+            .xdp_attach_flags(XdpFlags::SKB_MODE)
+            .build()
+    });
+
+    const N: usize = 4096;
+    let tx = UdpSocket::bind("127.0.0.1:0").expect("bind udp tx");
+    for chunk in 0..N / 256 {
+        for _ in 0..256 {
+            let _ = tx.send_to(b"netring-afxdp-drops", "127.0.0.1:65113");
+        }
+        if chunk % 4 == 3 {
+            std::thread::sleep(Duration::from_millis(1));
+        }
+    }
+    std::thread::sleep(Duration::from_millis(200));
+
+    let raw = sock.statistics().expect("statistics");
+    let cs = sock.capture_stats().expect("capture_stats");
+    eprintln!("raw: {raw}; capture_stats: {cs}");
+    let (packets, drops) = (cs.packets as usize, cs.drops as usize);
+    assert!(drops >= N / 2, "the socket should have overflowed: {cs}");
+    assert!(drops <= N + 256, "drops counted twice? {cs} for {N} sent");
+    let delivered = packets - drops;
+    assert!(
+        delivered > 0 && delivered <= 64,
+        "only the 64 prefilled frames can hold packets: {cs}"
+    );
+
+    // Draining moves packets from the ring to userspace; it does not change
+    // how many the socket received.
+    let mut drained = 0;
+    loop {
+        let n = sock.recv().expect("recv").len();
+        if n == 0 {
+            break;
+        }
+        drained += n;
+    }
+    assert!(drained <= 64, "drained {drained}");
+    let after = sock.capture_stats().expect("capture_stats");
+    assert!(after.packets >= cs.packets, "{after} < {cs}");
+    drop(sock);
+    std::thread::sleep(Duration::from_millis(300));
+}
+
+/// A veth pair with `queues` RX/TX queues per end, removed on drop. Names
+/// must start with `nrx`.
+struct MultiQueueVeth(&'static str);
+
+impl MultiQueueVeth {
+    fn create(a: &'static str, b: &'static str, queues: u32) -> Self {
+        use std::process::Command;
+        let q = queues.to_string();
+        let _ = Command::new("ip").args(["link", "delete", a]).output();
+        let ok = Command::new("ip")
+            .args(["link", "add", a, "numrxqueues", &q, "numtxqueues", &q])
+            .args(["type", "veth", "peer", "name", b])
+            .args(["numrxqueues", &q, "numtxqueues", &q])
+            .status()
+            .expect("run ip link add")
+            .success();
+        assert!(ok, "ip link add {a} (needs root)");
+        let guard = Self(a);
+        for dev in [a, b] {
+            let up = Command::new("ip")
+                .args(["link", "set", dev, "up"])
+                .status()
+                .expect("run ip link set up")
+                .success();
+            assert!(up, "ip link set {dev} up");
+        }
+        guard
+    }
+}
+
+impl Drop for MultiQueueVeth {
+    fn drop(&mut self) {
+        let _ = std::process::Command::new("ip")
+            .args(["link", "delete", self.0])
+            .output();
+    }
+}
+
+/// `XdpShardedRunner`'s `build_shard(queue_id, builder)` closure must get
+/// each shard's RX queue id, not its index in the queue set: with
+/// `Queues::range(2..4)` the shards serve queues 2 and 3.
+#[cfg(all(feature = "flow", feature = "tokio"))]
+#[test]
+fn xdp_sharded_runner_passes_queue_ids_to_build_shard() {
+    use std::sync::{Arc, Mutex};
+
+    use netring::monitor::XdpShardedRunner;
+    use netring::protocol::builtin::Udp;
+    use netring::xdp::Queues;
+
+    let _veth = MultiQueueVeth::create("nrxq0", "nrxq1", 4);
+
+    let seen = Arc::new(Mutex::new(Vec::new()));
+    let seen_h = Arc::clone(&seen);
+    XdpShardedRunner::new("nrxq0", Queues::range(2..4), move |queue, builder| {
+        seen_h.lock().unwrap().push(queue);
+        builder.protocol::<Udp>()
+    })
+    .run_for(Duration::from_millis(300))
+    .expect("XdpShardedRunner on a 4-queue veth (needs root)");
+
+    let mut seen = seen.lock().unwrap().clone();
+    seen.sort_unstable();
+    assert_eq!(
+        seen,
+        vec![2, 3],
+        "build_shard got shard indices, not queue ids"
+    );
+}
+
+/// A bare TX-only socket on `lo` (no XDP program — TX needs none).
+fn tx_socket(frame_count: usize) -> XdpSocket {
+    build_with_retry("tx socket on lo", || {
+        XdpSocket::builder()
+            .interface("lo")
+            .queue_id(0)
+            .frame_size(2048)
+            .frame_count(frame_count)
+            .mode(netring::XdpMode::Tx)
+            .build()
+    })
+}
+
+/// A 64-byte Ethernet frame (local experimental EtherType) for TX tests;
+/// the loopback stack drops it after the transmit completes.
+fn tx_frame(i: usize) -> [u8; 64] {
+    let mut f = [0u8; 64];
+    f[12..14].copy_from_slice(&0x88b5u16.to_be_bytes());
+    f[14..22].copy_from_slice(&(i as u64).to_be_bytes());
+    f
+}
+
+/// `send(&[])` must be rejected: the kernel never transmits nor completes a
+/// zero-length TX descriptor (`xp_aligned_validate_desc`), so the UMEM frame
+/// it carried would be lost for good.
+#[test]
+fn afxdp_send_rejects_empty_packet() {
+    wait_lo_free();
+    let mut sock = tx_socket(4);
+
+    let empty: Vec<_> = (0..4).map(|_| sock.send(&[])).collect();
+    sock.flush().expect("flush");
+    std::thread::sleep(Duration::from_millis(50));
+    let invalid = sock.statistics().expect("statistics").tx_invalid_descs;
+
+    // No frame leaked: all 4 still carry real packets.
+    let resent = (0..4)
+        .filter(|&i| sock.send(&tx_frame(i)).expect("send"))
+        .count();
+    assert_eq!(
+        (resent, invalid),
+        (4, 0),
+        "(frames still usable, invalid TX descs) after send(&[]) x4 → {empty:?}"
+    );
+    assert!(
+        empty
+            .iter()
+            .all(|r| matches!(r, Err(netring::Error::Config(_)))),
+        "send(&[]) must be a config error: {empty:?}"
+    );
+    drop(sock);
+    std::thread::sleep(Duration::from_millis(300));
+}
+
+/// One `flush()` must transmit everything queued. In copy mode each
+/// `sendto()` kick sends at most `TX_BATCH_SIZE` (32) descriptors and
+/// returns `EAGAIN`; the rest stayed in the TX ring (and were discarded when
+/// the socket closed).
+#[test]
+fn afxdp_flush_transmits_more_than_one_kernel_batch() {
+    wait_lo_free();
+    let mut sock = tx_socket(128);
+
+    for i in 0..100 {
+        assert!(sock.send(&tx_frame(i)).expect("send"), "frame {i}");
+    }
+    sock.flush().expect("flush");
+    std::thread::sleep(Duration::from_millis(100));
+
+    // Every transmitted frame completes (synchronously on lo) and is free
+    // again, and the kernel has released every TX slot: the socket can queue
+    // its full 128 frames once more.
+    let mut free = 0;
+    while free < 256 && sock.send(&tx_frame(free)).expect("send") {
+        free += 1;
+    }
+    assert_eq!(
+        free, 128,
+        "one flush() left part of the 100 queued frames untransmitted"
+    );
+    drop(sock);
+    std::thread::sleep(Duration::from_millis(300));
+}
+
+/// `AsyncXdpSocket::send` on a full UMEM must get the queued frames
+/// transmitted itself: it used to wait for `POLLOUT` without ever kicking
+/// TX, so with nothing flushed no frame could complete and the 65th send on
+/// a 64-frame socket hung forever.
+#[cfg(feature = "tokio")]
+#[tokio::test(flavor = "current_thread")]
+async fn async_xdp_send_kicks_tx_when_umem_is_full() {
+    wait_lo_free();
+    let sock = tx_socket(64);
+    let mut xdp = netring::AsyncXdpSocket::new(sock).expect("AsyncXdpSocket");
+    // Let the reactor consume the registration readiness, as any program
+    // that awaits something between opening the socket and sending does.
+    // (While that event is pending, the reactor's epoll_wait re-polls the
+    // socket, and xsk_poll() drives copy-mode TX itself.)
+    tokio::time::sleep(Duration::from_millis(20)).await;
+
+    // 65 is the first send that needs a recycled frame; 200 recycles the
+    // whole UMEM a few times over.
+    let mut sent = 0;
+    let done = tokio::time::timeout(Duration::from_secs(2), async {
+        for i in 0..200 {
+            xdp.send(&tx_frame(i)).await.expect("send");
+            sent += 1;
+        }
+    })
+    .await;
+    assert!(
+        done.is_ok(),
+        "send #{} on a 64-frame socket never completed",
+        sent + 1
+    );
+    xdp.flush().await.expect("flush");
+    drop(xdp);
+    std::thread::sleep(Duration::from_millis(300));
+}
+
+/// Whether `lo` has an XDP program attached (`ip link` shows `xdpgeneric`).
+#[cfg(target_arch = "x86_64")]
+fn lo_has_xdp() -> bool {
+    let out = std::process::Command::new("ip")
+        .args(["-o", "link", "show", "dev", "lo"])
+        .output()
+        .expect("run ip link show");
+    String::from_utf8_lossy(&out.stdout).contains("xdp")
+}
+
+/// Make `bpf(BPF_LINK_CREATE, ...)` fail with `EINVAL` on the calling thread
+/// (only), as on a kernel without XDP bpf_link support (< 5.9).
+#[cfg(target_arch = "x86_64")]
+fn fail_bpf_link_create_on_this_thread() {
+    const AUDIT_ARCH_X86_64: u32 = 0xc000_003e;
+    const BPF_LINK_CREATE: u32 = 28;
+    // struct seccomp_data: nr @0, arch @4, args[0] (low half on LE) @16.
+    let stmt = |code: u32, k: u32| libc::sock_filter {
+        code: code as u16,
+        jt: 0,
+        jf: 0,
+        k,
+    };
+    let jeq = |k: u32, jf: u8| libc::sock_filter {
+        code: (libc::BPF_JMP | libc::BPF_JEQ | libc::BPF_K) as u16,
+        jt: 0,
+        jf,
+        k,
+    };
+    let ld = libc::BPF_LD | libc::BPF_W | libc::BPF_ABS;
+    let ret = libc::BPF_RET | libc::BPF_K;
+    let filter = [
+        stmt(ld, 4),
+        jeq(AUDIT_ARCH_X86_64, 5), // → allow
+        stmt(ld, 0),
+        jeq(libc::SYS_bpf as u32, 3), // → allow
+        stmt(ld, 16),
+        jeq(BPF_LINK_CREATE, 1), // → allow
+        stmt(ret, libc::SECCOMP_RET_ERRNO | libc::EINVAL as u32),
+        stmt(ret, libc::SECCOMP_RET_ALLOW),
+    ];
+    let prog = libc::sock_fprog {
+        len: filter.len() as u16,
+        filter: filter.as_ptr() as *mut libc::sock_filter,
+    };
+    // SAFETY: plain prctl calls; the kernel copies the filter.
+    unsafe {
+        assert_eq!(libc::prctl(libc::PR_SET_NO_NEW_PRIVS, 1, 0, 0, 0), 0);
+        let rc = libc::prctl(
+            libc::PR_SET_SECCOMP,
+            libc::SECCOMP_MODE_FILTER as libc::c_ulong,
+            &prog as *const libc::sock_fprog,
+        );
+        assert_eq!(rc, 0, "install seccomp filter");
+    }
+}
+
+/// Where `bpf_link_create` can't attach XDP (kernels < 5.9) aya falls back
+/// to a netlink attachment, which `XdpProgram::attach` must keep and detach
+/// on drop. It converted aya's link into an `FdLink`, which fails for a
+/// netlink link *after* taking it out of the wrapper whose drop detaches:
+/// attach returned an error and left the program attached to the interface.
+/// The old kernel is simulated with a seccomp filter on the attaching thread.
+#[cfg(target_arch = "x86_64")]
+#[test]
+fn xdp_attach_netlink_fallback_keeps_and_detaches_the_link() {
+    use netring::xdp::{XdpFlags, default_program};
+
+    struct DetachLo;
+    impl Drop for DetachLo {
+        fn drop(&mut self) {
+            if lo_has_xdp() {
+                let _ = std::process::Command::new("ip")
+                    .args(["link", "set", "dev", "lo", "xdpgeneric", "off"])
+                    .output();
+            }
+        }
+    }
+
+    wait_lo_free();
+    assert!(!lo_has_xdp(), "lo already has an XDP program");
+    let _cleanup = DetachLo;
+
+    let (attached, while_held, after_drop) = std::thread::spawn(|| {
+        // Load before the filter: aya's feature probes also use bpf_link.
+        let prog = default_program(1).expect("load default program");
+        fail_bpf_link_create_on_this_thread();
+        let attachment = prog.attach("lo", XdpFlags::SKB_MODE);
+        let attached = attachment.as_ref().map(|_| ()).map_err(|e| e.to_string());
+        let while_held = lo_has_xdp();
+        drop(attachment);
+        (attached, while_held, lo_has_xdp())
+    })
+    .join()
+    .expect("attach thread");
+
+    assert_eq!(
+        (attached, while_held, after_drop),
+        (Ok(()), true, false),
+        "(attach result, attached while held, still attached after drop)"
+    );
 }

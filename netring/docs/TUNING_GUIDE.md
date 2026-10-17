@@ -127,8 +127,8 @@ let total = cap.cumulative_stats()?;  // monotonic since open
 
 | Field | Meaning |
 |-------|---------|
-| `packets` | Total packets received (passed BPF filter) |
-| `drops` | Packets dropped because ring was full |
+| `packets` | Packets received (passed BPF filter), **including** the dropped ones (kernel convention) |
+| `drops` | Packets dropped because the ring was full — the loss fraction is `drops / packets` |
 | `freeze_count` | Times the ring was frozen (queue depth exceeded) |
 
 **`stats()` resets kernel counters.** **Don't mix `stats()` and
@@ -194,7 +194,7 @@ if batch.seq_num() != expected_seq {
 | `Tx` | 0 % to fill ring, 100 % free for TX alloc | TX-only workloads (no BPF program needed) |
 | `Rx` | 100 % to fill ring, 0 % free | RX-only workloads with attached XDP program |
 | `RxTx` (default) | 50 / 50 | Bidirectional |
-| `Custom { prefill }` | caller-specified | asymmetric or shared-UMEM setups |
+| `Custom { prefill }` | caller-specified | asymmetric setups |
 
 The default split breaks TX-only code if you forget to set the mode —
 `send()` returns `Ok(false)` because all UMEM is in the fill ring.
@@ -212,8 +212,8 @@ XdpSocket::builder()
 
 - `frame_count` should be ≥ 2 × max-inflight-per-direction in `RxTx`.
 - Ring size is rounded up to the next power of two; oversized rings are fine.
-- Bind to one NIC queue per socket; pair with shared-UMEM (when supported)
-  for multi-queue capture.
+- Bind to one NIC queue per socket, each with its own UMEM; `XdpCapture`
+  does this for multi-queue capture (shared UMEM is not supported).
 
 ### Wakeup optimization
 

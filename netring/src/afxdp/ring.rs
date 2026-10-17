@@ -56,11 +56,13 @@ pub(crate) struct XdpRing<T: Copy> {
     mask: u32, // size - 1
     producer: *const AtomicU32,
     consumer: *const AtomicU32,
-    #[allow(dead_code)] // used by needs_wakeup(), which will be called from flush() optimization
     flags: *const u32,
     descs: *mut T,
     cached_prod: u32,
     cached_cons: u32,
+    /// Entries released by the consumer over the ring's lifetime (`u64`,
+    /// so it never wraps like the `u32` ring indices).
+    released: u64,
 }
 
 impl<T: Copy> XdpRing<T> {
@@ -116,7 +118,14 @@ impl<T: Copy> XdpRing<T> {
             descs,
             cached_prod: 0,
             cached_cons: 0,
+            released: 0,
         })
+    }
+
+    /// Ring capacity in descriptors.
+    #[inline]
+    pub(crate) fn size(&self) -> u32 {
+        self.size
     }
 
     // ── Producer protocol (Fill ring, TX ring) ───────────────────────────
@@ -251,16 +260,31 @@ impl<T: Copy> XdpRing<T> {
     #[inline]
     pub(crate) fn consumer_release(&mut self, tok: PeekToken) {
         self.cached_cons = self.cached_cons.wrapping_add(tok.n);
+        self.released += u64::from(tok.n);
         unsafe { &*self.consumer }.store(self.cached_cons, Ordering::Release);
+    }
+
+    /// Entries the producer has ever placed in this ring: those the consumer
+    /// released plus those still waiting (peeked or not). For the RX ring
+    /// this is the socket's received-packet count (#183). Counting at
+    /// release — not at peek — keeps it exact when a peek is abandoned
+    /// (e.g. a `mem::forget`-ed batch) and the same entries are peeked again.
+    #[inline]
+    pub(crate) fn received_total(&self) -> u64 {
+        // SAFETY: `producer` points into this ring's live mmap region.
+        let prod = unsafe { &*self.producer }.load(Ordering::Acquire);
+        self.released + u64::from(prod.wrapping_sub(self.cached_cons))
     }
 
     // ── Wakeup ───────────────────────────────────────────────────────────
 
-    /// Check if the kernel needs a wakeup (via `sendto` or `poll`).
+    /// Check if the kernel needs a wakeup (via `sendto` / `recvfrom` or
+    /// `poll`).
     ///
-    /// Honored by [`XdpSocket::flush`] when the socket was bound with
-    /// `XDP_USE_NEED_WAKEUP` — skips the syscall when the kernel signals it
-    /// is actively polling the TX ring.
+    /// Honored when the socket was bound with `XDP_USE_NEED_WAKEUP`: on the
+    /// TX ring by [`XdpSocket::flush`] (it skips the syscall while the kernel
+    /// is actively polling the TX ring), on the FILL ring by the RX paths
+    /// (they kick the driver after refilling or finding RX empty).
     #[inline]
     pub(crate) fn needs_wakeup(&self) -> bool {
         // SAFETY: `self.flags` is a u32 in the mmap'd ring shared with the kernel.
@@ -312,78 +336,127 @@ pub(crate) type RxRing = XdpRing<libc::xdp_desc>;
 /// TX ring: userspace produces `xdp_desc`, kernel consumes for transmission.
 pub(crate) type TxRing = XdpRing<libc::xdp_desc>;
 
+/// Heap-backed rings for unit tests — the producer/consumer protocol, and
+/// whole `XdpSocket`s, without an AF_XDP socket.
 #[cfg(test)]
-mod tests {
+pub(crate) mod mock {
     use super::*;
     use std::alloc::{Layout, alloc_zeroed, dealloc};
 
-    /// Helper to create a mock ring in heap memory for testing the
-    /// producer/consumer protocol without actual AF_XDP sockets.
-    ///
-    /// Layout matches kernel ring: [producer: AtomicU32, consumer: AtomicU32, flags: u32, pad: u32, descs...]
-    struct MockRing<T: Copy> {
-        ring: XdpRing<T>,
+    /// The memory behind a [`ring`]; must be dropped after that ring.
+    pub(crate) struct RingMem {
         ptr: *mut u8,
         layout: Layout,
     }
 
+    impl Drop for RingMem {
+        fn drop(&mut self) {
+            // SAFETY: allocated in `ring` with this layout.
+            unsafe { dealloc(self.ptr, self.layout) };
+        }
+    }
+
+    /// A `size`-entry ring over zeroed heap memory laid out like the
+    /// kernel's: [producer: AtomicU32, consumer: AtomicU32, flags: u32,
+    /// pad: u32, descs...]. Its `mmap_size` is 0, so its `Drop` only makes a
+    /// harmless zero-length `munmap`; the memory belongs to the `RingMem`.
+    pub(crate) fn ring<T: Copy>(size: u32) -> (XdpRing<T>, RingMem) {
+        assert!(size.is_power_of_two());
+        let desc_offset = 16usize; // after producer(4) + consumer(4) + flags(4) + pad(4)
+        let total = desc_offset + (size as usize) * std::mem::size_of::<T>();
+        let layout = Layout::from_size_align(total, 8).unwrap();
+        // SAFETY: `layout` has a non-zero size.
+        let ptr = unsafe { alloc_zeroed(layout) };
+        assert!(!ptr.is_null());
+
+        let producer = ptr.cast::<AtomicU32>();
+        // SAFETY: all offsets lie inside the `total`-byte allocation.
+        let consumer = unsafe { ptr.add(4) }.cast::<AtomicU32>();
+        let flags = unsafe { ptr.add(8) }.cast::<u32>();
+        let descs = unsafe { ptr.add(desc_offset) }.cast::<T>();
+
+        let ring = XdpRing {
+            // SAFETY: checked non-null above.
+            base: unsafe { NonNull::new_unchecked(ptr) },
+            mmap_size: 0, // nothing to munmap
+            size,
+            mask: size - 1,
+            producer,
+            consumer,
+            flags,
+            descs,
+            cached_prod: 0,
+            cached_cons: 0,
+            released: 0,
+        };
+        (ring, RingMem { ptr, layout })
+    }
+
+    /// The kernel's side of a mock ring.
+    impl<T: Copy> XdpRing<T> {
+        /// Publish `val` as the producer index.
+        pub(crate) fn mock_set_producer(&self, val: u32) {
+            unsafe { &*self.producer }.store(val, Ordering::Release);
+        }
+
+        /// The published producer index.
+        pub(crate) fn mock_producer(&self) -> u32 {
+            unsafe { &*self.producer }.load(Ordering::Acquire)
+        }
+
+        /// The published consumer index.
+        pub(crate) fn mock_consumer(&self) -> u32 {
+            unsafe { &*self.consumer }.load(Ordering::Acquire)
+        }
+
+        /// Set the ring's flags word (e.g. `XDP_RING_NEED_WAKEUP`).
+        pub(crate) fn mock_set_flags(&self, val: u32) {
+            unsafe { std::ptr::write_volatile(self.flags as *mut u32, val) };
+        }
+
+        /// Write descriptor `val` at ring index `idx` (masked).
+        pub(crate) fn mock_write(&self, idx: u32, val: T) {
+            unsafe { self.descs.add((idx & self.mask) as usize).write(val) };
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// A heap-backed ring for testing the producer/consumer protocol
+    /// without actual AF_XDP sockets (see [`mock::ring`]).
+    struct MockRing<T: Copy> {
+        ring: XdpRing<T>,
+        // Dropped after `ring`.
+        _mem: mock::RingMem,
+    }
+
     impl<T: Copy> MockRing<T> {
         fn new(size: u32) -> Self {
-            assert!(size.is_power_of_two());
-            let desc_offset = 16usize; // after producer(4) + consumer(4) + flags(4) + pad(4)
-            let total = desc_offset + (size as usize) * std::mem::size_of::<T>();
-            let layout = Layout::from_size_align(total, 8).unwrap();
-            let ptr = unsafe { alloc_zeroed(layout) };
-            assert!(!ptr.is_null());
-
-            let producer = ptr.cast::<AtomicU32>();
-            let consumer = unsafe { ptr.add(4) }.cast::<AtomicU32>();
-            let flags = unsafe { ptr.add(8) }.cast::<u32>();
-            let descs = unsafe { ptr.add(desc_offset) }.cast::<T>();
-
-            let ring = XdpRing {
-                base: unsafe { NonNull::new_unchecked(ptr) },
-                mmap_size: 0, // prevent munmap in drop
-                size,
-                mask: size - 1,
-                producer,
-                consumer,
-                flags,
-                descs,
-                cached_prod: 0,
-                cached_cons: 0,
-            };
-
-            Self { ring, ptr, layout }
+            let (ring, _mem) = mock::ring(size);
+            Self { ring, _mem }
         }
 
         /// Simulate kernel writing to the producer index (for consumer-side testing).
         fn kernel_set_producer(&self, val: u32) {
-            unsafe { &*self.ring.producer }.store(val, Ordering::Release);
+            self.ring.mock_set_producer(val);
         }
 
         /// Read the producer index (to verify producer-side writes).
         fn read_producer(&self) -> u32 {
-            unsafe { &*self.ring.producer }.load(Ordering::Acquire)
+            self.ring.mock_producer()
         }
 
         /// Read the consumer index (to verify consumer-side writes).
         fn read_consumer(&self) -> u32 {
-            unsafe { &*self.ring.consumer }.load(Ordering::Acquire)
+            self.ring.mock_consumer()
         }
 
         /// Set the flags field (to test needs_wakeup).
         fn set_flags(&self, val: u32) {
-            unsafe { std::ptr::write_volatile(self.ring.flags as *mut u32, val) };
-        }
-    }
-
-    impl<T: Copy> Drop for MockRing<T> {
-        fn drop(&mut self) {
-            // Override mmap_size to 0 so XdpRing::drop doesn't munmap.
-            self.ring.mmap_size = 0;
-            // Manually free the heap allocation.
-            unsafe { dealloc(self.ptr, self.layout) };
+            self.ring.mock_set_flags(val);
         }
     }
 
@@ -510,6 +583,43 @@ mod tests {
 
         mock.set_flags(0);
         assert!(!mock.ring.needs_wakeup());
+    }
+
+    /// #183: received = released + still in the ring, counted once even
+    /// when a peek is abandoned and repeated.
+    #[test]
+    fn received_total_counts_released_plus_pending() {
+        let mut mock = MockRing::<u64>::new(8);
+        mock.kernel_set_producer(5);
+        assert_eq!(mock.ring.received_total(), 5);
+        let tok = mock.ring.consumer_peek(4).unwrap();
+        assert_eq!(mock.ring.received_total(), 5, "peeking changes nothing");
+        // Abandoned peek (forgotten batch): the next peek sees the same
+        // entries; still 5.
+        let tok2 = mock.ring.consumer_peek(4).unwrap();
+        assert_eq!((tok2.start, tok2.n), (tok.start, tok.n));
+        assert_eq!(mock.ring.received_total(), 5);
+        mock.ring.consumer_release(tok2);
+        assert_eq!(mock.ring.received_total(), 5);
+        mock.kernel_set_producer(7);
+        let tok = mock.ring.consumer_peek(8).unwrap();
+        mock.ring.consumer_release(tok);
+        assert_eq!(mock.ring.received_total(), 7);
+    }
+
+    /// The `u32` ring indices wrap; the count must not.
+    #[test]
+    fn received_total_survives_index_wrap() {
+        let mut mock = MockRing::<u64>::new(8);
+        mock.ring.cached_cons = u32::MAX - 1;
+        mock.ring.cached_prod = u32::MAX - 1;
+        mock.ring.released = u64::from(u32::MAX);
+        mock.kernel_set_producer(2); // 4 entries past cached_cons, wrapped
+        assert_eq!(mock.ring.received_total(), u64::from(u32::MAX) + 4);
+        let tok = mock.ring.consumer_peek(8).unwrap();
+        assert_eq!(tok.n, 4);
+        mock.ring.consumer_release(tok);
+        assert_eq!(mock.ring.received_total(), u64::from(u32::MAX) + 4);
     }
 
     #[test]

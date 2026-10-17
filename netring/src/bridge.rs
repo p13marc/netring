@@ -26,7 +26,7 @@ use crate::afpacket::rx::{Capture, CaptureBuilder};
 use crate::afpacket::tx::{Injector, InjectorBuilder};
 use crate::config::RingProfile;
 use crate::error::Error;
-use crate::packet::Packet;
+use crate::packet::{Packet, PacketDirection};
 use crate::stats::CaptureStats;
 
 /// Action returned by a bridge filter callback.
@@ -99,6 +99,11 @@ impl std::fmt::Display for BridgeStats {
 ///
 /// The bridge waits via `poll(2)` on both RX fds before draining each direction,
 /// so it does not consume CPU while idle.
+///
+/// Only frames *arriving* on an interface are bridged. Frames leaving it —
+/// the bridge's own forwards and anything the host itself sends there — are
+/// skipped (and not shown to the filter), so the two directions cannot
+/// bounce a frame back and forth.
 #[must_use]
 pub struct Bridge {
     rx_a: Capture,
@@ -152,7 +157,10 @@ impl Bridge {
     ///
     /// # Errors
     ///
-    /// Returns [`Error::Io`] if `poll(2)` or a `flush()` syscall fails.
+    /// Returns [`Error::Io`] if `poll(2)` or a `flush()` syscall fails, or
+    /// with `ENETDOWN` when either interface is removed. A side that is
+    /// merely down is waited out (with a warning) and forwarding resumes
+    /// when it comes back up.
     pub fn run<F>(&mut self, mut filter: F) -> Result<(), Error>
     where
         F: FnMut(&Packet<'_>, BridgeDirection) -> BridgeAction,
@@ -192,6 +200,8 @@ impl Bridge {
     ///
     /// Returns `[a_ready, b_ready]`. Both `false` indicates the timeout
     /// elapsed with no traffic. EINTR is handled by [`crate::syscall::poll_eintr_safe`].
+    /// A socket error is read (clearing it) rather than left to make every
+    /// poll return at once; a removed interface is returned as an error.
     fn poll_both(&self, timeout: Duration) -> Result<[bool; 2], Error> {
         use nix::poll::{PollFd, PollFlags};
 
@@ -200,6 +210,8 @@ impl Bridge {
             PollFd::new(self.rx_b.as_fd(), PollFlags::POLLIN),
         ];
         crate::syscall::poll_eintr_safe(&mut pfds, timeout).map_err(Error::Io)?;
+        crate::afpacket::socket::poll_error(self.rx_a.as_fd(), pfds[0].revents())?;
+        crate::afpacket::socket::poll_error(self.rx_b.as_fd(), pfds[1].revents())?;
         Ok([
             pfds[0]
                 .revents()
@@ -270,15 +282,18 @@ impl Bridge {
             tokio::select! {
                 result = async_a.readable() => {
                     let mut guard = result.map_err(Error::Io)?;
-                    self.drain_direction(&mut filter, BridgeDirection::AtoB)?;
-                    // We've drained until next_batch returned None — re-arm
-                    // tokio's readiness so the next iteration awaits epoll.
-                    guard.clear_ready();
+                    // Re-arm tokio's readiness only once the ring is empty;
+                    // a capped drain leaves it set so the backlog is resumed
+                    // (epoll is edge-triggered: no new edge would come).
+                    if self.drain_direction(&mut filter, BridgeDirection::AtoB)? {
+                        guard.clear_ready();
+                    }
                 }
                 result = async_b.readable() => {
                     let mut guard = result.map_err(Error::Io)?;
-                    self.drain_direction(&mut filter, BridgeDirection::BtoA)?;
-                    guard.clear_ready();
+                    if self.drain_direction(&mut filter, BridgeDirection::BtoA)? {
+                        guard.clear_ready();
+                    }
                 }
             }
         }
@@ -318,13 +333,15 @@ impl Bridge {
             tokio::select! {
                 result = async_a.readable() => {
                     let mut guard = result.map_err(Error::Io)?;
-                    self.drain_direction(&mut filter, BridgeDirection::AtoB)?;
-                    guard.clear_ready();
+                    if self.drain_direction(&mut filter, BridgeDirection::AtoB)? {
+                        guard.clear_ready();
+                    }
                 }
                 result = async_b.readable() => {
                     let mut guard = result.map_err(Error::Io)?;
-                    self.drain_direction(&mut filter, BridgeDirection::BtoA)?;
-                    guard.clear_ready();
+                    if self.drain_direction(&mut filter, BridgeDirection::BtoA)? {
+                        guard.clear_ready();
+                    }
                 }
                 _ = tokio::time::sleep(self.poll_timeout) => {
                     // Idle iteration — fall through to next loop pass.
@@ -334,16 +351,18 @@ impl Bridge {
         Ok(())
     }
 
-    /// Drain every retired block from one direction, forwarding through the filter.
+    /// Drain retired blocks from one direction, forwarding through the filter.
     ///
-    /// Continues until `next_batch()` reports nothing more is currently retired,
-    /// so a single readability wakeup empties the backlog (otherwise blocks
-    /// pile up until the next poll cycle).
+    /// Takes up to [`DRAIN_BATCHES`] blocks, then returns so the other
+    /// direction gets its turn: draining until empty never ends while one
+    /// side is under sustained load, starving the other. Returns `true` when
+    /// the direction had nothing more retired. The leftover backlog keeps
+    /// the RX fd readable, so the next `poll(2)` returns at once.
     fn drain_direction<F>(
         &mut self,
         filter: &mut F,
         direction: BridgeDirection,
-    ) -> Result<(), Error>
+    ) -> Result<bool, Error>
     where
         F: FnMut(&Packet<'_>, BridgeDirection) -> BridgeAction,
     {
@@ -364,8 +383,19 @@ impl Bridge {
 
         let tx_capacity = tx.frame_capacity();
 
-        while let Some(batch) = rx.next_batch() {
+        for _ in 0..DRAIN_BATCHES {
+            let Some(batch) = rx.next_batch() else {
+                return Ok(true);
+            };
             for pkt in &batch {
+                // Frames leaving this interface are not bridged: without
+                // qdisc bypass the other direction's own forwards pass the
+                // packet taps here (dev_queue_xmit_nit() skips only the
+                // sending socket), and sending them back would bounce every
+                // frame between the two sides forever.
+                if pkt.direction() == PacketDirection::Outgoing {
+                    continue;
+                }
                 if filter(&pkt, direction) != BridgeAction::Forward {
                     continue;
                 }
@@ -378,24 +408,17 @@ impl Bridge {
                     );
                     continue;
                 }
-                match tx.allocate(pkt.len()) {
-                    Some(mut slot) => {
-                        slot.data_mut()[..pkt.len()].copy_from_slice(pkt.data());
-                        slot.set_len(pkt.len());
-                        slot.send();
-                    }
-                    None => {
-                        *ring_full += 1;
-                        tracing::debug!(
-                            pkt_len = pkt.len(),
-                            "Bridge: dropping packet — TX ring full"
-                        );
-                    }
+                if !queue_frame(tx, pkt.data())? {
+                    *ring_full += 1;
+                    tracing::debug!(
+                        pkt_len = pkt.len(),
+                        "Bridge: dropping packet — TX ring full"
+                    );
                 }
             }
             tx.flush()?;
         }
-        Ok(())
+        Ok(false)
     }
 
     /// Get forwarding statistics for both directions.
@@ -457,6 +480,28 @@ impl Bridge {
     pub fn handles(&self) -> (&Capture, &Injector, &Capture, &Injector) {
         (&self.rx_a, &self.tx_b, &self.rx_b, &self.tx_a)
     }
+}
+
+/// Blocks one direction forwards before the other gets its turn.
+const DRAIN_BATCHES: usize = 4;
+
+/// Copy `data` into a TX slot and queue it. A batch can hold more packets
+/// than the TX ring has frames, and queued frames only leave the ring on a
+/// kick (`tpacket_snd()` runs from `sendto()`), so a full ring is flushed
+/// and the allocation retried once. `false`: still no free frame.
+fn queue_frame(tx: &mut Injector, data: &[u8]) -> Result<bool, Error> {
+    for attempt in 0..2 {
+        if let Some(mut slot) = tx.allocate(data.len()) {
+            slot.data_mut()[..data.len()].copy_from_slice(data);
+            slot.set_len(data.len());
+            slot.send();
+            return Ok(true);
+        }
+        if attempt == 0 {
+            tx.flush()?;
+        }
+    }
+    Ok(false)
 }
 
 /// The four backend handles that make up a [`Bridge`].

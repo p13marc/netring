@@ -151,7 +151,7 @@ its queue, even in promiscuous mode. Either reduce the NIC to a single queue:
 ethtool -L <iface> combined 1
 ```
 
-or open one AF_XDP socket per queue (shared-UMEM / fanout). On some Mellanox
+or open one AF_XDP socket per queue (`XdpCapture` with `Queues::Auto`). On some Mellanox
 NICs you must create twice as many AF_XDP queues as `ethtool -L combined` sets.
 
 ## Testing Without a Network

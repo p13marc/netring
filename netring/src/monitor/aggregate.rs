@@ -78,6 +78,23 @@ impl Default for AggregateState {
     }
 }
 
+/// The key a DNS name or SNI is counted under. Names are case-insensitive
+/// (RFC 4343 — and resolvers randomise the case of queries, "DNS 0x20"), and
+/// a trailing dot names the same FQDN: one domain, one key.
+#[cfg(any(feature = "dns", feature = "tls"))]
+pub(crate) fn name_key(name: &str) -> String {
+    name.strip_suffix('.').unwrap_or(name).to_ascii_lowercase()
+}
+
+#[cfg(all(test, any(feature = "dns", feature = "tls")))]
+mod tests {
+    #[test]
+    fn name_key_folds_case_and_the_trailing_dot() {
+        assert_eq!(super::name_key("Login.EXAMPLE.com."), "login.example.com");
+        assert_eq!(super::name_key("example.com"), "example.com");
+    }
+}
+
 /// A read view over the aggregation tables at a fixed instant (issue #121).
 pub struct AggregateReport<'a> {
     pub(crate) state: &'a AggregateState,

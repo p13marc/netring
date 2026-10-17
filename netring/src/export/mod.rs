@@ -100,8 +100,8 @@ impl FlowRecord {
 
     /// Build an **ongoing** interim record for a still-alive flow at the active
     /// timeout (0.25 W1c). `reason` is `None`; `end` is the snapshot time
-    /// (`stats.last_seen`). Counters are cumulative-to-date, matching how
-    /// NetFlow/IPFIX active-timeout records report long-lived flows.
+    /// (`stats.last_seen`). Counters are cumulative-to-date; the IPFIX
+    /// exporter derives the per-record delta counts (IE 1/2) from them.
     pub(crate) fn from_active(key: &FlowKey, stats: &FlowStats) -> Self {
         Self {
             proto: key.proto,

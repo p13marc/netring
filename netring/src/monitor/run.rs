@@ -59,6 +59,9 @@ type ArpTableRef<'a> =
 pub(crate) enum StopCondition {
     /// Stop when wall-clock reaches this deadline.
     Deadline(Instant),
+    /// No stop condition: a `run_for` duration too long to represent as
+    /// an `Instant`. The run ends only on an error.
+    Never,
     /// Stop on Ctrl-C / SIGTERM. Available only when the tokio
     /// `signal` feature is on; today that's transitively enabled
     /// by netring's `tokio` feature.
@@ -200,7 +203,7 @@ pub(crate) async fn run_loop(monitor: Monitor, stop: StopCondition) -> Result<()
         detector_names: _,
         monitor_name,
         drain_timeout,
-        broadcast_handles: _,
+        broadcast_handles,
         #[cfg(all(feature = "pcap", feature = "tokio"))]
             pcap_source_path: _,
         #[cfg(all(feature = "pcap", feature = "tokio"))]
@@ -209,11 +212,13 @@ pub(crate) async fn run_loop(monitor: Monitor, stop: StopCondition) -> Result<()
         fanout,
         label_table,
         mut merge_rx,
+        shard_stop,
         handler_error_policy,
         backend_error_policy,
         mut capture_stats,
         health,
         mut flow_exporters,
+        mut report_flushers,
         mut ml_feature_handlers,
         mut byte_accumulators,
         ip_frag_config,
@@ -244,6 +249,11 @@ pub(crate) async fn run_loop(monitor: Monitor, stop: StopCondition) -> Result<()
         #[cfg(feature = "p0f")]
         mut p0f_watch,
     } = monitor;
+    // Each `BroadcastSlotHandle` is a subscriber with its own queue: the
+    // templates `subscribe()` cloned from would otherwise queue every message,
+    // unread, until the run ends (a `_` pattern doesn't move the field out).
+    // Subscribers minted before the run keep their own handles.
+    drop(broadcast_handles);
     // Issue #134: build the IP-fragment reassembler if armed. It lives in this
     // stack frame and is fed per-frame before `track_into`.
     let mut ip_reassembly = ip_frag_config
@@ -314,32 +324,30 @@ pub(crate) async fn run_loop(monitor: Monitor, stop: StopCondition) -> Result<()
     let mut dedups: Vec<Option<crate::dedup::Dedup>> =
         specs.iter().map(|_| dedup.clone()).collect();
     // 0.24 Phase C4: all sockets are open and the loop is about to run —
-    // readiness flips true. `mark_started` stamps the uptime/liveness
-    // clock now (not at build time).
+    // readiness flips true, until the loop stops. `mark_started` stamps the
+    // uptime/liveness clock now (not at build time).
     health.mark_started();
-    health.mark_sockets_open();
+    let ready = health.ready_while_running();
 
     let mut events: Vec<FsEvent<FlowKey>> = Vec::with_capacity(64);
     let mut shutdown = ShutdownSignal::new(stop);
     // Periodic sweep: idle flows end (FlowEnded), parsers' `on_tick`
     // runs, out-of-order holes expire, per-flow state is released.
     // Driven by wall time, stamped in packet time (see PacketClock).
-    let mut sweep_timer = {
-        let period = driver
-            .tracker()
-            .config()
-            .sweep_interval
-            .max(Duration::from_millis(10));
-        let mut int = tokio::time::interval_at(tokio::time::Instant::now() + period, period);
-        int.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
-        int
-    };
-    let mut packet_clock = PacketClock::default();
+    let sweep_period = driver
+        .tracker()
+        .config()
+        .sweep_interval
+        .max(Duration::from_millis(10));
+    let mut sweep_timer = periodic(sweep_period);
+    // A source's timestamps going back by more than a sweep period is a
+    // clock step, not reordering.
+    let mut packet_clock = PacketClock::new(caps.len(), sweep_period);
     let mut rr_anchor: usize = 0;
     // 0.24 Phase B: consecutive backend-error count for the SkipSource circuit
     // breaker. Reset on every successful readable wake.
     let mut backend_errors: u64 = 0;
-    // 0.21 E.2: bumped on every packet batch + every tick. Idle
+    // 0.21 E.2: bumped on every readable wake (traffic only). Idle
     // mode computes its deadline as `last_event_at + window`,
     // so refreshing this resets the idle timer. Initialized to
     // "now" so the loop has the full window of grace before the
@@ -350,27 +358,15 @@ pub(crate) async fn run_loop(monitor: Monitor, stop: StopCondition) -> Result<()
     // First tick fires after `period` (interval_at with deadline =
     // now + period), not immediately. `Skip` missed-tick behaviour
     // so a slow tick handler doesn't pile up backlog ticks.
-    let mut tick_intervals: Vec<tokio::time::Interval> = tick_handlers
-        .iter()
-        .map(|t| {
-            let mut int =
-                tokio::time::interval_at(tokio::time::Instant::now() + t.period, t.period);
-            int.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
-            int
-        })
-        .collect();
+    let mut tick_intervals: Vec<tokio::time::Interval> =
+        tick_handlers.iter().map(|t| periodic(t.period)).collect();
 
     // 0.24 Phase C: capture-telemetry sampling. Only armed when an
     // `on_capture_stats` handler is registered — otherwise the `Option`
     // is `None` and the `select!` branch is gated off at zero cost (same
     // pattern as the tick / merge branches). The sampler keeps per-source
     // cumulative state so each sample's `drop_rate` is windowed.
-    let mut telemetry_interval = capture_stats.as_ref().map(|reg| {
-        let mut int =
-            tokio::time::interval_at(tokio::time::Instant::now() + reg.period, reg.period);
-        int.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
-        int
-    });
+    let mut telemetry_interval = capture_stats.as_ref().map(|reg| periodic(reg.period));
     // Allocate per-source sampler slots only when telemetry is armed — an
     // empty `Vec` doesn't allocate, so an unconfigured monitor pays nothing.
     let mut telemetry_sampler =
@@ -387,32 +383,36 @@ pub(crate) async fn run_loop(monitor: Monitor, stop: StopCondition) -> Result<()
     // long-lived flow gets one interim record per active-timeout window.
     let mut active_export = flow_active_timeout
         .filter(|_| !flow_exporters.is_empty())
-        .map(|period| {
-            let mut int = tokio::time::interval_at(tokio::time::Instant::now() + period, period);
-            int.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
-            (int, period)
-        });
+        .map(|period| (periodic(period), period));
     let mut last_active_export: std::collections::HashMap<FlowKey, flowscope::Timestamp> =
         std::collections::HashMap::new();
 
     // Every exit — stop condition, EOF, or an error — reaches the
     // output flush below.
     let run: Result<()> = async {
+        // One waiter for the whole run: a fresh one per `select!` pass
+        // would lock the `Notify` every shard shares on every loop turn.
+        let sibling_stop = sibling_stopped(&shard_stop);
+        tokio::pin!(sibling_stop);
         loop {
             // tokio::select! waits on shutdown, the next packet, OR
             // the next tick. The `if !tick_intervals.is_empty()`
             // gate keeps the tick branch from being polled when no
             // handlers are registered (saves one cx wake per loop).
+            // Biased, capture last: under sustained load the capture is
+            // ready every time, and polled earlier it would starve the
+            // timers below (each fires at most once per period, so they
+            // can't starve the capture in turn).
             let ready = tokio::select! {
                 biased;
                 _ = shutdown.recv(last_event_at) => break,
-                idx = ready_capture(&mut caps, &mut rr_anchor) => idx,
+                // A `ShardedRunner` sibling's run ended (an error, a signal).
+                _ = &mut sibling_stop, if shard_stop.is_some() => break,
                 // Housekeeping, like telemetry: does not reset the idle timer.
                 _ = sweep_timer.tick() => {
                     if let Some(now) = packet_clock.now() {
                         events.clear();
                         driver.sweep_into(now, &mut events);
-                        flow_states.sweep(now);
                         #[cfg(feature = "arp")]
                         let arp_table_ref: ArpTableRef<'_> = arp_watch.as_ref().map(|w| &w.table);
                         #[cfg(not(feature = "arp"))]
@@ -438,15 +438,19 @@ pub(crate) async fn run_loop(monitor: Monitor, stop: StopCondition) -> Result<()
                             None,
                         )
                         .await?;
+                        // After the dispatch: the flows this sweep ended
+                        // were released by their `FlowEnded`, whose
+                        // handlers could still read the state.
+                        flow_states.sweep(now);
                     }
                     continue;
                 }
                 tick_idx = next_tick(&mut tick_intervals), if !tick_intervals.is_empty() => {
-                    // Reset idle timer on every tick — periodic
-                    // tick fires are intended user activity, not
-                    // dead air. Without this, a 1s idle timeout +
-                    // 500ms tick handler would never resolve.
-                    last_event_at = Instant::now();
+                    // A tick is not traffic: it doesn't reset the idle
+                    // timer, or any tick period shorter than the idle
+                    // window (a `.report` / `on_bandwidth` cadence
+                    // included) would keep `run_until_idle` from ever
+                    // stopping.
                     // Packet time (the clock of every event's `ctx.ts`,
                     // so time-bound state lines up), wall time before
                     // the first packet.
@@ -464,6 +468,8 @@ pub(crate) async fn run_loop(monitor: Monitor, stop: StopCondition) -> Result<()
                         &mut flow_states,
                         &label_table,
                         now,
+                        handler_error_policy,
+                        &health,
                     )
                     .await?;
                     // 0.24 Phase C4: a tick is progress too — keeps liveness
@@ -506,6 +512,8 @@ pub(crate) async fn run_loop(monitor: Monitor, stop: StopCondition) -> Result<()
                             &mut flow_states,
                             &label_table,
                             &health,
+                            handler_error_policy,
+                            dispatcher.catch_panics(),
                         )?;
                     }
                     continue;
@@ -524,6 +532,7 @@ pub(crate) async fn run_loop(monitor: Monitor, stop: StopCondition) -> Result<()
                     }
                     continue;
                 }
+                idx = ready_capture(&mut caps, &mut rr_anchor) => idx,
             };
             let i = match ready {
                 Some((i, Ok(()))) => i,
@@ -551,6 +560,11 @@ pub(crate) async fn run_loop(monitor: Monitor, stop: StopCondition) -> Result<()
                         health.record_backend_error();
                         match open_backend(&specs[i], fanout, &kernel_prefilter, promiscuous) {
                             Ok(b) => {
+                                // The new backend's counters start at zero:
+                                // hand the old one's totals to the sampler.
+                                if capture_stats.is_some() {
+                                    telemetry_sampler.retire(i, caps[i].counters().ok());
+                                }
                                 caps[i] = b;
                                 tracing::warn!(error = %e, idx = i, count = backend_errors, "capture backend error (Reopen) — source reopened");
                             }
@@ -592,7 +606,7 @@ pub(crate) async fn run_loop(monitor: Monitor, stop: StopCondition) -> Result<()
             let mut packet_err: Option<crate::error::Error> = None;
             // #178: the source's dedup ring, checked first for every frame.
             let mut dedup_i = dedups[i].as_mut();
-            let last_ts = caps[i]
+            let (last_ts, more_ready) = caps[i]
                 .drain_batch(|view, direction| {
                     if let Some(d) = dedup_i.as_deref_mut()
                         && !d.keep_raw(view.frame, direction, view.timestamp)
@@ -811,16 +825,27 @@ pub(crate) async fn run_loop(monitor: Monitor, stop: StopCondition) -> Result<()
                 None,
             )
             .await?;
-            packet_clock.observe(ts);
+            packet_clock.observe(i, ts);
 
             // 0.24 Phase C4: record progress for the health handle — a packet
             // batch was processed; snapshot the tracker's active-flow count.
             health.record_event(driver.tracker().flow_count());
+
+            // The drain budget ran out with packets still waiting: the loop
+            // would go straight back to the capture without ever returning
+            // `Pending`, so the runtime would never turn its timer driver
+            // and the timers above would never fire (on a current-thread
+            // runtime nothing else does). Yield first.
+            if more_ready {
+                tokio::task::yield_now().await;
+            }
         }
         #[allow(unreachable_code)]
         Ok(())
     }
     .await;
+    // The loop no longer services the sockets: not ready.
+    drop(ready);
 
     // 0.21 D.2: graceful drain phase. After the stop condition
     // fires, flush in-flight flows out of the central tracker,
@@ -829,12 +854,13 @@ pub(crate) async fn run_loop(monitor: Monitor, stop: StopCondition) -> Result<()
     // for fail-fast smoke tests that don't care about residual
     // events.
     if let Err(e) = run {
-        let _ = flush_outputs(sink.as_mut(), &mut flow_exporters);
+        let _ = flush_outputs(sink.as_mut(), &mut flow_exporters, &mut report_flushers);
         return Err(e);
     }
     let mut drained = Ok(());
     if !drain_timeout.is_zero() {
-        let deadline = Instant::now() + drain_timeout;
+        // A timeout too long to represent is no deadline.
+        let deadline = Instant::now().checked_add(drain_timeout);
         drained = drain_phase(
             &mut driver,
             &mut dispatcher,
@@ -856,7 +882,7 @@ pub(crate) async fn run_loop(monitor: Monitor, stop: StopCondition) -> Result<()
     }
 
     // Flush even when the drain failed; the drain's error wins.
-    let flushed = flush_outputs(sink.as_mut(), &mut flow_exporters);
+    let flushed = flush_outputs(sink.as_mut(), &mut flow_exporters, &mut report_flushers);
     drained.and(flushed)
 }
 
@@ -895,18 +921,20 @@ pub(crate) async fn replay_loop(
         detector_names: _,
         monitor_name,
         drain_timeout,
-        broadcast_handles: _,
+        broadcast_handles,
         pcap_source_path: _,
         pcap_speed_factor: _,
         mut flow_states,
         fanout: _,
         label_table,
         merge_rx: _, // replay is single-shard; no cross-shard merge
+        shard_stop: _,
         handler_error_policy,
         backend_error_policy: _, // replay has no live capture backend
         capture_stats: _,        // pcap replay has no kernel ring to sample
         health,
         mut flow_exporters,
+        mut report_flushers,
         mut ml_feature_handlers,
         mut byte_accumulators,
         ip_frag_config,
@@ -938,6 +966,9 @@ pub(crate) async fn replay_loop(
         #[cfg(feature = "p0f")]
         mut p0f_watch,
     } = monitor;
+    // The `subscribe()` templates are subscribers too — drop them (see
+    // `run_loop`).
+    drop(broadcast_handles);
     // Issue #134: IP-fragment reassembler for offline replay (armed via
     // `reassemble_ip_fragments`). Same interception as the live loop.
     let mut ip_reassembly = ip_frag_config
@@ -959,7 +990,7 @@ pub(crate) async fn replay_loop(
     // 0.24 Phase C4: the pcap source is open and replay is starting — the
     // same readiness/liveness handle works for offline replay.
     health.mark_started();
-    health.mark_sockets_open();
+    let ready = health.ready_while_running();
 
     // Every exit — stop condition, EOF, or an error — reaches the
     // output flush below.
@@ -983,7 +1014,6 @@ pub(crate) async fn replay_loop(
                 last_sweep = Some(now);
                 events.clear();
                 driver.sweep_into(now, &mut events);
-                flow_states.sweep(now);
                 dispatch_batch(
                     &mut dispatcher,
                     &mut protocol_slots,
@@ -1005,6 +1035,8 @@ pub(crate) async fn replay_loop(
                     None,
                 )
                 .await?;
+                // After the `FlowEnded` handlers (see `run_loop`).
+                flow_states.sweep(now);
             }
 
             // Ticks that fell due before this packet, at their
@@ -1017,7 +1049,8 @@ pub(crate) async fn replay_loop(
                     continue;
                 }
                 match *due {
-                    None => *due = Some(now_d + period),
+                    // A period past `Duration::MAX` is never due.
+                    None => *due = Some(now_d.saturating_add(period)),
                     Some(d) if d <= now_d => {
                         fire_tick(
                             i,
@@ -1030,6 +1063,8 @@ pub(crate) async fn replay_loop(
                             &mut flow_states,
                             &label_table,
                             flowscope::Timestamp::new(d.as_secs() as u32, d.subsec_nanos()),
+                            handler_error_policy,
+                            &health,
                         )
                         .await?;
                         let steps = (now_d - d).as_nanos() / period.as_nanos() + 1;
@@ -1226,17 +1261,19 @@ pub(crate) async fn replay_loop(
         Ok(())
     }
     .await;
+    drop(ready);
 
     // EOF reached. Run the drain phase to land any trailing
     // events (flowscope's `finish()` synthesises FlowEnded
     // events for in-flight flows).
     if let Err(e) = run {
-        let _ = flush_outputs(sink.as_mut(), &mut flow_exporters);
+        let _ = flush_outputs(sink.as_mut(), &mut flow_exporters, &mut report_flushers);
         return Err(e);
     }
     let mut drained = Ok(());
     if !drain_timeout.is_zero() {
-        let deadline = Instant::now() + drain_timeout;
+        // A timeout too long to represent is no deadline.
+        let deadline = Instant::now().checked_add(drain_timeout);
         drained = drain_phase(
             &mut driver,
             &mut dispatcher,
@@ -1258,7 +1295,7 @@ pub(crate) async fn replay_loop(
     }
 
     // Flush even when the drain failed; the drain's error wins.
-    let flushed = flush_outputs(sink.as_mut(), &mut flow_exporters);
+    let flushed = flush_outputs(sink.as_mut(), &mut flow_exporters, &mut report_flushers);
     drained.and(flushed)
 }
 
@@ -1282,7 +1319,7 @@ async fn drain_phase(
     counters: &mut CounterRegistry,
     protocol_slots: &mut [Box<dyn crate::monitor::ProtocolSlot>],
     monitor_name: Option<&str>,
-    deadline: Instant,
+    deadline: Option<Instant>,
     flow_states: &mut crate::ctx::FlowStateRegistry,
     label_table: &flowscope::well_known::LabelTable,
     policy: HandlerErrorPolicy,
@@ -1313,23 +1350,29 @@ async fn drain_phase(
         // Issue #23: the graceful-drain flush runs after the main loop; the
         // ARP table isn't threaded into shutdown.
         None,
-        Some(deadline),
+        deadline,
     )
     .await
 }
 
 /// Flush every buffered output at loop exit — the anomaly sink (EVE /
-/// JSON / syslog writers buffer) and the flow exporters — whatever the
-/// drain phase did (a zero `drain_timeout`, a missed deadline, an
-/// error). An exporter's flush error is logged; the sink's is
-/// returned.
+/// JSON / syslog writers buffer), the flow exporters and the report
+/// sinks — whatever the drain phase did (a zero `drain_timeout`, a
+/// missed deadline, an error). An exporter's or report sink's flush
+/// error is logged; the sink's is returned.
 fn flush_outputs(
     sink: &mut dyn AnomalySink,
     flow_exporters: &mut [Box<dyn crate::export::FlowExporter>],
+    report_flushers: &mut [crate::monitor::ReportFlush],
 ) -> Result<()> {
     for exporter in flow_exporters.iter_mut() {
         if let Err(e) = exporter.flush() {
             tracing::warn!(error = %e, "flow exporter flush failed");
+        }
+    }
+    for flush in report_flushers.iter_mut() {
+        if let Err(e) = flush() {
+            tracing::warn!(error = %e, "report sink flush failed");
         }
     }
     sink.flush().map_err(|e| {
@@ -1378,6 +1421,21 @@ async fn ready_capture(caps: &mut [AnyBackend], anchor: &mut usize) -> Option<(u
     .await
 }
 
+/// A tokio interval for `period` (non-zero — `build()` rejects zero
+/// periods): first tick one `period` from now, missed ticks skipped (a
+/// slow handler doesn't pile up a backlog). A period too long to
+/// represent as an `Instant` never ticks.
+fn periodic(period: Duration) -> tokio::time::Interval {
+    let now = tokio::time::Instant::now();
+    // What tokio itself uses for "never": 30 years out.
+    let first = now
+        .checked_add(period)
+        .unwrap_or_else(|| now + Duration::from_secs(86_400 * 365 * 30));
+    let mut int = tokio::time::interval_at(first, period);
+    int.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+    int
+}
+
 /// Round-robin poll across N tick intervals. Returns the index of
 /// whichever interval ticked first.
 ///
@@ -1407,6 +1465,15 @@ async fn recv_merge(
 ) -> Option<crate::monitor::merge::MergeRequest> {
     match rx {
         Some(r) => r.recv().await,
+        None => std::future::pending().await,
+    }
+}
+
+/// Await the `ShardedRunner` siblings' stop. `None` → never fires (gated
+/// off in the `select!`).
+async fn sibling_stopped(stop: &Option<std::sync::Arc<crate::monitor::shard::ShardStop>>) {
+    match stop {
+        Some(s) => s.stopped().await,
         None => std::future::pending().await,
     }
 }
@@ -1479,11 +1546,12 @@ fn emit_active_flow_records(
 /// fold them into a windowed [`CaptureTelemetry`], and fire the registered
 /// `on_capture_stats` handler once per source.
 ///
-/// Reads `cumulative_stats` (non-destructive at the API level — the inner
-/// `Capture` accumulates the destructive `u32` kernel reads internally), so
-/// it never disturbs the user-visible counters. A per-source stats read
-/// that errors is logged and skipped rather than tearing down the monitor:
-/// telemetry is best-effort observability.
+/// Reads each backend's cumulative `u64` counters (non-destructive at the
+/// API level — the inner `Capture` accumulates the destructive kernel reads
+/// internally), so it never disturbs the user-visible counters. A
+/// per-source stats read that errors is logged and skipped rather than
+/// tearing down the monitor (its last totals still count toward the health
+/// handle): telemetry is best-effort observability.
 #[allow(clippy::too_many_arguments)]
 fn sample_and_fire_capture_stats(
     caps: &[AnyBackend],
@@ -1497,6 +1565,8 @@ fn sample_and_fire_capture_stats(
     flow_states: &mut crate::ctx::FlowStateRegistry,
     label_table: &flowscope::well_known::LabelTable,
     health: &crate::monitor::health::HealthState,
+    policy: HandlerErrorPolicy,
+    catch_panics: bool,
 ) -> Result<()> {
     let now = flowscope::Timestamp::from_system_time(SystemTime::now());
     // Accumulate the cumulative totals across sources for the health
@@ -1504,7 +1574,7 @@ fn sample_and_fire_capture_stats(
     let mut total_packets: u64 = 0;
     let mut total_drops: u64 = 0;
     for (i, cap) in caps.iter().enumerate() {
-        let (cum, detail) = match cap.detailed_stats() {
+        let (cum, detail) = match cap.counters() {
             Ok(s) => s,
             Err(e) => {
                 tracing::warn!(
@@ -1512,6 +1582,10 @@ fn sample_and_fire_capture_stats(
                     error = %e,
                     "capture stats read failed; skipping telemetry sample for this source"
                 );
+                if let Some(last) = sampler.last_cumulative(i) {
+                    total_packets += last.delivered;
+                    total_drops += last.drops;
+                }
                 continue;
             }
         };
@@ -1533,7 +1607,12 @@ fn sample_and_fire_capture_stats(
         );
         ctx.monitor_name = monitor_name;
         ctx.label_table = label_table;
-        (reg.handler)(&telemetry, &mut ctx)?;
+        let res = if catch_panics {
+            crate::monitor::dispatcher::call_catching(|| (reg.handler)(&telemetry, &mut ctx))
+        } else {
+            (reg.handler)(&telemetry, &mut ctx)
+        };
+        apply_handler_error_policy(res, policy, health, "capture-stats")?;
     }
     health.record_totals(total_packets, total_drops);
     Ok(())
@@ -1602,7 +1681,8 @@ async fn dispatch_batch(
             health,
             arp_table,
             base + i as u64,
-        )?;
+        )
+        .await?;
         dispatch_tracked_event(
             dispatcher,
             protocol_slots,
@@ -1641,12 +1721,14 @@ async fn dispatch_batch(
         arp_table,
         u64::MAX,
     )
+    .await
 }
 
 /// Dispatch the protocol slots' pending messages positioned at or
-/// before lifecycle event `upto`, across slots in engine order.
+/// before lifecycle event `upto`, across slots in engine order: each
+/// message's sync handlers, then its async and effect handlers.
 #[allow(clippy::too_many_arguments)]
-fn dispatch_slot_messages(
+async fn dispatch_slot_messages(
     dispatcher: &mut Dispatcher,
     protocol_slots: &mut [Box<dyn crate::monitor::ProtocolSlot>],
     driver: &flowscope::driver::Driver<FiveTuple>,
@@ -1689,7 +1771,20 @@ fn dispatch_slot_messages(
         ctx.tracker = Some(driver.tracker());
         // Issue #23: cross-protocol IP→MAC lookup for L7 (TLS/HTTP/DNS) handlers.
         ctx.arp_table = arp_table;
-        if let Err(e) = protocol_slots[i].dispatch_next(dispatcher, &mut ctx) {
+        let res = protocol_slots[i].dispatch_next(dispatcher, &mut ctx);
+        // The async / effect passes run only when such handlers exist (the
+        // slot keeps the message only if its type has some): no future is
+        // boxed otherwise.
+        let res = match res {
+            Ok(()) if dispatcher.async_handler_count() + dispatcher.effect_handler_count() > 0 => {
+                match protocol_slots[i].dispatch_async_effects(dispatcher, &mut ctx) {
+                    Some(passes) => passes.await,
+                    None => Ok(()),
+                }
+            }
+            res => res,
+        };
+        if let Err(e) = res {
             match policy {
                 HandlerErrorPolicy::Propagate => return Err(e),
                 HandlerErrorPolicy::Isolate => {
@@ -1825,6 +1920,7 @@ async fn dispatch_tracked_event(
             detail,
             ts,
         };
+        // Sync, async, then effect handlers, the first error ending it.
         let res = {
             let mut ctx = Ctx::new(
                 Some(key),
@@ -1837,11 +1933,16 @@ async fn dispatch_tracked_event(
             );
             ctx.monitor_name = monitor_name;
             ctx.label_table = label_table;
-            owner.dispatch_parser_event(dispatcher, &mut ctx, &pe)
-        };
-        let res = match res {
-            Ok(()) => owner.dispatch_parser_event_async(dispatcher, pe).await,
-            e => e,
+            let mut res = owner.dispatch_parser_event(dispatcher, &mut ctx, &pe);
+            if res.is_ok() {
+                res = owner.dispatch_parser_event_async(dispatcher, pe).await;
+            }
+            if res.is_ok() && dispatcher.effect_handler_count() > 0 {
+                res = owner
+                    .dispatch_parser_event_effects(dispatcher, &mut ctx, pe)
+                    .await;
+            }
+            res
         };
         if let Err(e) = res {
             match policy {
@@ -1938,11 +2039,13 @@ async fn dispatch_tracked_event(
 /// 1. The `.tick(period, handler)` registration's boxed closure —
 ///    drives the period scheduling and is the ergonomic
 ///    registration form.
-/// 2. The dispatcher's typed `Tick` slot (sync + async) — so
-///    users who registered via `.on::<Tick>(...)` also receive
-///    the event.
+/// 2. The dispatcher's typed `Tick` slot (sync, async, effects) —
+///    so users who registered via `.on::<Tick>(...)` (or `on_async` /
+///    `on_effect`) also receive the event.
 ///
-/// Both run in the order: closure first, then dispatcher.
+/// Both run in the order: closure first, then dispatcher. Errors go
+/// through the [`HandlerErrorPolicy`] like every other handler's: the
+/// closure and the typed `Tick` handlers are isolated from each other.
 #[allow(clippy::too_many_arguments)]
 async fn fire_tick(
     tick_idx: usize,
@@ -1955,13 +2058,15 @@ async fn fire_tick(
     flow_states: &mut crate::ctx::FlowStateRegistry,
     label_table: &flowscope::well_known::LabelTable,
     now: flowscope::Timestamp,
+    policy: HandlerErrorPolicy,
+    health: &crate::monitor::health::HealthState,
 ) -> Result<()> {
     let reg = &mut tick_handlers[tick_idx];
     let tick = Tick {
         now,
         period: reg.period,
     };
-    {
+    let res = {
         let mut ctx = Ctx::new(
             None,
             tick.now,
@@ -1973,48 +2078,112 @@ async fn fire_tick(
         );
         ctx.monitor_name = monitor_name;
         ctx.label_table = label_table;
-        (reg.handler)(&tick, &mut ctx)?;
+        if dispatcher.catch_panics() {
+            crate::monitor::dispatcher::call_catching(|| (reg.handler)(&tick, &mut ctx))
+        } else {
+            (reg.handler)(&tick, &mut ctx)
+        }
+    };
+    apply_handler_error_policy(res, policy, health, "tick")?;
+    let mut ctx = Ctx::new(
+        None,
+        tick.now,
+        SourceIdx(0),
+        state_map,
+        sink,
+        counters,
+        flow_states,
+    );
+    ctx.monitor_name = monitor_name;
+    ctx.label_table = label_table;
+    let mut res = dispatcher.dispatch::<Tick>(&tick, &mut ctx);
+    if res.is_ok() {
+        res = dispatcher.dispatch_async::<Tick>(&tick).await;
     }
-    {
-        let mut ctx = Ctx::new(
-            None,
-            tick.now,
-            SourceIdx(0),
-            state_map,
-            sink,
-            counters,
-            flow_states,
-        );
-        ctx.monitor_name = monitor_name;
-        ctx.label_table = label_table;
-        dispatcher.dispatch::<Tick>(&tick, &mut ctx)?;
+    if res.is_ok() {
+        res = dispatcher.dispatch_effects::<Tick>(&tick, &mut ctx).await;
     }
-    dispatcher.dispatch_async::<Tick>(&tick).await?;
-    Ok(())
+    apply_handler_error_policy(res, policy, health, "tick")
+}
+
+/// A handler's `res` under `policy`: `Propagate` returns the error,
+/// `Isolate` counts and logs it and carries on.
+fn apply_handler_error_policy(
+    res: Result<()>,
+    policy: HandlerErrorPolicy,
+    health: &crate::monitor::health::HealthState,
+    what: &'static str,
+) -> Result<()> {
+    match res {
+        Err(e) if policy == HandlerErrorPolicy::Isolate => {
+            health.record_handler_error();
+            tracing::warn!(error = %e, handler = what, "handler error isolated");
+            Ok(())
+        }
+        res => res,
+    }
 }
 
 /// Packet time, extrapolated by wall time since the last packet: what
 /// a live sweep's `now` is. Sweeping on the packets' own clock keeps
 /// idle timeouts right even when packet timestamps come from another
 /// clock (hardware / PHC) than the host's.
-#[derive(Default)]
+///
+/// Kept per capture source. Within a source the clock only moves
+/// forward, except across a step: a timestamp more than `step` behind the
+/// source's latest (the host clock was set back) re-anchors it — holding
+/// on to the old maximum put `now` that far ahead of every new packet,
+/// and each sweep ended every flow until packet time caught up.
+///
+/// `now` is the latest clock among the sources heard from in the last
+/// two `step`s (else the most recently heard one). Leaving out quiet
+/// sources keeps one that hasn't seen a packet since a host clock step
+/// from holding `now` ahead; taking the latest rather than the earliest
+/// keeps a source whose clock lags (an undisciplined PHC) from freezing
+/// every flow's idle expiry. Sources whose clocks disagree while both
+/// active still share one `now` — the tracker sweeps all flows on a
+/// single clock.
 struct PacketClock {
-    last: Option<(flowscope::Timestamp, Instant)>,
+    sources: Vec<Option<(flowscope::Timestamp, Instant)>>,
+    step: Duration,
 }
 
 impl PacketClock {
-    fn observe(&mut self, ts: flowscope::Timestamp) {
-        let ts = self.last.map_or(ts, |(prev, _)| prev.max(ts));
-        self.last = Some((ts, Instant::now()));
+    fn new(sources: usize, step: Duration) -> Self {
+        Self {
+            sources: vec![None; sources],
+            step,
+        }
+    }
+
+    fn observe(&mut self, source: usize, ts: flowscope::Timestamp) {
+        let Some(slot) = self.sources.get_mut(source) else {
+            return;
+        };
+        let ts = match *slot {
+            // Reordering (across CPUs / batches) keeps the latest.
+            Some((prev, _)) if ts < prev && prev.saturating_sub(ts) <= self.step => prev,
+            _ => ts,
+        };
+        *slot = Some((ts, Instant::now()));
     }
 
     fn now(&self) -> Option<flowscope::Timestamp> {
-        let (ts, at) = self.last?;
-        let d = ts.to_duration() + at.elapsed();
-        Some(flowscope::Timestamp::new(
-            d.as_secs() as u32,
-            d.subsec_nanos(),
-        ))
+        self.now_at(Instant::now())
+    }
+
+    fn now_at(&self, wall: Instant) -> Option<flowscope::Timestamp> {
+        let fresh = self.step.max(Duration::from_millis(500)) * 2;
+        let clock = |&(ts, at): &(flowscope::Timestamp, Instant)| {
+            let d = ts.to_duration() + wall.saturating_duration_since(at);
+            flowscope::Timestamp::new(d.as_secs() as u32, d.subsec_nanos())
+        };
+        let anchored = || self.sources.iter().flatten();
+        anchored()
+            .filter(|(_, at)| wall.saturating_duration_since(*at) <= fresh)
+            .map(clock)
+            .max()
+            .or_else(|| anchored().max_by_key(|(_, at)| *at).map(clock))
     }
 }
 
@@ -2035,7 +2204,9 @@ impl ShutdownSignal {
                     tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate()).ok();
                 (sigint, sigterm)
             }
-            StopCondition::Deadline(_) | StopCondition::Idle(_) => (None, None),
+            StopCondition::Deadline(_) | StopCondition::Idle(_) | StopCondition::Never => {
+                (None, None)
+            }
         };
         Self {
             stop,
@@ -2051,9 +2222,12 @@ impl ShutdownSignal {
             StopCondition::Deadline(t) => {
                 tokio::time::sleep_until((*t).into()).await;
             }
-            StopCondition::Idle(window) => {
-                tokio::time::sleep_until((last_event_at + *window).into()).await;
-            }
+            // A window too long to represent never expires.
+            StopCondition::Idle(window) => match last_event_at.checked_add(*window) {
+                Some(t) => tokio::time::sleep_until(t.into()).await,
+                None => std::future::pending::<()>().await,
+            },
+            StopCondition::Never => std::future::pending::<()>().await,
             StopCondition::Signal => match (self.sig_int.as_mut(), self.sig_term.as_mut()) {
                 (Some(i), Some(t)) => {
                     tokio::select! {
@@ -2697,15 +2871,23 @@ fn absorb_frame_assets(
 
     #[cfg(feature = "arp")]
     if let Ok(m) = flowscope::arp::parse_frame(view.frame) {
-        feed!(flowscope::Asset::from_arp(&m));
+        let mut a = flowscope::Asset::from_arp(&m);
+        // An ARP probe's sender IP 0.0.0.0 (RFC 5227) is no address.
+        a.ipv4.retain(|ip| !ip.is_unspecified());
+        feed!(a);
     }
     #[cfg(feature = "ndp")]
     if let Ok(layers) = view.layers()
-        && let Some(icmp) = layers.icmpv6()
-        && let Ok(m) = flowscope::ndp::parse_icmpv6(icmp.bytes())
-        && let Some(a) = flowscope::Asset::from_ndp(&m)
+        && let (Some(ip6), Some(icmp)) = (layers.ipv6(), layers.icmpv6())
+        && let Ok(mut m) = flowscope::ndp::parse_icmpv6(icmp.bytes())
+        && let Some((ip, mac)) = crate::monitor::ndp::sender_binding(&m, ip6.source())
     {
-        feed!(a);
+        // An NS's target is the address being resolved, not the sender's:
+        // bind what the message proves about its sender.
+        (m.target, m.lladdr) = (ip, Some(mac));
+        if let Some(a) = flowscope::Asset::from_ndp(&m) {
+            feed!(a);
+        }
     }
     #[cfg(feature = "lldp")]
     if let Ok(m) = flowscope::lldp::parse_frame(view.frame)
@@ -3344,6 +3526,33 @@ async fn dispatch_lifecycle_effects(
             }
             _ => {}
         },
+        FsEvent::ParserSideStopped {
+            key,
+            parser_kind,
+            side,
+            reason,
+            detail,
+            ts,
+            ..
+        } => match key.proto {
+            L4Proto::Tcp => {
+                dispatch_one!(
+                    ParserSideStopped<Tcp>,
+                    ParserSideStopped::<Tcp>::new(key, parser_kind, side, reason, detail, ts),
+                    Some(key),
+                    ts
+                );
+            }
+            L4Proto::Udp => {
+                dispatch_one!(
+                    ParserSideStopped<Udp>,
+                    ParserSideStopped::<Udp>::new(key, parser_kind, side, reason, detail, ts),
+                    Some(key),
+                    ts
+                );
+            }
+            _ => {}
+        },
         _ => {}
     }
     Ok(())
@@ -3419,5 +3628,124 @@ mod active_export_tests {
             1,
             "dedup: no second record within the active window"
         );
+    }
+}
+
+#[cfg(test)]
+mod duration_tests {
+    use std::time::{Duration, Instant};
+
+    use super::{ShutdownSignal, StopCondition, periodic};
+
+    /// `run_until_idle(Duration::MAX)`: the idle deadline can't be
+    /// represented — it never fires (no `Instant + Duration` panic).
+    #[tokio::test(flavor = "current_thread")]
+    async fn huge_idle_window_never_fires() {
+        let mut stop = ShutdownSignal::new(StopCondition::Idle(Duration::MAX));
+        let fired =
+            tokio::time::timeout(Duration::from_millis(20), stop.recv(Instant::now())).await;
+        assert!(fired.is_err(), "pending, not fired");
+        let mut never = ShutdownSignal::new(StopCondition::Never);
+        let fired =
+            tokio::time::timeout(Duration::from_millis(20), never.recv(Instant::now())).await;
+        assert!(fired.is_err());
+    }
+
+    /// A huge period arms an interval that never ticks; a short one
+    /// ticks after one period, not immediately.
+    #[tokio::test(flavor = "current_thread")]
+    async fn periodic_handles_huge_and_short_periods() {
+        let mut never = periodic(Duration::MAX);
+        let ticked = tokio::time::timeout(Duration::from_millis(20), never.tick()).await;
+        assert!(ticked.is_err());
+        let start = tokio::time::Instant::now();
+        let mut short = periodic(Duration::from_millis(10));
+        short.tick().await;
+        assert!(start.elapsed() >= Duration::from_millis(10));
+    }
+}
+
+#[cfg(test)]
+mod packet_clock_tests {
+    use std::time::Duration;
+
+    use super::PacketClock;
+
+    fn secs(s: u32) -> flowscope::Timestamp {
+        flowscope::Timestamp::new(s, 0)
+    }
+
+    fn clock(sources: usize) -> PacketClock {
+        PacketClock::new(sources, Duration::from_secs(1))
+    }
+
+    #[test]
+    fn no_packet_no_time() {
+        assert_eq!(clock(2).now(), None);
+    }
+
+    #[test]
+    fn a_backward_clock_step_reanchors() {
+        let mut clock = clock(1);
+        clock.observe(0, secs(1_000));
+        // The host clock was set back 500 s.
+        clock.observe(0, secs(500));
+        let now = clock.now().unwrap();
+        assert!(now < secs(501), "now follows the stepped clock: {now:?}");
+    }
+
+    #[test]
+    fn reordering_within_the_step_keeps_the_latest() {
+        let mut clock = clock(1);
+        clock.observe(0, secs(1_000));
+        clock.observe(0, flowscope::Timestamp::new(999, 500_000_000));
+        let now = clock.now().unwrap();
+        assert!(now >= secs(1_000) && now < secs(1_001), "{now:?}");
+    }
+
+    /// A source whose clock lags (an undisciplined PHC near the epoch)
+    /// must not freeze idle expiry for everyone: the latest active clock
+    /// leads.
+    #[test]
+    fn a_lagging_source_does_not_hold_time_back() {
+        let mut clock = clock(2);
+        clock.observe(0, secs(1_000));
+        clock.observe(1, secs(10));
+        let now = clock.now().unwrap();
+        assert!(now >= secs(1_000) && now < secs(1_001), "{now:?}");
+        // Out-of-range sources are ignored.
+        clock.observe(5, secs(5_000));
+        assert!(clock.now().unwrap() < secs(1_001));
+    }
+
+    /// After a host clock step back, a source that hasn't seen a packet
+    /// since still projects the old clock; once it has been quiet for two
+    /// step windows it no longer holds `now` ahead of the stepped sources.
+    #[test]
+    fn a_quiet_source_stops_holding_time_ahead() {
+        let mut clock = clock(2);
+        let t0 = std::time::Instant::now();
+        clock.observe(0, secs(1_000));
+        clock.observe(1, secs(1_000));
+        // Host clock set back 500 s; only source 0 sees traffic.
+        clock.observe(0, secs(500));
+        let soon = clock.now_at(t0).unwrap();
+        assert!(soon >= secs(1_000), "both still fresh: {soon:?}");
+        // Source 1 stays quiet, source 0 keeps seeing packets.
+        let later = t0 + Duration::from_secs(5);
+        clock.sources[0] = Some((secs(505), later));
+        let now = clock.now_at(later).unwrap();
+        assert!(now >= secs(505) && now < secs(506), "{now:?}");
+    }
+
+    /// No source heard from recently: the most recently heard one.
+    #[test]
+    fn all_quiet_uses_the_latest_heard_source() {
+        let mut clock = clock(2);
+        let t0 = std::time::Instant::now();
+        clock.sources[0] = Some((secs(2_000), t0));
+        clock.sources[1] = Some((secs(500), t0 + Duration::from_secs(1)));
+        let now = clock.now_at(t0 + Duration::from_secs(60)).unwrap();
+        assert!(now >= secs(559) && now < secs(561), "{now:?}");
     }
 }

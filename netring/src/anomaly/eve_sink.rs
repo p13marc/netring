@@ -297,7 +297,7 @@ mod tests {
             SocketAddr::new(IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1)), 1234),
             SocketAddr::new(IpAddr::V4(Ipv4Addr::new(10, 0, 0, 2)), 443),
         );
-        let fp = TlsFingerprint::from_handshake(&hs, Some(key));
+        let fp = TlsFingerprint::from_handshake(&hs, Some(key), 443);
 
         let v = eve_tls_record(&fp, Timestamp::from_unix_f64(1000.0), "eth0");
         assert_eq!(v["event_type"], "tls");

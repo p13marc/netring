@@ -61,6 +61,21 @@ pub use capture::{Queues, interface_numa_node, queue_count};
 pub use capture::{XdpCapture, XdpCaptureBuilder, XdpCaptureGuard};
 pub use stats::XdpStats;
 
+/// Sum `XDP_STATISTICS` and the RX received counts over a multi-queue
+/// capture's sockets (`XdpCapture` / `AsyncXdpCapture`).
+#[cfg(all(feature = "af-xdp", feature = "xdp-loader"))]
+pub(crate) fn sum_socket_stats<'a>(
+    sockets: impl IntoIterator<Item = &'a XdpSocket>,
+) -> Result<(XdpStats, u64), Error> {
+    let mut stats = XdpStats::default();
+    let mut received = 0u64;
+    for s in sockets {
+        stats = stats.saturating_add(s.statistics()?);
+        received = received.saturating_add(s.rx_received());
+    }
+    Ok((stats, received))
+}
+
 #[cfg(feature = "xdp-loader")]
 pub use loader::{XdpAttachment, XdpFlags, XdpProgram, default_program};
 
@@ -88,8 +103,8 @@ use crate::packet::OwnedPacket;
 /// either RX (kernel can't enqueue packets — `rx_dropped` counter rises) or TX
 /// (`send()` can never allocate a frame).
 ///
-/// Pick the mode that matches your traffic direction. For asymmetric splits or
-/// shared-UMEM setups, use [`XdpMode::Custom`].
+/// Pick the mode that matches your traffic direction. For asymmetric splits,
+/// use [`XdpMode::Custom`].
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
 #[non_exhaustive]
 pub enum XdpMode {
@@ -150,10 +165,9 @@ pub struct XdpSocketBuilder {
     frame_count: usize,
     need_wakeup: bool,
     mode: XdpMode,
-    /// Raw fd of an already-bound XDP socket whose UMEM we want to share.
-    /// `0` means "no sharing". When non-zero, build() skips
-    /// `XDP_UMEM_REG` and sets `XDP_SHARED_UMEM` in the bind flags.
-    shared_umem_fd: u32,
+    /// Fd of the socket passed to [`shared_umem`](Self::shared_umem), if
+    /// any. Shared UMEM is unsupported, so `Some` makes `validate()` fail.
+    shared_umem_fd: Option<std::os::fd::RawFd>,
     busy_poll_us: Option<u32>,
     prefer_busy_poll: Option<bool>,
     busy_poll_budget: Option<u16>,
@@ -174,6 +188,10 @@ pub struct XdpSocketBuilder {
     attach_flags: loader::XdpFlags,
     #[cfg(feature = "xdp-loader")]
     force_replace: bool,
+    /// Bind with `XDP_COPY` because a program attached in generic mode
+    /// outside this builder feeds the socket (`XdpCapture`).
+    #[cfg(feature = "xdp-loader")]
+    copy_mode: bool,
     /// Caller-supplied XDP program to register + attach during `build()`.
     /// Mutually exclusive with `attach_default`.
     #[cfg(feature = "xdp-loader")]
@@ -189,7 +207,7 @@ impl Default for XdpSocketBuilder {
             frame_count: 4096,
             need_wakeup: true,
             mode: XdpMode::default(),
-            shared_umem_fd: 0,
+            shared_umem_fd: None,
             busy_poll_us: None,
             prefer_busy_poll: None,
             busy_poll_budget: None,
@@ -203,6 +221,8 @@ impl Default for XdpSocketBuilder {
             attach_flags: loader::XdpFlags::SKB_MODE, // safest default; works on lo
             #[cfg(feature = "xdp-loader")]
             force_replace: false,
+            #[cfg(feature = "xdp-loader")]
+            copy_mode: false,
             #[cfg(feature = "xdp-loader")]
             program: None,
         }
@@ -360,8 +380,9 @@ impl XdpSocketBuilder {
     /// detached from the interface and the map fd is closed.
     ///
     /// Default attach mode is `SKB_MODE` (works on every interface
-    /// including `lo`). Override with [`xdp_attach_flags`](Self::xdp_attach_flags)
-    /// for `DRV_MODE` on supported NICs.
+    /// including `lo`), and the socket then binds in copy mode (`XDP_COPY`).
+    /// Override with [`xdp_attach_flags`](Self::xdp_attach_flags) for
+    /// `DRV_MODE` on supported NICs.
     ///
     /// If a program is already attached to the interface, `build()`
     /// fails with an error suggesting [`force_replace`](Self::force_replace).
@@ -419,11 +440,24 @@ impl XdpSocketBuilder {
         self
     }
 
-    /// Set the XDP attach flags used by [`with_default_program`](Self::with_default_program).
-    /// Default: `SKB_MODE`.
+    /// Set the XDP attach flags used by [`with_default_program`](Self::with_default_program)
+    /// and [`with_program`](Self::with_program). Default: `SKB_MODE`.
+    ///
+    /// When the program attaches in `SKB_MODE` (generic XDP) the socket binds
+    /// with `XDP_COPY`: generic XDP only ever hands it copies, and a socket
+    /// left to negotiate would bind zero-copy on a ZC-capable driver whose
+    /// native XDP is off — where every wakeup fails, so TX never starts.
     #[cfg(feature = "xdp-loader")]
     pub fn xdp_attach_flags(mut self, flags: loader::XdpFlags) -> Self {
         self.attach_flags = flags;
+        self
+    }
+
+    /// Bind with `XDP_COPY` (for sockets fed by a generic-mode program that
+    /// is attached outside this builder, as `XdpCapture` does).
+    #[cfg(feature = "xdp-loader")]
+    pub(crate) fn copy_mode(mut self, on: bool) -> Self {
+        self.copy_mode = on;
         self
     }
 
@@ -450,42 +484,25 @@ impl XdpSocketBuilder {
     /// Bind this socket as a secondary that **shares the UMEM** of an
     /// existing AF_XDP socket.
     ///
-    /// Pass an `AsFd` for an already-bound `XdpSocket` that owns the
-    /// UMEM you want to reuse. The kernel skips per-socket UMEM
-    /// registration and threads packets through *this* socket's RX/TX
-    /// rings while addressing the same shared frame pool.
+    /// # Not supported
     ///
-    /// # Manual partitioning
+    /// Shared UMEM is unsupported until it is redesigned:
+    /// [`validate`](Self::validate) and [`build`](Self::build) return
+    /// [`Error::Config`] when this was called.
     ///
-    /// netring does **not** synchronize allocation between the primary
-    /// and secondary sockets. Each socket's allocator hands out frame
-    /// addresses independently — if both pick the same address, the
-    /// kernel will overwrite one with the other's data. You're
-    /// responsible for partitioning the UMEM range across sockets.
-    /// The simplest scheme is: primary uses the first half, secondary
-    /// uses the second half; configure each via `frame_count` and
-    /// arrange for them to land at disjoint frame indices.
+    /// A secondary socket has to bind without any other bind flag, must not
+    /// create its own FILL / COMPLETION rings when it shares the primary's
+    /// device and queue, and must read and write the *primary's* UMEM
+    /// (`xsk_bind()`, `net/xdp/xsk.c`). The implementation shipped up to
+    /// 0.31.1 did none of that: the bind failed with `EINVAL`, or — on another
+    /// queue — the secondary received into the primary's UMEM while reading
+    /// its own private, never-registered region, and handed the kernel FILL
+    /// addresses that index frames the primary owns.
     ///
-    /// # Expert-only — prefer per-socket UMEM for multi-queue capture
-    ///
-    /// Issue #6 F1: the high-level [`XdpCapture`] gives
-    /// each per-queue socket its **own** UMEM and is the blessed multi-queue
-    /// path. Shared UMEM is a *memory* optimization with two sharp edges, so it
-    /// stays low-level and opt-in:
-    /// 1. **Manual frame-space partitioning** (above) — netring won't do it for
-    ///    you, and a mistake silently corrupts frames.
-    /// 2. **A per-CPU FILL-queue race** — when sockets on different cores share
-    ///    one UMEM, the kernel's shared `xsk_buff_pool` FILL queue can race
-    ///    ([kernel AF_XDP docs] / LKML 2025). Only share a UMEM across sockets
-    ///    you drive from a **single thread**, or accept the partitioning + FILL
-    ///    discipline yourself.
-    ///
-    /// Reach for this only to cut UMEM memory on a single-threaded multi-queue
-    /// drain; otherwise use `XdpCapture` (own UMEM per queue).
-    ///
-    /// [kernel AF_XDP docs]: https://docs.kernel.org/networking/af_xdp.html
+    /// For multi-queue capture use [`XdpCapture`], which gives each per-queue
+    /// socket its own UMEM.
     pub fn shared_umem<F: AsFd>(mut self, primary: F) -> Self {
-        self.shared_umem_fd = primary.as_fd().as_raw_fd() as u32;
+        self.shared_umem_fd = Some(primary.as_fd().as_raw_fd());
         self
     }
 
@@ -502,6 +519,12 @@ impl XdpSocketBuilder {
         }
         if self.frame_count == 0 {
             return Err(Error::Config("frame_count must be > 0".into()));
+        }
+        if let Some(fd) = self.shared_umem_fd {
+            return Err(Error::Config(format!(
+                "shared UMEM (shared_umem, primary fd {fd}) is not supported; \
+                 give each socket its own UMEM"
+            )));
         }
         Ok(iface)
     }
@@ -554,11 +577,7 @@ impl XdpSocketBuilder {
         }
 
         // 3. Register UMEM with kernel.
-        //    Skipped when this socket is binding as a XDP_SHARED_UMEM secondary —
-        //    the kernel inherits the UMEM from the primary socket fd.
-        if self.shared_umem_fd == 0 {
-            socket::register_umem(fd.as_fd(), &umem.as_reg())?;
-        }
+        socket::register_umem(fd.as_fd(), &umem.as_reg())?;
 
         // 4. Configure ring sizes (each power of 2, independent)
         let ring_size = (self.frame_count as u32).next_power_of_two();
@@ -655,24 +674,7 @@ impl XdpSocketBuilder {
         }
 
         // 8. Bind to interface + queue
-        // flags=0: auto-negotiate (kernel tries zero-copy, falls back to copy)
-        // XDP_USE_NEED_WAKEUP enables wakeup optimization
-        // XDP_SHARED_UMEM tells the kernel to attach this socket to the
-        //   UMEM owned by `shared_umem_fd` instead of the one we registered.
-        let mut bind_flags: u16 = 0;
-        if self.need_wakeup {
-            bind_flags |= ffi::XDP_USE_NEED_WAKEUP;
-        }
-        if self.shared_umem_fd != 0 {
-            bind_flags |= ffi::XDP_SHARED_UMEM;
-        }
-        socket::bind_xdp(
-            fd.as_fd(),
-            ifindex,
-            self.queue_id,
-            bind_flags,
-            self.shared_umem_fd,
-        )?;
+        socket::bind_xdp(fd.as_fd(), ifindex, self.queue_id, self.bind_flags())?;
 
         // 0.25 W4 / issue #6 F2: read the bind mode. On a fast NIC the per-frame
         // copy of COPY mode dominates; the operator should know to switch to a
@@ -693,7 +695,7 @@ impl XdpSocketBuilder {
                 )
             };
             let zc = rc == 0 && opts & libc::XDP_OPTIONS_ZEROCOPY != 0;
-            if self.shared_umem_fd == 0 && !zc {
+            if !zc {
                 tracing::warn!(
                     "AF_XDP bound in COPY mode (not zero-copy); for line-rate use a \
                      native-XDP-capable driver with XdpFlags::DRV_MODE"
@@ -773,6 +775,48 @@ impl XdpSocketBuilder {
         }
 
         Ok(socket)
+    }
+
+    /// `sxdp_flags` for the bind: `0` auto-negotiates (the kernel tries
+    /// zero-copy and falls back to copy); `XDP_USE_NEED_WAKEUP` enables the
+    /// wakeup optimization; `XDP_COPY` forces copy mode (see
+    /// [`copy_bind`](Self::copy_bind)).
+    #[cfg(feature = "af-xdp")]
+    fn bind_flags(&self) -> u16 {
+        let mut flags: u16 = 0;
+        if self.need_wakeup {
+            flags |= ffi::XDP_USE_NEED_WAKEUP;
+        }
+        if self.copy_bind() {
+            flags |= ffi::XDP_COPY;
+        }
+        flags
+    }
+
+    /// Whether to bind with `XDP_COPY`: the socket is fed by a program
+    /// netring attaches in generic (SKB) mode — here through
+    /// `with_default_program` / `with_program`, or by `XdpCapture`
+    /// ([`copy_mode`](Self::copy_mode)).
+    ///
+    /// Generic XDP hands the socket copies anyway. Left to negotiate, the
+    /// bind goes zero-copy on any driver advertising XSK support —
+    /// `xp_assign_dev()` checks the driver's feature bits, not that native
+    /// XDP is running — and such a driver then fails every wakeup:
+    /// `i40e_xsk_wakeup()` returns `EINVAL` while its VSI has no native XDP
+    /// program, so TX never starts and `flush()` errors (xdpsock's `-S` sets
+    /// `XDP_COPY` for the same reason).
+    #[cfg(feature = "af-xdp")]
+    fn copy_bind(&self) -> bool {
+        #[cfg(feature = "xdp-loader")]
+        {
+            self.copy_mode
+                || ((self.attach_default || self.program.is_some())
+                    && self.attach_flags.is_generic())
+        }
+        #[cfg(not(feature = "xdp-loader"))]
+        {
+            false
+        }
     }
 
     /// Build the XDP socket (stub without `af-xdp` feature).
@@ -889,9 +933,13 @@ impl XdpSocket {
     #[cfg(feature = "af-xdp")]
     pub fn next_batch(&mut self) -> Option<XdpBatch<'_>> {
         self.recycle_completed();
-        self.rx
-            .consumer_peek(64)
-            .map(|tok| XdpBatch::new(self, tok))
+        match self.rx.consumer_peek(64) {
+            Some(tok) => Some(XdpBatch::new(self, tok)),
+            None => {
+                self.wake_rx_if_needed();
+                None
+            }
+        }
     }
 
     /// Block until a batch is available, or `timeout` elapses.
@@ -982,9 +1030,15 @@ impl XdpSocket {
     /// producer index and so can't be used to *decide* whether to peek), this
     /// re-loads the kernel producer index, so `XdpCapture` can pick which
     /// socket to drain without consuming from the others.
+    /// Like [`next_batch`](Self::next_batch), an empty ring wakes the
+    /// driver if it asked for it.
     #[cfg(all(feature = "af-xdp", feature = "xdp-loader"))]
     pub(crate) fn rx_poll_ready(&mut self) -> bool {
-        self.rx.refresh_count() > 0
+        let ready = self.rx.refresh_count() > 0;
+        if !ready {
+            self.wake_rx_if_needed();
+        }
+        ready
     }
 
     /// Receive packets (non-blocking) as owned copies.
@@ -1002,7 +1056,10 @@ impl XdpSocket {
         // 2. Peek RX ring
         let tok = match self.rx.consumer_peek(64) {
             Some(t) => t,
-            None => return Ok(Vec::new()),
+            None => {
+                self.wake_rx_if_needed();
+                return Ok(Vec::new());
+            }
         };
 
         let mut packets = Vec::with_capacity(tok.n as usize);
@@ -1029,8 +1086,7 @@ impl XdpSocket {
                     source_ll_addr_len: 0,
                 }),
                 None => {
-                    // Defense in depth: a kernel that's misbehaving (or a
-                    // shared-UMEM peer that wrote a corrupt desc) shouldn't
+                    // Defense in depth: a misbehaving kernel shouldn't
                     // panic the consumer.
                     tracing::warn!(
                         addr = desc.addr,
@@ -1039,8 +1095,8 @@ impl XdpSocket {
                     );
                 }
             }
-            // Return frame to free list (will be refilled below) regardless.
-            self.umem.free_frame(desc.addr);
+            // Return the frame to the RX pool (refilled below) regardless.
+            self.umem.recycle_rx_frame(desc.addr);
         }
 
         // 3. Release consumed RX descriptors
@@ -1058,8 +1114,18 @@ impl XdpSocket {
     /// Returns `Ok(true)` on success, `Ok(false)` if the TX ring or UMEM is full.
     ///
     /// Call [`flush`](Self::flush) after one or more `send` calls to kick the kernel.
+    ///
+    /// # Errors
+    ///
+    /// [`Error::Config`] if `data` is empty or longer than the UMEM frame
+    /// size. The kernel discards a zero-length TX descriptor without ever
+    /// completing it (`xp_aligned_validate_desc()`), which would lose the
+    /// frame it carried for good.
     #[cfg(feature = "af-xdp")]
     pub fn send(&mut self, data: &[u8]) -> Result<bool, Error> {
+        if data.is_empty() {
+            return Err(Error::Config("cannot send an empty packet".into()));
+        }
         if data.len() > self.umem.frame_size() {
             return Err(Error::Config(format!(
                 "packet {} bytes exceeds frame size {}",
@@ -1116,13 +1182,30 @@ impl XdpSocket {
     /// Uses `sendto(fd, NULL, 0, MSG_DONTWAIT, NULL, 0)`.
     /// `MSG_DONTWAIT` is **mandatory** — kernel returns `EOPNOTSUPP` without it.
     /// EINTR is retried; transient `EAGAIN`/`ENOBUFS` are reported as success.
+    ///
+    /// In copy mode one kick transmits at most one kernel batch (32
+    /// descriptors) and answers `EAGAIN` while more are queued, so `flush`
+    /// kicks again until the kernel stops asking — at most once per batch the
+    /// TX ring can hold, so a driver that keeps answering `EAGAIN` (busy) can't
+    /// spin it; whatever is left goes out on the next `flush`.
     #[cfg(feature = "af-xdp")]
     pub fn flush(&self) -> Result<(), Error> {
         if self.need_wakeup_enabled && !self.tx.needs_wakeup() {
             return Ok(());
         }
-        crate::syscall::sendto_kick_eintr_safe(self.fd.as_raw_fd(), libc::MSG_DONTWAIT)
-            .map_err(Error::Io)
+        // __xsk_generic_xmit() (net/xdp/xsk.c) sends up to TX_BATCH_SIZE (32)
+        // descriptors per call — newer kernels: `max_tx_budget`, never below
+        // that — then returns -EAGAIN with the rest still in the TX ring.
+        const KERNEL_TX_BATCH: u32 = 32;
+        let max_kicks = self.tx.size() / KERNEL_TX_BATCH + 1;
+        for _ in 0..max_kicks {
+            let again = crate::syscall::sendto_kick_status(self.fd.as_raw_fd(), libc::MSG_DONTWAIT)
+                .map_err(Error::Io)?;
+            if !again {
+                break;
+            }
+        }
+        Ok(())
     }
 
     /// Poll for readability (incoming packets) with a timeout.
@@ -1147,6 +1230,24 @@ impl XdpSocket {
         socket::get_statistics(self.fd.as_fd()).map(XdpStats::from)
     }
 
+    /// Unified [`CaptureStats`](crate::CaptureStats) for this socket, with
+    /// the same meaning as on AF_PACKET: `packets` = packets received
+    /// (placed in the RX ring, counted in userspace since `XDP_STATISTICS`
+    /// has none) **plus** the dropped ones, `drops` = `rx_dropped +
+    /// rx_ring_full`. Monotonic; each field saturates at `u32::MAX`. For
+    /// the per-cause counters use [`statistics`](Self::statistics).
+    #[cfg(feature = "af-xdp")]
+    pub fn capture_stats(&self) -> Result<crate::CaptureStats, Error> {
+        Ok(self.statistics()?.to_capture_stats(self.rx_received()))
+    }
+
+    /// Packets the kernel has placed in this socket's RX ring so far
+    /// (consumed or still pending).
+    #[cfg(feature = "af-xdp")]
+    pub(crate) fn rx_received(&self) -> u64 {
+        self.rx.received_total()
+    }
+
     // ── Internal helpers ─────────────────────────────────────────────────
 
     /// Recycle frames from the completion ring back to the UMEM free list.
@@ -1164,26 +1265,52 @@ impl XdpSocket {
         self.comp.consumer_release(tok);
     }
 
-    /// Refill the fill ring with available UMEM frames.
+    /// Whether the driver has stopped RX until it is woken up: zero-copy
+    /// drivers set `XDP_RING_NEED_WAKEUP` on the FILL ring when they ran out
+    /// of buffers (e.g. `i40e_clean_rx_irq_zc()`; copy mode never sets it),
+    /// and only when the socket was bound with `XDP_USE_NEED_WAKEUP`.
+    #[cfg(feature = "af-xdp")]
+    fn fill_needs_wakeup(&self) -> bool {
+        self.need_wakeup_enabled && self.fill.needs_wakeup()
+    }
+
+    /// Wake the driver's RX if it asked for it — "If the flag is set on the
+    /// FILL ring, the application needs to call poll() to be able to
+    /// continue to receive packets" (Documentation/networking/af_xdp.rst).
+    /// `recvfrom(MSG_DONTWAIT)` reaches `ndo_xsk_wakeup` like `poll()`, as in
+    /// libxdp; nothing else does — an epoll-driven (tokio) socket never
+    /// re-polls it while no packet arrives.
+    #[cfg(feature = "af-xdp")]
+    fn wake_rx_if_needed(&self) {
+        if self.fill_needs_wakeup() {
+            crate::syscall::recvfrom_kick(self.fd.as_raw_fd());
+        }
+    }
+
+    /// Refill the fill ring with frames the RX path has released, then wake
+    /// the driver if it stopped for lack of them. Only the RX pool feeds the
+    /// fill ring, so the TX share of the UMEM (per [`XdpMode`]) stays
+    /// available to `send()`.
     #[cfg(feature = "af-xdp")]
     fn refill(&mut self) {
-        let want = self.umem.available().min(64) as u32;
+        let want = self.umem.rx_available().min(64) as u32;
         if want == 0 {
             return;
         }
         if let Some(tok) = self.fill.producer_reserve(want) {
             let mut filled = 0u32;
             for i in 0..tok.n {
-                if let Some(addr) = self.umem.alloc_frame() {
+                if let Some(addr) = self.umem.take_rx_frame() {
                     self.fill.write_at(tok, i, addr);
                     filled += 1;
                 }
             }
-            // `want` was bounded by umem.available() so all reservations get
+            // `want` was bounded by umem.rx_available() so all reservations get
             // filled; the assertion documents the invariant.
             debug_assert_eq!(filled, tok.n);
             if filled > 0 {
                 self.fill.producer_submit(tok);
+                self.wake_rx_if_needed();
             }
         }
     }
@@ -1318,6 +1445,26 @@ mod tests {
         assert!(!b.promiscuous);
     }
 
+    /// Shared UMEM is refused up front (`Error::Config`, before any syscall)
+    /// — including for a primary on fd 0, which used to mean "not shared".
+    #[test]
+    fn builder_refuses_shared_umem() {
+        let primary = std::net::UdpSocket::bind("127.0.0.1:0").unwrap();
+        for b in [
+            XdpSocketBuilder::default()
+                .interface("lo")
+                .shared_umem(&primary),
+            // fd 0
+            XdpSocketBuilder::default()
+                .interface("lo")
+                .shared_umem(std::io::stdin()),
+        ] {
+            assert!(matches!(b.validate(), Err(Error::Config(_))));
+            let err = b.build().unwrap_err();
+            assert!(matches!(err, Error::Config(_)), "{err:?}");
+        }
+    }
+
     #[cfg(feature = "xdp-loader")]
     #[test]
     fn check_program_conflict_helper() {
@@ -1332,6 +1479,43 @@ mod tests {
         assert!(format!("{err}").contains("conflicts"));
     }
 
+    /// A program netring attaches in generic (SKB) mode only redirects
+    /// copies, so the socket must bind with `XDP_COPY`: left to negotiate,
+    /// the kernel binds zero-copy on a ZC-capable driver whose native XDP is
+    /// off, and every wakeup then fails (`i40e_xsk_wakeup`: `EINVAL`).
+    #[cfg(feature = "xdp-loader")]
+    #[test]
+    fn bind_flags_force_copy_for_generic_attach() {
+        let copy = |b: XdpSocketBuilder| b.bind_flags() & ffi::XDP_COPY != 0;
+        let base = || XdpSocketBuilder::default().interface("eth0");
+
+        // Self-attached in SKB mode (the default) → copy.
+        assert!(copy(base().with_default_program()));
+        assert!(copy(
+            base()
+                .with_default_program()
+                .xdp_attach_flags(loader::XdpFlags::SKB_MODE)
+        ));
+        // Native / offload / kernel-chosen attach → negotiate.
+        for flags in [
+            loader::XdpFlags::DRV_MODE,
+            loader::XdpFlags::HW_MODE,
+            loader::XdpFlags::empty(),
+        ] {
+            assert!(!copy(base().with_default_program().xdp_attach_flags(flags)));
+        }
+        // No program attached by netring → negotiate.
+        assert!(!copy(base()));
+        // need_wakeup is independent.
+        let f = base()
+            .with_default_program()
+            .need_wakeup(false)
+            .bind_flags();
+        assert_eq!(f, ffi::XDP_COPY);
+        let f = base().with_default_program().bind_flags();
+        assert_eq!(f, ffi::XDP_COPY | ffi::XDP_USE_NEED_WAKEUP);
+    }
+
     #[cfg(feature = "xdp-loader")]
     #[test]
     fn builder_with_default_program_chains() {
@@ -1340,6 +1524,159 @@ mod tests {
             .with_default_program();
         assert!(b.attach_default);
         assert!(b.program.is_none());
+    }
+
+    /// An `XdpSocket` over heap rings and a real UMEM, without an AF_XDP
+    /// socket. Its fd is one end of a datagram socketpair: an RX kick
+    /// (`recvfrom(fd, NULL, 0, MSG_DONTWAIT)`) consumes a datagram queued
+    /// from `peer`, which is how the tests see whether a kick happened.
+    #[cfg(feature = "af-xdp")]
+    struct MockSocket {
+        sock: XdpSocket,
+        peer: std::os::unix::net::UnixDatagram,
+        // Dropped after `sock`, whose rings live in it.
+        _mem: Vec<ring::mock::RingMem>,
+    }
+
+    #[cfg(feature = "af-xdp")]
+    impl MockSocket {
+        const FRAME: usize = 2048;
+
+        fn new(frames: usize, need_wakeup: bool) -> Self {
+            let (ours, peer) = std::os::unix::net::UnixDatagram::pair().unwrap();
+            let size = (frames as u32).next_power_of_two();
+            let (fill, m1) = ring::mock::ring(size);
+            let (rx, m2) = ring::mock::ring(size);
+            let (tx, m3) = ring::mock::ring(size);
+            let (comp, m4) = ring::mock::ring(size);
+            let sock = XdpSocket {
+                fd: OwnedFd::from(ours),
+                umem: Umem::new(Self::FRAME, frames).unwrap(),
+                fill,
+                rx,
+                tx,
+                comp,
+                need_wakeup_enabled: need_wakeup,
+                zerocopy: true,
+                rx_metadata: false,
+                _promisc_guard: None,
+                #[cfg(feature = "xdp-loader")]
+                _xdp_attachment: None,
+            };
+            Self {
+                sock,
+                peer,
+                _mem: vec![m1, m2, m3, m4],
+            }
+        }
+
+        /// Kernel side: place `n` received packets in the RX ring, in TX-pool
+        /// frames (the test doesn't care where they came from).
+        fn deliver_rx(&mut self, n: u32) {
+            let prod = self.sock.rx.mock_producer();
+            for i in 0..n {
+                let chunk = self.sock.umem.alloc_frame().unwrap();
+                let desc = libc::xdp_desc {
+                    addr: chunk + 256, // XDP_PACKET_HEADROOM
+                    len: 60,
+                    options: 0,
+                };
+                self.sock.rx.mock_write(prod + i, desc);
+            }
+            self.sock.rx.mock_set_producer(prod + n);
+        }
+
+        /// The driver asks (or stops asking) for an RX wakeup.
+        fn set_fill_need_wakeup(&self, on: bool) {
+            let flags = if on { ffi::XDP_RING_NEED_WAKEUP } else { 0 };
+            self.sock.fill.mock_set_flags(flags);
+        }
+
+        /// Queue the datagram an RX kick would consume.
+        fn arm(&self) {
+            self.peer.send(b"k").unwrap();
+        }
+
+        /// Whether the datagram queued by `arm` was consumed by a kick.
+        fn kicked(&self) -> bool {
+            let mut b = [0u8; 1];
+            // SAFETY: peeks at most 1 byte into `b`.
+            let n = unsafe {
+                libc::recv(
+                    self.sock.as_raw_fd(),
+                    b.as_mut_ptr().cast(),
+                    1,
+                    libc::MSG_DONTWAIT | libc::MSG_PEEK,
+                )
+            };
+            n < 0
+        }
+    }
+
+    /// Zero-copy drivers stop RX when the FILL ring runs dry and set
+    /// `XDP_RING_NEED_WAKEUP` on it; after refilling, the socket must kick
+    /// them, or RX stalls for good.
+    #[cfg(feature = "af-xdp")]
+    #[test]
+    fn rx_refill_wakes_driver_when_fill_ring_needs_it() {
+        let mut m = MockSocket::new(8, true);
+        m.set_fill_need_wakeup(true);
+
+        // recv(): consume, refill, kick.
+        m.deliver_rx(2);
+        m.arm();
+        assert_eq!(m.sock.recv().unwrap().len(), 2);
+        assert_eq!(m.sock.fill.mock_producer(), 2, "frames back to FILL");
+        assert!(m.kicked(), "recv() refilled without waking the driver");
+
+        // next_batch(): dropping the batch refills and kicks.
+        m.deliver_rx(2);
+        m.arm();
+        assert_eq!(m.sock.next_batch().map(|b| b.len()), Some(2));
+        assert_eq!(m.sock.fill.mock_producer(), 4, "frames back to FILL");
+        assert!(
+            m.kicked(),
+            "a dropped batch refilled without waking the driver"
+        );
+    }
+
+    /// Finding the RX ring empty while the driver waits for a wakeup must
+    /// kick it too (it may have stopped after our last refill).
+    #[cfg(feature = "af-xdp")]
+    #[test]
+    fn rx_empty_wakes_driver_when_fill_ring_needs_it() {
+        let mut m = MockSocket::new(8, true);
+        m.set_fill_need_wakeup(true);
+
+        m.arm();
+        assert!(m.sock.next_batch().is_none());
+        assert!(m.kicked(), "next_batch()");
+
+        m.arm();
+        assert!(m.sock.recv().unwrap().is_empty());
+        assert!(m.kicked(), "recv()");
+
+        #[cfg(feature = "xdp-loader")]
+        {
+            m.arm();
+            assert!(!m.sock.rx_poll_ready());
+            assert!(m.kicked(), "rx_poll_ready()");
+        }
+    }
+
+    /// No wakeup asked for (or none negotiated): no syscall.
+    #[cfg(feature = "af-xdp")]
+    #[test]
+    fn rx_does_not_kick_unless_the_driver_asks() {
+        for (need_wakeup, flag) in [(true, false), (false, true)] {
+            let mut m = MockSocket::new(8, need_wakeup);
+            m.set_fill_need_wakeup(flag);
+            m.deliver_rx(2);
+            m.arm();
+            assert_eq!(m.sock.recv().unwrap().len(), 2);
+            assert!(m.sock.next_batch().is_none());
+            assert!(!m.kicked(), "need_wakeup={need_wakeup} flag={flag}");
+        }
     }
 
     /// Compute the prefill count the same way `build()` does, in isolation,

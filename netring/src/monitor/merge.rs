@@ -54,6 +54,11 @@ pub(crate) struct MergeSpec {
 
 impl MergeSpec {
     /// `merge_state` / `state_auto_merge` build this. `merge(&mut primary, shard_value)`.
+    /// The interval between probes.
+    pub(crate) fn period(&self) -> Duration {
+        self.period
+    }
+
     pub(crate) fn new<T, F>(period: Duration, mut merge: F) -> Self
     where
         T: Default + Send + 'static,
@@ -100,7 +105,10 @@ pub(crate) fn merge_worker(
         return;
     }
     let reply_timeout = Duration::from_millis(500);
-    let mut next_fire: Vec<Instant> = specs.iter().map(|s| Instant::now() + s.period).collect();
+    let mut next_fire: Vec<Instant> = specs
+        .iter()
+        .map(|s| crate::monitor::shard::deadline_after(s.period))
+        .collect();
 
     while !stop.load(Ordering::Relaxed) {
         // Park until the soonest fire, in ≤50ms slices so `stop` stays
@@ -124,7 +132,7 @@ pub(crate) fn merge_worker(
         let now = Instant::now();
         for (i, spec) in specs.iter_mut().enumerate() {
             if now >= next_fire[i] {
-                next_fire[i] = now + spec.period;
+                next_fire[i] = crate::monitor::shard::deadline_after(spec.period);
                 probe_and_fold(spec, &txs, reply_timeout);
             }
         }

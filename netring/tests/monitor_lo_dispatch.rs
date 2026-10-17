@@ -131,9 +131,11 @@ async fn monitor_lo_run_until_signal_can_be_aborted() {
 #[tokio::test(flavor = "current_thread")]
 async fn monitor_lo_tick_handler_fires_at_period() {
     // Phase F.2: tick handler firing. Registers a 50ms tick
-    // handler, runs the monitor for 300ms, asserts the handler
+    // handler, runs the monitor for 600ms, asserts the handler
     // fired at least twice. Doesn't need traffic — the tick
-    // pump is independent of the packet stream.
+    // pump is independent of the packet stream. (The window is
+    // generous: `run_for`'s deadline includes opening the capture,
+    // and on a busy host `lo` the drain competes with the ticks.)
     let tick_count = Arc::new(AtomicU32::new(0));
     let c = Arc::clone(&tick_count);
     let monitor_result = Monitor::builder()
@@ -152,20 +154,20 @@ async fn monitor_lo_tick_handler_fires_at_period() {
     };
     let res = tokio::time::timeout(
         Duration::from_secs(2),
-        monitor.run_for(Duration::from_millis(300)),
+        monitor.run_for(Duration::from_millis(600)),
     )
     .await;
     match res {
         Ok(Ok(())) => {
             let fired = tick_count.load(Ordering::Relaxed);
-            eprintln!("tick handler fired {fired} times in 300ms (period 50ms)");
+            eprintln!("tick handler fired {fired} times in 600ms (period 50ms)");
             assert!(
                 fired >= 2,
-                "expected tick handler to fire ≥ 2 times across 300ms / 50ms period; got {fired}"
+                "expected tick handler to fire ≥ 2 times across 600ms / 50ms period; got {fired}"
             );
         }
         Ok(Err(e)) => eprintln!("run_for failed (likely no CAP_NET_RAW): {e}"),
-        Err(_) => panic!("run_for didn't honour its 300ms deadline within 2s"),
+        Err(_) => panic!("run_for didn't honour its 600ms deadline within 2s"),
     }
 }
 

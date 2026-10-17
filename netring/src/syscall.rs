@@ -7,7 +7,7 @@
 //! can pretend signals don't exist.
 
 use std::os::fd::RawFd;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use nix::errno::Errno;
 use nix::poll::{PollFd, PollTimeout, poll};
@@ -15,19 +15,33 @@ use nix::poll::{PollFd, PollTimeout, poll};
 /// Run [`nix::poll::poll`], retrying on `EINTR`.
 ///
 /// Returns `Ok(0)` on timeout, `Ok(n)` for the number of fds with revents set,
-/// or any non-EINTR error from the underlying syscall.
+/// or any non-EINTR error from the underlying syscall. A retry polls for what
+/// is left of `timeout`, so periodic signals cannot keep it from expiring.
 pub(crate) fn poll_eintr_safe(
     pfds: &mut [PollFd<'_>],
     timeout: Duration,
 ) -> Result<i32, std::io::Error> {
-    let pt = PollTimeout::try_from(timeout).unwrap_or(PollTimeout::MAX);
+    // `None` (a timeout past `Instant`'s range) waits like `PollTimeout::MAX`.
+    let deadline = Instant::now().checked_add(timeout);
+    let mut remaining = timeout;
     loop {
-        match poll(pfds, pt) {
+        match poll(pfds, poll_timeout(remaining)) {
             Ok(n) => return Ok(n),
-            Err(Errno::EINTR) => continue,
+            Err(Errno::EINTR) => {
+                if let Some(deadline) = deadline {
+                    remaining = deadline.saturating_duration_since(Instant::now());
+                }
+            }
             Err(e) => return Err(e.into()),
         }
     }
+}
+
+/// `timeout` in whole milliseconds, rounded **up**: a sub-millisecond
+/// remainder would otherwise become `poll(0)`, which returns at once and
+/// turns a caller's wait-until-deadline loop into a spin.
+fn poll_timeout(timeout: Duration) -> PollTimeout {
+    PollTimeout::try_from(timeout.as_nanos().div_ceil(1_000_000)).unwrap_or(PollTimeout::MAX)
 }
 
 /// Run `libc::sendto(fd, NULL, 0, flags, NULL, 0)` — the standard TPACKET
@@ -39,19 +53,51 @@ pub(crate) fn poll_eintr_safe(
 ///
 /// `flags`: `0` for AF_PACKET, `MSG_DONTWAIT` for AF_XDP.
 pub(crate) fn sendto_kick_eintr_safe(fd: RawFd, flags: i32) -> Result<(), std::io::Error> {
+    sendto_kick_status(fd, flags).map(|_| ())
+}
+
+/// [`sendto_kick_eintr_safe`], telling `EAGAIN` apart: `Ok(true)` when the
+/// kernel answered `EAGAIN` (it stopped with work left — an AF_XDP copy-mode
+/// kick transmits at most one batch), `Ok(false)` on success or `ENOBUFS`.
+pub(crate) fn sendto_kick_status(fd: RawFd, flags: i32) -> Result<bool, std::io::Error> {
     loop {
         // SAFETY: standard sendto() syscall with NULL buffer and NULL addr —
         // the conventional TPACKET TX kick. `fd` validity is the caller's
         // contract.
         let ret = unsafe { libc::sendto(fd, std::ptr::null(), 0, flags, std::ptr::null(), 0) };
         if ret >= 0 {
-            return Ok(());
+            return Ok(false);
         }
         let err = std::io::Error::last_os_error();
         match err.raw_os_error() {
             Some(libc::EINTR) => continue,
-            Some(libc::EAGAIN) | Some(libc::ENOBUFS) => return Ok(()),
+            Some(libc::EAGAIN) => return Ok(true),
+            Some(libc::ENOBUFS) => return Ok(false),
             _ => return Err(err),
+        }
+    }
+}
+
+/// `recvfrom(fd, NULL, 0, MSG_DONTWAIT, NULL, NULL)` — the AF_XDP RX wakeup
+/// (it runs the driver's NAPI when the FILL ring asked for a wakeup).
+/// Best-effort: `EINTR` is retried, any other result ignored, as in libxdp.
+#[cfg(feature = "af-xdp")]
+pub(crate) fn recvfrom_kick(fd: RawFd) {
+    loop {
+        // SAFETY: zero-length recvfrom() with NULL buffer and address — the
+        // kernel writes nothing. `fd` validity is the caller's contract.
+        let ret = unsafe {
+            libc::recvfrom(
+                fd,
+                std::ptr::null_mut(),
+                0,
+                libc::MSG_DONTWAIT,
+                std::ptr::null_mut(),
+                std::ptr::null_mut(),
+            )
+        };
+        if ret >= 0 || std::io::Error::last_os_error().raw_os_error() != Some(libc::EINTR) {
+            return;
         }
     }
 }
@@ -76,5 +122,79 @@ mod tests {
         // n could be 0 (timeout) or 1 (stdin readable, e.g., closed pipe in CI).
         // Either is fine — the assertion is "no error".
         assert!(n >= 0);
+    }
+
+    extern "C" fn ignore_signal(_: libc::c_int) {}
+
+    /// A signal every 20 ms interrupts poll() over and over; the timeout
+    /// still expires on time instead of restarting in full each time.
+    #[test]
+    fn poll_eintr_safe_timeout_survives_periodic_signals() {
+        use std::os::fd::{FromRawFd, OwnedFd};
+        use std::sync::Arc;
+        use std::sync::atomic::{AtomicBool, Ordering};
+
+        // SAFETY: a no-op handler without SA_RESTART, so poll() fails with
+        // EINTR. Process-wide, but nothing else in the crate uses SIGUSR1.
+        unsafe {
+            let mut sa: libc::sigaction = std::mem::zeroed();
+            sa.sa_sigaction = ignore_signal as *const () as usize;
+            libc::sigemptyset(&mut sa.sa_mask);
+            assert_eq!(libc::sigaction(libc::SIGUSR1, &sa, std::ptr::null_mut()), 0);
+        }
+        let mut fds = [0; 2];
+        // SAFETY: pipe2 writes two fds into `fds`.
+        assert_eq!(unsafe { libc::pipe2(fds.as_mut_ptr(), libc::O_CLOEXEC) }, 0);
+        // SAFETY: both fds were just returned by pipe2 and are owned here.
+        let (read, _write) =
+            unsafe { (OwnedFd::from_raw_fd(fds[0]), OwnedFd::from_raw_fd(fds[1])) };
+
+        let me = unsafe { libc::pthread_self() };
+        let stop = Arc::new(AtomicBool::new(false));
+        let signaler = std::thread::spawn({
+            let stop = Arc::clone(&stop);
+            move || {
+                // Bounded, so the old behaviour fails instead of hanging.
+                let give_up = Instant::now() + Duration::from_secs(3);
+                while !stop.load(Ordering::Relaxed) && Instant::now() < give_up {
+                    // SAFETY: `me` stays alive until `stop` is set.
+                    unsafe { libc::pthread_kill(me, libc::SIGUSR1) };
+                    std::thread::sleep(Duration::from_millis(20));
+                }
+            }
+        });
+
+        let start = Instant::now();
+        let mut pfds = [PollFd::new(read.as_fd(), nix::poll::PollFlags::POLLIN)];
+        let n = poll_eintr_safe(&mut pfds, Duration::from_millis(200)).unwrap();
+        let elapsed = start.elapsed();
+        stop.store(true, Ordering::Relaxed);
+        signaler.join().unwrap();
+
+        assert_eq!(n, 0, "timed out, nothing to read");
+        assert!(
+            elapsed < Duration::from_millis(400),
+            "a 200 ms poll took {elapsed:?} under periodic signals"
+        );
+    }
+
+    /// A sub-millisecond timeout waits about a millisecond rather than
+    /// becoming poll(0), which callers looping until a deadline spin on.
+    #[test]
+    fn poll_timeout_rounds_sub_millisecond_up() {
+        assert_eq!(poll_timeout(Duration::ZERO), PollTimeout::ZERO);
+        assert_eq!(
+            poll_timeout(Duration::from_micros(1)),
+            PollTimeout::from(1u8)
+        );
+        assert_eq!(
+            poll_timeout(Duration::from_micros(999)),
+            PollTimeout::from(1u8)
+        );
+        assert_eq!(
+            poll_timeout(Duration::from_micros(1001)),
+            PollTimeout::from(2u8)
+        );
+        assert_eq!(poll_timeout(Duration::MAX), PollTimeout::MAX);
     }
 }

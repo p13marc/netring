@@ -91,6 +91,9 @@ jobs:
       # is correct on an unprivileged runner, in a rootless container, and as
       # real root alike.
       - run: cargo test --workspace --features tokio,channel
+      # The AF_XDP unit tests (ring / UMEM / socket logic over mock rings)
+      # need no privileges but compile only under `af-xdp`.
+      - run: cargo test -p netring --features af-xdp,xdp-loader,tokio,flow --lib
       - name: sccache stats
         run: /srv/cache/bin/sccache --show-stats
 

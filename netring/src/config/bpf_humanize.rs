@@ -7,12 +7,17 @@ use std::fmt;
 use super::bpf_builder::{BpfFilterBuilder, MatchFrag};
 
 /// Entry point — render `builder` into the provided formatter.
+///
+/// The compiled program is `[not] (chain₀ or chain₁ or …)`: the main
+/// AND chain and each `or()` branch are alternatives, and `negate()`
+/// applies to the whole disjunction. (A branch can't carry its own
+/// `or()` / `negate()` — the compiler rejects that — so only the
+/// branches' fragments matter here.)
 pub(crate) fn render(builder: &BpfFilterBuilder, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-    let body = render_to_string(builder);
+    let body = render_body(builder);
 
     if builder.negated {
-        let body_is_composite = builder.fragments.len() + builder.or_branches.len() > 1
-            || !builder.or_branches.is_empty();
+        let body_is_composite = !builder.or_branches.is_empty() || builder.fragments.len() > 1;
         if body.is_empty() {
             // `not <empty>` is the always-drop filter; pcap-filter
             // doesn't have a canonical spelling for it. Emit an
@@ -29,35 +34,35 @@ pub(crate) fn render(builder: &BpfFilterBuilder, f: &mut fmt::Formatter<'_>) -> 
     }
 }
 
-/// Render body parts (fragments + OR branches) into a single
-/// String. The top-level AND chain is joined with " and ", each OR
-/// branch is parenthesised. Returns the empty string for an empty
-/// builder.
-fn render_to_string(builder: &BpfFilterBuilder) -> String {
-    let mut parts: Vec<String> = builder.fragments.iter().map(frag_to_string).collect();
-    for branch in &builder.or_branches {
-        parts.push(format!("({})", render_branch(branch)));
+/// Render the disjunction of the main chain and the OR branches:
+/// `chain` alone, or `(a and b) or c or …` — a multi-fragment chain
+/// is parenthesised. Returns the empty string for a filter that
+/// matches everything (an empty chain, alone or as one alternative).
+fn render_body(builder: &BpfFilterBuilder) -> String {
+    let chains: Vec<&[MatchFrag]> = std::iter::once(builder.fragments.as_slice())
+        .chain(builder.or_branches.iter().map(|b| b.fragments.as_slice()))
+        .collect();
+    if chains.len() == 1 {
+        return render_chain(chains[0]);
     }
-    parts.join(" and ")
+    if chains.iter().any(|c| c.is_empty()) {
+        // An empty AND chain is always true, and so is any OR with it.
+        return String::new();
+    }
+    let alts: Vec<String> = chains
+        .iter()
+        .map(|c| {
+            let s = render_chain(c);
+            if c.len() > 1 { format!("({s})") } else { s }
+        })
+        .collect();
+    alts.join(" or ")
 }
 
-/// Render an inner OR branch — same as the top-level body but
-/// without the trailing parens (the caller wraps).
-fn render_branch(branch: &BpfFilterBuilder) -> String {
-    let body = render_to_string(branch);
-    if branch.negated {
-        let composite =
-            branch.fragments.len() + branch.or_branches.len() > 1 || !branch.or_branches.is_empty();
-        if body.is_empty() {
-            "not ()".to_string()
-        } else if composite {
-            format!("not ({body})")
-        } else {
-            format!("not {body}")
-        }
-    } else {
-        body
-    }
+/// One AND chain: its fragments joined with " and ".
+fn render_chain(fragments: &[MatchFrag]) -> String {
+    let parts: Vec<String> = fragments.iter().map(frag_to_string).collect();
+    parts.join(" and ")
 }
 
 fn frag_to_string(frag: &MatchFrag) -> String {
@@ -82,5 +87,9 @@ fn frag_to_string(frag: &MatchFrag) -> String {
         MatchFrag::SrcPort(p) => format!("src port {p}"),
         MatchFrag::DstPort(p) => format!("dst port {p}"),
         MatchFrag::AnyPort(p) => format!("port {p}"),
+        MatchFrag::AnyOf(alts) => {
+            let alts: Vec<String> = alts.iter().map(frag_to_string).collect();
+            format!("({})", alts.join(" or "))
+        }
     }
 }

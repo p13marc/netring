@@ -1,14 +1,31 @@
-//! AF_PACKET TX path (V1 frame-based semantics).
+//! AF_PACKET TX path (`TPACKET_V2` frame ring).
 //!
-//! TPACKET_V3 TX falls back to V1 frame-based operation. Each frame has a
-//! `tpacket_hdr` at its start and is walked by index with `frame_size` stride.
+//! The TX ring is frame-based on every TPACKET version (V3's block layout is
+//! RX-only), so the TX socket is set to `TPACKET_V2`: each frame starts with a
+//! `tpacket2_hdr` (`u32 tp_status` at offset 0) and is walked by index with
+//! `frame_size` stride. The kernel reads the packet from the fixed offset
+//! `TPACKET2_HDRLEN - sizeof(sockaddr_ll)` = `TPACKET_ALIGN(sizeof(tpacket2_hdr))`
+//! (`tpacket_parse_header()` in `net/packet/af_packet.c`).
+//!
+//! The socket's `PACKET_VERSION` and the header type written here must agree:
+//! the kernel locates `tp_status` / `tp_len` by version, so a mismatch leaves
+//! every frame looking `TP_STATUS_AVAILABLE` and nothing is sent (#187).
 
 use std::os::fd::{AsFd, AsRawFd, BorrowedFd, OwnedFd};
 use std::ptr::NonNull;
 use std::sync::atomic::{AtomicU32, Ordering};
 
-use crate::afpacket::{ffi, ring::MmapRing, socket};
+use crate::afpacket::ring::{MmapRing, RingGeometry};
+use crate::afpacket::{ffi, socket};
 use crate::error::Error;
+
+/// The TX frame header: the socket is set to `TPACKET_V2`.
+type TxFrameHdr = libc::tpacket2_hdr;
+
+/// Offset of the packet data inside a TX frame. Without
+/// `PACKET_TX_HAS_OFF` the kernel reads the packet from
+/// `TPACKET2_HDRLEN - sizeof(sockaddr_ll)`, i.e. the aligned header size.
+const TX_DATA_OFFSET: usize = ffi::tpacket_align(std::mem::size_of::<TxFrameHdr>());
 
 // ── TxSlot ─────────────────────────────────────────────────────────────────
 
@@ -63,9 +80,9 @@ impl<'a> TxSlot<'a> {
     /// [`flush()`](Injector::flush) to trigger
     /// kernel transmission of all queued frames.
     pub fn send(mut self) {
-        // Write tp_len, tp_snaplen, tp_mac into the tpacket_hdr at frame start
-        let hdr = self.frame_ptr.as_ptr().cast::<libc::tpacket_hdr>();
-        // SAFETY: frame_ptr points to valid tpacket_hdr in mmap region.
+        // Write tp_len, tp_snaplen, tp_mac into the tpacket2_hdr at frame start
+        let hdr = self.frame_ptr.as_ptr().cast::<TxFrameHdr>();
+        // SAFETY: frame_ptr points to a valid tpacket2_hdr in the mmap region.
         unsafe {
             (*hdr).tp_len = self.len as u32;
             (*hdr).tp_snaplen = self.len as u32;
@@ -76,7 +93,7 @@ impl<'a> TxSlot<'a> {
         // Atomic store: TP_STATUS_SEND_REQUEST with Release ordering
         // ensures all data writes are visible before kernel reads the frame.
         let status_ptr = hdr.cast::<AtomicU32>();
-        // SAFETY: tp_status is at offset 0 of tpacket_hdr, naturally aligned u32.
+        // SAFETY: tp_status is the u32 at offset 0 of tpacket2_hdr, naturally aligned.
         unsafe { &*status_ptr }.store(ffi::TP_STATUS_SEND_REQUEST, Ordering::Release);
 
         self.sent = true;
@@ -89,7 +106,7 @@ impl Drop for TxSlot<'_> {
         if !self.sent {
             // Discard: return frame to available pool.
             let status_ptr = self.frame_ptr.as_ptr().cast::<AtomicU32>();
-            // SAFETY: frame_ptr points to valid tpacket_hdr, tp_status at offset 0.
+            // SAFETY: frame_ptr points to a valid tpacket2_hdr, tp_status at offset 0.
             unsafe { &*status_ptr }.store(ffi::TP_STATUS_AVAILABLE, Ordering::Release);
         }
     }
@@ -97,7 +114,7 @@ impl Drop for TxSlot<'_> {
 
 // ── Injector ───────────────────────────────────────────────────────────────
 
-/// AF_PACKET packet injector (TX ring with V1 frame-based semantics).
+/// AF_PACKET packet injector (`TPACKET_V2` TX frame ring).
 ///
 /// Implements [`PacketSink`](crate::traits::PacketSink) and [`AsFd`].
 /// Use [`Injector::open`] for the common case or [`Injector::builder`]
@@ -130,6 +147,10 @@ pub struct Injector {
     current_frame: usize,
     frame_count: usize,
     frame_size: usize,
+    /// Frames per ring block: the kernel never lets a frame cross a block,
+    /// so with a `frame_size` that does not divide the block the tail of
+    /// each block is unused.
+    frames_per_block: usize,
     data_offset: usize,
     pending: u32,
 }
@@ -157,24 +178,29 @@ impl Injector {
         InjectorBuilder::default()
     }
 
+    /// Frame `index`, where the kernel looks for it: frame
+    /// `index % frames_per_block` of block `index / frames_per_block`
+    /// (packet_lookup_frame()), not `index * frame_size`.
     fn frame_ptr(&self, index: usize) -> NonNull<u8> {
-        let offset = index * self.frame_size;
-        let ptr = self.ring.base().as_ptr().map_addr(|a| a + offset);
-        // SAFETY: offset is within ring (index < frame_count).
+        let block = self.ring.block_ptr(index / self.frames_per_block);
+        let offset = (index % self.frames_per_block) * self.frame_size;
+        let ptr = block.as_ptr().cast::<u8>().map_addr(|a| a + offset);
+        // SAFETY: block_ptr is in the ring and `offset + frame_size` is at
+        // most `frames_per_block * frame_size <= block_size`.
         unsafe { NonNull::new_unchecked(ptr) }
     }
 
     fn read_frame_status(&self, index: usize) -> u32 {
         let ptr = self.frame_ptr(index).as_ptr().cast::<AtomicU32>();
-        // SAFETY: points to tp_status at start of tpacket_hdr.
+        // SAFETY: points to tp_status at the start of a tpacket2_hdr.
         unsafe { &*ptr }.load(Ordering::Acquire)
     }
 
     /// Maximum payload bytes that fit in a single TX frame.
     ///
     /// Equal to `frame_size - data_offset` where `data_offset` is the
-    /// `tpacket_align(sizeof(tpacket_hdr))` reservation at the start of
-    /// each frame.
+    /// `tpacket_align(sizeof(tpacket2_hdr))` (32-byte) reservation at the
+    /// start of each frame.
     #[inline]
     pub fn frame_capacity(&self) -> usize {
         self.frame_size - self.data_offset
@@ -397,7 +423,7 @@ impl Injector {
     fn reset_slot(&self, idx: usize) {
         let ptr = self.frame_ptr(idx).as_ptr().cast::<AtomicU32>();
         // SAFETY: ptr points to the tp_status u32 at the start of a
-        // tpacket_hdr in the mmap region; AtomicU32 has the same layout.
+        // tpacket2_hdr in the mmap region; AtomicU32 has the same layout.
         unsafe { &*ptr }.store(ffi::TP_STATUS_AVAILABLE, Ordering::Release);
     }
 
@@ -550,28 +576,37 @@ impl InjectorBuilder {
         // Each "block" holds 1+ frames. The kernel requires block_size to be a
         // power of 2 and a multiple of PAGE_SIZE.
         let page_size = 4096usize;
-        let block_size = self.frame_size.max(page_size).next_power_of_two();
+        let block_size = self
+            .frame_size
+            .max(page_size)
+            .checked_next_power_of_two()
+            .ok_or_else(|| Error::Config(format!("frame_size {} is too large", self.frame_size)))?;
 
         let frames_per_block = block_size / self.frame_size;
         let block_count = self.frame_count.div_ceil(frames_per_block);
-        let actual_frame_count = block_count * frames_per_block;
+        let geometry = RingGeometry::new(block_size, block_count, self.frame_size)?;
 
         let mut req: ffi::tpacket_req3 = unsafe { std::mem::zeroed() };
-        req.tp_block_size = block_size as u32;
-        req.tp_block_nr = block_count as u32;
-        req.tp_frame_size = self.frame_size as u32;
-        req.tp_frame_nr = actual_frame_count as u32;
+        req.tp_block_size = geometry.block_size;
+        req.tp_block_nr = geometry.block_nr;
+        req.tp_frame_size = geometry.frame_size;
+        req.tp_frame_nr = geometry.frame_nr;
 
-        // Create socket, set version, set TX ring, mmap, bind
-        let fd = socket::create_packet_socket()?;
-        socket::set_packet_version(fd.as_fd())?;
+        // Create socket, set version, set TX ring, mmap, bind. Protocol 0
+        // throughout: the injector never reads, and a socket bound to
+        // ETH_P_ALL without an RX ring gets a copy of every packet on the
+        // interface queued (packet_rcv()) until its rcvbuf fills. TX does
+        // not need it — tpacket_snd() sends on the bound device and
+        // packet_parse_headers() takes skb->protocol from the frame.
+        let fd = socket::create_packet_socket_proto(0)?;
+        socket::set_packet_version(fd.as_fd(), ffi::TPACKET_V2_INT)?;
+        // V2 reads only the leading `tpacket_req` part of the request.
         socket::set_tx_ring(fd.as_fd(), &req)?;
 
-        let ring_size = block_size * block_count;
-        let ring = MmapRing::new(fd.as_fd(), ring_size, block_size, block_count)?;
+        let ring = MmapRing::new(fd.as_fd(), geometry.size, block_size, block_count)?;
 
         let ifindex = socket::resolve_interface(&interface)?;
-        socket::bind_to_interface(fd.as_fd(), ifindex)?;
+        socket::bind_to_interface_proto(fd.as_fd(), ifindex, 0)?;
 
         if self.qdisc_bypass {
             // PACKET_QDISC_BYPASS sets a function pointer on the packet_sock
@@ -611,14 +646,15 @@ impl InjectorBuilder {
             }
         }
 
-        let data_offset = ffi::tpacket_align(std::mem::size_of::<libc::tpacket_hdr>());
+        let data_offset = TX_DATA_OFFSET;
 
         Ok(Injector {
             ring,
             fd,
             current_frame: 0,
-            frame_count: actual_frame_count,
+            frame_count: geometry.frame_nr as usize,
             frame_size: self.frame_size,
+            frames_per_block,
             data_offset,
             pending: 0,
         })
@@ -655,6 +691,19 @@ mod tests {
         assert!(matches!(err, Error::Config(_)));
     }
 
+    /// A frame count whose ring size overflows `usize` (or whose block /
+    /// frame counts do not fit the kernel's `u32` fields) is a config error,
+    /// caught before the socket exists.
+    #[test]
+    fn builder_rejects_ring_geometry_overflow() {
+        let err = InjectorBuilder::default()
+            .interface("lo")
+            .frame_count((1 << 53) + 2)
+            .build()
+            .unwrap_err();
+        assert!(matches!(err, Error::Config(_)), "{err:?}");
+    }
+
     #[test]
     fn builder_defaults() {
         let b = InjectorBuilder::default();
@@ -663,12 +712,21 @@ mod tests {
         assert!(!b.qdisc_bypass);
     }
 
-    /// frame_capacity should equal frame_size minus the tpacket_hdr alignment.
+    /// frame_capacity should equal frame_size minus the tpacket2_hdr alignment.
     #[test]
     fn frame_capacity_arithmetic() {
-        let hdr_aligned = ffi::tpacket_align(std::mem::size_of::<libc::tpacket_hdr>());
-        let capacity = 2048 - hdr_aligned;
-        assert!(capacity > 1500);
-        assert!(capacity < 2048);
+        let capacity = 2048 - TX_DATA_OFFSET;
+        assert_eq!(capacity, 2016);
+    }
+
+    /// The header layout the TX code writes must be the kernel's V2 layout:
+    /// `tp_status` (the word `read_frame_status` / `send` access atomically)
+    /// at offset 0 and `tp_len` right after it.
+    #[test]
+    fn tx_header_is_tpacket_v2() {
+        assert_eq!(std::mem::offset_of!(TxFrameHdr, tp_status), 0);
+        assert_eq!(std::mem::offset_of!(TxFrameHdr, tp_len), 4);
+        assert_eq!(std::mem::size_of::<TxFrameHdr>(), 32);
+        assert_eq!(ffi::TPACKET_V2_INT, 1);
     }
 }

@@ -137,11 +137,19 @@ pub(crate) type BoxedEffectHandler = Arc<dyn DynEffectHandler>;
 /// the outcome (rather than the panic unwinding the whole run loop). The
 /// default panic hook still prints to stderr, so panics stay visible.
 fn call_handler_catching(handler: &BoxedHandler, ptr: *const (), ctx: &mut Ctx<'_>) -> Result<()> {
+    call_catching(|| handler(ptr, ctx))
+}
+
+/// Run a user callback inside `catch_unwind`, converting a panic into
+/// [`Error::HandlerPanic`] — the shape of [`call_handler_catching`] for the
+/// callbacks the run loop invokes outside the dispatcher (tick closures,
+/// capture-stats handlers).
+pub(crate) fn call_catching(f: impl FnOnce() -> Result<()>) -> Result<()> {
     use std::panic::{AssertUnwindSafe, catch_unwind};
     // `ptr`/`ctx` aren't `UnwindSafe`; asserting is sound because on a panic we
     // discard them and surface an error — we don't observe broken invariants
     // through them afterwards (the caller stops dispatching this event).
-    match catch_unwind(AssertUnwindSafe(|| handler(ptr, ctx))) {
+    match catch_unwind(AssertUnwindSafe(f)) {
         Ok(res) => res,
         // `&*payload` derefs the `Box<dyn Any>` to the *inner* value; passing
         // `&payload` would re-erase the Box itself as the `dyn Any` and both
@@ -233,6 +241,11 @@ impl Dispatcher {
     /// `MonitorBuilder::catch_handler_panics`.
     pub(crate) fn set_catch_panics(&mut self, on: bool) {
         self.catch_panics = on;
+    }
+
+    /// Whether sync-handler panics are caught (see [`Self::set_catch_panics`]).
+    pub(crate) fn catch_panics(&self) -> bool {
+        self.catch_panics
     }
 
     /// Dispatch the typed payload `P` through all registered
@@ -462,6 +475,13 @@ impl Dispatcher {
         self.slot_by_type
             .get(TypeId::of::<P>())
             .is_some_and(|i| !self.async_slots[i as usize].is_empty())
+    }
+
+    /// Whether an effect handler is registered for `P`.
+    pub(crate) fn handles_effects<P: 'static>(&self) -> bool {
+        self.slot_by_type
+            .get(TypeId::of::<P>())
+            .is_some_and(|i| !self.effect_slots[i as usize].is_empty())
     }
 
     /// Number of distinct event types registered. Useful for tests.

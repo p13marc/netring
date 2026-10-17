@@ -18,7 +18,7 @@ impl MessageProtocol for TlsHandshake {}
 /// Pairs with [`super::Tls`] — they run independent parser slots.
 /// Most consumers want one or the other.
 ///
-/// Default ports: 443, 8443.
+/// Default ports: 443, 853 (DNS over TLS), 8443.
 #[derive(Debug, Clone, Copy)]
 pub struct TlsHandshake;
 
@@ -27,7 +27,7 @@ impl Protocol for TlsHandshake {
     const NAME: &'static str = flowscope::tls::handshake::PARSER_KIND;
 
     fn dispatch() -> Dispatch {
-        Dispatch::Tcp(vec![443, 8443])
+        Dispatch::Tcp(vec![443, 853, 8443])
     }
 
     fn register(
@@ -51,6 +51,16 @@ mod tests {
             <TlsHandshake as Protocol>::NAME,
             flowscope::tls::handshake::PARSER_KIND
         );
+    }
+
+    /// 853 is DNS over TLS (RFC 7858 §3.1), which `on_encrypted_dns`
+    /// classifies.
+    #[test]
+    fn dispatch_includes_dot() {
+        match <TlsHandshake as Protocol>::dispatch() {
+            Dispatch::Tcp(ports) => assert_eq!(ports, vec![443, 853, 8443]),
+            other => panic!("expected Dispatch::Tcp, got {other:?}"),
+        }
     }
 
     #[test]

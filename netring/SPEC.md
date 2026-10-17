@@ -295,7 +295,8 @@ impl CaptureBuilder {
 ```rust
 /// High-level packet injection handle.
 ///
-/// TPACKET_V3 TX uses V1 frame-based semantics (not block-based).
+/// The TX ring is a `TPACKET_V2` frame ring (TX is frame-based on every
+/// TPACKET version; V3's block layout is RX-only).
 /// Each frame is submitted individually, then [`flush()`](Injector::flush)
 /// triggers kernel transmission.
 ///
@@ -585,7 +586,7 @@ impl Drop for AfPacketRx { /* munmap + close */ }
 unsafe impl Send for AfPacketRx {}
 
 
-/// AF_PACKET TX ring (V1 frame-based semantics).
+/// AF_PACKET TX ring (`TPACKET_V2` frames).
 ///
 /// Implements [`PacketSink`] and [`AsFd`].
 pub struct AfPacketTx { /* OwnedFd, MmapRing, frame cursor, pending count */ }
@@ -1271,9 +1272,9 @@ while let Some(pkt) = pkts.next_packet() {
 
 7. **`nix` + `libc`**: `nix` 0.31 for standard syscalls (safe wrappers); raw `libc` only for TPACKET-specific structs/constants that `nix` doesn't wrap.
 
-8. **Separate RX/TX**: Different kernel semantics (V3 blocks vs V1 frames), independent configuration, no contention.
+8. **Separate RX/TX**: Different kernel semantics (V3 blocks vs V2 frames), independent configuration, no contention.
 
-9. **TX now**: V1-style TX through `Injector` — imperfect but usable without waiting for AF_XDP.
+9. **TX now**: frame-ring TX through `Injector` — imperfect but usable without waiting for AF_XDP.
 
 10. **Raw VLAN fields**: Users decode `vlan_tci()` / `vlan_tpid()` themselves.
 
@@ -1477,9 +1478,13 @@ pub struct AfPacketRx {
 with lifetime erasure on `PacketBatch`. Blocks are released lazily at
 the start of the next `next()` call. Documented for `for`-loop consumption only.
 
-**4. TX uses V1 frame-based semantics:**
-TPACKET_V3 TX falls back to V1. Frames are walked by index with `frame_size`
-stride, not by `tp_next_offset`. Status flow:
+**4. TX uses a `TPACKET_V2` frame ring:**
+TX is frame-based on every TPACKET version, so the TX socket is set to
+`TPACKET_V2` and each frame starts with a `tpacket2_hdr` (`u32 tp_status` at
+offset 0, packet data at `TPACKET_ALIGN(sizeof(tpacket2_hdr))` = 32). The
+socket's `PACKET_VERSION` must match the header written: the kernel finds
+`tp_status` by version, so a mismatch means nothing is ever sent (#187).
+Frames are walked by index with `frame_size` stride. Status flow:
 `TP_STATUS_AVAILABLE (0) → TP_STATUS_SEND_REQUEST (1) → kernel sends → TP_STATUS_AVAILABLE`
 
 **5. `r#async` module naming:**

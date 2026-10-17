@@ -55,13 +55,43 @@ pub struct TlsFingerprint {
     pub key: Option<FlowKey>,
 }
 
+/// The server's port of a flow, which drives app-protocol classification
+/// (853 = DoT / DoQ, …). The flow key is address-sorted, not
+/// initiator→responder, so the server end comes from the message's
+/// direction: its bytes went `key.a → key.b` when `orientation` is
+/// `Forward`, and they came from the initiator when `side` is `Initiator`.
+/// Without that context, the lower port (a service port rather than an
+/// ephemeral one); without a key, 443.
+#[cfg(any(feature = "tls", feature = "quic"))]
+pub(crate) fn server_port(
+    key: Option<FlowKey>,
+    side: Option<flowscope::FlowSide>,
+    orientation: Option<flowscope::Orientation>,
+) -> u16 {
+    let Some(k) = key else { return 443 };
+    match (side, orientation) {
+        (Some(side), Some(orientation)) => {
+            let initiator_is_a = (orientation == flowscope::Orientation::Forward)
+                == (side == flowscope::FlowSide::Initiator);
+            if initiator_is_a {
+                k.b.port()
+            } else {
+                k.a.port()
+            }
+        }
+        _ => k.a.port().min(k.b.port()),
+    }
+}
+
 #[cfg(feature = "tls")]
 impl TlsFingerprint {
-    /// Build from a flowscope handshake event + the flow key.
-    pub(crate) fn from_handshake(hs: &flowscope::tls::TlsHandshake, key: Option<FlowKey>) -> Self {
-        // The server port drives app-proto classification (853 = DoT, etc.);
-        // for TLS the server is the destination side of the key. Default 443.
-        let port = key.map(|k| k.b.port()).unwrap_or(443);
+    /// Build from a flowscope handshake event + the flow key; `port` is
+    /// the server's (see [`server_port`]).
+    pub(crate) fn from_handshake(
+        hs: &flowscope::tls::TlsHandshake,
+        key: Option<FlowKey>,
+        port: u16,
+    ) -> Self {
         Self {
             sni: hs.sni.clone(),
             alpn: hs
@@ -222,9 +252,13 @@ pub struct QuicFingerprint {
 
 #[cfg(feature = "quic")]
 impl QuicFingerprint {
-    /// Build from a parsed QUIC Initial + the flow key.
-    pub(crate) fn from_initial(initial: &flowscope::QuicInitial, key: Option<FlowKey>) -> Self {
-        let port = key.map(|k| k.b.port()).unwrap_or(443);
+    /// Build from a parsed QUIC Initial + the flow key; `port` is the
+    /// server's (see [`server_port`]).
+    pub(crate) fn from_initial(
+        initial: &flowscope::QuicInitial,
+        key: Option<FlowKey>,
+        port: u16,
+    ) -> Self {
         let version = if initial.version.is_v1() {
             "v1".to_string()
         } else if initial.version.is_v2() {
@@ -343,6 +377,61 @@ mod tests {
     use super::*;
     use flowscope::tls::TlsHandshake;
 
+    /// A DoT client 192.168.1.10:41000 → resolver 9.9.9.9:853. The
+    /// bidirectional key is address-sorted, so the resolver sits in `a`.
+    fn dot_key() -> FlowKey {
+        use std::net::{IpAddr, Ipv4Addr, SocketAddr};
+        FlowKey::new(
+            flowscope::L4Proto::Tcp,
+            SocketAddr::new(IpAddr::V4(Ipv4Addr::new(9, 9, 9, 9)), 853),
+            SocketAddr::new(IpAddr::V4(Ipv4Addr::new(192, 168, 1, 10)), 41000),
+        )
+    }
+
+    /// The server port comes from the message's direction, not from the
+    /// key's `b` slot (which held the client's port here).
+    #[cfg(any(feature = "tls", feature = "quic"))]
+    #[test]
+    fn server_port_follows_the_message_direction_not_the_key_order() {
+        use flowscope::{FlowSide, Orientation};
+        let k = Some(dot_key());
+        // ClientHello: from the initiator (b) → b→a = Reverse.
+        assert_eq!(
+            server_port(k, Some(FlowSide::Initiator), Some(Orientation::Reverse)),
+            853
+        );
+        // ServerHello: from the responder (a) → a→b = Forward.
+        assert_eq!(
+            server_port(k, Some(FlowSide::Responder), Some(Orientation::Forward)),
+            853
+        );
+        // Mirror case: the initiator sorted into `a`.
+        assert_eq!(
+            server_port(k, Some(FlowSide::Initiator), Some(Orientation::Forward)),
+            41000
+        );
+        // No direction: the lower (service) port. No key: 443.
+        assert_eq!(server_port(k, None, None), 853);
+        assert_eq!(server_port(None, None, None), 443);
+    }
+
+    #[cfg(feature = "tls")]
+    #[test]
+    fn dot_without_alpn_classifies_from_the_server_port() {
+        use flowscope::{FlowSide, Orientation};
+        let hs = TlsHandshake::default();
+        let port = server_port(
+            Some(dot_key()),
+            Some(FlowSide::Initiator),
+            Some(Orientation::Reverse),
+        );
+        let fp = TlsFingerprint::from_handshake(&hs, Some(dot_key()), port);
+        assert_eq!(
+            fp.app_protocol,
+            flowscope::app_proto::AppProtocol::DnsOverTls
+        );
+    }
+
     #[test]
     fn bundles_handshake_fields_and_prefers_server_alpn() {
         // `TlsHandshake` is `#[non_exhaustive]` — build via Default.
@@ -359,7 +448,7 @@ mod tests {
             hs.ja4x = Some("a564fbbd9b48_5e2c5a8f4f17_8c0e391b6d8b".to_string());
         }
 
-        let fp = TlsFingerprint::from_handshake(&hs, None);
+        let fp = TlsFingerprint::from_handshake(&hs, None, 443);
         assert_eq!(fp.sni.as_deref(), Some("example.com"));
         assert_eq!(fp.alpn.as_deref(), Some("h2")); // server's pick
         assert!(fp.pq_key_share, "pq_key_share should carry through (#128)");
@@ -386,7 +475,7 @@ mod tests {
         hs.client_alpn = vec!["h2".to_string()];
         hs.server_alpn = None;
 
-        let fp = TlsFingerprint::from_handshake(&hs, None);
+        let fp = TlsFingerprint::from_handshake(&hs, None, 443);
         assert_eq!(fp.alpn.as_deref(), Some("h2"));
         assert!(!fp.has_fingerprint());
     }
@@ -405,7 +494,7 @@ mod tests {
         let mut hs = TlsHandshake::default();
         hs.server_alpn = Some("h2".to_string());
         hs.sni = Some("cloudflare-dns.com".to_string());
-        let fp = TlsFingerprint::from_handshake(&hs, None);
+        let fp = TlsFingerprint::from_handshake(&hs, None, 443);
         assert_eq!(
             fp.app_protocol,
             flowscope::app_proto::AppProtocol::DnsOverHttps

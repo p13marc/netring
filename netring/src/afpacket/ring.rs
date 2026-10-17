@@ -10,6 +10,62 @@ use nix::sys::mman::{MapFlags, ProtFlags};
 use crate::afpacket::ffi;
 use crate::error::Error;
 
+// ── RingGeometry ───────────────────────────────────────────────────────────
+
+/// Checked ring geometry: the `tpacket_req3` fields handed to
+/// `PACKET_RX_RING` / `PACKET_TX_RING` and the mmap length that matches them.
+///
+/// The kernel takes `u32` block / frame counts and maps exactly
+/// `tp_block_nr` blocks, so a count that wraps — on the `u32` cast or on the
+/// `usize` size multiply — would leave the kernel with a smaller ring than
+/// the one [`MmapRing`] walks.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct RingGeometry {
+    pub(crate) block_size: u32,
+    pub(crate) block_nr: u32,
+    pub(crate) frame_size: u32,
+    pub(crate) frame_nr: u32,
+    /// `block_size * block_nr` bytes: the length to mmap.
+    pub(crate) size: usize,
+}
+
+impl RingGeometry {
+    /// Geometry of `block_count` blocks of `block_size` bytes, each holding
+    /// `block_size / frame_size` frames. Overflow is an [`Error::Config`].
+    pub(crate) fn new(
+        block_size: usize,
+        block_count: usize,
+        frame_size: usize,
+    ) -> Result<Self, Error> {
+        let overflow = || {
+            Error::Config(format!(
+                "ring of {block_count} blocks of {block_size} bytes \
+                 ({frame_size}-byte frames) exceeds the kernel's ring limits"
+            ))
+        };
+        let frames_per_block = block_size
+            .checked_div(frame_size)
+            .filter(|&n| n > 0)
+            .ok_or_else(|| {
+                Error::Config(format!(
+                    "frame_size {frame_size} does not fit block_size {block_size}"
+                ))
+            })?;
+        let frame_nr = frames_per_block
+            .checked_mul(block_count)
+            .ok_or_else(overflow)?;
+        let size = block_size.checked_mul(block_count).ok_or_else(overflow)?;
+        let to_u32 = |n: usize| u32::try_from(n).map_err(|_| overflow());
+        Ok(Self {
+            block_size: to_u32(block_size)?,
+            block_nr: to_u32(block_count)?,
+            frame_size: to_u32(frame_size)?,
+            frame_nr: to_u32(frame_nr)?,
+            size,
+        })
+    }
+}
+
 // ── MmapRing ───────────────────────────────────────────────────────────────
 
 /// RAII wrapper for an mmap'd TPACKET ring buffer region.
@@ -33,7 +89,12 @@ impl MmapRing {
         block_size: usize,
         block_count: usize,
     ) -> Result<Self, Error> {
-        debug_assert_eq!(size, block_size * block_count);
+        // `block_ptr` trusts this: every block it hands out lies in the map.
+        if block_size.checked_mul(block_count) != Some(size) {
+            return Err(Error::Config(format!(
+                "ring size {size} is not {block_count} blocks of {block_size} bytes"
+            )));
+        }
 
         let length =
             NonZeroUsize::new(size).ok_or_else(|| Error::Config("ring size is 0".into()))?;
@@ -95,7 +156,8 @@ impl MmapRing {
         );
         let offset = index * self.block_size;
         let ptr = self.base.as_ptr().map_addr(|a| a + offset);
-        // SAFETY: base is non-null, offset is within the mmap region.
+        // SAFETY: base is non-null; `new` checked `size == block_size *
+        // block_count`, so the offset is within the mmap region.
         unsafe { NonNull::new_unchecked(ptr.cast::<ffi::tpacket_block_desc>()) }
     }
 
@@ -162,4 +224,58 @@ pub(crate) unsafe fn release_block(bd: NonNull<ffi::tpacket_block_desc>) {
         unsafe { core::ptr::addr_of!((*bd.as_ptr()).hdr.bh1.block_status) as *const AtomicU32 };
     // SAFETY: AtomicU32 reference is valid for the mmap region lifetime.
     unsafe { &*status_ptr }.store(ffi::TP_STATUS_KERNEL, Ordering::Release);
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// `block_ptr` trusts `size == block_size * block_count`; a mismatch
+    /// must be refused before anything is mapped.
+    #[test]
+    fn new_rejects_size_mismatch() {
+        let fd = std::fs::OpenOptions::new()
+            .read(true)
+            .write(true)
+            .open("/dev/zero")
+            .unwrap();
+        let err = MmapRing::new(&fd, 4096, 4096, 2).err().expect("rejected");
+        assert!(matches!(err, Error::Config(_)), "{err:?}");
+        let err = MmapRing::new(&fd, 4096, 1 << 22, (1 << 42) + 1)
+            .err()
+            .expect("rejected");
+        assert!(matches!(err, Error::Config(_)), "{err:?}");
+    }
+
+    #[test]
+    fn geometry_of_the_default_rx_ring() {
+        let g = RingGeometry::new(1 << 22, 64, 2048).unwrap();
+        assert_eq!(
+            g,
+            RingGeometry {
+                block_size: 1 << 22,
+                block_nr: 64,
+                frame_size: 2048,
+                frame_nr: 2048 * 64,
+                size: 64 << 22,
+            }
+        );
+    }
+
+    /// Counts that wrapped silently: the `usize` size multiply, the `u32`
+    /// block / frame counts, and a block size beyond `u32`.
+    #[test]
+    fn geometry_rejects_overflow() {
+        for (block_size, block_count, frame_size) in [
+            (1 << 22, (1usize << 42) + 1, 2048), // size wraps to one block
+            (1 << 12, 1usize << 32, 2048),       // block_nr wraps to 0
+            (1 << 22, 1usize << 20, 256),        // frame_nr > u32::MAX
+            (1usize << 32, 1, 2048),             // block_size > u32::MAX
+        ] {
+            let err = RingGeometry::new(block_size, block_count, frame_size).unwrap_err();
+            assert!(matches!(err, Error::Config(_)), "{err:?}");
+        }
+        assert!(RingGeometry::new(4096, 1, 8192).is_err());
+        assert!(RingGeometry::new(4096, 1, 0).is_err());
+    }
 }

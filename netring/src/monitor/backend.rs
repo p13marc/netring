@@ -31,7 +31,18 @@ use flowscope::{PacketView, Timestamp};
 use crate::AsyncCapture;
 use crate::error::{Error, Result};
 use crate::packet::PacketDirection;
-use crate::stats::CaptureStats;
+use crate::stats::SourceCounters;
+
+/// Packets one [`AnyBackend::drain_batch`] call delivers before it returns
+/// to the run loop — checked between batches, which are never split (an
+/// AF_PACKET block goes back to the kernel whole). Under sustained load
+/// the source is readable every time the loop looks: an uncapped drain
+/// never returned, starving the loop's timers (sweeps, ticks, telemetry,
+/// the stop deadline) and growing the events buffer without bound.
+/// Readiness stays set when the budget cuts a drain short, so the loop's
+/// next readiness poll resolves at once — after it has yielded to the
+/// runtime (see the run loop).
+const DRAIN_BUDGET: usize = 4096;
 
 /// A live capture backend behind the Monitor run loop. AF_PACKET today;
 /// AF_XDP behind the `af-xdp` feature.
@@ -77,12 +88,14 @@ impl AnyBackend {
         }
     }
 
-    /// Drain every retired batch currently ready on this backend, invoking
+    /// Drain the retired batches currently ready on this backend — up to
+    /// [`DRAIN_BUDGET`] packets' worth — invoking
     /// `on_packet` with a borrowed [`PacketView`] per packet plus the
     /// frame's direction (AF_PACKET reports it; AF_XDP has none —
     /// `PacketDirection::Unknown(0)`, as the streams do — which is what
     /// the direction-aware loopback dedup needs, #178). Returns the
-    /// last packet's timestamp, or `None` on a spurious wake (no data).
+    /// last packet's timestamp, or `None` on a spurious wake (no data),
+    /// and whether the budget cut the drain short (more is ready).
     ///
     /// The readiness guard is held only across the synchronous callback
     /// loop and dropped before this future resolves — no ring borrow
@@ -90,12 +103,16 @@ impl AnyBackend {
     pub(crate) async fn drain_batch(
         &mut self,
         mut on_packet: impl FnMut(PacketView<'_>, PacketDirection),
-    ) -> Result<Option<Timestamp>> {
+    ) -> Result<(Option<Timestamp>, bool)> {
         let mut last_ts: Option<Timestamp> = None;
+        let mut delivered: usize = 0;
         match self {
             AnyBackend::AfPacket(cap) => {
                 let mut guard = cap.readable().await?;
-                while let Some(batch) = guard.next_batch() {
+                while delivered < DRAIN_BUDGET
+                    && let Some(batch) = guard.next_batch()
+                {
+                    delivered += batch.len();
                     for pkt in &batch {
                         let ts = pkt.timestamp();
                         last_ts = Some(ts);
@@ -106,7 +123,10 @@ impl AnyBackend {
             #[cfg(feature = "af-xdp")]
             AnyBackend::Xdp(xdp) => {
                 let mut guard = xdp.readable().await?;
-                while let Some(batch) = guard.next_batch() {
+                while delivered < DRAIN_BUDGET
+                    && let Some(batch) = guard.next_batch()
+                {
+                    delivered += batch.len();
                     for pkt in &batch {
                         // AF_XDP frames carry a hardware timestamp + RX metadata
                         // only when the NIC + driver populate it (issue #13);
@@ -130,11 +150,14 @@ impl AnyBackend {
                 let start = cap.next_cursor();
                 for off in 0..n {
                     let i = (start + off) % n;
-                    if !cap.socket_rx_ready(i) {
+                    if delivered >= DRAIN_BUDGET || !cap.socket_rx_ready(i) {
                         continue;
                     }
                     let mut guard = cap.socket_readable(i).await?;
-                    while let Some(batch) = guard.next_batch() {
+                    while delivered < DRAIN_BUDGET
+                        && let Some(batch) = guard.next_batch()
+                    {
+                        delivered += batch.len();
                         for pkt in &batch {
                             let ts = pkt.timestamp().unwrap_or_else(now_ts);
                             last_ts = Some(ts);
@@ -147,30 +170,28 @@ impl AnyBackend {
                 }
             }
         }
-        Ok(last_ts)
+        Ok((last_ts, delivered >= DRAIN_BUDGET))
     }
 
-    /// Cumulative capture statistics **plus** the per-source
-    /// [`DropBreakdown`](crate::stats::DropBreakdown) — the un-collapsed
-    /// "where did packets drop" detail (issue #39). Returns both from a
-    /// single counter read so AF_PACKET's destructive `tp_drops` read
-    /// isn't double-consumed.
-    pub(crate) fn detailed_stats(&self) -> Result<(CaptureStats, crate::stats::DropBreakdown)> {
+    /// Cumulative `u64` counters (delivered packets split from drops)
+    /// **plus** the per-source [`DropBreakdown`](crate::stats::DropBreakdown)
+    /// — the un-collapsed "where did packets drop" detail (issue #39).
+    /// Returns both from a single counter read so AF_PACKET's destructive
+    /// `PACKET_STATISTICS` read isn't double-consumed.
+    pub(crate) fn counters(&self) -> Result<(SourceCounters, crate::stats::DropBreakdown)> {
         match self {
             AnyBackend::AfPacket(cap) => {
-                let stats = cap.cumulative_stats()?;
-                let detail = crate::stats::DropBreakdown::AfPacket {
-                    freezes: stats.freeze_count as u64,
-                };
-                Ok((stats, detail))
+                let c = cap.get_ref().cumulative_counters()?;
+                let detail = crate::stats::DropBreakdown::AfPacket { freezes: c.freezes };
+                Ok((c, detail))
             }
             #[cfg(feature = "af-xdp")]
             AnyBackend::Xdp(xdp) => {
                 let s = xdp.statistics()?;
-                Ok((s.to_capture_stats(), s.into()))
+                Ok((s.counters(xdp.get_ref().rx_received()), s.into()))
             }
             #[cfg(all(feature = "af-xdp", feature = "xdp-loader"))]
-            AnyBackend::XdpMq(cap) => cap.detailed_stats(),
+            AnyBackend::XdpMq(cap) => cap.counters(),
         }
     }
 }

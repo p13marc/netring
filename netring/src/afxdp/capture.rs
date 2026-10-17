@@ -25,9 +25,10 @@ pub enum Queues {
     Single(u32),
     /// An explicit half-open range of queue ids, e.g. `0..4`.
     Range(std::ops::Range<u32>),
-    /// Every RSS/combined queue on the interface, auto-detected via
-    /// `ETHTOOL_GCHANNELS`. Falls back to queue 0 only if detection fails
-    /// (virtual interface, `lo`, missing support) — always safe to use.
+    /// Every RX queue (combined + RX-only channels) on the interface,
+    /// auto-detected via `ETHTOOL_GCHANNELS`. Falls back to queue 0 only if
+    /// detection fails (virtual interface, `lo`, missing support) — always
+    /// safe to use.
     Auto,
 }
 
@@ -77,13 +78,14 @@ impl Queues {
 
 // ── Queue-count discovery ───────────────────────────────────────────────────
 
-/// Number of RSS/combined RX queues on `iface`, via the `ETHTOOL_GCHANNELS`
-/// ioctl (issue #6 G3).
+/// Number of RX queues on `iface`, via the `ETHTOOL_GCHANNELS` ioctl (issue
+/// #6 G3).
 ///
-/// Returns the NIC's `combined_count` (RSS-bearing queues), or `rx_count` on
-/// rx/tx-split NICs. Requires no privilege. Errors on interfaces that don't
-/// support channel queries (e.g. `lo`, many virtual devices) — callers that want
-/// a soft fallback should use [`Queues::Auto`], which degrades to queue 0.
+/// Returns the NIC's combined channels plus its RX-only channels
+/// (`combined_count + rx_count`). Requires no privilege. Errors on interfaces
+/// that don't support channel queries (e.g. `lo`, many virtual devices) —
+/// callers that want a soft fallback should use [`Queues::Auto`], which
+/// degrades to queue 0.
 pub fn queue_count(iface: &str) -> Result<u32, Error> {
     use std::os::fd::{AsRawFd, FromRawFd, OwnedFd};
 
@@ -104,13 +106,8 @@ pub fn queue_count(iface: &str) -> Result<u32, Error> {
         cmd: ffi::ETHTOOL_GCHANNELS,
         ..Default::default()
     };
-    let mut ifr = ffi::ethtool_ifreq {
-        ifr_name: [0; libc::IFNAMSIZ],
-        ifr_data: (&mut channels as *mut ffi::ethtool_channels).cast(),
-    };
-    for (dst, &b) in ifr.ifr_name.iter_mut().zip(iface.as_bytes()) {
-        *dst = b as libc::c_char;
-    }
+    let mut ifr =
+        ffi::ethtool_ifreq::new(iface, (&mut channels as *mut ffi::ethtool_channels).cast())?;
 
     // SAFETY: `ifr` is a well-formed ifreq whose ifr_data points at `channels`;
     // the kernel writes channel counts into `channels` for ETHTOOL_GCHANNELS.
@@ -119,14 +116,18 @@ pub fn queue_count(iface: &str) -> Result<u32, Error> {
         return Err(Error::Io(std::io::Error::last_os_error()));
     }
 
-    let n = if channels.combined_count > 0 {
-        channels.combined_count
-    } else if channels.rx_count > 0 {
-        channels.rx_count
-    } else {
-        1
-    };
-    Ok(n)
+    Ok(rx_queue_count(&channels))
+}
+
+/// RX queues described by an `ETHTOOL_GCHANNELS` reply: the combined
+/// channels plus the RX-only ones. The kernel numbers RX queues
+/// `0..combined_count + rx_count` (`ethtool_set_channels()` in
+/// `net/ethtool/ioctl.c`), so `combined 4 rx 4` is 8 RX queues.
+fn rx_queue_count(channels: &ffi::ethtool_channels) -> u32 {
+    match channels.combined_count.saturating_add(channels.rx_count) {
+        0 => 1,
+        n => n,
+    }
 }
 
 /// The NUMA node the NIC backing `iface` sits on (issue #6 F3), read from
@@ -154,7 +155,7 @@ mod mq {
 
     use super::{Error, Queues};
     use crate::afxdp::loader::{XdpAttachment, XdpFlags, XdpProgram, default_program};
-    use crate::afxdp::{XdpBatch, XdpMode, XdpSocket, XdpSocketBuilder};
+    use crate::afxdp::{XdpBatch, XdpMode, XdpSocket, XdpSocketBuilder, XdpStats};
 
     /// Builder for [`XdpCapture`].
     #[must_use]
@@ -287,8 +288,9 @@ mod mq {
             self
         }
 
-        /// XDP attach mode. Default: `SKB_MODE` (works everywhere incl. `lo`).
-        /// Use `DRV_MODE` for native-driver zero-copy on a real NIC.
+        /// XDP attach mode. Default: `SKB_MODE` (works everywhere incl. `lo`;
+        /// the sockets then bind in copy mode, `XDP_COPY`). Use `DRV_MODE`
+        /// for native-driver zero-copy on a real NIC.
         pub fn attach_flags(mut self, flags: XdpFlags) -> Self {
             self.attach_flags = flags;
             self
@@ -327,7 +329,12 @@ mod mq {
             // (queue `q` registers at index `q`), now that `default_program`
             // honors its `max_queues` argument. A caller-supplied program keeps
             // its own map size; registering past it errors at `register`.
-            let map_size = queue_ids.iter().max().map(|&m| m + 1).unwrap_or(1);
+            let map_size = match queue_ids.iter().max() {
+                Some(&m) => m.checked_add(1).ok_or_else(|| {
+                    Error::Config(format!("queue id {m} is out of range for an XSKMAP"))
+                })?,
+                None => 1,
+            };
             let mut prog = match self.program.take() {
                 Some(p) => p,
                 None => default_program(map_size)?,
@@ -337,26 +344,7 @@ mod mq {
             // registered at its queue index in the shared XSKMAP.
             let mut sockets = Vec::with_capacity(queue_ids.len());
             for &q in &queue_ids {
-                let mut b = XdpSocketBuilder::default()
-                    .interface(&iface)
-                    .queue_id(q)
-                    .mode(self.mode)
-                    .frame_size(self.frame_size)
-                    .frame_count(self.frame_count)
-                    .hugepages(self.hugepages);
-                if let Some(node) = numa_node {
-                    b = b.numa_node(node);
-                }
-                if let Some(us) = self.busy_poll_us {
-                    b = b.busy_poll_us(us);
-                }
-                if let Some(prefer) = self.prefer_busy_poll {
-                    b = b.prefer_busy_poll(prefer);
-                }
-                if let Some(budget) = self.busy_poll_budget {
-                    b = b.busy_poll_budget(budget);
-                }
-                let sock = b.build()?;
+                let sock = self.queue_socket(&iface, q, numa_node).build()?;
                 prog.register(q, &sock)?;
                 sockets.push(sock);
             }
@@ -380,6 +368,39 @@ mod mq {
                 _attachment: attachment,
                 _promisc: promisc,
             })
+        }
+    }
+
+    impl XdpCaptureBuilder {
+        /// The bare builder for queue `q`'s socket (the program is attached
+        /// once, by `build()`).
+        pub(super) fn queue_socket(
+            &self,
+            iface: &str,
+            q: u32,
+            numa_node: Option<u32>,
+        ) -> XdpSocketBuilder {
+            let mut b = XdpSocketBuilder::default()
+                .interface(iface)
+                .queue_id(q)
+                .mode(self.mode)
+                .frame_size(self.frame_size)
+                .frame_count(self.frame_count)
+                .hugepages(self.hugepages)
+                .copy_mode(self.attach_flags.is_generic());
+            if let Some(node) = numa_node {
+                b = b.numa_node(node);
+            }
+            if let Some(us) = self.busy_poll_us {
+                b = b.busy_poll_us(us);
+            }
+            if let Some(prefer) = self.prefer_busy_poll {
+                b = b.prefer_busy_poll(prefer);
+            }
+            if let Some(budget) = self.busy_poll_budget {
+                b = b.busy_poll_budget(budget);
+            }
+            b
         }
     }
 
@@ -431,6 +452,19 @@ mod mq {
         /// Mutable access to the per-queue sockets (for advanced drain loops).
         pub fn sockets_mut(&mut self) -> &mut [XdpSocket] {
             &mut self.sockets
+        }
+
+        /// `XDP_STATISTICS` summed across the per-queue sockets (each
+        /// counter saturating). See [`XdpStats`] for what each one means.
+        pub fn statistics(&self) -> Result<XdpStats, Error> {
+            crate::afxdp::sum_socket_stats(&self.sockets).map(|(s, _)| s)
+        }
+
+        /// Unified [`CaptureStats`](crate::CaptureStats) summed across the
+        /// per-queue sockets — see [`XdpSocket::capture_stats`].
+        pub fn capture_stats(&self) -> Result<crate::CaptureStats, Error> {
+            let (stats, received) = crate::afxdp::sum_socket_stats(&self.sockets)?;
+            Ok(stats.to_capture_stats(received))
         }
 
         /// Non-blocking unified RX: round-robins the queues and returns the next
@@ -537,6 +571,54 @@ mod tests {
         assert_eq!(interface_numa_node("lo"), None);
         // A nonexistent interface is also None (missing path).
         assert_eq!(interface_numa_node("netring-no-such-if0"), None);
+    }
+
+    /// Queue `u32::MAX` would need an XSKMAP of `u32::MAX + 1` entries: a
+    /// config error, reported before any privileged syscall (it used to
+    /// overflow — a panic in debug builds).
+    #[cfg(feature = "xdp-loader")]
+    #[test]
+    fn build_rejects_queue_id_u32_max() {
+        let err = XdpCapture::builder()
+            .interface("lo")
+            .queues(Queues::single(u32::MAX))
+            .build()
+            .err()
+            .expect("queue u32::MAX must not build");
+        assert!(matches!(err, Error::Config(_)), "{err:?}");
+    }
+
+    /// A NIC's RX queues are its combined channels plus its RX-only ones
+    /// (`ethtool -L <if> combined 4 rx 4` → queues 0..8).
+    #[test]
+    fn rx_queue_count_adds_rx_only_channels() {
+        let ch = |combined_count, rx_count| ffi::ethtool_channels {
+            combined_count,
+            rx_count,
+            ..Default::default()
+        };
+        assert_eq!(rx_queue_count(&ch(4, 0)), 4);
+        assert_eq!(rx_queue_count(&ch(4, 4)), 8);
+        assert_eq!(rx_queue_count(&ch(0, 2)), 2);
+        assert_eq!(rx_queue_count(&ch(0, 0)), 1);
+        assert_eq!(rx_queue_count(&ch(u32::MAX, 1)), u32::MAX);
+    }
+
+    /// `XdpCapture` attaches its program itself; in SKB mode (the default)
+    /// every per-queue socket must bind with `XDP_COPY`.
+    #[cfg(feature = "xdp-loader")]
+    #[test]
+    fn queue_sockets_bind_copy_for_generic_attach() {
+        use crate::xdp::XdpFlags;
+        let copy = |b: XdpCaptureBuilder| {
+            b.queue_socket("eth0", 1, None).bind_flags() & ffi::XDP_COPY != 0
+        };
+        assert!(copy(XdpCapture::builder()));
+        assert!(copy(XdpCapture::builder().attach_flags(XdpFlags::SKB_MODE)));
+        assert!(!copy(
+            XdpCapture::builder().attach_flags(XdpFlags::DRV_MODE)
+        ));
+        assert!(!copy(XdpCapture::builder().attach_flags(XdpFlags::empty())));
     }
 
     #[test]

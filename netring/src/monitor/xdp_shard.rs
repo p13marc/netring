@@ -194,8 +194,7 @@ impl XdpShardedRunner {
 
     /// Run every shard for `duration` (shared deadline).
     pub fn run_for(self, duration: Duration) -> Result<()> {
-        let deadline = Instant::now() + duration;
-        self.run_until(deadline)
+        self.run_until(crate::monitor::shard::deadline_after(duration))
     }
 
     /// Number of queues (shards) this runner will resolve `queues` to is

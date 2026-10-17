@@ -525,3 +525,78 @@ async fn health_is_not_ready_after_the_run_returns() {
     assert!(monitor.replay().await.is_err());
     assert!(!health.is_ready());
 }
+
+/// A zero period is a build error, not a panic when the live loop arms
+/// its interval.
+#[test]
+fn zero_periods_are_rejected_at_build() {
+    use netring::protocol::builtin::Udp;
+    let base = || {
+        Monitor::builder()
+            .pcap_source("unused.pcap")
+            .protocol::<Udp>()
+    };
+    let cases = [
+        (
+            "tick",
+            base().tick_ctx(Duration::ZERO, |_ctx: &mut Ctx<'_>| Ok(())),
+        ),
+        ("tick", base().report(Duration::ZERO, |_snap| Ok(()))),
+        (
+            "on_capture_stats",
+            base().on_capture_stats(Duration::ZERO, |_t, _ctx| Ok(())),
+        ),
+        (
+            "export_active_timeout",
+            base().export_active_timeout(Duration::ZERO),
+        ),
+    ];
+    for (what, builder) in cases {
+        let err = builder.build().expect_err(what).to_string();
+        assert!(
+            err.contains(what) && err.contains("non-zero period"),
+            "{what}: {err}"
+        );
+    }
+}
+
+/// Durations too long to add to an `Instant` mean "never", not an
+/// overflow panic: a `Duration::MAX` drain timeout or tick period on
+/// replay.
+#[tokio::test(flavor = "current_thread")]
+async fn huge_durations_do_not_overflow_on_replay() {
+    use netring::protocol::builtin::Udp;
+    let file = pcap(&two_udp_flows());
+    let ticks = Arc::new(AtomicUsize::new(0));
+    let t = Arc::clone(&ticks);
+    Monitor::builder()
+        .pcap_source(file.path())
+        .protocol::<Udp>()
+        .drain_timeout(Duration::MAX)
+        .tick_ctx(Duration::MAX, move |_ctx: &mut Ctx<'_>| {
+            t.fetch_add(1, Ordering::SeqCst);
+            Ok(())
+        })
+        .build()
+        .unwrap()
+        .replay()
+        .await
+        .unwrap();
+    assert_eq!(ticks.load(Ordering::SeqCst), 0);
+}
+
+/// `run_for(Duration::MAX)` runs with no deadline instead of panicking
+/// on `Instant + Duration::MAX`. Cap-free: the interface doesn't exist,
+/// so the run fails opening it — after the deadline arithmetic.
+#[tokio::test(flavor = "current_thread")]
+async fn run_for_duration_max_does_not_overflow() {
+    use netring::protocol::builtin::Udp;
+    let res = Monitor::builder()
+        .interface("nrm-missing0")
+        .protocol::<Udp>()
+        .build()
+        .unwrap()
+        .run_for(Duration::MAX)
+        .await;
+    assert!(res.is_err(), "the missing interface fails the open");
+}

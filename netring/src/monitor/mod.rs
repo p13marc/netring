@@ -466,9 +466,13 @@ impl Monitor {
         run::run_loop(self, run::StopCondition::Deadline(deadline)).await
     }
 
-    /// Run for `duration`.
+    /// Run for `duration`. A duration too long to represent as an
+    /// [`Instant`] (e.g. `Duration::MAX`) means no deadline.
     pub async fn run_for(self, duration: Duration) -> Result<()> {
-        self.run_until(Instant::now() + duration).await
+        match Instant::now().checked_add(duration) {
+            Some(deadline) => self.run_until(deadline).await,
+            None => run::run_loop(self, run::StopCondition::Never).await,
+        }
     }
 
     /// Run until Ctrl-C (SIGINT) / SIGTERM.
@@ -4489,6 +4493,24 @@ impl MonitorBuilder {
         // Issue #130: owner_bandwidth() was armed before with_flow_attribution().
         if self.owner_bandwidth_needs_hook {
             return Err(BuildError::AttributionHookRequired.into());
+        }
+        // A zero period has no next firing time (the live loop's interval
+        // would panic on it).
+        let zero_period = if self.tick_handlers.iter().any(|t| t.period.is_zero()) {
+            Some("tick")
+        } else if self
+            .capture_stats
+            .as_ref()
+            .is_some_and(|r| r.period.is_zero())
+        {
+            Some("on_capture_stats")
+        } else if self.flow_active_timeout.is_some_and(|p| p.is_zero()) {
+            Some("export_active_timeout")
+        } else {
+            None
+        };
+        if let Some(what) = zero_period {
+            return Err(BuildError::ZeroPeriod { what }.into());
         }
         // 0.21 E.1: when a pcap source is declared, the
         // `NoInterface` check is relaxed — replay mode never

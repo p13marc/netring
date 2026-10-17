@@ -59,6 +59,9 @@ type ArpTableRef<'a> =
 pub(crate) enum StopCondition {
     /// Stop when wall-clock reaches this deadline.
     Deadline(Instant),
+    /// No stop condition: a `run_for` duration too long to represent as
+    /// an `Instant`. The run ends only on an error.
+    Never,
     /// Stop on Ctrl-C / SIGTERM. Available only when the tokio
     /// `signal` feature is on; today that's transitively enabled
     /// by netring's `tokio` feature.
@@ -329,16 +332,13 @@ pub(crate) async fn run_loop(monitor: Monitor, stop: StopCondition) -> Result<()
     // Periodic sweep: idle flows end (FlowEnded), parsers' `on_tick`
     // runs, out-of-order holes expire, per-flow state is released.
     // Driven by wall time, stamped in packet time (see PacketClock).
-    let mut sweep_timer = {
-        let period = driver
+    let mut sweep_timer = periodic(
+        driver
             .tracker()
             .config()
             .sweep_interval
-            .max(Duration::from_millis(10));
-        let mut int = tokio::time::interval_at(tokio::time::Instant::now() + period, period);
-        int.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
-        int
-    };
+            .max(Duration::from_millis(10)),
+    );
     let mut packet_clock = PacketClock::default();
     let mut rr_anchor: usize = 0;
     // 0.24 Phase B: consecutive backend-error count for the SkipSource circuit
@@ -355,27 +355,15 @@ pub(crate) async fn run_loop(monitor: Monitor, stop: StopCondition) -> Result<()
     // First tick fires after `period` (interval_at with deadline =
     // now + period), not immediately. `Skip` missed-tick behaviour
     // so a slow tick handler doesn't pile up backlog ticks.
-    let mut tick_intervals: Vec<tokio::time::Interval> = tick_handlers
-        .iter()
-        .map(|t| {
-            let mut int =
-                tokio::time::interval_at(tokio::time::Instant::now() + t.period, t.period);
-            int.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
-            int
-        })
-        .collect();
+    let mut tick_intervals: Vec<tokio::time::Interval> =
+        tick_handlers.iter().map(|t| periodic(t.period)).collect();
 
     // 0.24 Phase C: capture-telemetry sampling. Only armed when an
     // `on_capture_stats` handler is registered — otherwise the `Option`
     // is `None` and the `select!` branch is gated off at zero cost (same
     // pattern as the tick / merge branches). The sampler keeps per-source
     // cumulative state so each sample's `drop_rate` is windowed.
-    let mut telemetry_interval = capture_stats.as_ref().map(|reg| {
-        let mut int =
-            tokio::time::interval_at(tokio::time::Instant::now() + reg.period, reg.period);
-        int.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
-        int
-    });
+    let mut telemetry_interval = capture_stats.as_ref().map(|reg| periodic(reg.period));
     // Allocate per-source sampler slots only when telemetry is armed — an
     // empty `Vec` doesn't allocate, so an unconfigured monitor pays nothing.
     let mut telemetry_sampler =
@@ -392,11 +380,7 @@ pub(crate) async fn run_loop(monitor: Monitor, stop: StopCondition) -> Result<()
     // long-lived flow gets one interim record per active-timeout window.
     let mut active_export = flow_active_timeout
         .filter(|_| !flow_exporters.is_empty())
-        .map(|period| {
-            let mut int = tokio::time::interval_at(tokio::time::Instant::now() + period, period);
-            int.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
-            (int, period)
-        });
+        .map(|period| (periodic(period), period));
     let mut last_active_export: std::collections::HashMap<FlowKey, flowscope::Timestamp> =
         std::collections::HashMap::new();
 
@@ -853,7 +837,8 @@ pub(crate) async fn run_loop(monitor: Monitor, stop: StopCondition) -> Result<()
     }
     let mut drained = Ok(());
     if !drain_timeout.is_zero() {
-        let deadline = Instant::now() + drain_timeout;
+        // A timeout too long to represent is no deadline.
+        let deadline = Instant::now().checked_add(drain_timeout);
         drained = drain_phase(
             &mut driver,
             &mut dispatcher,
@@ -1040,7 +1025,8 @@ pub(crate) async fn replay_loop(
                     continue;
                 }
                 match *due {
-                    None => *due = Some(now_d + period),
+                    // A period past `Duration::MAX` is never due.
+                    None => *due = Some(now_d.saturating_add(period)),
                     Some(d) if d <= now_d => {
                         fire_tick(
                             i,
@@ -1262,7 +1248,8 @@ pub(crate) async fn replay_loop(
     }
     let mut drained = Ok(());
     if !drain_timeout.is_zero() {
-        let deadline = Instant::now() + drain_timeout;
+        // A timeout too long to represent is no deadline.
+        let deadline = Instant::now().checked_add(drain_timeout);
         drained = drain_phase(
             &mut driver,
             &mut dispatcher,
@@ -1308,7 +1295,7 @@ async fn drain_phase(
     counters: &mut CounterRegistry,
     protocol_slots: &mut [Box<dyn crate::monitor::ProtocolSlot>],
     monitor_name: Option<&str>,
-    deadline: Instant,
+    deadline: Option<Instant>,
     flow_states: &mut crate::ctx::FlowStateRegistry,
     label_table: &flowscope::well_known::LabelTable,
     policy: HandlerErrorPolicy,
@@ -1339,7 +1326,7 @@ async fn drain_phase(
         // Issue #23: the graceful-drain flush runs after the main loop; the
         // ARP table isn't threaded into shutdown.
         None,
-        Some(deadline),
+        deadline,
     )
     .await
 }
@@ -1402,6 +1389,21 @@ async fn ready_capture(caps: &mut [AnyBackend], anchor: &mut usize) -> Option<(u
         },
     )
     .await
+}
+
+/// A tokio interval for `period` (non-zero — `build()` rejects zero
+/// periods): first tick one `period` from now, missed ticks skipped (a
+/// slow handler doesn't pile up a backlog). A period too long to
+/// represent as an `Instant` never ticks.
+fn periodic(period: Duration) -> tokio::time::Interval {
+    let now = tokio::time::Instant::now();
+    // What tokio itself uses for "never": 30 years out.
+    let first = now
+        .checked_add(period)
+        .unwrap_or_else(|| now + Duration::from_secs(86_400 * 365 * 30));
+    let mut int = tokio::time::interval_at(first, period);
+    int.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+    int
 }
 
 /// Round-robin poll across N tick intervals. Returns the index of
@@ -2103,7 +2105,9 @@ impl ShutdownSignal {
                     tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate()).ok();
                 (sigint, sigterm)
             }
-            StopCondition::Deadline(_) | StopCondition::Idle(_) => (None, None),
+            StopCondition::Deadline(_) | StopCondition::Idle(_) | StopCondition::Never => {
+                (None, None)
+            }
         };
         Self {
             stop,
@@ -2119,9 +2123,12 @@ impl ShutdownSignal {
             StopCondition::Deadline(t) => {
                 tokio::time::sleep_until((*t).into()).await;
             }
-            StopCondition::Idle(window) => {
-                tokio::time::sleep_until((last_event_at + *window).into()).await;
-            }
+            // A window too long to represent never expires.
+            StopCondition::Idle(window) => match last_event_at.checked_add(*window) {
+                Some(t) => tokio::time::sleep_until(t.into()).await,
+                None => std::future::pending::<()>().await,
+            },
+            StopCondition::Never => std::future::pending::<()>().await,
             StopCondition::Signal => match (self.sig_int.as_mut(), self.sig_term.as_mut()) {
                 (Some(i), Some(t)) => {
                     tokio::select! {
@@ -3487,5 +3494,39 @@ mod active_export_tests {
             1,
             "dedup: no second record within the active window"
         );
+    }
+}
+
+#[cfg(test)]
+mod duration_tests {
+    use std::time::{Duration, Instant};
+
+    use super::{ShutdownSignal, StopCondition, periodic};
+
+    /// `run_until_idle(Duration::MAX)`: the idle deadline can't be
+    /// represented — it never fires (no `Instant + Duration` panic).
+    #[tokio::test(flavor = "current_thread")]
+    async fn huge_idle_window_never_fires() {
+        let mut stop = ShutdownSignal::new(StopCondition::Idle(Duration::MAX));
+        let fired =
+            tokio::time::timeout(Duration::from_millis(20), stop.recv(Instant::now())).await;
+        assert!(fired.is_err(), "pending, not fired");
+        let mut never = ShutdownSignal::new(StopCondition::Never);
+        let fired =
+            tokio::time::timeout(Duration::from_millis(20), never.recv(Instant::now())).await;
+        assert!(fired.is_err());
+    }
+
+    /// A huge period arms an interval that never ticks; a short one
+    /// ticks after one period, not immediately.
+    #[tokio::test(flavor = "current_thread")]
+    async fn periodic_handles_huge_and_short_periods() {
+        let mut never = periodic(Duration::MAX);
+        let ticked = tokio::time::timeout(Duration::from_millis(20), never.tick()).await;
+        assert!(ticked.is_err());
+        let start = tokio::time::Instant::now();
+        let mut short = periodic(Duration::from_millis(10));
+        short.tick().await;
+        assert!(start.elapsed() >= Duration::from_millis(10));
     }
 }

@@ -240,8 +240,7 @@ impl ShardedRunner {
     /// Run all shards for `duration`. Each shard sees the same
     /// wall-clock deadline.
     pub fn run_for(self, duration: Duration) -> Result<()> {
-        let deadline = Instant::now() + duration;
-        self.run_until(deadline)
+        self.run_until(deadline_after(duration))
     }
 
     /// Run all shards until SIGINT/SIGTERM is observed. Each shard
@@ -375,6 +374,15 @@ impl ShardedRunner {
 enum RunMode {
     Deadline(Instant),
     Signal,
+}
+
+/// `now + duration` for the runners' shared deadline. A duration too long
+/// to represent as an `Instant` (e.g. `Duration::MAX`) means "never" —
+/// 30 years out, tokio's own far future — instead of an overflow panic.
+pub(crate) fn deadline_after(duration: Duration) -> Instant {
+    let now = Instant::now();
+    now.checked_add(duration)
+        .unwrap_or_else(|| now + Duration::from_secs(86_400 * 365 * 30))
 }
 
 /// 0.25 C1: pin the calling OS thread to a single CPU core via

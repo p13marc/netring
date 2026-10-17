@@ -3,7 +3,8 @@
 
 use aya::Ebpf;
 use aya::maps::xdp::XskMap;
-use aya::programs::{Xdp, XdpMode as AyaXdpMode, links::FdLink};
+use aya::programs::xdp::XdpLink;
+use aya::programs::{Xdp, XdpMode as AyaXdpMode};
 
 use crate::afxdp::XdpSocket;
 use crate::error::Error;
@@ -206,15 +207,16 @@ impl XdpProgram {
         let link_id = prog
             .attach(iface, flags.to_aya())
             .map_err(|e| LoaderError::Aya(e.to_string()))?;
-        // Take ownership of the link so we can detach in Drop.
-        let xdp_link = prog
+        // Take ownership of the link so we can detach in Drop. Keep aya's
+        // `XdpLink` as is: converting it to an `FdLink` fails for the netlink
+        // attachment aya falls back to where `bpf_link_create` can't attach
+        // XDP (kernels < 5.9) — after taking the link out of the wrapper
+        // whose drop detaches it, so the program stayed attached.
+        let link = prog
             .take_link(link_id)
             .map_err(|e| LoaderError::Aya(e.to_string()))?;
-        let owned: FdLink = xdp_link
-            .try_into()
-            .map_err(|e: aya::programs::links::LinkError| LoaderError::Aya(e.to_string()))?;
         Ok(XdpAttachment {
-            _link: owned,
+            _link: link,
             _program: self,
         })
     }
@@ -233,7 +235,10 @@ impl std::fmt::Debug for XdpProgram {
 /// from the interface; the program and map are then unloaded when
 /// the inner `Ebpf` drops.
 pub struct XdpAttachment {
-    _link: FdLink,
+    /// A `bpf_link` or, on kernels < 5.9, a netlink attachment; dropping it
+    /// detaches either. Dropped before `_program`, whose fd a netlink detach
+    /// still names.
+    _link: XdpLink,
     _program: XdpProgram,
 }
 

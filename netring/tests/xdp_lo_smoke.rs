@@ -895,3 +895,106 @@ async fn async_xdp_send_kicks_tx_when_umem_is_full() {
     drop(xdp);
     std::thread::sleep(Duration::from_millis(300));
 }
+
+/// Whether `lo` has an XDP program attached (`ip link` shows `xdpgeneric`).
+#[cfg(target_arch = "x86_64")]
+fn lo_has_xdp() -> bool {
+    let out = std::process::Command::new("ip")
+        .args(["-o", "link", "show", "dev", "lo"])
+        .output()
+        .expect("run ip link show");
+    String::from_utf8_lossy(&out.stdout).contains("xdp")
+}
+
+/// Make `bpf(BPF_LINK_CREATE, ...)` fail with `EINVAL` on the calling thread
+/// (only), as on a kernel without XDP bpf_link support (< 5.9).
+#[cfg(target_arch = "x86_64")]
+fn fail_bpf_link_create_on_this_thread() {
+    const AUDIT_ARCH_X86_64: u32 = 0xc000_003e;
+    const BPF_LINK_CREATE: u32 = 28;
+    // struct seccomp_data: nr @0, arch @4, args[0] (low half on LE) @16.
+    let stmt = |code: u32, k: u32| libc::sock_filter {
+        code: code as u16,
+        jt: 0,
+        jf: 0,
+        k,
+    };
+    let jeq = |k: u32, jf: u8| libc::sock_filter {
+        code: (libc::BPF_JMP | libc::BPF_JEQ | libc::BPF_K) as u16,
+        jt: 0,
+        jf,
+        k,
+    };
+    let ld = libc::BPF_LD | libc::BPF_W | libc::BPF_ABS;
+    let ret = libc::BPF_RET | libc::BPF_K;
+    let filter = [
+        stmt(ld, 4),
+        jeq(AUDIT_ARCH_X86_64, 5), // → allow
+        stmt(ld, 0),
+        jeq(libc::SYS_bpf as u32, 3), // → allow
+        stmt(ld, 16),
+        jeq(BPF_LINK_CREATE, 1), // → allow
+        stmt(ret, libc::SECCOMP_RET_ERRNO | libc::EINVAL as u32),
+        stmt(ret, libc::SECCOMP_RET_ALLOW),
+    ];
+    let prog = libc::sock_fprog {
+        len: filter.len() as u16,
+        filter: filter.as_ptr() as *mut libc::sock_filter,
+    };
+    // SAFETY: plain prctl calls; the kernel copies the filter.
+    unsafe {
+        assert_eq!(libc::prctl(libc::PR_SET_NO_NEW_PRIVS, 1, 0, 0, 0), 0);
+        let rc = libc::prctl(
+            libc::PR_SET_SECCOMP,
+            libc::SECCOMP_MODE_FILTER as libc::c_ulong,
+            &prog as *const libc::sock_fprog,
+        );
+        assert_eq!(rc, 0, "install seccomp filter");
+    }
+}
+
+/// Where `bpf_link_create` can't attach XDP (kernels < 5.9) aya falls back
+/// to a netlink attachment, which `XdpProgram::attach` must keep and detach
+/// on drop. It converted aya's link into an `FdLink`, which fails for a
+/// netlink link *after* taking it out of the wrapper whose drop detaches:
+/// attach returned an error and left the program attached to the interface.
+/// The old kernel is simulated with a seccomp filter on the attaching thread.
+#[cfg(target_arch = "x86_64")]
+#[test]
+fn xdp_attach_netlink_fallback_keeps_and_detaches_the_link() {
+    use netring::xdp::{XdpFlags, default_program};
+
+    struct DetachLo;
+    impl Drop for DetachLo {
+        fn drop(&mut self) {
+            if lo_has_xdp() {
+                let _ = std::process::Command::new("ip")
+                    .args(["link", "set", "dev", "lo", "xdpgeneric", "off"])
+                    .output();
+            }
+        }
+    }
+
+    wait_lo_free();
+    assert!(!lo_has_xdp(), "lo already has an XDP program");
+    let _cleanup = DetachLo;
+
+    let (attached, while_held, after_drop) = std::thread::spawn(|| {
+        // Load before the filter: aya's feature probes also use bpf_link.
+        let prog = default_program(1).expect("load default program");
+        fail_bpf_link_create_on_this_thread();
+        let attachment = prog.attach("lo", XdpFlags::SKB_MODE);
+        let attached = attachment.as_ref().map(|_| ()).map_err(|e| e.to_string());
+        let while_held = lo_has_xdp();
+        drop(attachment);
+        (attached, while_held, lo_has_xdp())
+    })
+    .join()
+    .expect("attach thread");
+
+    assert_eq!(
+        (attached, while_held, after_drop),
+        (Ok(()), true, false),
+        "(attach result, attached while held, still attached after drop)"
+    );
+}

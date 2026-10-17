@@ -162,3 +162,97 @@ fn bridge_forwards_frames_a_to_b() {
         "y0 captured {found} of {N} bridged frames"
     );
 }
+
+/// A broadcast frame with an experimental EtherType carrying `marker`.
+fn marked_frame(marker: &[u8], seq: u16) -> Vec<u8> {
+    let mut frame = Vec::with_capacity(64);
+    frame.extend_from_slice(&[0xff; 6]);
+    frame.extend_from_slice(&[0x02, 0, 0, 0, 0, 0x03]);
+    frame.extend_from_slice(&0x88b5u16.to_be_bytes());
+    frame.extend_from_slice(&seq.to_be_bytes());
+    frame.extend_from_slice(marker);
+    frame.resize(frame.len().max(60), 0);
+    frame
+}
+
+/// Send `n` marked frames out of `iface` with one kick.
+fn inject_marked(iface: &str, marker: &[u8], n: u16) {
+    let mut tx = netring::Injector::builder()
+        .interface(iface)
+        .frame_count(usize::from(n).max(1))
+        .build()
+        .expect("injector");
+    for seq in 0..n {
+        let frame = marked_frame(marker, seq);
+        let mut slot = tx.allocate(frame.len()).expect("allocate");
+        slot.data_mut()[..frame.len()].copy_from_slice(&frame);
+        slot.set_len(frame.len());
+        slot.send();
+    }
+    tx.flush().expect("flush");
+    tx.wait_drained(Duration::from_secs(2)).expect("drained");
+}
+
+/// Count frames carrying `marker` on `cap` until `window` passes.
+fn count_marked(cap: &mut netring::Capture, marker: &[u8], window: Duration) -> usize {
+    let mut found = 0;
+    let deadline = std::time::Instant::now() + window;
+    while std::time::Instant::now() < deadline {
+        if let Some(batch) = cap.next_batch_blocking(Duration::from_millis(50)).unwrap() {
+            found += batch
+                .iter()
+                .filter(|p| p.data().windows(marker.len()).any(|w| w == marker))
+                .count();
+        }
+    }
+    found
+}
+
+/// Two veth pairs `x` and `y` with `nrp` names unique to this process.
+fn veth_pairs(tag: &str) -> Option<(VethPair, VethPair)> {
+    let pid = std::process::id() % 1000;
+    let x = VethPair::create(&format!("nrp{tag}{pid}x0"), &format!("nrp{tag}{pid}x1"))?;
+    let y = VethPair::create(&format!("nrp{tag}{pid}y0"), &format!("nrp{tag}{pid}y1"))?;
+    Some((x, y))
+}
+
+/// More packets in one RX block than the TX ring has frames: every one is
+/// forwarded (the TX ring is kicked when it fills), none counted ring-full.
+#[test]
+fn bridge_forwards_a_block_larger_than_the_tx_ring() {
+    let Some((x, y)) = veth_pairs("f") else {
+        eprintln!("skipping: needs CAP_NET_ADMIN to create veth");
+        return;
+    };
+    let marker = format!("netring_bridge_full_{}", helpers::unique_port());
+    let mut sink = netring::CaptureBuilder::default()
+        .interface(&y.a)
+        .block_timeout_ms(10)
+        .build()
+        .expect("capture on y0");
+    // One long-lived RX block on A, so all frames arrive in a single batch.
+    let mut bridge = Bridge::builder()
+        .interface_a(&x.b)
+        .interface_b(&y.b)
+        .a_block_timeout_ms(1_000)
+        .poll_timeout(Duration::from_millis(50))
+        .build()
+        .expect("build bridge");
+    let tx_frames = bridge.handles().1.frame_count();
+
+    const N: u16 = 2_000;
+    assert!(usize::from(N) > 4 * tx_frames);
+    inject_marked(&x.a, marker.as_bytes(), N);
+    bridge
+        .run_iterations(40, |_pkt, _dir| BridgeAction::Forward)
+        .expect("run_iterations");
+
+    let stats = bridge.cumulative_stats().expect("stats");
+    assert_eq!(stats.a_to_b_dropped_ring_full, 0, "{stats}");
+    let found = count_marked(&mut sink, marker.as_bytes(), Duration::from_millis(500));
+    assert_eq!(
+        found,
+        usize::from(N),
+        "y0 captured {found} of {N} bridged frames"
+    );
+}

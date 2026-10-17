@@ -383,19 +383,12 @@ impl Bridge {
                     );
                     continue;
                 }
-                match tx.allocate(pkt.len()) {
-                    Some(mut slot) => {
-                        slot.data_mut()[..pkt.len()].copy_from_slice(pkt.data());
-                        slot.set_len(pkt.len());
-                        slot.send();
-                    }
-                    None => {
-                        *ring_full += 1;
-                        tracing::debug!(
-                            pkt_len = pkt.len(),
-                            "Bridge: dropping packet — TX ring full"
-                        );
-                    }
+                if !queue_frame(tx, pkt.data())? {
+                    *ring_full += 1;
+                    tracing::debug!(
+                        pkt_len = pkt.len(),
+                        "Bridge: dropping packet — TX ring full"
+                    );
                 }
             }
             tx.flush()?;
@@ -462,6 +455,25 @@ impl Bridge {
     pub fn handles(&self) -> (&Capture, &Injector, &Capture, &Injector) {
         (&self.rx_a, &self.tx_b, &self.rx_b, &self.tx_a)
     }
+}
+
+/// Copy `data` into a TX slot and queue it. A batch can hold more packets
+/// than the TX ring has frames, and queued frames only leave the ring on a
+/// kick (`tpacket_snd()` runs from `sendto()`), so a full ring is flushed
+/// and the allocation retried once. `false`: still no free frame.
+fn queue_frame(tx: &mut Injector, data: &[u8]) -> Result<bool, Error> {
+    for attempt in 0..2 {
+        if let Some(mut slot) = tx.allocate(data.len()) {
+            slot.data_mut()[..data.len()].copy_from_slice(data);
+            slot.set_len(data.len());
+            slot.send();
+            return Ok(true);
+        }
+        if attempt == 0 {
+            tx.flush()?;
+        }
+    }
+    Ok(false)
 }
 
 /// The four backend handles that make up a [`Bridge`].

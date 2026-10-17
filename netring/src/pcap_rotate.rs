@@ -57,8 +57,8 @@ pub struct RotatingConfig {
     pub max_duration: Option<Duration>,
     /// Keep at most this many files; older ones are deleted. `None` = unbounded.
     pub max_files: Option<usize>,
-    /// Keep at most this many bytes across all files, the one being written
-    /// included; oldest deleted first. `None` = unbounded.
+    /// Keep at most this many bytes across this writer's files, the one
+    /// being written included; oldest deleted first. `None` = unbounded.
     pub max_total_bytes: Option<u64>,
     /// File naming scheme.
     pub naming: FileNaming,
@@ -109,10 +109,12 @@ impl RotatingPcapWriter {
     /// Create a rotating writer under `dir` with file basename `base`. Files are
     /// opened lazily on the first packet. The directory must exist.
     ///
-    /// Files a previous writer left under the same basename
-    /// (`<base>-<number>.pcap`, `<base>-<number>-<number>.pcap`) are adopted,
-    /// oldest first: retention counts them, and [`FileNaming::Sequence`]
-    /// continues after the highest number instead of overwriting them.
+    /// Files already in `dir` are never overwritten or deleted: a name in
+    /// use moves on to the next one, and [`FileNaming::Sequence`] continues
+    /// after the highest `<base>-<number>.pcap` there (so a restarted
+    /// capture doesn't clobber the previous run's evidence). Retention
+    /// (`max_files` / `max_total_bytes`) covers only the files this writer
+    /// created — another writer's, or an earlier run's, are left alone.
     pub fn create(
         dir: impl AsRef<Path>,
         base: impl Into<String>,
@@ -120,8 +122,10 @@ impl RotatingPcapWriter {
     ) -> std::io::Result<Self> {
         let dir = dir.as_ref().to_path_buf();
         let base = base.into();
-        let (files, seq) = adopt_existing(&dir, &base)?;
-        let closed_bytes = files.iter().map(|r| r.bytes).sum();
+        let seq = match config.naming {
+            FileNaming::Sequence => highest_sequence(&dir, &base)?,
+            FileNaming::EpochSeconds => 0,
+        };
         Ok(Self {
             dir,
             base,
@@ -131,8 +135,8 @@ impl RotatingPcapWriter {
             current_path: None,
             opened_at: None,
             current_bytes: 0,
-            files,
-            closed_bytes,
+            files: VecDeque::new(),
+            closed_bytes: 0,
         })
     }
 
@@ -328,48 +332,23 @@ impl RotatingPcapWriter {
     }
 }
 
-/// The files a previous writer left in `dir` under `base`
-/// (`<base>-<number>.pcap` or `<base>-<number>-<number>.pcap`), oldest first,
-/// plus the highest leading number (where a [`FileNaming::Sequence`] writer
-/// continues).
-fn adopt_existing(dir: &Path, base: &str) -> std::io::Result<(VecDeque<FileRecord>, u64)> {
+/// The highest `<n>` among the `<base>-<n>.pcap` files already in `dir`
+/// (0 if none), where a [`FileNaming::Sequence`] writer continues.
+fn highest_sequence(dir: &Path, base: &str) -> std::io::Result<u64> {
     let prefix = format!("{base}-");
-    let mut found = Vec::new();
     let mut max_seq = 0;
     for entry in std::fs::read_dir(dir)? {
-        let entry = entry?;
-        let name = entry.file_name();
+        let name = entry?.file_name();
         let Some(name) = name.to_str() else { continue };
-        let Some(stem) = name
+        if let Some(seq) = name
             .strip_prefix(&prefix)
             .and_then(|r| r.strip_suffix(".pcap"))
-        else {
-            continue;
-        };
-        let mut parts = stem.split('-');
-        let Some(Ok(first)) = parts.next().map(str::parse::<u64>) else {
-            continue;
-        };
-        if !parts.all(|p| !p.is_empty() && p.bytes().all(|b| b.is_ascii_digit())) {
-            continue;
+            .and_then(|n| n.parse::<u64>().ok())
+        {
+            max_seq = max_seq.max(seq);
         }
-        let meta = entry.metadata()?;
-        if !meta.is_file() {
-            continue;
-        }
-        max_seq = max_seq.max(first);
-        let modified = meta.modified().unwrap_or(std::time::UNIX_EPOCH);
-        found.push((modified, name.to_owned(), meta.len()));
     }
-    found.sort();
-    let files = found
-        .into_iter()
-        .map(|(_, name, bytes)| FileRecord {
-            path: dir.join(name),
-            bytes,
-        })
-        .collect();
-    Ok((files, max_seq))
+    Ok(max_seq)
 }
 
 /// A bytes-bounded ring of buffered packets — the pre-trigger window (issue
@@ -587,9 +566,10 @@ mod tests {
         );
     }
 
-    /// Retention covers the files a previous run left behind.
+    /// Retention covers only this writer's files: a previous run's (or
+    /// another writer's) are never deleted.
     #[test]
-    fn retention_counts_the_previous_runs_files() {
+    fn retention_leaves_files_it_did_not_write() {
         let dir = tempfile::tempdir().unwrap();
         let mut w = RotatingPcapWriter::create(dir.path(), "cap", seq_cfg(Some(2), None)).unwrap();
         for i in 0..2 {
@@ -597,13 +577,20 @@ mod tests {
         }
         w.sync_and_close().unwrap();
         let mut w = RotatingPcapWriter::create(dir.path(), "cap", seq_cfg(Some(2), None)).unwrap();
-        w.write_raw(&raw(200), ts(9), 200, None).unwrap();
+        for i in 0..3 {
+            w.write_raw(&raw(200), ts(10 + i), 200, None).unwrap();
+        }
         w.sync_and_close().unwrap();
-        assert_eq!(names(dir.path()), ["cap-000002.pcap", "cap-000003.pcap"]);
-        // Files that don't follow the naming scheme are left alone.
-        std::fs::write(dir.path().join("cap-notes.txt"), b"x").unwrap();
-        let w = RotatingPcapWriter::create(dir.path(), "cap", seq_cfg(Some(2), None)).unwrap();
-        assert_eq!(w.file_paths().len(), 2);
+        // Run 2 wrote 3..=5 and kept its newest 2; run 1's files remain.
+        assert_eq!(
+            names(dir.path()),
+            [
+                "cap-000001.pcap",
+                "cap-000002.pcap",
+                "cap-000004.pcap",
+                "cap-000005.pcap"
+            ]
+        );
     }
 
     /// `max_total_bytes` bounds every file, the open one included, while it

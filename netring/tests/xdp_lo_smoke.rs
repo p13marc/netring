@@ -700,3 +700,73 @@ fn afxdp_lo_capture_stats_counts_each_drop_once() {
     drop(sock);
     std::thread::sleep(Duration::from_millis(300));
 }
+
+/// A veth pair with `queues` RX/TX queues per end, removed on drop. Names
+/// must start with `nrx`.
+struct MultiQueueVeth(&'static str);
+
+impl MultiQueueVeth {
+    fn create(a: &'static str, b: &'static str, queues: u32) -> Self {
+        use std::process::Command;
+        let q = queues.to_string();
+        let _ = Command::new("ip").args(["link", "delete", a]).output();
+        let ok = Command::new("ip")
+            .args(["link", "add", a, "numrxqueues", &q, "numtxqueues", &q])
+            .args(["type", "veth", "peer", "name", b])
+            .args(["numrxqueues", &q, "numtxqueues", &q])
+            .status()
+            .expect("run ip link add")
+            .success();
+        assert!(ok, "ip link add {a} (needs root)");
+        let guard = Self(a);
+        for dev in [a, b] {
+            let up = Command::new("ip")
+                .args(["link", "set", dev, "up"])
+                .status()
+                .expect("run ip link set up")
+                .success();
+            assert!(up, "ip link set {dev} up");
+        }
+        guard
+    }
+}
+
+impl Drop for MultiQueueVeth {
+    fn drop(&mut self) {
+        let _ = std::process::Command::new("ip")
+            .args(["link", "delete", self.0])
+            .output();
+    }
+}
+
+/// `XdpShardedRunner`'s `build_shard(queue_id, builder)` closure must get
+/// each shard's RX queue id, not its index in the queue set: with
+/// `Queues::range(2..4)` the shards serve queues 2 and 3.
+#[cfg(all(feature = "flow", feature = "tokio"))]
+#[test]
+fn xdp_sharded_runner_passes_queue_ids_to_build_shard() {
+    use std::sync::{Arc, Mutex};
+
+    use netring::monitor::XdpShardedRunner;
+    use netring::protocol::builtin::Udp;
+    use netring::xdp::Queues;
+
+    let _veth = MultiQueueVeth::create("nrxq0", "nrxq1", 4);
+
+    let seen = Arc::new(Mutex::new(Vec::new()));
+    let seen_h = Arc::clone(&seen);
+    XdpShardedRunner::new("nrxq0", Queues::range(2..4), move |queue, builder| {
+        seen_h.lock().unwrap().push(queue);
+        builder.protocol::<Udp>()
+    })
+    .run_for(Duration::from_millis(300))
+    .expect("XdpShardedRunner on a 4-queue veth (needs root)");
+
+    let mut seen = seen.lock().unwrap().clone();
+    seen.sort_unstable();
+    assert_eq!(
+        seen,
+        vec![2, 3],
+        "build_shard got shard indices, not queue ids"
+    );
+}

@@ -422,6 +422,15 @@ where
                 return Poll::Ready(Some(Ok(evt)));
             }
 
+            // `TapErrorPolicy::FailStream`: the queued events are out;
+            // yield the write error once, then end.
+            #[cfg(feature = "pcap")]
+            if let Some(t) = this.tap.as_mut()
+                && t.has_failed()
+            {
+                return Poll::Ready(t.take_failure().map(Err));
+            }
+
             if poll_sweep(&mut this.sweep, cx) {
                 let now = clamp_now(current_timestamp(), &mut this.monotonic_ts);
                 for ev in this.tracker.sweep(now) {
@@ -441,8 +450,6 @@ where
             let monotonic_ts = &mut this.monotonic_ts;
             #[cfg(feature = "pcap")]
             let tap = &mut this.tap;
-            #[cfg(feature = "pcap")]
-            let mut tap_error: Option<Error> = None;
 
             let outcome = cap.poll_drain(cx, &mut |sp: SourcePacket<'_>| {
                 // Plan 17: optional pre-tracking dedup (on the unclamped ts).
@@ -454,17 +461,12 @@ where
 
                 // Plan 20: pcap tap — record what the tracker is about to
                 // see, skipping duplicates so the file matches the events.
+                // After a `FailStream` error nothing more is tracked.
                 #[cfg(feature = "pcap")]
-                if let Some(t) = tap.as_mut() {
-                    if tap_error.is_some() {
-                        return;
-                    }
-                    if let Some(err) =
-                        t.write_raw_or_handle(sp.data, sp.view.timestamp, sp.original_len)
-                    {
-                        tap_error = Some(err);
-                        return;
-                    }
+                if let Some(t) = tap.as_mut()
+                    && !t.write_raw_or_handle(sp.data, sp.view.timestamp, sp.original_len)
+                {
+                    return;
                 }
 
                 let view = clamp_view(sp.view, monotonic_ts);
@@ -477,14 +479,7 @@ where
             match outcome {
                 Poll::Pending => return Poll::Pending,
                 Poll::Ready(Err(e)) => return Poll::Ready(Some(Err(Error::Io(e)))),
-                Poll::Ready(Ok(DrainOutcome::Drained)) =>
-                {
-                    #[cfg(feature = "pcap")]
-                    if let Some(err) = tap_error {
-                        return Poll::Ready(Some(Err(err)));
-                    }
-                }
-                Poll::Ready(Ok(DrainOutcome::Idle)) => {}
+                Poll::Ready(Ok(DrainOutcome::Drained | DrainOutcome::Idle)) => {}
             }
         }
     }
@@ -883,6 +878,116 @@ pub(crate) mod monotonic_tests {
             ),
         );
         next_until(&mut s, |ev| matches!(ev, FlowEvent::Ended { .. })).await;
+    }
+
+    /// A tap whose second write fails.
+    #[cfg(feature = "pcap")]
+    struct FailSecondWrite(usize);
+
+    #[cfg(feature = "pcap")]
+    impl crate::pcap_tap::TapWriter for FailSecondWrite {
+        fn write(
+            &mut self,
+            _: &crate::packet::Packet<'_>,
+            _: Option<u32>,
+        ) -> Result<(), pcap_file::PcapError> {
+            unreachable!("the flow streams tap raw bytes")
+        }
+
+        fn write_raw(
+            &mut self,
+            _: &[u8],
+            _: Timestamp,
+            _: usize,
+            _: Option<u32>,
+        ) -> Result<(), pcap_file::PcapError> {
+            self.0 += 1;
+            if self.0 == 2 {
+                return Err(pcap_file::PcapError::IoError(std::io::Error::other(
+                    "disk full",
+                )));
+            }
+            Ok(())
+        }
+    }
+
+    /// Three single-datagram UDP flows (source ports 5000, 6000, 7000)
+    /// in one drain, behind a `FailStream` tap whose second write fails.
+    #[cfg(feature = "pcap")]
+    fn flows_with_failing_tap()
+    -> FlowStream<crate::async_adapters::flow_source::VecSource, flowscope::extract::FiveTuple>
+    {
+        use flowscope::extract::parse::test_frames::ipv4_udp;
+        let ts = current_timestamp();
+        let frames =
+            [5000, 6000, 7000].map(|sp| (ipv4_udp([10, 0, 0, 1], [10, 0, 0, 2], sp, 53, b"q"), ts));
+        let mut flows = FlowStream::new(
+            crate::async_adapters::flow_source::VecSource(frames.into()),
+            flowscope::extract::FiveTuple::bidirectional(),
+        );
+        flows.tap = Some(crate::pcap_tap::PcapTap::from_writer(
+            Box::new(FailSecondWrite(0)),
+            crate::pcap_tap::TapErrorPolicy::FailStream,
+        ));
+        flows
+    }
+
+    /// Everything `s` yields until it ends; panics if it stays open.
+    #[cfg(feature = "pcap")]
+    async fn until_end<S, T>(s: &mut S) -> Vec<Result<T, Error>>
+    where
+        S: Stream<Item = Result<T, Error>> + Unpin,
+    {
+        use futures::StreamExt;
+        let mut items = Vec::new();
+        loop {
+            match tokio::time::timeout(Duration::from_secs(1), s.next()).await {
+                Ok(Some(item)) => items.push(item),
+                Ok(None) => return items,
+                Err(_) => panic!("a FailStream tap error must end the stream"),
+            }
+        }
+    }
+
+    /// `TapErrorPolicy::FailStream`: the events of the packets recorded
+    /// before the failed write, then the error once, then the end —
+    /// nothing about the packets the file is missing.
+    #[cfg(feature = "pcap")]
+    #[tokio::test(flavor = "current_thread")]
+    async fn fail_stream_tap_ends_the_flow_stream() {
+        let items = until_end(&mut flows_with_failing_tap()).await;
+        let (last, events) = items.split_last().expect("items");
+        assert!(matches!(last, Err(Error::Io(_))), "{items:?}");
+        assert!(!events.is_empty());
+        for ev in events {
+            let ev = ev.as_ref().expect("one error, last");
+            let key = ev.key().expect("per-flow event");
+            assert_eq!(key.a.port().max(key.b.port()), 5000, "{ev:?}");
+        }
+    }
+
+    /// Same, through the session / datagram / reassembly conversions
+    /// (the tap carries over).
+    #[cfg(feature = "pcap")]
+    #[tokio::test(flavor = "current_thread")]
+    async fn fail_stream_tap_ends_every_stream() {
+        fn check<T: std::fmt::Debug>(items: Vec<Result<T, Error>>) {
+            let (last, events) = items.split_last().expect("items");
+            assert!(matches!(last, Err(Error::Io(_))), "{items:?}");
+            assert!(events.iter().all(Result::is_ok), "{items:?}");
+        }
+        check(until_end(&mut flows_with_failing_tap().session_stream(NopParser)).await);
+        check(until_end(&mut flows_with_failing_tap().datagram_stream(NopParser)).await);
+        check(
+            until_end(&mut flows_with_failing_tap().with_async_reassembler(
+                crate::async_adapters::async_reassembler::channel_factory(
+                    |_: &flowscope::extract::FiveTupleKey, _: flowscope::FlowSide| {
+                        tokio::sync::mpsc::channel(1).0
+                    },
+                ),
+            ))
+            .await,
+        );
     }
 
     #[test]

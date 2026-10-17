@@ -523,6 +523,15 @@ where
                 continue;
             }
 
+            // `TapErrorPolicy::FailStream`: the queued work is done;
+            // yield the write error once, then end.
+            #[cfg(feature = "pcap")]
+            if let Some(t) = this.tap.as_mut()
+                && t.has_failed()
+            {
+                return Poll::Ready(t.take_failure().map(Err));
+            }
+
             // 3. Periodic sweep: idle flows end, expired holes release.
             if poll_sweep(&mut this.sweep, cx) {
                 let now = clamp_now(current_timestamp(), &mut this.monotonic_ts);
@@ -555,8 +564,6 @@ where
             let monotonic_ts = &mut this.monotonic_ts;
             #[cfg(feature = "pcap")]
             let tap = &mut this.tap;
-            #[cfg(feature = "pcap")]
-            let mut tap_error: Option<Error> = None;
 
             let outcome = cap.poll_drain(cx, &mut |sp: SourcePacket<'_>| {
                 if let Some(d) = dedup.as_mut()
@@ -564,17 +571,12 @@ where
                 {
                     return;
                 }
+                // After a `FailStream` error nothing more is tracked.
                 #[cfg(feature = "pcap")]
-                if let Some(t) = tap.as_mut() {
-                    if tap_error.is_some() {
-                        return;
-                    }
-                    if let Some(err) =
-                        t.write_raw_or_handle(sp.data, sp.view.timestamp, sp.original_len)
-                    {
-                        tap_error = Some(err);
-                        return;
-                    }
+                if let Some(t) = tap.as_mut()
+                    && !t.write_raw_or_handle(sp.data, sp.view.timestamp, sp.original_len)
+                {
+                    return;
                 }
                 let view = clamp_view(sp.view, monotonic_ts);
                 let events = driver.track_pending(view);
@@ -585,14 +587,7 @@ where
             match outcome {
                 Poll::Pending => return Poll::Pending,
                 Poll::Ready(Err(e)) => return Poll::Ready(Some(Err(Error::Io(e)))),
-                Poll::Ready(Ok(DrainOutcome::Drained)) =>
-                {
-                    #[cfg(feature = "pcap")]
-                    if let Some(err) = tap_error {
-                        return Poll::Ready(Some(Err(err)));
-                    }
-                }
-                Poll::Ready(Ok(DrainOutcome::Idle)) => {}
+                Poll::Ready(Ok(DrainOutcome::Drained | DrainOutcome::Idle)) => {}
             }
         }
     }

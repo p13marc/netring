@@ -327,12 +327,13 @@ pub struct Monitor {
     /// [`crate::ctx::Ctx`] at dispatch time.
     pub(crate) label_table: flowscope::well_known::LabelTable,
     /// 0.22 §5.1: when this monitor runs as a shard under a
-    /// [`ShardedRunner`] with a registered merge, the run loop polls
-    /// this for "hand me your `T` slot" probes. `None` for ordinary
-    /// (non-merged) monitors — the run-loop branch is then disabled at
-    /// zero cost. Injected by `ShardedRunner::run_inner` via
-    /// [`Self::set_merge_rx`].
-    pub(crate) merge_rx: Option<tokio::sync::mpsc::UnboundedReceiver<merge::MergeRequest>>,
+    /// [`ShardedRunner`] with a registered merge, the run loop answers
+    /// the merge worker's "hand me your `T` slot" probes through this,
+    /// and pushes its final deltas through it when the run ends. `None`
+    /// for ordinary (non-merged) monitors — the run-loop branch is then
+    /// disabled at zero cost. Injected by `ShardedRunner::run_inner` via
+    /// [`Self::set_merge_link`].
+    pub(crate) merge_link: Option<merge::MergeLink>,
     /// The [`ShardedRunner`]'s shared stop when this monitor runs as one of
     /// its shards: the run loop also stops when a sibling's run ends.
     /// Injected via [`Self::set_shard_stop`]; `None` otherwise.
@@ -766,14 +767,11 @@ impl Monitor {
         self.sink = layer.wrap(inner);
     }
 
-    /// 0.22 §5.1: inject the merge-request receiver so this shard's run
-    /// loop answers the merge worker's probes. Called by
-    /// `ShardedRunner::run_inner` after `build`.
-    pub(crate) fn set_merge_rx(
-        &mut self,
-        rx: tokio::sync::mpsc::UnboundedReceiver<merge::MergeRequest>,
-    ) {
-        self.merge_rx = Some(rx);
+    /// 0.22 §5.1: inject this shard's merge channels so its run loop
+    /// answers the merge worker's probes (and pushes its final deltas).
+    /// Called by `ShardedRunner::run_inner` after `build`.
+    pub(crate) fn set_merge_link(&mut self, link: merge::MergeLink) {
+        self.merge_link = Some(link);
     }
 
     /// Run as a [`ShardedRunner`] shard: stop with the siblings. Called by
@@ -4334,15 +4332,24 @@ impl MonitorBuilder {
     /// `Ctx::state_mut::<T>()` lazy-creates on first access; this
     /// call surfaces typos at build time and lets you set
     /// non-default initial state by reaching through the builder
-    /// (see [`Self::state_with`]).
+    /// (see [`Self::state_with`]). A cross-shard merge
+    /// ([`ShardedRunner::merge_state`]) re-seeds the slot with
+    /// `T::default()` after each take.
     pub fn state<T: Default + Send + 'static>(mut self) -> Self {
         let _ = self.state_map.get_or_init_mut::<T>();
+        self.state_map.set_reseed(T::default);
         self
     }
 
     /// Pre-register `T` with a caller-supplied initial value.
     /// Replaces any prior `T` in the slot. 0.21 A.4: the `Default`
     /// bound is dropped — any `T: Send + 'static` works now.
+    ///
+    /// A value can't be re-created: for a type merged across shards
+    /// ([`ShardedRunner::merge_state`]) use [`Self::state`] or
+    /// [`Self::state_init`], whose seed the shard starts each interval
+    /// from. After a merge take, a `state_with` slot is gone until the
+    /// next `Ctx::state_mut::<T>()` re-creates `T::default()`.
     pub fn state_with<T: Send + 'static>(mut self, value: T) -> Self {
         self.state_map.insert(value);
         self
@@ -4351,16 +4358,19 @@ impl MonitorBuilder {
     /// Pre-register `T` via a factory closure. Lets you populate the
     /// state map with types that don't implement `Default` (e.g.
     /// `Arc<DashMap>`, `Mutex<X>`, anything wrapping a non-default
-    /// handle). Closure runs once at build time; the resulting `T` is
-    /// inserted via [`StateMap::insert`]. Equivalent to
-    /// `state_with(factory())` but reads cleaner when the factory has
-    /// side effects (opening a file, allocating an arena, etc.).
+    /// handle). The factory runs once at build time, its `T` inserted
+    /// via [`StateMap::insert`] — and again whenever the slot is reset:
+    /// a cross-shard merge ([`ShardedRunner::merge_state`]) takes the
+    /// slot each interval and re-seeds it with `factory()`, so the shard
+    /// starts every interval from your configuration rather than
+    /// `T::default()` (#216). Hence `Fn`, not `FnOnce`.
     pub fn state_init<T, F>(mut self, factory: F) -> Self
     where
         T: Send + 'static,
-        F: FnOnce() -> T,
+        F: Fn() -> T + Send + Sync + 'static,
     {
         self.state_map.insert(factory());
+        self.state_map.set_reseed(factory);
         self
     }
 
@@ -4749,7 +4759,7 @@ impl MonitorBuilder {
             label_table: self
                 .label_table
                 .unwrap_or_else(flowscope::well_known::LabelTable::new),
-            merge_rx: None,
+            merge_link: None,
             shard_stop: None,
             handler_error_policy: self.handler_error_policy,
             backend_error_policy: self.backend_error_policy,
@@ -4967,6 +4977,45 @@ mod tests {
         // State map carries Handle even though it has no Default.
         let h: &mut Handle = m.state_map.get_or_init_with::<Handle, _>(|| Handle(0));
         assert_eq!(h.0, 42);
+    }
+
+    /// #216: a merge take re-seeds a `state_init` slot from its factory —
+    /// it used to come back as `T::default()`, losing the configuration —
+    /// and a `state::<T>()` slot with `T::default()`.
+    #[test]
+    fn take_reset_reseeds_from_state_init() {
+        #[derive(Default)]
+        struct Limit {
+            max: u32,
+            seen: u32,
+        }
+        #[derive(Default)]
+        struct Hits(u32);
+        let mut m = Monitor::builder()
+            .interface("lo")
+            .state_init(|| Limit { max: 7, seen: 0 })
+            .state::<Hits>()
+            .build()
+            .unwrap();
+        m.state_map.get_or_init_mut::<Limit>().seen = 3;
+        m.state_map.get_or_init_mut::<Hits>().0 = 5;
+        let taken = m
+            .state_map
+            .take_reset(std::any::TypeId::of::<Limit>())
+            .unwrap()
+            .downcast::<Limit>()
+            .unwrap();
+        assert_eq!((taken.max, taken.seen), (7, 3));
+        let fresh = m.state_map.get::<Limit>().unwrap();
+        assert_eq!((fresh.max, fresh.seen), (7, 0));
+        let hits = m
+            .state_map
+            .take_reset(std::any::TypeId::of::<Hits>())
+            .unwrap()
+            .downcast::<Hits>()
+            .unwrap();
+        assert_eq!(hits.0, 5);
+        assert_eq!(m.state_map.get::<Hits>().map(|h| h.0), Some(0));
     }
 
     #[test]

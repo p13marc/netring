@@ -336,12 +336,19 @@ impl ShardedRunner {
     /// single primary via `merge(&mut primary, shard_value)`.
     ///
     /// Every `period`, a merge-worker thread probes each shard for its
-    /// `T` (removing it — the shard re-creates `T::default()` lazily, so
-    /// each interval folds the delta since the last probe), folds into a
-    /// persistent primary (the running grand total), and hands it to any
-    /// [`Self::on_merge`] observer. Pairs with `MonitorBuilder::state::<T>()`
-    /// in `build_shard`. **flowscope follow-up:** `RollingRate::merge_into`
-    /// would let a sharded `bandwidth_by_app` merge globally (0.15 wishlist).
+    /// `T` — taking it and re-seeding the slot the way it was registered
+    /// (`T::default()` for `MonitorBuilder::state::<T>()`, the factory for
+    /// `state_init`), so each interval folds the delta since the last
+    /// probe — folds it into a persistent primary (the running grand
+    /// total), and hands it to any [`Self::on_merge`] observer. A shard
+    /// that answers late is folded at the next probe; when the run ends,
+    /// every shard hands over its last delta and the primary is observed
+    /// once more, so the grand total covers the whole run (#216).
+    ///
+    /// Register `T` in `build_shard` with `MonitorBuilder::state::<T>()` or
+    /// `state_init`: a `state_with(value)` slot can't be re-seeded.
+    /// **flowscope follow-up:** `RollingRate::merge_into` would let a
+    /// sharded `bandwidth_by_app` merge globally (0.15 wishlist).
     pub fn merge_state<T, F>(mut self, period: Duration, merge: F) -> Self
     where
         T: Default + Send + 'static,
@@ -448,9 +455,13 @@ impl ShardedRunner {
 
         // 0.22 §5.1: if any merge is registered, create one request
         // channel per shard — the shard run loop owns the receiver, the
-        // merge worker holds all senders. Each shard takes its receiver
-        // from its slot.
+        // merge worker holds all senders — and one reply channel every
+        // shard shares (#216: it outlives each probe, so a late reply is
+        // folded at the next pass instead of lost). Each shard takes its
+        // request receiver from its slot.
         let merges = self.merges;
+        let merge_types: Arc<[std::any::TypeId]> = merges.iter().map(|m| m.type_id()).collect();
+        let (reply_tx, reply_rx) = std::sync::mpsc::channel();
         let (merge_txs, merge_rxs): (Vec<_>, Vec<_>) = if merges.is_empty() {
             (Vec::new(), Vec::new())
         } else {
@@ -464,9 +475,10 @@ impl ShardedRunner {
         let merge_rxs = Arc::new(merge_rxs);
 
         // 0.22 §5.1: the merge worker (one extra OS thread, no runtime)
-        // probes shards on each spec's cadence while they run, and exits
-        // when `stop` flips. Started first: if it can't be, no shard is
-        // running yet.
+        // probes shards on each spec's cadence while they run. Started
+        // first: if it can't be, no shard is running yet. It is stopped
+        // only after every shard was joined, so it folds their final
+        // pushes (#216: the last partial interval used to be lost).
         let stop = Arc::new(AtomicBool::new(false));
         let merge_handle = if merges.is_empty() {
             None
@@ -474,7 +486,9 @@ impl ShardedRunner {
             let stop = Arc::clone(&stop);
             let handle = std::thread::Builder::new()
                 .name("netring-merge".to_string())
-                .spawn(move || crate::monitor::merge::merge_worker(merge_txs, merges, stop))
+                .spawn(move || {
+                    crate::monitor::merge::merge_worker(merge_txs, reply_rx, merges, stop)
+                })
                 .map_err(Error::Io)?;
             Some(handle)
         };
@@ -487,12 +501,16 @@ impl ShardedRunner {
             for spec in layer_specs.iter() {
                 monitor.wrap_sink(spec.instantiate());
             }
-            // 0.22 §5.1: wire the merge-request receiver.
-            if let Some(rx) = merge_rxs
+            // 0.22 §5.1: wire the merge channels.
+            if let Some(requests) = merge_rxs
                 .get(i)
                 .and_then(|slot| slot.lock().ok().and_then(|mut rx| rx.take()))
             {
-                monitor.set_merge_rx(rx);
+                monitor.set_merge_link(crate::monitor::merge::MergeLink {
+                    requests,
+                    replies: reply_tx.clone(),
+                    types: Arc::clone(&merge_types),
+                });
             }
             monitor.set_shard_stop(shard_stop);
             rt.block_on(mode.run(monitor))
@@ -500,9 +518,10 @@ impl ShardedRunner {
         let pin = self.pin_cpus.then(allowed_cpus);
         let res = run_shard_threads(self.num_shards, "netring-shard", pin, body);
 
+        // Every shard was joined: their final deltas are queued. Join the
+        // merge worker (it sees `stop` — or every reply sender gone — folds
+        // what is queued, observes once more, and exits).
         stop.store(true, Ordering::Relaxed);
-        // Join the merge worker (it sees `stop`, does a final best-effort
-        // pass, and exits).
         if let Some(h) = merge_handle {
             let _ = h.join();
         }

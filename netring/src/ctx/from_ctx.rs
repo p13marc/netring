@@ -21,7 +21,13 @@ use crate::correlate::TimeBucketedCounter;
 #[derive(Default)]
 pub struct StateMap {
     by_type: FxHashMap<TypeId, Box<dyn Any + Send>>,
+    /// How [`Self::take_reset`] re-creates a slot: registered by
+    /// [`Self::set_reseed`] (`MonitorBuilder::state` / `state_init`).
+    reseed: FxHashMap<TypeId, Reseed>,
 }
+
+/// A slot's factory: a fresh value, boxed.
+type Reseed = Box<dyn Fn() -> Box<dyn Any + Send> + Send + Sync>;
 
 impl StateMap {
     /// Borrow `T` mutably, default-creating it if absent.
@@ -87,13 +93,34 @@ impl StateMap {
             .and_then(|b| b.downcast_ref::<T>())
     }
 
-    /// 0.22 §5.1: remove the slot keyed by `type_id` and return it
-    /// boxed (the cross-shard merge worker's "hand me your `T`" probe).
-    /// The shard's next `state_mut::<T>()` lazily re-creates
-    /// `T::default()`, so this is a take-and-reset: each merge interval
-    /// folds the delta accumulated since the previous take.
-    pub fn take_dyn(&mut self, type_id: TypeId) -> Option<Box<dyn Any + Send>> {
-        self.by_type.remove(&type_id)
+    /// Remember how to re-create `T`'s slot: [`Self::take_reset`] calls
+    /// `factory` for the fresh value. Replaces an earlier factory for `T`.
+    /// Doesn't touch the slot itself.
+    pub fn set_reseed<T, F>(&mut self, factory: F)
+    where
+        T: Send + 'static,
+        F: Fn() -> T + Send + Sync + 'static,
+    {
+        self.reseed.insert(
+            TypeId::of::<T>(),
+            Box::new(move || Box::new(factory()) as Box<dyn Any + Send>),
+        );
+    }
+
+    /// Take the slot keyed by `type_id` (boxed) and reset it: re-seeded
+    /// from its factory ([`Self::set_reseed`] — `T::default()` for
+    /// `MonitorBuilder::state::<T>()`, the closure for `state_init`), or
+    /// removed when it has none (the next `state_mut::<T>()` then
+    /// re-creates `T::default()`). `None` when there was no slot.
+    ///
+    /// The cross-shard merge's "hand me your `T`" probe: each merge
+    /// interval folds the delta accumulated since the previous take, and
+    /// the shard starts the next interval from the registered seed (#216).
+    pub fn take_reset(&mut self, type_id: TypeId) -> Option<Box<dyn Any + Send>> {
+        match self.reseed.get(&type_id) {
+            Some(fresh) => self.by_type.insert(type_id, fresh()),
+            None => self.by_type.remove(&type_id),
+        }
     }
 
     /// Number of distinct state slots currently registered.
@@ -324,15 +351,39 @@ mod tests {
     }
 
     #[test]
-    fn take_dyn_removes_slot_and_downcasts() {
+    fn take_reset_without_a_seed_removes_the_slot() {
         // 0.22 §5.1: the merge worker's take-and-reset probe.
         let mut m = StateMap::default();
         m.get_or_init_mut::<Counter1>().n = 42;
-        let taken = m.take_dyn(std::any::TypeId::of::<Counter1>());
+        let taken = m.take_reset(std::any::TypeId::of::<Counter1>());
         assert_eq!(taken.unwrap().downcast::<Counter1>().unwrap().n, 42);
         assert!(m.is_empty()); // slot removed
         // A second take finds nothing.
-        assert!(m.take_dyn(std::any::TypeId::of::<Counter1>()).is_none());
+        assert!(m.take_reset(std::any::TypeId::of::<Counter1>()).is_none());
+    }
+
+    /// #216: a take re-seeds the slot from its registered factory — not
+    /// `T::default()`, which ignores what `state_init` configured.
+    #[test]
+    fn take_reset_reseeds_from_the_factory() {
+        #[derive(Default)]
+        struct Limit {
+            max: u32,
+            seen: u32,
+        }
+        let mut m = StateMap::default();
+        m.insert(Limit { max: 7, seen: 0 });
+        m.set_reseed(|| Limit { max: 7, seen: 0 });
+        m.get_or_init_mut::<Limit>().seen = 3;
+        let taken = m.take_reset(std::any::TypeId::of::<Limit>()).unwrap();
+        assert_eq!(taken.downcast::<Limit>().unwrap().seen, 3);
+        let fresh = m.get::<Limit>().expect("re-seeded, not removed");
+        assert_eq!((fresh.max, fresh.seen), (7, 0));
+        // A seeded slot that was never touched: re-created, nothing taken.
+        let mut m = StateMap::default();
+        m.set_reseed(|| Limit { max: 9, seen: 0 });
+        assert!(m.take_reset(std::any::TypeId::of::<Limit>()).is_none());
+        assert_eq!(m.get::<Limit>().map(|l| l.max), Some(9));
     }
 
     #[test]

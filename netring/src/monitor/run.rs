@@ -223,7 +223,7 @@ pub(crate) async fn run_loop(monitor: Monitor, stop: StopCondition) -> Result<()
         mut flow_states,
         fanout,
         label_table,
-        mut merge_rx,
+        mut merge_link,
         shard_stop,
         handler_error_policy,
         backend_error_policy,
@@ -494,10 +494,9 @@ pub(crate) async fn run_loop(monitor: Monitor, stop: StopCondition) -> Result<()
                 // 0.22 §5.1: cross-shard merge probe. Gated so non-merged
                 // monitors never poll it (zero cost, like the tick branch).
                 // Out-of-band — doesn't touch the idle timer.
-                req = recv_merge(&mut merge_rx), if merge_rx.is_some() => {
-                    if let Some(req) = req {
-                        let taken = state_map.take_dyn(req.type_id);
-                        let _ = req.reply.send(taken);
+                req = recv_merge(&mut merge_link), if merge_link.is_some() => {
+                    if let (Some(req), Some(link)) = (req, merge_link.as_ref()) {
+                        link.reply(&mut state_map, req.type_id);
                     }
                     continue;
                 }
@@ -880,6 +879,9 @@ pub(crate) async fn run_loop(monitor: Monitor, stop: StopCondition) -> Result<()
     // events.
     if let Err(e) = run {
         let _ = flush_outputs(sink.as_mut(), &mut flow_exporters, &mut report_flushers);
+        if let Some(link) = &merge_link {
+            link.push_final(&mut state_map);
+        }
         return Err(e);
     }
     let mut drained = Ok(());
@@ -908,6 +910,11 @@ pub(crate) async fn run_loop(monitor: Monitor, stop: StopCondition) -> Result<()
 
     // Flush even when the drain failed; the drain's error wins.
     let flushed = flush_outputs(sink.as_mut(), &mut flow_exporters, &mut report_flushers);
+    // #216: a sharded shard hands the merge worker what it accumulated
+    // since the last probe — the drain phase's events included.
+    if let Some(link) = &merge_link {
+        link.push_final(&mut state_map);
+    }
     drained.and(flushed)
 }
 
@@ -952,7 +959,7 @@ pub(crate) async fn replay_loop(
         mut flow_states,
         fanout: _,
         label_table,
-        merge_rx: _, // replay is single-shard; no cross-shard merge
+        merge_link: _, // replay is single-shard; no cross-shard merge
         shard_stop: _,
         handler_error_policy,
         backend_error_policy: _, // replay has no live capture backend
@@ -1647,13 +1654,13 @@ async fn next_tick(intervals: &mut [tokio::time::Interval]) -> usize {
 }
 
 /// 0.22 §5.1: await the next cross-shard merge probe. When no merge
-/// receiver is wired the future never resolves (the `select!` branch is
-/// gated `if merge_rx.is_some()`, so this only runs in the `Some` case).
+/// link is wired the future never resolves (the `select!` branch is
+/// gated `if merge_link.is_some()`, so this only runs in the `Some` case).
 async fn recv_merge(
-    rx: &mut Option<tokio::sync::mpsc::UnboundedReceiver<crate::monitor::merge::MergeRequest>>,
+    link: &mut Option<crate::monitor::merge::MergeLink>,
 ) -> Option<crate::monitor::merge::MergeRequest> {
-    match rx {
-        Some(r) => r.recv().await,
+    match link {
+        Some(l) => l.requests.recv().await,
         None => std::future::pending().await,
     }
 }

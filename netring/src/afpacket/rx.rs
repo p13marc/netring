@@ -405,11 +405,11 @@ impl Capture {
     ///
     /// # Errors
     ///
-    /// [`Error::Io`] with `ENETDOWN` when the interface went down, or was
-    /// down when the capture was opened. Like libpcap, the error is
-    /// reported once (reading it clears it in the kernel): calling again
-    /// waits for packets, which flow again once the interface is back up.
-    /// [`Error::Io`] also for a failed `poll(2)`.
+    /// [`Error::Io`] with `ENETDOWN` when the interface was removed, and
+    /// for a failed `poll(2)`. An interface that is merely down (or was
+    /// down when the capture was opened) is not an error: the read waits
+    /// out its timeout, logging a warning, and packets flow again once the
+    /// interface is back up.
     pub fn next_batch_blocking(
         &mut self,
         timeout: Duration,

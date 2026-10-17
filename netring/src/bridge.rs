@@ -158,7 +158,9 @@ impl Bridge {
     /// # Errors
     ///
     /// Returns [`Error::Io`] if `poll(2)` or a `flush()` syscall fails, or
-    /// with `ENETDOWN` when either interface goes down.
+    /// with `ENETDOWN` when either interface is removed. A side that is
+    /// merely down is waited out (with a warning) and forwarding resumes
+    /// when it comes back up.
     pub fn run<F>(&mut self, mut filter: F) -> Result<(), Error>
     where
         F: FnMut(&Packet<'_>, BridgeDirection) -> BridgeAction,
@@ -198,8 +200,8 @@ impl Bridge {
     ///
     /// Returns `[a_ready, b_ready]`. Both `false` indicates the timeout
     /// elapsed with no traffic. EINTR is handled by [`crate::syscall::poll_eintr_safe`].
-    /// A socket error (`ENETDOWN` when a side went down) is returned rather
-    /// than left to make every poll return at once.
+    /// A socket error is read (clearing it) rather than left to make every
+    /// poll return at once; a removed interface is returned as an error.
     fn poll_both(&self, timeout: Duration) -> Result<[bool; 2], Error> {
         use nix::poll::{PollFd, PollFlags};
 

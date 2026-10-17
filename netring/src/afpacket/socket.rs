@@ -274,28 +274,46 @@ pub(crate) fn set_timestamp_source(
     )
 }
 
-/// Turn a packet socket's exceptional `poll(2)` events into an error.
+/// Handle a packet socket's exceptional `poll(2)` events.
 ///
 /// `POLLERR` means `sk_err` is set — `ENETDOWN` when the interface went
 /// down (packet_notifier()) or was down at bind() (packet_do_bind()). The
-/// kernel keeps reporting it on every poll, so a caller that ignores it
-/// polls in a tight loop; reading `SO_ERROR` returns and clears it, so it
-/// is reported once. `POLLHUP` / `POLLNVAL` are errors too.
+/// kernel keeps reporting it on every poll until `SO_ERROR` is read, so a
+/// caller that ignores it polls in a tight loop. It is read (and so
+/// cleared) here:
+///
+/// - `ENETDOWN` with the device still registered is **transient**: the
+///   kernel re-arms the socket when the interface comes back up
+///   (NETDEV_UP), so it is logged and the read reports "no batch" — the
+///   next poll waits normally instead of spinning.
+/// - `ENETDOWN` after the device was unregistered (`getsockname` reports
+///   ifindex -1) is permanent and returned, like any other socket error.
+///   An interface deleted while already down raises no new `POLLERR` (the
+///   socket was no longer running), so an idle poll checks the binding too.
+///
+/// `POLLHUP` / `POLLNVAL` are errors too.
 pub(crate) fn poll_error(
     fd: BorrowedFd<'_>,
     revents: Option<nix::poll::PollFlags>,
 ) -> Result<(), Error> {
     use nix::poll::PollFlags;
 
-    let Some(revents) = revents else {
-        return Ok(());
+    let Some(revents) = revents.filter(|r| !r.is_empty()) else {
+        // Nothing happened on this socket (timeout, or a stop wake-up).
+        return if bound_ifindex(fd)? < 0 {
+            Err(Error::Io(std::io::Error::from_raw_os_error(libc::ENETDOWN)))
+        } else {
+            Ok(())
+        };
     };
     if revents.contains(PollFlags::POLLNVAL) {
         return Err(Error::Io(std::io::Error::from_raw_os_error(libc::EBADF)));
     }
     if revents.contains(PollFlags::POLLERR) {
         let err = take_socket_error(fd)?;
-        if err != 0 {
+        if err == libc::ENETDOWN && bound_ifindex(fd)? >= 0 {
+            tracing::warn!("capture interface is down; waiting for it to come back up");
+        } else if err != 0 {
             return Err(Error::Io(std::io::Error::from_raw_os_error(err)));
         }
     }
@@ -303,6 +321,26 @@ pub(crate) fn poll_error(
         return Err(Error::Io(std::io::Error::other("hangup on packet socket")));
     }
     Ok(())
+}
+
+/// The ifindex a packet socket is bound to: -1 once the device was
+/// unregistered (packet_notifier() resets it), as packet_getname() reports.
+fn bound_ifindex(fd: BorrowedFd<'_>) -> Result<i32, Error> {
+    // SAFETY: zeroed sockaddr_ll is a valid out-buffer for getsockname.
+    let mut sll: libc::sockaddr_ll = unsafe { std::mem::zeroed() };
+    let mut len = std::mem::size_of::<libc::sockaddr_ll>() as libc::socklen_t;
+    // SAFETY: fd is valid; `sll` / `len` describe a sockaddr_ll-sized buffer.
+    let ret = unsafe {
+        libc::getsockname(
+            fd.as_raw_fd(),
+            (&mut sll as *mut libc::sockaddr_ll).cast(),
+            &mut len,
+        )
+    };
+    if ret == -1 {
+        return Err(Error::Socket(std::io::Error::last_os_error()));
+    }
+    Ok(sll.sll_ifindex)
 }
 
 /// Read and clear the socket's pending error (`SO_ERROR`).

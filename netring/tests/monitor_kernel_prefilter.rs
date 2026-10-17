@@ -44,6 +44,83 @@ fn frame(proto: u8, dst_port: u16) -> Vec<u8> {
 const TCP: u8 = 6;
 const UDP: u8 = 17;
 
+/// Minimal Ethernet/IPv6 frame for `proto` to `dst_port`, optionally with an
+/// 8-byte Hop-by-Hop extension header between the IPv6 header and L4.
+fn frame6(proto: u8, dst_port: u16, hop_by_hop: bool) -> Vec<u8> {
+    let mut l4 = Vec::new();
+    l4.extend_from_slice(&54321u16.to_be_bytes());
+    l4.extend_from_slice(&dst_port.to_be_bytes());
+    if proto == TCP {
+        l4.extend_from_slice(&[0, 0, 0, 1, 0, 0, 0, 0, 0x50, 0x02, 0x20, 0, 0, 0, 0, 0]);
+    } else {
+        l4.extend_from_slice(&8u16.to_be_bytes());
+        l4.extend_from_slice(&[0, 0]);
+    }
+    let ext: &[u8] = if hop_by_hop {
+        &[proto, 0, 1, 4, 0, 0, 0, 0]
+    } else {
+        &[]
+    };
+    let mut f = Vec::new();
+    f.extend_from_slice(&[0x02, 0, 0, 0, 0, 1]); // dst mac
+    f.extend_from_slice(&[0x02, 0, 0, 0, 0, 2]); // src mac
+    f.extend_from_slice(&[0x86, 0xdd]); // ipv6
+    f.extend_from_slice(&[0x60, 0, 0, 0]);
+    f.extend_from_slice(&((ext.len() + l4.len()) as u16).to_be_bytes());
+    f.push(if hop_by_hop { 0 } else { proto });
+    f.push(64);
+    let src: std::net::Ipv6Addr = "2001:db8::1".parse().unwrap();
+    let dst: std::net::Ipv6Addr = "2001:db8::2".parse().unwrap();
+    f.extend_from_slice(&src.octets());
+    f.extend_from_slice(&dst.octets());
+    f.extend_from_slice(ext);
+    f.extend_from_slice(&l4);
+    f
+}
+
+// Audit A1: protocol interests are family-agnostic in userspace, so the
+// prefilter must not default them to IPv4 — IPv6 TLS / DNS (also behind an
+// extension header) has to reach the parsers on live capture.
+#[test]
+fn ipv6_reaches_protocol_parsers() {
+    let bpf = Monitor::builder()
+        .interface("lo")
+        .protocol::<Tls>()
+        .protocol::<Dns>()
+        .kernel_prefilter()
+        .expect("tls + dns is still a real filter");
+    assert!(bpf.matches(&frame6(TCP, 443, false)), "v6 tls");
+    assert!(
+        bpf.matches(&frame6(TCP, 443, true)),
+        "v6 tls behind hop-by-hop"
+    );
+    assert!(bpf.matches(&frame6(UDP, 53, false)), "v6 dns");
+    assert!(
+        bpf.matches(&frame6(UDP, 53, true)),
+        "v6 dns behind hop-by-hop"
+    );
+    assert!(
+        !bpf.matches(&frame6(TCP, 80, false)),
+        "v6 tcp/80 still shed"
+    );
+    assert!(bpf.matches(&frame(TCP, 443)), "v4 tls unchanged");
+    assert!(!bpf.matches(&frame(TCP, 80)), "v4 tcp/80 still shed");
+}
+
+#[test]
+fn all_l4_passes_ipv6_transport() {
+    let bpf = Monitor::builder()
+        .interface("lo")
+        .all_l4()
+        .kernel_prefilter()
+        .expect("all_l4 is a proto-only filter");
+    for hbh in [false, true] {
+        assert!(bpf.matches(&frame6(TCP, 12345, hbh)), "v6 tcp (hbh={hbh})");
+        assert!(bpf.matches(&frame6(UDP, 12345, hbh)), "v6 udp (hbh={hbh})");
+    }
+    assert!(bpf.matches(&frame(TCP, 1)) && bpf.matches(&frame(UDP, 1)));
+}
+
 /// A minimal broadcast ARP-request Ethernet frame (EtherType 0x0806).
 #[cfg(feature = "arp")]
 fn arp_frame() -> Vec<u8> {

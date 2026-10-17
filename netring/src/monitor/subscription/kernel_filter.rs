@@ -14,6 +14,12 @@
 //! Negations are not lowered (per-atom cBPF negation isn't expressible through
 //! the builder); a filter whose kernel approximation contains a `Not` falls
 //! back to `None`.
+//!
+//! Address families: userspace matches IPv4 and IPv6 alike, while the cBPF
+//! builder defaults an IP-aware chain to IPv4. So every conjunction that
+//! doesn't pin a family (by an EtherType or a host / net address) is lowered
+//! once per family, the IPv6 copy widened past what its fixed-offset templates
+//! can't see (extension headers) — see [`split_families`].
 
 use flowscope::L4Proto;
 
@@ -68,8 +74,33 @@ fn proto_ports(proto: L4Proto, ports: &[u16]) -> Predicate {
 /// Cost cap (Zeek `max_filter_compile_time` analog): if the union's DNF has
 /// more than this many OR-clauses, **widen to no filter** (capture all) rather
 /// than push a huge/slow cBPF program. Fail-open — degrade toward over-capture,
-/// never toward dropping a wanted frame.
+/// never toward dropping a wanted frame. The cap applies both to the union's
+/// DNF and to the per-family clauses it lowers to (see [`split_families`]).
 const MAX_KERNEL_CLAUSES: usize = 64;
+
+/// IPv6 extension headers userspace walks past to reach the transport header
+/// (etherparse's `Ipv6ExtensionsSlice`, under flowscope's extractors:
+/// Hop-by-Hop, Routing, Fragment, Authentication, Destination Options). The
+/// cBPF builder's IPv6 templates read the next-header byte and the ports at
+/// **fixed** offsets, so an IPv6 frame whose first next-header is one of these
+/// has its transport header where the kernel can't look — it must pass.
+const IPV6_EXT_HEADERS: [u8; 5] = [0, 43, 44, 51, 60];
+
+const ETH_IPV4: u16 = 0x0800;
+const ETH_IPV6: u16 = 0x86dd;
+
+/// How [`split_families`] lowers the IPv6 copy of a conjunction.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum V6Lowering {
+    /// The conjunction on `ip6` (exact for frames without extension headers),
+    /// plus one `ip6 && next-header == E` escape clause per
+    /// [`IPV6_EXT_HEADERS`] entry carrying only the conjunction's address /
+    /// VLAN atoms (those sit at fixed offsets, so stay exact).
+    Precise,
+    /// `ip6` plus the address / VLAN atoms only: every IPv6 frame of those
+    /// hosts passes. The fallback when `Precise` exceeds the clause budget.
+    Coarse,
+}
 
 /// Compile the conservative kernel prefilter for an arbitrary set of consumer
 /// **traffic-interest** predicates (0.25 S2): the OR-union of each interest's
@@ -102,6 +133,13 @@ pub(crate) fn predicate_to_bpf(pred: &Predicate) -> Option<BpfFilter> {
     if dnf.is_empty() {
         return None;
     }
+    // Name every IP-dependent conjunction's address family explicitly — the
+    // builder would default it to IPv4 and shed all IPv6. The precise IPv6
+    // lowering first; the coarse one if that's over budget; else no filter.
+    let dnf = [V6Lowering::Precise, V6Lowering::Coarse]
+        .into_iter()
+        .map(|v6| split_families(&dnf, v6))
+        .find(|lowered| lowered.len() <= MAX_KERNEL_CLAUSES)?;
     let mut clauses = dnf.into_iter();
     // First conjunction is the base builder; the rest become OR branches.
     let first = clauses.next()?;
@@ -176,6 +214,117 @@ fn to_dnf(pred: &Predicate, max_clauses: usize) -> Option<Vec<Vec<Atom>>> {
     }
 }
 
+/// The address family an atom pins its conjunction to, if any.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Family {
+    V4,
+    V6,
+    /// A non-IP EtherType (ARP, LLDP, …).
+    NonIp,
+}
+
+fn atom_family(atom: &Atom) -> Option<Family> {
+    let of = |v6: bool| Some(if v6 { Family::V6 } else { Family::V4 });
+    match atom {
+        Atom::EtherType(ETH_IPV4) => Some(Family::V4),
+        Atom::EtherType(ETH_IPV6) => Some(Family::V6),
+        Atom::EtherType(_) => Some(Family::NonIp),
+        Atom::SrcHost(ip) | Atom::DstHost(ip) | Atom::AnyHost(ip) => of(ip.is_ipv6()),
+        Atom::SrcNet(net) | Atom::DstNet(net) | Atom::AnyNet(net) => of(net.is_ipv6()),
+        _ => None,
+    }
+}
+
+/// Atoms the builder lowers to IP-header (or deeper) loads.
+fn is_ip_atom(atom: &Atom) -> bool {
+    !matches!(atom, Atom::EtherType(_) | Atom::VlanId(_))
+}
+
+/// Atoms the IPv6 templates read past the fixed header (next-header, ports).
+fn reads_past_ipv6_header(atom: &Atom) -> bool {
+    matches!(
+        atom,
+        Atom::Proto(_) | Atom::SrcPort(_) | Atom::DstPort(_) | Atom::AnyPort(_)
+    )
+}
+
+fn push_unique(out: &mut Vec<Vec<Atom>>, clause: Vec<Atom>) {
+    if !out.contains(&clause) {
+        out.push(clause);
+    }
+}
+
+/// Rewrite a DNF so every IP-dependent conjunction carries an explicit IPv4 /
+/// IPv6 EtherType atom. The cBPF builder defaults an IP-aware chain without
+/// one to IPv4, but userspace (flowscope's extractors) accepts both families —
+/// so `tcp && port 443` used to compile to `ether 0x0800 && …` and every IPv6
+/// TLS / DNS / … frame was shed in-kernel on live capture.
+///
+/// Per conjunction:
+/// - no IP atom (EtherType / VLAN only), or a non-IP EtherType → unchanged;
+/// - IPv4 and IPv6 pins at once (e.g. a v4 and a v6 host) → dropped: no frame
+///   has both families, so userspace can't want one;
+/// - pinned to one family → that family only;
+/// - unpinned → one IPv4 copy and the IPv6 lowering below.
+///
+/// The IPv6 copy over-approximates where the templates can't see: the builder
+/// reads the IPv6 next-header and ports at fixed offsets, which miss a
+/// transport header behind extension headers. So unless it reads nothing past
+/// the fixed header, it also passes any IPv6 frame whose first next-header is
+/// an [`IPV6_EXT_HEADERS`] entry ([`V6Lowering::Precise`]), or simply every
+/// IPv6 frame of its hosts ([`V6Lowering::Coarse`]). Protocol atoms are
+/// family-agnostic here (userspace reports `Icmp` / `IcmpV6` by protocol
+/// number in either family).
+fn split_families(dnf: &[Vec<Atom>], v6: V6Lowering) -> Vec<Vec<Atom>> {
+    let mut out: Vec<Vec<Atom>> = Vec::with_capacity(dnf.len() * 2);
+    for clause in dnf {
+        let fams: Vec<Family> = clause.iter().filter_map(atom_family).collect();
+        if !clause.iter().any(is_ip_atom) || fams.contains(&Family::NonIp) {
+            push_unique(&mut out, clause.clone());
+            continue;
+        }
+        let (pin_v4, pin_v6) = (fams.contains(&Family::V4), fams.contains(&Family::V6));
+        if pin_v4 && pin_v6 {
+            continue;
+        }
+        // Everything but the EtherType atoms; the family is re-added below.
+        let rest = clause.iter().filter(|a| !matches!(a, Atom::EtherType(_)));
+        if !pin_v6 {
+            let mut v4 = vec![Atom::EtherType(ETH_IPV4)];
+            v4.extend(rest.clone().cloned());
+            push_unique(&mut out, v4);
+        }
+        if pin_v4 {
+            continue;
+        }
+        let mut exact = vec![Atom::EtherType(ETH_IPV6)];
+        exact.extend(rest.clone().cloned());
+        if !clause.iter().any(reads_past_ipv6_header) {
+            push_unique(&mut out, exact);
+            continue;
+        }
+        // Address and VLAN atoms: fixed offsets, exact behind extension headers.
+        let fixed = rest.filter(|a| !reads_past_ipv6_header(a)).cloned();
+        match v6 {
+            V6Lowering::Precise => {
+                push_unique(&mut out, exact);
+                for ext in IPV6_EXT_HEADERS {
+                    let mut escape =
+                        vec![Atom::EtherType(ETH_IPV6), Atom::Proto(L4Proto::Other(ext))];
+                    escape.extend(fixed.clone());
+                    push_unique(&mut out, escape);
+                }
+            }
+            V6Lowering::Coarse => {
+                let mut any = vec![Atom::EtherType(ETH_IPV6)];
+                any.extend(fixed);
+                push_unique(&mut out, any);
+            }
+        }
+    }
+    out
+}
+
 /// Apply a conjunction of positive atoms onto a builder (AND chain). `None` if
 /// any atom can't be mapped or the conjunction is empty (an always-true clause,
 /// which the union compiler rejects upstream — an empty clause here means the
@@ -199,7 +348,9 @@ fn apply_atom(b: BpfFilterBuilder, atom: &Atom) -> Option<BpfFilterBuilder> {
             L4Proto::Tcp => b.tcp(),
             L4Proto::Udp => b.udp(),
             L4Proto::Icmp => b.icmp(),
-            L4Proto::IcmpV6 => b.ipv6().ip_proto(58),
+            // The family comes from the conjunction's EtherType atom, which
+            // `split_families` always adds to an IP-dependent conjunction.
+            L4Proto::IcmpV6 => b.ip_proto(58),
             L4Proto::Sctp => b.ip_proto(132),
             L4Proto::Other(n) => b.ip_proto(*n),
             // flowscope 0.18 made `L4Proto` #[non_exhaustive]. A future named
@@ -420,5 +571,266 @@ mod tests {
             compile_union(widened).is_none(),
             "a signature in the union must collapse it to capture-all",
         );
+    }
+
+    // ── Address families (audit A1) ─────────────────────────────────────────
+
+    use std::net::IpAddr;
+
+    use super::super::packet::{PacketFields, packet_field_extractor};
+
+    const V4_A: &str = "10.0.0.1";
+    const V4_B: &str = "192.0.2.7";
+    const V6_A: &str = "2001:db8::1";
+    const V6_B: &str = "2001:db8::2";
+
+    fn ip(s: &str) -> IpAddr {
+        s.parse().unwrap()
+    }
+
+    /// A well-formed Ethernet frame: IPv4 or IPv6 (optionally behind a
+    /// Hop-by-Hop extension header) carrying a TCP / UDP header, or an
+    /// 8-byte ICMP-shaped body for any other `proto`.
+    fn ip_frame(
+        src: IpAddr,
+        dst: IpAddr,
+        hop_by_hop: bool,
+        proto: u8,
+        sport: u16,
+        dport: u16,
+    ) -> Vec<u8> {
+        let mut l4 = Vec::new();
+        match proto {
+            6 => {
+                l4.extend_from_slice(&sport.to_be_bytes());
+                l4.extend_from_slice(&dport.to_be_bytes());
+                l4.extend_from_slice(&[0, 0, 0, 1, 0, 0, 0, 0]); // seq, ack
+                l4.extend_from_slice(&[0x50, 0x02, 0x20, 0x00, 0, 0, 0, 0]); // SYN
+            }
+            17 => {
+                l4.extend_from_slice(&sport.to_be_bytes());
+                l4.extend_from_slice(&dport.to_be_bytes());
+                l4.extend_from_slice(&8u16.to_be_bytes());
+                l4.extend_from_slice(&[0, 0]);
+            }
+            _ => l4.extend_from_slice(&[8, 0, 0, 0, 0, 1, 0, 1]),
+        }
+        let mut f = vec![0x02, 0, 0, 0, 0, 1, 0x02, 0, 0, 0, 0, 2];
+        match (src, dst) {
+            (IpAddr::V4(s), IpAddr::V4(d)) => {
+                assert!(!hop_by_hop, "IPv4 has no extension headers");
+                f.extend_from_slice(&[0x08, 0x00, 0x45, 0]);
+                f.extend_from_slice(&(20 + l4.len() as u16).to_be_bytes());
+                f.extend_from_slice(&[0, 0, 0, 0, 64, proto, 0, 0]);
+                f.extend_from_slice(&s.octets());
+                f.extend_from_slice(&d.octets());
+            }
+            (IpAddr::V6(s), IpAddr::V6(d)) => {
+                let ext: &[u8] = if hop_by_hop {
+                    // next header, length 0 (8 bytes), PadN over the rest.
+                    &[proto, 0, 1, 4, 0, 0, 0, 0]
+                } else {
+                    &[]
+                };
+                f.extend_from_slice(&[0x86, 0xdd, 0x60, 0, 0, 0]);
+                f.extend_from_slice(&((ext.len() + l4.len()) as u16).to_be_bytes());
+                f.push(if hop_by_hop { 0 } else { proto });
+                f.push(64);
+                f.extend_from_slice(&s.octets());
+                f.extend_from_slice(&d.octets());
+                f.extend_from_slice(ext);
+            }
+            _ => panic!("mixed address families"),
+        }
+        f.extend_from_slice(&l4);
+        f
+    }
+
+    /// Every frame of a small cartesian product — both families, IPv6 with
+    /// and without a Hop-by-Hop header, TCP / UDP / ICMP / ICMPv6 (including
+    /// the cross-family proto numbers userspace also accepts), a handful of
+    /// well-known and ephemeral ports in both directions.
+    fn frame_corpus() -> Vec<Vec<u8>> {
+        let ports = [
+            (54321, 443),
+            (8443, 40000),
+            (33000, 53),
+            (80, 1234),
+            (5000, 5001),
+        ];
+        let mut out = Vec::new();
+        for (src, dst) in [(V4_A, V4_B), (V4_B, V4_A), (V6_A, V6_B), (V6_B, V6_A)] {
+            let (src, dst) = (ip(src), ip(dst));
+            for hbh in [false, true] {
+                if hbh && src.is_ipv4() {
+                    continue;
+                }
+                for proto in [6u8, 17, 1, 58] {
+                    for (sp, dp) in ports {
+                        out.push(ip_frame(src, dst, hbh, proto, sp, dp));
+                    }
+                }
+            }
+        }
+        out
+    }
+
+    /// The prefilter's contract: a frame any interest accepts in userspace
+    /// must pass the kernel filter (`None` = no filter = passes everything).
+    fn assert_superset(name: &str, interests: &[Predicate]) {
+        let bpf = compile_union(interests.to_vec());
+        assert!(
+            bpf.is_some(),
+            "{name}: expected a real filter, not capture-all"
+        );
+        let ex = packet_field_extractor();
+        let mut wanted = 0;
+        for f in frame_corpus() {
+            let view = flowscope::PacketView::new(&f, flowscope::Timestamp::new(0, 0));
+            let Some((_key, fields)) = PacketFields::extract(view, &ex) else {
+                panic!("{name}: corpus frame did not parse: {f:02x?}");
+            };
+            if interests.iter().any(|p| p.eval(&fields)) {
+                wanted += 1;
+                assert!(
+                    bpf.as_ref().is_none_or(|b| b.matches(&f)),
+                    "{name}: userspace wants this frame but the kernel prefilter \
+                     drops it\n  frame: {f:02x?}\n  filter: {:?}",
+                    bpf.as_ref().map(|b| b.to_human()),
+                );
+            }
+        }
+        assert!(wanted > 0, "{name}: corpus exercises nothing");
+    }
+
+    #[test]
+    fn prefilter_is_a_superset_of_userspace_for_both_families() {
+        let tls = || dispatch_interest(&Dispatch::Tcp(vec![443, 8443]));
+        let dns = || dispatch_interest(&Dispatch::Udp(vec![53]));
+        use super::super::builder::{PacketTier, SubscriptionBuilder};
+        let p = |b: SubscriptionBuilder<PacketTier>| b.into_predicate();
+        let cases: Vec<(&str, Vec<Predicate>)> = vec![
+            ("tls", vec![tls()]),
+            ("tls+dns", vec![tls(), dns()]),
+            (
+                "all_l4",
+                vec![
+                    dispatch_interest(&Dispatch::AllTcp),
+                    dispatch_interest(&Dispatch::AllUdp),
+                    dispatch_interest(&Dispatch::Icmp),
+                ],
+            ),
+            ("icmp", vec![dispatch_interest(&Dispatch::Icmp)]),
+            ("tcp dst 443", vec![p(packet().tcp().dst_port(443))]),
+            ("udp port 53", vec![p(packet().udp().port(53))]),
+            ("v6 host", vec![p(packet().host(ip(V6_A)))]),
+            ("tcp + v6 host", vec![p(packet().tcp().host(ip(V6_A)))]),
+            ("v6 src + udp", vec![p(packet().src_host(ip(V6_B)).udp())]),
+            ("v4 src + udp", vec![p(packet().src_host(ip(V4_B)).udp())]),
+            (
+                "expr",
+                vec![p(packet()
+                    .expr("tcp and (port 443 or port 80) or udp and dst port 53")
+                    .unwrap())],
+            ),
+            (
+                "mixed hosts",
+                vec![
+                    p(packet().tcp().dst_host(ip(V4_B))),
+                    p(packet().udp().dst_host(ip(V6_B))),
+                ],
+            ),
+        ];
+        for (name, interests) in &cases {
+            assert_superset(name, interests);
+        }
+    }
+
+    #[test]
+    fn ipv6_tls_and_dns_pass_including_behind_extension_headers() {
+        let bpf = compile_union([
+            dispatch_interest(&Dispatch::Tcp(vec![443, 8443])),
+            dispatch_interest(&Dispatch::Udp(vec![53])),
+        ])
+        .expect("tls + dns still lowers to a real filter");
+        let (a, b) = (ip(V6_A), ip(V6_B));
+        assert!(
+            bpf.matches(&ip_frame(a, b, false, 6, 54321, 443)),
+            "v6 tcp/443"
+        );
+        assert!(
+            bpf.matches(&ip_frame(a, b, true, 6, 54321, 443)),
+            "v6 hbh tcp/443"
+        );
+        assert!(
+            bpf.matches(&ip_frame(a, b, false, 17, 33000, 53)),
+            "v6 udp/53"
+        );
+        assert!(
+            bpf.matches(&ip_frame(a, b, true, 17, 33000, 53)),
+            "v6 hbh udp/53"
+        );
+        // Still a filter, for IPv6 as for IPv4: no extension header and an
+        // uninteresting port is shed.
+        assert!(
+            !bpf.matches(&ip_frame(a, b, false, 6, 54321, 80)),
+            "v6 tcp/80"
+        );
+        assert!(
+            !bpf.matches(&ip_frame(a, b, false, 17, 33000, 123)),
+            "v6 udp/123"
+        );
+        let (a4, b4) = (ip(V4_A), ip(V4_B));
+        assert!(
+            bpf.matches(&ip_frame(a4, b4, false, 6, 54321, 443)),
+            "v4 tcp/443"
+        );
+        assert!(
+            !bpf.matches(&ip_frame(a4, b4, false, 6, 54321, 80)),
+            "v4 tcp/80"
+        );
+    }
+
+    #[test]
+    fn over_budget_ipv6_lowering_degrades_to_coarse_not_to_none() {
+        // 30 TCP ports: 30 IPv4 + 30 IPv6 + 5 extension-header clauses is over
+        // MAX_KERNEL_CLAUSES, so IPv6 widens to "all of ip6" — IPv4 stays
+        // filtered rather than the whole prefilter collapsing to capture-all.
+        let ports: Vec<u16> = (1000..1030).collect();
+        let bpf = compile_union([dispatch_interest(&Dispatch::Tcp(ports))])
+            .expect("the coarse IPv6 lowering fits the budget");
+        let (a, b) = (ip(V6_A), ip(V6_B));
+        assert!(bpf.matches(&ip_frame(a, b, false, 6, 40000, 1000)));
+        assert!(
+            bpf.matches(&ip_frame(a, b, false, 17, 40000, 9)),
+            "coarse: all v6"
+        );
+        let (a4, b4) = (ip(V4_A), ip(V4_B));
+        assert!(bpf.matches(&ip_frame(a4, b4, false, 6, 40000, 1029)));
+        assert!(!bpf.matches(&ip_frame(a4, b4, false, 6, 40000, 1030)));
+    }
+
+    #[test]
+    fn host_pins_the_family_and_keeps_the_other_one_out() {
+        // A v4-host interest stays IPv4-only, a v6-host one IPv6-only.
+        let v4 = compile_union([packet().udp().src_host(ip(V4_A)).into_predicate()]).unwrap();
+        let v6 = compile_union([packet().udp().src_host(ip(V6_A)).into_predicate()]).unwrap();
+        let f4 = ip_frame(ip(V4_A), ip(V4_B), false, 17, 1, 2);
+        let f6 = ip_frame(ip(V6_A), ip(V6_B), false, 17, 1, 2);
+        assert!(v4.matches(&f4) && !v4.matches(&f6));
+        assert!(v6.matches(&f6) && !v6.matches(&f4));
+    }
+
+    #[test]
+    fn contradictory_family_clause_is_dropped_not_fatal() {
+        // `host v4 and host v6` matches no frame; the other interest must still
+        // get a real filter rather than a build error → capture-all.
+        let bpf = compile_union([
+            packet().host(ip(V4_A)).host(ip(V6_A)).into_predicate(),
+            packet().tcp().dst_port(443).into_predicate(),
+        ])
+        .expect("the satisfiable interest still lowers");
+        assert!(bpf.matches(&ip_frame(ip(V4_A), ip(V4_B), false, 6, 1, 443)));
+        assert!(!bpf.matches(&ip_frame(ip(V4_A), ip(V4_B), false, 17, 1, 53)));
     }
 }

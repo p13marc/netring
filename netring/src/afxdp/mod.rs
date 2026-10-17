@@ -933,9 +933,13 @@ impl XdpSocket {
     #[cfg(feature = "af-xdp")]
     pub fn next_batch(&mut self) -> Option<XdpBatch<'_>> {
         self.recycle_completed();
-        self.rx
-            .consumer_peek(64)
-            .map(|tok| XdpBatch::new(self, tok))
+        match self.rx.consumer_peek(64) {
+            Some(tok) => Some(XdpBatch::new(self, tok)),
+            None => {
+                self.wake_rx_if_needed();
+                None
+            }
+        }
     }
 
     /// Block until a batch is available, or `timeout` elapses.
@@ -1026,9 +1030,15 @@ impl XdpSocket {
     /// producer index and so can't be used to *decide* whether to peek), this
     /// re-loads the kernel producer index, so `XdpCapture` can pick which
     /// socket to drain without consuming from the others.
+    /// Like [`next_batch`](Self::next_batch), an empty ring wakes the
+    /// driver if it asked for it.
     #[cfg(all(feature = "af-xdp", feature = "xdp-loader"))]
     pub(crate) fn rx_poll_ready(&mut self) -> bool {
-        self.rx.refresh_count() > 0
+        let ready = self.rx.refresh_count() > 0;
+        if !ready {
+            self.wake_rx_if_needed();
+        }
+        ready
     }
 
     /// Receive packets (non-blocking) as owned copies.
@@ -1046,7 +1056,10 @@ impl XdpSocket {
         // 2. Peek RX ring
         let tok = match self.rx.consumer_peek(64) {
             Some(t) => t,
-            None => return Ok(Vec::new()),
+            None => {
+                self.wake_rx_if_needed();
+                return Ok(Vec::new());
+            }
         };
 
         let mut packets = Vec::with_capacity(tok.n as usize);
@@ -1252,9 +1265,32 @@ impl XdpSocket {
         self.comp.consumer_release(tok);
     }
 
-    /// Refill the fill ring with frames the RX path has released. Only the
-    /// RX pool feeds the fill ring, so the TX share of the UMEM (per
-    /// [`XdpMode`]) stays available to `send()`.
+    /// Whether the driver has stopped RX until it is woken up: zero-copy
+    /// drivers set `XDP_RING_NEED_WAKEUP` on the FILL ring when they ran out
+    /// of buffers (e.g. `i40e_clean_rx_irq_zc()`; copy mode never sets it),
+    /// and only when the socket was bound with `XDP_USE_NEED_WAKEUP`.
+    #[cfg(feature = "af-xdp")]
+    fn fill_needs_wakeup(&self) -> bool {
+        self.need_wakeup_enabled && self.fill.needs_wakeup()
+    }
+
+    /// Wake the driver's RX if it asked for it — "If the flag is set on the
+    /// FILL ring, the application needs to call poll() to be able to
+    /// continue to receive packets" (Documentation/networking/af_xdp.rst).
+    /// `recvfrom(MSG_DONTWAIT)` reaches `ndo_xsk_wakeup` like `poll()`, as in
+    /// libxdp; nothing else does — an epoll-driven (tokio) socket never
+    /// re-polls it while no packet arrives.
+    #[cfg(feature = "af-xdp")]
+    fn wake_rx_if_needed(&self) {
+        if self.fill_needs_wakeup() {
+            crate::syscall::recvfrom_kick(self.fd.as_raw_fd());
+        }
+    }
+
+    /// Refill the fill ring with frames the RX path has released, then wake
+    /// the driver if it stopped for lack of them. Only the RX pool feeds the
+    /// fill ring, so the TX share of the UMEM (per [`XdpMode`]) stays
+    /// available to `send()`.
     #[cfg(feature = "af-xdp")]
     fn refill(&mut self) {
         let want = self.umem.rx_available().min(64) as u32;
@@ -1274,6 +1310,7 @@ impl XdpSocket {
             debug_assert_eq!(filled, tok.n);
             if filled > 0 {
                 self.fill.producer_submit(tok);
+                self.wake_rx_if_needed();
             }
         }
     }
@@ -1487,6 +1524,159 @@ mod tests {
             .with_default_program();
         assert!(b.attach_default);
         assert!(b.program.is_none());
+    }
+
+    /// An `XdpSocket` over heap rings and a real UMEM, without an AF_XDP
+    /// socket. Its fd is one end of a datagram socketpair: an RX kick
+    /// (`recvfrom(fd, NULL, 0, MSG_DONTWAIT)`) consumes a datagram queued
+    /// from `peer`, which is how the tests see whether a kick happened.
+    #[cfg(feature = "af-xdp")]
+    struct MockSocket {
+        sock: XdpSocket,
+        peer: std::os::unix::net::UnixDatagram,
+        // Dropped after `sock`, whose rings live in it.
+        _mem: Vec<ring::mock::RingMem>,
+    }
+
+    #[cfg(feature = "af-xdp")]
+    impl MockSocket {
+        const FRAME: usize = 2048;
+
+        fn new(frames: usize, need_wakeup: bool) -> Self {
+            let (ours, peer) = std::os::unix::net::UnixDatagram::pair().unwrap();
+            let size = (frames as u32).next_power_of_two();
+            let (fill, m1) = ring::mock::ring(size);
+            let (rx, m2) = ring::mock::ring(size);
+            let (tx, m3) = ring::mock::ring(size);
+            let (comp, m4) = ring::mock::ring(size);
+            let sock = XdpSocket {
+                fd: OwnedFd::from(ours),
+                umem: Umem::new(Self::FRAME, frames).unwrap(),
+                fill,
+                rx,
+                tx,
+                comp,
+                need_wakeup_enabled: need_wakeup,
+                zerocopy: true,
+                rx_metadata: false,
+                _promisc_guard: None,
+                #[cfg(feature = "xdp-loader")]
+                _xdp_attachment: None,
+            };
+            Self {
+                sock,
+                peer,
+                _mem: vec![m1, m2, m3, m4],
+            }
+        }
+
+        /// Kernel side: place `n` received packets in the RX ring, in TX-pool
+        /// frames (the test doesn't care where they came from).
+        fn deliver_rx(&mut self, n: u32) {
+            let prod = self.sock.rx.mock_producer();
+            for i in 0..n {
+                let chunk = self.sock.umem.alloc_frame().unwrap();
+                let desc = libc::xdp_desc {
+                    addr: chunk + 256, // XDP_PACKET_HEADROOM
+                    len: 60,
+                    options: 0,
+                };
+                self.sock.rx.mock_write(prod + i, desc);
+            }
+            self.sock.rx.mock_set_producer(prod + n);
+        }
+
+        /// The driver asks (or stops asking) for an RX wakeup.
+        fn set_fill_need_wakeup(&self, on: bool) {
+            let flags = if on { ffi::XDP_RING_NEED_WAKEUP } else { 0 };
+            self.sock.fill.mock_set_flags(flags);
+        }
+
+        /// Queue the datagram an RX kick would consume.
+        fn arm(&self) {
+            self.peer.send(b"k").unwrap();
+        }
+
+        /// Whether the datagram queued by `arm` was consumed by a kick.
+        fn kicked(&self) -> bool {
+            let mut b = [0u8; 1];
+            // SAFETY: peeks at most 1 byte into `b`.
+            let n = unsafe {
+                libc::recv(
+                    self.sock.as_raw_fd(),
+                    b.as_mut_ptr().cast(),
+                    1,
+                    libc::MSG_DONTWAIT | libc::MSG_PEEK,
+                )
+            };
+            n < 0
+        }
+    }
+
+    /// Zero-copy drivers stop RX when the FILL ring runs dry and set
+    /// `XDP_RING_NEED_WAKEUP` on it; after refilling, the socket must kick
+    /// them, or RX stalls for good.
+    #[cfg(feature = "af-xdp")]
+    #[test]
+    fn rx_refill_wakes_driver_when_fill_ring_needs_it() {
+        let mut m = MockSocket::new(8, true);
+        m.set_fill_need_wakeup(true);
+
+        // recv(): consume, refill, kick.
+        m.deliver_rx(2);
+        m.arm();
+        assert_eq!(m.sock.recv().unwrap().len(), 2);
+        assert_eq!(m.sock.fill.mock_producer(), 2, "frames back to FILL");
+        assert!(m.kicked(), "recv() refilled without waking the driver");
+
+        // next_batch(): dropping the batch refills and kicks.
+        m.deliver_rx(2);
+        m.arm();
+        assert_eq!(m.sock.next_batch().map(|b| b.len()), Some(2));
+        assert_eq!(m.sock.fill.mock_producer(), 4, "frames back to FILL");
+        assert!(
+            m.kicked(),
+            "a dropped batch refilled without waking the driver"
+        );
+    }
+
+    /// Finding the RX ring empty while the driver waits for a wakeup must
+    /// kick it too (it may have stopped after our last refill).
+    #[cfg(feature = "af-xdp")]
+    #[test]
+    fn rx_empty_wakes_driver_when_fill_ring_needs_it() {
+        let mut m = MockSocket::new(8, true);
+        m.set_fill_need_wakeup(true);
+
+        m.arm();
+        assert!(m.sock.next_batch().is_none());
+        assert!(m.kicked(), "next_batch()");
+
+        m.arm();
+        assert!(m.sock.recv().unwrap().is_empty());
+        assert!(m.kicked(), "recv()");
+
+        #[cfg(feature = "xdp-loader")]
+        {
+            m.arm();
+            assert!(!m.sock.rx_poll_ready());
+            assert!(m.kicked(), "rx_poll_ready()");
+        }
+    }
+
+    /// No wakeup asked for (or none negotiated): no syscall.
+    #[cfg(feature = "af-xdp")]
+    #[test]
+    fn rx_does_not_kick_unless_the_driver_asks() {
+        for (need_wakeup, flag) in [(true, false), (false, true)] {
+            let mut m = MockSocket::new(8, need_wakeup);
+            m.set_fill_need_wakeup(flag);
+            m.deliver_rx(2);
+            m.arm();
+            assert_eq!(m.sock.recv().unwrap().len(), 2);
+            assert!(m.sock.next_batch().is_none());
+            assert!(!m.kicked(), "need_wakeup={need_wakeup} flag={flag}");
+        }
     }
 
     /// Compute the prefill count the same way `build()` does, in isolation,

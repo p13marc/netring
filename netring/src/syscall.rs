@@ -64,6 +64,30 @@ pub(crate) fn sendto_kick_status(fd: RawFd, flags: i32) -> Result<bool, std::io:
     }
 }
 
+/// `recvfrom(fd, NULL, 0, MSG_DONTWAIT, NULL, NULL)` — the AF_XDP RX wakeup
+/// (it runs the driver's NAPI when the FILL ring asked for a wakeup).
+/// Best-effort: `EINTR` is retried, any other result ignored, as in libxdp.
+#[cfg(feature = "af-xdp")]
+pub(crate) fn recvfrom_kick(fd: RawFd) {
+    loop {
+        // SAFETY: zero-length recvfrom() with NULL buffer and address — the
+        // kernel writes nothing. `fd` validity is the caller's contract.
+        let ret = unsafe {
+            libc::recvfrom(
+                fd,
+                std::ptr::null_mut(),
+                0,
+                libc::MSG_DONTWAIT,
+                std::ptr::null_mut(),
+                std::ptr::null_mut(),
+            )
+        };
+        if ret >= 0 || std::io::Error::last_os_error().raw_os_error() != Some(libc::EINTR) {
+            return;
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

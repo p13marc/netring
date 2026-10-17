@@ -26,7 +26,7 @@ use crate::afpacket::rx::{Capture, CaptureBuilder};
 use crate::afpacket::tx::{Injector, InjectorBuilder};
 use crate::config::RingProfile;
 use crate::error::Error;
-use crate::packet::Packet;
+use crate::packet::{Packet, PacketDirection};
 use crate::stats::CaptureStats;
 
 /// Action returned by a bridge filter callback.
@@ -99,6 +99,11 @@ impl std::fmt::Display for BridgeStats {
 ///
 /// The bridge waits via `poll(2)` on both RX fds before draining each direction,
 /// so it does not consume CPU while idle.
+///
+/// Only frames *arriving* on an interface are bridged. Frames leaving it —
+/// the bridge's own forwards and anything the host itself sends there — are
+/// skipped (and not shown to the filter), so the two directions cannot
+/// bounce a frame back and forth.
 #[must_use]
 pub struct Bridge {
     rx_a: Capture,
@@ -371,6 +376,14 @@ impl Bridge {
 
         while let Some(batch) = rx.next_batch() {
             for pkt in &batch {
+                // Frames leaving this interface are not bridged: without
+                // qdisc bypass the other direction's own forwards pass the
+                // packet taps here (dev_queue_xmit_nit() skips only the
+                // sending socket), and sending them back would bounce every
+                // frame between the two sides forever.
+                if pkt.direction() == PacketDirection::Outgoing {
+                    continue;
+                }
                 if filter(&pkt, direction) != BridgeAction::Forward {
                     continue;
                 }

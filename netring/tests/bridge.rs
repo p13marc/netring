@@ -256,3 +256,38 @@ fn bridge_forwards_a_block_larger_than_the_tx_ring() {
         "y0 captured {found} of {N} bridged frames"
     );
 }
+
+/// Without qdisc bypass, the bridge's own transmissions pass the packet
+/// taps on the egress interface, so its other RX socket sees them as
+/// outgoing. Forwarding those back makes every frame ping-pong between the
+/// two sides forever; one injected frame must arrive exactly once.
+#[test]
+fn bridge_does_not_forward_its_own_transmissions() {
+    let Some((x, y)) = veth_pairs("l") else {
+        eprintln!("skipping: needs CAP_NET_ADMIN to create veth");
+        return;
+    };
+    let marker = format!("netring_bridge_loop_{}", helpers::unique_port());
+    let mut sink = netring::CaptureBuilder::default()
+        .interface(&y.a)
+        .block_timeout_ms(10)
+        .build()
+        .expect("capture on y0");
+    let mut bridge = Bridge::builder()
+        .interface_a(&x.b)
+        .interface_b(&y.b)
+        .qdisc_bypass(false)
+        .a_block_timeout_ms(5)
+        .b_block_timeout_ms(5)
+        .poll_timeout(Duration::from_millis(20))
+        .build()
+        .expect("build bridge");
+
+    inject_marked(&x.a, marker.as_bytes(), 1);
+    bridge
+        .run_iterations(20, |_pkt, _dir| BridgeAction::Forward)
+        .expect("run_iterations");
+
+    let found = count_marked(&mut sink, marker.as_bytes(), Duration::from_millis(300));
+    assert_eq!(found, 1, "y0 received the one bridged frame {found} times");
+}

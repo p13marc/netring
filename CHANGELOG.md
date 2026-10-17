@@ -1,5 +1,218 @@
 # Changelog
 
+## 0.31.2 — unreleased — capture statistics, a working TX ring, and a pre-release audit
+
+Patch release: bug fixes, plus a few additive accessors and `BuildError`
+variants; cargo-semver-checks passes against 0.31.1. It started from an
+AF_XDP drop-count report (GitHub #138 → #182) and grew into a review of
+the whole crate (milestone "0.31.2 — capture statistics & pre-release bug
+hunt"): every fix below has a regression test that fails on 0.31.1. Still
+**flowscope 0.25.1**; flowscope 0.25.2 (its own audit fixes: IPFIX
+flowEndReason codes, snap-length pcaps, NBNS asset names) reaches netring
+through `cargo update`. `netring-exporters` stays 0.7.0.
+
+Read **Changed** before upgrading: several fixes change numbers or
+strings that downstream code may have been reading.
+
+### Fixed — the ones you most likely hit
+
+- **The AF_PACKET TX ring never transmitted** (#187). The injector set
+  `PACKET_VERSION = TPACKET_V3` but wrote V1 frame headers; the kernel
+  reads the status word by version, saw every frame `AVAILABLE`, and sent
+  nothing. `Injector`, `AsyncInjector` / `send_stream` and `Bridge` have
+  never worked. The TX socket now uses `TPACKET_V2`; frames with a
+  `frame_size` that doesn't divide the block are addressed per block, as
+  the kernel does (#194).
+- **AF_XDP drop counts were doubled** (#182). In copy mode one packet
+  lost for lack of a fill-ring buffer bumps both `rx_dropped` and
+  `rx_fill_ring_empty_descs`; netring added both. `drops` is now
+  `rx_dropped + rx_ring_full`, `DropBreakdown::total_rx_drops()` likewise,
+  and the `XdpStats` docs follow the kernel's meaning.
+- **`drop_rate` was wrong on both backends** (#183): AF_PACKET's
+  `tp_packets` already includes the drops, so the rate could never exceed
+  0.5; AF_XDP reported `packets = 0`, so its rate was 0 or 1 (a false
+  overload alarm on any fill-ring bump). The Monitor now splits each
+  kernel read into delivered and dropped, and counts AF_XDP packets in
+  the RX ring.
+- **Monitor telemetry froze** when a `u32` counter saturated (minutes at
+  10 Mpps) and spiked to `drop_rate` 1.0 after a backend `Reopen` (#184):
+  the Monitor reads `u64` counters internally and rebases across resets.
+- **The kernel prefilter dropped all IPv6** for protocol / port
+  interests on live capture (`.protocol::<Tls>()` compiled to
+  `ether 0x0800 && …`) — pcap replay has no kernel filter, so replay tests
+  passed (#198). It also dropped the IP fragments
+  `reassemble_ip_fragments()` needs, ignored ML-features / nPrint / YARA,
+  and a large `.expr()` could exhaust memory at `build()`.
+- **Idle flows never ended on a quiet source** in the async streams: the
+  sweep interval was left disarmed after a sweep that ended nothing (#203).
+- **`on_async` / `on_effect` never fired for L7 messages** (HTTP, DNS,
+  TLS, ICMP …), ticks or parser events (#200).
+- **A busy capture starved the Monitor's housekeeping** (sweeps, ticks,
+  `on_capture_stats` — the documented `LoadShedder` input — merges,
+  active export) and `run_for` overran by tens of seconds (#201).
+
+### Fixed — AF_PACKET
+
+- `PacketBatch::iter` tied its packets to the capture instead of the
+  batch: a packet could outlive the block it points into (use-after-free
+  in safe code) (#192).
+- Ring geometry is checked instead of wrapping on absurd sizes (#192).
+- A capture's first blocks held other interfaces' packets and packets its
+  own BPF filter rejects: the socket is now bound only after the ring and
+  filter are set up (#192).
+- A down / removed interface made `next_batch_blocking` (and `Packets`,
+  `ChannelCapture`, `Bridge::run`) spin at 100% CPU: a down interface is
+  now waited out (capture resumes when it comes back up) and a removed one
+  is reported as `ENETDOWN` (#193). `StopHandle` could lose a stop and spin; poll timeouts restarted
+  on every `EINTR` (#193).
+- `Bridge`: kicks the TX ring instead of dropping past `frame_count`
+  packets per block, stops forwarding its own transmissions (a broadcast
+  ping-ponged), and takes turns between directions (#194).
+  `AsyncInjector::send` no longer hangs on a full ring; the TX socket no
+  longer queues a copy of all received traffic (#194).
+- `Dedup` content keys include the wire length and compare timestamps by
+  distance; `InterfaceInfo.flags` parses sysfs' hex (#195).
+
+### Fixed — AF_XDP
+
+- RX frames were recycled at their data address, not their chunk start:
+  a full-size `send()` after RX wedged TX (copy mode), leaked frames
+  (zero-copy) or panicked (#188). `RxTx` / `Custom` modes refilled the TX
+  share of the UMEM into the fill ring, starving `send()` (#189).
+- `SIOCETHTOOL` calls passed a 24-byte `ifreq`; the kernel copies 40
+  bytes in and out — a stack overwrite (#185).
+- Zero-copy RX stalled once the fill ring ran dry (its need-wakeup flag
+  was never honoured); netring's own SKB-mode attach could bind zero-copy
+  on i40e / ice and break TX; copy-mode `flush()` sent at most 32 frames;
+  `AsyncXdpSocket::send` could hang; `send(&[])` leaked a frame (#196).
+- On kernels < 5.9 a failed link attach left the program attached;
+  1 GiB-hugepage hosts leaked the UMEM; `queue_count` missed RX-only
+  channels; `XdpShardedRunner` passed the shard index as the queue id;
+  `Queues::single(u32::MAX)` overflowed (#197).
+
+### Fixed — Monitor
+
+- A `with_broadcast` template subscriber leaked every message for the
+  whole run; `Isolate` didn't cover tick / telemetry handlers; a caught
+  handler panic poisoned handler lists for good; `protocol::<P>()` twice
+  (e.g. `.all_l4().on_icmp_error(..)`) delivered every message twice
+  (#200).
+- Per-flow state was freed before an idle-ended flow's `FlowEnded`
+  handlers ran (0.31 regression); a clock step made every sweep end all
+  flows; `run_until_idle` never returned with a faster tick; a failed
+  `ShardedRunner` shard left its siblings running; `is_ready()` stayed
+  true after the loop exited (#201).
+- Zero periods and huge durations panicked; a 257th capture source
+  aliased source 0; a zero merge period spun (#202).
+- DNS over TLS / QUIC (port 853) were never dispatched, and TLS / QUIC
+  classification read the server port from the wrong end of the sorted
+  flow key (#191).
+- NDP / ARP watchers raised false binding changes on every address
+  resolution and on ARP probes; IOC / Sigma matches on L7 messages carried
+  no flow key; the owner-bandwidth cache leaked non-TCP/UDP flows; top
+  domains were case-sensitive; top talkers and Sigma `src_ip` / `dst_ip`
+  followed the sorted key instead of the initiator; `sigma_level` read
+  `"Some(High)"` (#207).
+
+### Fixed — streams, pcap, export, sinks
+
+- `TapErrorPolicy::FailStream` didn't end the stream; `with_state`
+  dropped the idle-timeout predicate and queued events; a zero sweep
+  interval, `broadcast(0)` or a degenerate replay speed panicked; a
+  stopped side split a `Conversation` in two;
+  `AsyncXdpMultiCapture::from_captures` could panic on a label count
+  mismatch (#203).
+- `AsyncPcapSource`: `original_len` was smaller than the
+  Ethernet-normalised frame (raw-IP / SLL captures couldn't be rewritten),
+  an unopenable capture looked like EOF, and paced replay ignored a dropped
+  receiver (#204).
+- `RotatingPcapWriter` overwrote the previous run's files on restart and
+  let the open file exceed `max_total_bytes` (#190).
+- IPFIX interim records put cumulative counts in the delta IEs (collectors
+  summed them); `protocolIdentifier` was 0 for SCTP / other (#205).
+- `SyslogSink`: control characters in an observation could forge a
+  record; timestamps had 9 fractional digits (RFC 5424 allows 6). Report
+  sinks were never flushed at exit and the stdout ones panicked on a closed
+  pipe; `OcsfSink` didn't forward `flush`; `ChannelSink::bounded(0)`
+  panicked; `RateLimitAnomalies::new(0, _)` let anomalies through (#206).
+- `BpfFilter`: fragments chained after `ports()` applied to the first port
+  only; an IPv6 `host` needed `.ipv6()`; `to_human()` joined OR branches
+  with "and"; `negate()` was misdocumented (#199).
+
+### Added
+
+- `XdpSocket::capture_stats()`, `AsyncXdpSocket::capture_stats()`,
+  `XdpCapture::{statistics, capture_stats}`,
+  `AsyncXdpCapture::statistics()` (#182). `AsyncXdpCapture::capture_stats`
+  no longer needs the `flow` feature.
+- `BuildError::ZeroPeriod`, `BuildError::TooManyCaptureSources` (#202).
+- `ProtocolSlot::dispatch_async_effects` /
+  `dispatch_parser_event_effects`, defaulted (custom slots keep sync-only
+  dispatch unless they implement them) (#200).
+
+### Changed
+
+- **Capture statistics.** `CaptureStats::packets` follows the kernel's
+  AF_PACKET convention on both backends — packets received *including*
+  the dropped ones; AF_XDP's is no longer 0. AF_XDP `drops` no longer adds
+  `rx_fill_ring_empty_descs`. `CaptureTelemetry::packets` /
+  `CaptureHealth::packets` / `MonitorHealth::packets()` and the
+  `netring_capture_packets` gauge are packets *delivered* (excluding
+  drops), as documented. `drop_rate` thresholds now compare against true
+  loss.
+- **Kernel prefilter.** Passes IPv6 and in-frame VLAN-tagged frames;
+  `reassemble_ip_fragments`, `on_ml_features`, `nprint` and `yara` turn it
+  off (capture all).
+- **`BpfFilter`.** Port sets combine with later fragments as documented;
+  a port set inside `.or()` compiles; an IPv6 host / net implies IPv6;
+  mixing address families is `ConflictingProtocols`; `to_human()` strings
+  changed for OR filters and port sets.
+- **AF_PACKET.** `next_batch_blocking` / `Bridge::run` return
+  `Err(ENETDOWN)` when the interface is removed (a down one is waited
+  out, with a warning). `PacketBatch::iter`
+  returns `BatchIter<'_>` (only unsound code stops compiling). `Bridge`
+  no longer forwards host-originated frames.
+- **AF_XDP.** `shared_umem()` is refused with `Error::Config` (it never
+  worked; unsupported until a redesign). `send(&[])` is an error. Sockets
+  netring attaches in SKB / generic mode bind with `XDP_COPY`
+  (`is_zerocopy()` is `false` there).
+- **Monitor.** `TlsHandshake` dispatches 443, 853, 8443 and `Quic` 443,
+  853. `protocol::<P>()` is idempotent. Zero periods and more than 256
+  sources are `BuildError`s. Ticks no longer reset `run_until_idle`.
+  Tick / telemetry handler errors follow `HandlerErrorPolicy`.
+- **Output formats.** IPFIX IE 1 / 2 on interim records are deltas since
+  the flow's previous record. Syslog escapes control characters as `\xNN`
+  and uses microsecond timestamps. `sigma_level` is the rule's level
+  (`high`).
+- **`RotatingPcapWriter`** never overwrites an existing file
+  (`Sequence` naming continues after the highest number in the
+  directory), and `max_total_bytes` now counts the file being written.
+  Retention covers only the files the writer created.
+
+### Docs
+
+- TX ring, capture statistics, `XdpStats` fields, metrics ratios
+  (`docs/METRICS.md`, `TUNING_GUIDE.md`), `Monitor::replay` (ticks fire on
+  packet time), `reassemble_ip_fragments` (disables the prefilter), shared
+  UMEM (unsupported).
+
+### Tests and CI
+
+- Root-only regression tests for the TX ring, Bridge forwarding, AF_XDP
+  drop counts / send / flush / RxTx pools, capture isolation, interface
+  down, the Monitor's run loop on a busy `lo`; unprivileged replay tests
+  for the Monitor's dispatch, timing and build validation; a prefilter
+  superset property test.
+- CI runs the AF_XDP unit tests (no job enabled `af-xdp` before).
+
+### Known issues (milestone "0.31.3 — audit follow-ups")
+
+`.vlan()` / `.vlan_id()` never match on live capture (the kernel strips
+the tag first) (#208); `snap_len()` is a no-op under TPACKET_V3 (#210);
+dropping a `Packets` iterator mid-block loses the rest of the block
+(#211); async captures don't report a dead interface (#212); see the
+milestone for the rest.
+
 ## 0.31.1 — 2026-09-28 — mixed-source fan-ins, Monitor dedup, flowscope 0.25.1
 
 Patch release, additive. Follow-ups from des-capture's move to 0.31.0

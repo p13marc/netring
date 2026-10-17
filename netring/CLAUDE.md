@@ -20,6 +20,40 @@ built on AF_PACKET with TPACKET_V3 (block-based mmap ring buffers) and AF_XDP.
 
 ## Implementation Status
 
+**0.31.2 — unreleased** (bug-fix patch, CHANGELOG `## 0.31.2`; milestone
+"0.31.2 — capture statistics & pre-release bug hunt", issues #182–#207;
+follow-ups in milestone "0.31.3 — audit follow-ups" #208–#217, breaking
+ones in "0.32" #186 / #209 / #215). Still flowscope 0.25.1 (flowscope 0.25.2
+carries its own audit fixes; reached via `cargo update`).
+Started from GitHub #138 (AF_XDP drops double-counted) and became a
+whole-crate audit: five read-only subsystem reviews, then fixes each pinned
+by a test that fails on 0.31.1. Things worth knowing when touching the code:
+
+- **Capture statistics** (`stats.rs`): `CaptureStats::packets` includes
+  drops on both backends (the kernel's AF_PACKET convention); the Monitor
+  reads crate-internal `SourceCounters` (`u64`, delivered split from drops
+  per kernel read) and `TelemetrySampler` rebases across Reopen. AF_XDP
+  counts received packets in the RX ring (`XdpRing::received_total`,
+  counted at release).
+- **TX ring** (`afpacket/tx.rs`): `TPACKET_V2` + `tpacket2_hdr`, frames
+  addressed per block; the version and the header must agree (#187).
+- **AF_PACKET RX** (`afpacket/rx.rs`): socket created with protocol 0,
+  bound only after ring + filter (fanout members behind `ret #0` until they
+  join); a down interface is waited out, a removed one is `ENETDOWN`
+  (`socket::poll_error`).
+- **AF_XDP UMEM** (`afxdp/umem.rs`): separate RX and TX pools, recycled
+  addresses reduced to the chunk start; FILL need-wakeup honoured; SKB-mode
+  self-attach binds `XDP_COPY`; `shared_umem` refused.
+- **Monitor**: housekeeping branches first in the biased `select!` plus a
+  drain budget; `PacketClock` per source (latest recently-heard clock);
+  `protocol::<P>()` idempotent via `slotted_protocols`; async / effect
+  passes for slot messages (`ProtocolSlot::dispatch_async_effects`).
+- **Kernel prefilter** (`monitor/subscription/kernel_filter.rs`):
+  `split_families` emits IPv4 + IPv6 copies (IPv6 fail-open behind
+  extension headers); reassembly / ML / nPrint / YARA force capture-all.
+- CI runs the AF_XDP unit tests; `deny.toml` documents the unfixable
+  wasmtime advisories (yara-x 1.21 still requires wasmtime ^45).
+
 **0.31.1 — RELEASED 2026-09-28** (published to crates.io, tag `0.31.1`; `netring-exporters` stays 0.7.0; additive patch, CHANGELOG `## 0.31.1`;
 milestone "0.31.1 — des-capture upgrade follow-ups", issues #176–#179).
 Depends on **flowscope 0.25.1**; `netring-exporters` stays 0.7.0.
@@ -1012,8 +1046,8 @@ just ci-full         # setcap + full test suite
 
 - `SPEC.md` — Complete specification (source of truth for design)
 - `docs/` — Architecture, API overview, tuning guide, troubleshooting
-- `src/capture.rs` — High-level Capture + CaptureBuilder
-- `src/inject.rs` — High-level Injector
+- `src/afpacket/rx.rs` — `Capture` + `CaptureBuilder` (the high-level RX API lives here)
+- `src/afpacket/tx.rs` — `Injector` + `InjectorBuilder`
 - `src/traits.rs` — PacketSource, PacketSink, AsyncPacketSource traits
 - `src/packet.rs` — Packet, PacketBatch, BatchIter, Timestamp, PacketStatus
 - `src/dedup.rs` — Loopback dedup primitive (plan 10)
@@ -1178,7 +1212,7 @@ Cargo features unique to 0.21:
     over `Fn(&E::Payload) -> impl Future + 'static`. `BoxFuture`
     type alias for the boxed-future return.
   - `dispatcher.rs` — `Dispatcher` (TypeId-keyed slot table,
-    `MAX_EVENT_TYPES = 16`). `dispatch::<P>` (sync) +
+    `MAX_EVENT_TYPES = u16::MAX` since 0.22; 16 in 0.20). `dispatch::<P>` (sync) +
     `dispatch_async::<P>` (async). `BoxedHandler`,
     `BoxedAsyncHandler`, `DynAsyncHandler` trait.
   - `registry.rs` — `HandlerRegistry` build-time collector,
@@ -1245,36 +1279,28 @@ Cargo features unique to 0.21:
 
 ## Pre-publish checklist
 
-For the `0.31.0` `cargo publish`. flowscope 0.25.0 is already on crates.io
-(published 2026-09-26) and the workspace resolves it from the registry — no
-upstream-first step or `[patch.crates-io]` to remove.
+For the `0.31.2` release (a non-breaking patch; flowscope stays 0.25.1).
 
-1. Merge the 0.31 PR (#175) once CI is green.
-2. Confirm `netring/Cargo.toml` is `version = "0.31.0"` and
-   `netring-exporters` is `0.7.0` depending on `netring = "0.31"`; date the
-   `## 0.31.0` CHANGELOG banner and flip "Implementation Status" above to
-   "released".
-3. `cargo publish -p netring --dry-run`, then `cargo publish -p netring`.
-4. **Then** `cargo publish -p netring-exporters` (its `kafka` feature needs
-   `cmake`/librdkafka at *its* build time, not at publish time).
-5. `git tag 0.31.0` (no `v` prefix, per the user's convention).
-6. Update the Forgejo issue tracker at
-   <https://git.marcpardo.eu/marcpardo/netring> (the 0.31 issues close through
-   their commits on merge; close the epic #173). Planning lives in issues —
-   there is no `plans/` directory. GitHub is a synced mirror; the canonical
-   tracker is Forgejo.
-
-Two lanes exist on the forge and are worth using rather than publishing by
-hand: `publish-crates.yml` is `workflow_dispatch`-only and runs the test suite
-plus a `cargo-semver-checks` gate before publishing both crates — **0.31.0 is a
-breaking release, so it needs `allow_breaking: yes`** or the gate will
-(correctly) stop it. `release.yml` fires on a bare-semver tag and attaches the
-tarball + `SHA256SUMS`.
+1. Merge the 0.31.2 PR once `ci.yml` and the integration lane are green
+   (the integration lane posts failures as a PR comment).
+2. Date the `## 0.31.2` CHANGELOG banner and flip "Implementation Status"
+   above to "RELEASED"; commit on master (`release: mark 0.31.2 released
+   (<date>)`).
+3. `git tag 0.31.2` (no `v` prefix); `release.yml` attaches the tarball +
+   `SHA256SUMS`.
+4. Publish: dispatch `publish-crates.yml` with `allow_breaking: no` (it runs
+   the tests and `cargo-semver-checks` first and skips `netring-exporters`,
+   whose 0.7.0 is already published). Its `CARGO_REGISTRY_TOKEN` was
+   rejected with a 403 for 0.31.1, and this host has no crates.io
+   credentials — if it fails again the owner runs
+   `cargo publish -p netring` by hand.
+5. Close the milestone's issues explicitly (`Closes #N` doesn't reliably
+   close them on merge here). Planning lives in Forgejo issues at
+   <https://git.marcpardo.eu/marcpardo/netring>; GitHub is a synced mirror.
 
 Run `just doc` (`RUSTDOCFLAGS="-D warnings"`) + `just ci` before publish — the
-CI doc job fails on broken intra-doc links. (Earlier-version notes: 0.22 needed
-flowscope 0.14.1 published first + a `[patch.crates-io]` removal; no longer
-applicable.)
+CI doc job fails on broken intra-doc links. Regenerate the public-API lock with
+`cargo +nightly-2026-08-18 public-api -p netring --all-features -ss`.
 
 **Known operator gotcha**: on at least one dev machine
 `~/.cargo/credentials.toml` is an empty root-owned directory (likely

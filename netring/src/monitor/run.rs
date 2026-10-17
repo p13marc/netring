@@ -218,6 +218,7 @@ pub(crate) async fn run_loop(monitor: Monitor, stop: StopCondition) -> Result<()
         mut capture_stats,
         health,
         mut flow_exporters,
+        mut report_flushers,
         mut ml_feature_handlers,
         mut byte_accumulators,
         ip_frag_config,
@@ -849,7 +850,7 @@ pub(crate) async fn run_loop(monitor: Monitor, stop: StopCondition) -> Result<()
     // for fail-fast smoke tests that don't care about residual
     // events.
     if let Err(e) = run {
-        let _ = flush_outputs(sink.as_mut(), &mut flow_exporters);
+        let _ = flush_outputs(sink.as_mut(), &mut flow_exporters, &mut report_flushers);
         return Err(e);
     }
     let mut drained = Ok(());
@@ -877,7 +878,7 @@ pub(crate) async fn run_loop(monitor: Monitor, stop: StopCondition) -> Result<()
     }
 
     // Flush even when the drain failed; the drain's error wins.
-    let flushed = flush_outputs(sink.as_mut(), &mut flow_exporters);
+    let flushed = flush_outputs(sink.as_mut(), &mut flow_exporters, &mut report_flushers);
     drained.and(flushed)
 }
 
@@ -929,6 +930,7 @@ pub(crate) async fn replay_loop(
         capture_stats: _,        // pcap replay has no kernel ring to sample
         health,
         mut flow_exporters,
+        mut report_flushers,
         mut ml_feature_handlers,
         mut byte_accumulators,
         ip_frag_config,
@@ -1261,7 +1263,7 @@ pub(crate) async fn replay_loop(
     // events (flowscope's `finish()` synthesises FlowEnded
     // events for in-flight flows).
     if let Err(e) = run {
-        let _ = flush_outputs(sink.as_mut(), &mut flow_exporters);
+        let _ = flush_outputs(sink.as_mut(), &mut flow_exporters, &mut report_flushers);
         return Err(e);
     }
     let mut drained = Ok(());
@@ -1289,7 +1291,7 @@ pub(crate) async fn replay_loop(
     }
 
     // Flush even when the drain failed; the drain's error wins.
-    let flushed = flush_outputs(sink.as_mut(), &mut flow_exporters);
+    let flushed = flush_outputs(sink.as_mut(), &mut flow_exporters, &mut report_flushers);
     drained.and(flushed)
 }
 
@@ -1350,17 +1352,23 @@ async fn drain_phase(
 }
 
 /// Flush every buffered output at loop exit — the anomaly sink (EVE /
-/// JSON / syslog writers buffer) and the flow exporters — whatever the
-/// drain phase did (a zero `drain_timeout`, a missed deadline, an
-/// error). An exporter's flush error is logged; the sink's is
-/// returned.
+/// JSON / syslog writers buffer), the flow exporters and the report
+/// sinks — whatever the drain phase did (a zero `drain_timeout`, a
+/// missed deadline, an error). An exporter's or report sink's flush
+/// error is logged; the sink's is returned.
 fn flush_outputs(
     sink: &mut dyn AnomalySink,
     flow_exporters: &mut [Box<dyn crate::export::FlowExporter>],
+    report_flushers: &mut [crate::monitor::ReportFlush],
 ) -> Result<()> {
     for exporter in flow_exporters.iter_mut() {
         if let Err(e) = exporter.flush() {
             tracing::warn!(error = %e, "flow exporter flush failed");
+        }
+    }
+    for flush in report_flushers.iter_mut() {
+        if let Err(e) = flush() {
+            tracing::warn!(error = %e, "report sink flush failed");
         }
     }
     sink.flush().map_err(|e| {

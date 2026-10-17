@@ -242,6 +242,19 @@ pub enum CaptureSourceBackend {
     AfXdpProvided,
 }
 
+/// Flushes one registered [`ReportSink`](crate::report::ReportSink).
+pub(crate) type ReportFlush = Box<dyn FnMut() -> std::io::Result<()> + Send>;
+
+/// The flush hook of a report sink shared with its tick handler.
+fn report_flush<R, S>(sink: &std::sync::Arc<std::sync::Mutex<S>>) -> ReportFlush
+where
+    R: crate::report::Report,
+    S: crate::report::ReportSink<R> + 'static,
+{
+    let sink = std::sync::Arc::clone(sink);
+    Box::new(move || sink.lock().map_or(Ok(()), |mut s| s.flush()))
+}
+
 /// The 0.20 top-level monitor — a fully-constructed graph of
 /// (driver, dispatcher, parser-slots, state) that runs to a
 /// stop condition.
@@ -348,6 +361,11 @@ pub struct Monitor {
     /// [`crate::export::FlowRecord`] for every `FlowEnded` and hands it
     /// to each. Empty (the common case) is zero cost.
     pub(crate) flow_exporters: Vec<Box<dyn crate::export::FlowExporter>>,
+    /// Flush hooks of the [`ReportSink`](crate::report::ReportSink)s
+    /// registered via [`MonitorBuilder::report_to`] /
+    /// [`MonitorBuilder::capture_health`]; run with the other outputs'
+    /// flushes when the monitor exits.
+    pub(crate) report_flushers: Vec<ReportFlush>,
     /// Issue #32: flow-end ML-feature handlers registered via
     /// [`MonitorBuilder::on_ml_features`]. Each is called with the live
     /// `(key, stats, reason)` at flow end; the `CicFlowFeatures` construction
@@ -975,6 +993,8 @@ pub struct MonitorBuilder {
     /// 0.24 Phase D1: flow exporters registered via
     /// [`Self::export_flows`]. Moved into [`Monitor::flow_exporters`].
     flow_exporters: Vec<Box<dyn crate::export::FlowExporter>>,
+    /// Report-sink flush hooks. Moved into [`Monitor::report_flushers`].
+    report_flushers: Vec<ReportFlush>,
     /// Issue #32: flow-end ML-feature handlers registered via
     /// [`Self::on_ml_features`]. Moved into [`Monitor::ml_feature_handlers`].
     ml_feature_handlers: Vec<ml_features::FlowEndHandler>,
@@ -1755,12 +1775,17 @@ impl MonitorBuilder {
     /// # Ok(())
     /// # }
     /// ```
-    pub fn capture_health<S>(self, period: Duration, mut sink: S) -> Self
+    pub fn capture_health<S>(mut self, period: Duration, sink: S) -> Self
     where
         S: crate::report::ReportSink<CaptureHealth> + 'static,
     {
+        let sink = std::sync::Arc::new(std::sync::Mutex::new(sink));
+        self.report_flushers
+            .push(report_flush::<CaptureHealth, S>(&sink));
         self.on_capture_stats(period, move |t, _ctx| {
-            sink.record(&CaptureHealth::from(*t));
+            if let Ok(mut s) = sink.lock() {
+                s.record(&CaptureHealth::from(*t));
+            }
             Ok(())
         })
     }
@@ -4477,7 +4502,7 @@ impl MonitorBuilder {
     ///     |snap| snap.bandwidth().unwrap().to_snapshot(10),
     ///     JsonReportSink)
     /// ```
-    pub fn report_to<R, B, S>(self, period: Duration, build: B, sink: S) -> Self
+    pub fn report_to<R, B, S>(mut self, period: Duration, build: B, sink: S) -> Self
     where
         R: crate::report::Report,
         B: Fn(crate::report::ReportSnapshot<'_, '_>) -> R + Send + Sync + 'static,
@@ -4486,7 +4511,8 @@ impl MonitorBuilder {
         // Tick handlers are stored behind `Arc<dyn Fn + Send + Sync>`, so
         // the sink needs interior mutability. The lock is taken once per
         // cadence tick (seconds), never on the packet path.
-        let sink = std::sync::Mutex::new(sink);
+        let sink = std::sync::Arc::new(std::sync::Mutex::new(sink));
+        self.report_flushers.push(report_flush::<R, S>(&sink));
         self.tick(period, move |tick: &Tick, ctx: &mut Ctx<'_>| {
             let report = build(crate::report::ReportSnapshot { ctx, now: tick.now });
             if let Ok(mut s) = sink.lock() {
@@ -4709,6 +4735,7 @@ impl MonitorBuilder {
             capture_stats: self.capture_stats,
             health: health::HealthState::new(),
             flow_exporters: self.flow_exporters,
+            report_flushers: self.report_flushers,
             ml_feature_handlers: self.ml_feature_handlers,
             byte_accumulators,
             ip_frag_config: self.ip_frag_config,

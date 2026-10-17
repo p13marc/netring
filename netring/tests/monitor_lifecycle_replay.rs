@@ -276,6 +276,42 @@ async fn sink_is_flushed_without_a_drain_phase() {
     assert!(flushes.load(Ordering::SeqCst) >= 1);
 }
 
+/// Report sinks are flushed at exit too, like the anomaly sink and the
+/// flow exporters.
+#[tokio::test(flavor = "current_thread")]
+async fn report_sinks_are_flushed_at_exit() {
+    #[derive(Debug)]
+    struct Snapshot;
+    impl netring::report::Report for Snapshot {
+        const NAME: &'static str = "snapshot";
+    }
+    struct Flushes(Arc<AtomicUsize>);
+    impl netring::report::ReportSink<Snapshot> for Flushes {
+        fn record(&mut self, _: &Snapshot) {}
+        fn flush(&mut self) -> std::io::Result<()> {
+            self.0.fetch_add(1, Ordering::SeqCst);
+            Ok(())
+        }
+    }
+
+    let file = pcap(&[udp(5000, 1), udp(5000, 3)]);
+    let flushes = Arc::new(AtomicUsize::new(0));
+    Monitor::builder()
+        .pcap_source(file.path())
+        .protocol::<Udp>()
+        .report_to(
+            Duration::from_secs(1),
+            |_| Snapshot,
+            Flushes(Arc::clone(&flushes)),
+        )
+        .build()
+        .unwrap()
+        .replay()
+        .await
+        .unwrap();
+    assert_eq!(flushes.load(Ordering::SeqCst), 1);
+}
+
 /// Tick handlers run on replay, on packet time (they never ran there):
 /// one per period of capture time, stamped with the scheduled time, a
 /// long silence costing one tick rather than a backlog.

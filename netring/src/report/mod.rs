@@ -85,17 +85,27 @@ impl ReportSnapshot<'_, '_> {
 }
 
 /// Prints each report via its `Debug` impl, prefixed with `R::NAME`.
+///
+/// Write errors (a closed pipe, …) are ignored, like the other shipped
+/// sinks — `println!` would panic.
 #[derive(Debug, Default, Clone, Copy)]
 pub struct StdoutReportSink;
 
 impl<R: Report + std::fmt::Debug> ReportSink<R> for StdoutReportSink {
     fn record(&mut self, report: &R) {
-        println!("[{}] {report:?}", R::NAME);
+        use std::io::Write as _;
+        let _ = writeln!(std::io::stdout().lock(), "[{}] {report:?}", R::NAME);
+    }
+
+    fn flush(&mut self) -> std::io::Result<()> {
+        use std::io::Write as _;
+        std::io::stdout().flush()
     }
 }
 
 /// Writes each report as one JSON line (newline-delimited JSON, the
-/// shape Vector / Filebeat / Loki ingest). Requires `serde`.
+/// shape Vector / Filebeat / Loki ingest) on stdout. Requires `serde`.
+/// Write errors are ignored, as in [`StdoutReportSink`].
 #[cfg(feature = "serde")]
 #[derive(Debug, Default, Clone, Copy)]
 pub struct JsonReportSink;
@@ -103,9 +113,17 @@ pub struct JsonReportSink;
 #[cfg(feature = "serde")]
 impl<R: Report + serde::Serialize> ReportSink<R> for JsonReportSink {
     fn record(&mut self, report: &R) {
+        use std::io::Write as _;
         match serde_json::to_string(report) {
-            Ok(line) => println!("{line}"),
+            Ok(line) => {
+                let _ = writeln!(std::io::stdout().lock(), "{line}");
+            }
             Err(e) => eprintln!("JsonReportSink: serialize failed: {e}"),
         }
+    }
+
+    fn flush(&mut self) -> std::io::Result<()> {
+        use std::io::Write as _;
+        std::io::stdout().flush()
     }
 }

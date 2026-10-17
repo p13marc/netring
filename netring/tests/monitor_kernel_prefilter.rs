@@ -292,3 +292,49 @@ fn pure_l4_protocol_keeps_all_of_that_l4() {
         "udp not wanted by Tcp marker"
     );
 }
+
+/// A non-first IPv4 fragment of a UDP datagram: fragment offset 1480 bytes,
+/// no UDP header (it lives in fragment 0), just payload.
+fn ipv4_udp_trailing_fragment() -> Vec<u8> {
+    let payload = [0xabu8; 16];
+    let mut f = Vec::new();
+    f.extend_from_slice(&[0x02, 0, 0, 0, 0, 1]); // dst mac
+    f.extend_from_slice(&[0x02, 0, 0, 0, 0, 2]); // src mac
+    f.extend_from_slice(&[0x08, 0x00]); // ipv4
+    f.extend_from_slice(&[0x45, 0]);
+    f.extend_from_slice(&(20 + payload.len() as u16).to_be_bytes());
+    f.extend_from_slice(&[0x12, 0x34]); // id
+    f.extend_from_slice(&(1480u16 / 8).to_be_bytes()); // MF clear, offset 185
+    f.extend_from_slice(&[64, UDP, 0, 0]);
+    f.extend_from_slice(&[10, 0, 0, 2]);
+    f.extend_from_slice(&[10, 0, 0, 1]);
+    f.extend_from_slice(&payload);
+    f
+}
+
+// Audit A3: the reassembler needs every fragment of a datagram, but only
+// fragment 0 carries the ports — a port-narrowed prefilter let the first
+// fragment through and shed the rest, so nothing ever reassembled on a live
+// capture (worse than not arming it).
+#[test]
+fn ip_fragment_reassembly_keeps_trailing_fragments() {
+    let narrow = Monitor::builder()
+        .interface("lo")
+        .protocol::<Dns>()
+        .kernel_prefilter()
+        .expect("dns alone narrows to udp/53");
+    assert!(
+        !narrow.matches(&ipv4_udp_trailing_fragment()),
+        "precondition: the port template sheds a trailing fragment"
+    );
+
+    let pf = Monitor::builder()
+        .interface("lo")
+        .protocol::<Dns>()
+        .reassemble_ip_fragments()
+        .kernel_prefilter();
+    assert!(
+        pf.is_none_or(|bpf| bpf.matches(&ipv4_udp_trailing_fragment())),
+        "an armed reassembler must see every fragment"
+    );
+}

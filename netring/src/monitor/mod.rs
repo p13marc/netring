@@ -2517,6 +2517,10 @@ impl MonitorBuilder {
     /// subscriptions, and p0f still see the raw wire fragments. Overlapping
     /// fragments (teardrop / RFC 5722) are dropped, so an evasion payload behind
     /// an overlap never reassembles.
+    ///
+    /// Arming reassembly turns the automatic kernel prefilter off (capture
+    /// everything): its port checks can't see the ports of a non-first
+    /// fragment, so they would drop the fragments the reassembler needs.
     pub fn reassemble_ip_fragments(self) -> Self {
         self.reassemble_ip_fragments_with(ip_frag::IpFragConfig::default())
     }
@@ -4175,11 +4179,12 @@ impl MonitorBuilder {
     ///
     /// `None` means **capture everything** (filter in userspace): it's returned
     /// when any consumer wants all traffic (a broad handler, an exporter, a
-    /// tick/report, broadcast, bandwidth), the union is empty, or it can't be
-    /// expressed within the cBPF budget. Because the union is a *superset* of
-    /// every consumer's interest, the filter never drops a frame any consumer
-    /// wants — **fail-open and starvation-free by construction**, which is what
-    /// makes it safe to auto-apply (see [`Monitor::run_*`](Monitor)).
+    /// tick/report, broadcast, bandwidth, IP-fragment reassembly), the union
+    /// is empty, or it can't be expressed within the cBPF budget. Because the
+    /// union is a *superset* of every consumer's interest, the filter never
+    /// drops a frame any consumer wants — **fail-open and starvation-free by
+    /// construction**, which is what makes it safe to auto-apply (see
+    /// [`Monitor::run_*`](Monitor)).
     ///
     /// Also exposed for **inspection / debugging** (what STAGE-0 would shed).
     pub fn kernel_prefilter(&self) -> Option<crate::config::BpfFilter> {
@@ -4189,7 +4194,11 @@ impl MonitorBuilder {
         let wants_all = !self.flow_exporters.is_empty()
             || !self.tick_handlers.is_empty()
             || !self.broadcast_handles.is_empty()
-            || self.bandwidth_registered;
+            || self.bandwidth_registered
+            // The IP-fragment reassembler needs every fragment of a datagram,
+            // but only fragment 0 carries the ports, and the port templates
+            // shed non-first fragments — a narrowed prefilter would starve it.
+            || self.ip_frag_config.is_some();
 
         let interests = self
             .handlers

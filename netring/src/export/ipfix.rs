@@ -119,6 +119,12 @@ fn to_ie_record(record: &FlowRecord) -> IeFlowRecord {
     rec.packet_delta_count_initiator = record.packets_initiator;
     rec.packet_delta_count_responder = record.packets_responder;
     rec.octet_total_count = record.total_ip_bytes();
+    // The wire (L2) bytes go to IE 352 / 353, as flowscope's own
+    // `FlowRecord::from_key_fields` maps them (not in the default
+    // templates' wire shape; carried for the canonical record).
+    rec.layer2_octet_delta_count_initiator = Some(record.bytes_initiator);
+    rec.layer2_octet_delta_count_responder = Some(record.bytes_responder);
+    rec.layer2_octet_total_count = Some(record.total_bytes());
     rec.packet_total_count = record.total_packets();
     rec.flow_start_milliseconds = ts_millis(record.start);
     rec.flow_end_milliseconds = ts_millis(record.end);
@@ -153,7 +159,7 @@ impl FlowRecord {
     /// flowscope IE-writer other than netring's [`IpfixExporter`]. The mapping is
     /// the same one `IpfixExporter` uses on the wire: the initiator as the
     /// source, per-direction delta counts (IE 1/2) + both-direction totals
-    /// (IE 85/86) in IP octets, `flowEndReason` (IE 136)
+    /// (IE 85/86) in IP octets, the wire (layer-2) octets in IE 352 / 353, `flowEndReason` (IE 136)
     /// **plus** the un-collapsed `original_end_reason` shadow, and the Community
     /// ID. `tcpControlBits` is left unset — flowscope's `FlowStats` does not
     /// accumulate per-flow TCP flags, so there is no source for it (a flowscope
@@ -192,6 +198,8 @@ type FlowId = (
 struct Exported {
     ip_bytes_initiator: u64,
     ip_bytes_responder: u64,
+    bytes_initiator: u64,
+    bytes_responder: u64,
     packets_initiator: u64,
     packets_responder: u64,
     /// The record's `end`, to forget flows that never get a final record.
@@ -286,6 +294,10 @@ impl<W: Write + Send> IpfixExporter<W> {
             rec.octet_delta_count_responder = record
                 .ip_bytes_responder
                 .saturating_sub(prev.ip_bytes_responder);
+            rec.layer2_octet_delta_count_initiator =
+                Some(record.bytes_initiator.saturating_sub(prev.bytes_initiator));
+            rec.layer2_octet_delta_count_responder =
+                Some(record.bytes_responder.saturating_sub(prev.bytes_responder));
             rec.packet_delta_count_initiator = record
                 .packets_initiator
                 .saturating_sub(prev.packets_initiator);
@@ -320,6 +332,8 @@ impl<W: Write + Send> IpfixExporter<W> {
             Exported {
                 ip_bytes_initiator: record.ip_bytes_initiator,
                 ip_bytes_responder: record.ip_bytes_responder,
+                bytes_initiator: record.bytes_initiator,
+                bytes_responder: record.bytes_responder,
                 packets_initiator: record.packets_initiator,
                 packets_responder: record.packets_responder,
                 at: record.end,
@@ -461,6 +475,10 @@ mod tests {
         assert_eq!(rec.packet_delta_count_responder, 5);
         // … and the totals (IE 85/86) are both directions summed.
         assert_eq!(rec.octet_total_count, 860);
+        // The wire bytes are the layer-2 octets (IE 352 / 353).
+        assert_eq!(rec.layer2_octet_delta_count_initiator, Some(400));
+        assert_eq!(rec.layer2_octet_delta_count_responder, Some(600));
+        assert_eq!(rec.layer2_octet_total_count, Some(1000));
         assert_eq!(rec.packet_total_count, 10);
         assert_eq!(rec.flow_end_reason, Some(FlowEndReason::EndOfFlowDetected));
         // Issue #33: the Community ID carries onto the canonical IE record
@@ -647,6 +665,34 @@ mod tests {
         assert_eq!(counts(msgs[0]), (100, 2, 100));
         assert_eq!(counts(msgs[1]), (50, 1, 150));
         assert_eq!(counts(msgs[2]), (40, 1, 40));
+    }
+
+    /// IE 352 / 353 carry the wire (layer-2) octets, delta-counted like
+    /// IE 1 across active-timeout records.
+    #[test]
+    fn layer2_octets_are_wire_bytes_with_deltas() {
+        let key = v4_record().key;
+        let mut s = FlowStats::default();
+        s.started = Timestamp::from_unix_f64(1000.0);
+        s.last_seen = Timestamp::from_unix_f64(1060.0);
+        s.bytes_initiator = 128;
+        s.ip_bytes_initiator = 100;
+        let mut exporter = IpfixExporter::new(std::io::sink(), 1);
+        let first = FlowRecord::from_stats(&key, &s, None);
+        assert_eq!(
+            exporter
+                .delta_record(&first)
+                .layer2_octet_delta_count_initiator,
+            Some(128)
+        );
+        exporter.export(&first);
+        s.bytes_initiator = 200;
+        s.ip_bytes_initiator = 158;
+        s.last_seen = Timestamp::from_unix_f64(1090.0);
+        let rec = exporter.delta_record(&FlowRecord::from_stats(&key, &s, Some(EndReason::Fin)));
+        assert_eq!(rec.layer2_octet_delta_count_initiator, Some(72));
+        assert_eq!(rec.octet_delta_count_initiator, 58);
+        assert_eq!(rec.layer2_octet_total_count, Some(200));
     }
 
     /// A long active timeout (interim records 2 h apart) with many

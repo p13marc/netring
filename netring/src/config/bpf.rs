@@ -17,7 +17,7 @@
 //! use [`aya`](https://crates.io/crates/aya) and attach to the
 //! socket fd via `AsFd`.
 
-pub use flowscope::{VlanProto, VlanTag};
+use flowscope::{VlanProto, VlanTag};
 
 /// A single classic BPF instruction.
 ///

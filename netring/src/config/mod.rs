@@ -10,9 +10,11 @@ pub mod bpf_interp;
 pub mod busy_poll;
 pub mod ipnet;
 
-pub use bpf::{BpfAncillary, BpfBuildError, BpfFilter, BpfInsn, VlanProto, VlanTag};
+pub use bpf::{BpfAncillary, BpfBuildError, BpfFilter, BpfInsn};
 pub use bpf_builder::BpfFilterBuilder;
 pub use busy_poll::BusyPollConfig;
+/// VLAN tag types (flowscope's), as `Packet::vlan` and `BpfAncillary` use them.
+pub use flowscope::{VlanProto, VlanTag};
 pub use ipnet::{IpNet, ParseIpNetError};
 
 /// Fanout distribution mode for multi-socket packet sharing.

@@ -1,5 +1,240 @@
 # Changelog
 
+## 0.32.0 — unreleased — capture that means what it says, initiator-first outputs, dead interfaces noticed
+
+Breaking release closing milestone "0.32" — the follow-ups of the 0.31.2
+audit. The capture layer now does what its knobs say: one meaning for
+capture statistics, a snap length that cuts, VLAN filters that match and
+tags that stay in the frame, a partly read block that survives. Every
+output names a flow from the endpoint that **opened** it (the flow key is
+address-sorted, and every sink, exporter and filter used to read its
+lower address as the source). Async reads and the Monitor notice a
+removed interface instead of waiting forever. Every fix has a regression
+test that fails on 0.31.3. Adopts **flowscope 0.26** (wire-length byte
+counts, initiator-oriented events, bounded rate tables). Alongside:
+**netring-exporters 0.9.0**.
+
+Upgrading: read `docs/MIGRATING_0.31_TO_0.32.md` — every breaking change
+has an old → new snippet there.
+
+### Breaking
+
+- **Capture statistics have one meaning** (#186): `CaptureStats` is `u64`
+  `delivered` / `drops` / `freezes` (`packets` and `freeze_count` are
+  gone), and every `stats()` / `capture_stats()` accessor returns lifetime
+  totals and never resets; `cumulative_stats()` is removed,
+  `MultiSource::capture_stats` is renamed `ring_stats`,
+  `metrics::record_capture_delta` becomes `record_capture_stats`.
+- **VLAN tags are re-inserted into captured frames** (#209), so byte
+  counts grow by 4 on tagged traffic; `Packet::vlan_tci()` / `vlan_tpid()`
+  → `Packet::vlan()`, `OwnedPacket::vlan_tci` / `vlan_tpid` →
+  `OwnedPacket::vlan`. `BpfFilter::matches` is the offline (in-frame)
+  verdict; `matches_with(frame, &BpfAncillary)` the kernel's (#208).
+- **`snap_len` cuts packets** through the socket filter (#210), and the
+  typed filters accept whole packets (`ret #4294967295`, #222);
+  `PacketStatus::losing` → `PacketBatch::losing()`.
+- **`AnomalySink::write(&AnomalyRecord)`** replaces the six positional
+  arguments (#215); `export::FlowRecord` has `key` / `initiator` /
+  `responder` (and `ip_bytes_*`) instead of `a` / `b` and is
+  `#[non_exhaustive]`; IPFIX's source is the initiator and IE 1 / 85 are
+  IP octets (#217).
+- **`Ctx.source` is `Option<SourceIdx>`** (#216); packet-tier `ctx.flow` is
+  the canonical (address-sorted) key.
+- `MonitorBuilder::state_init` takes `Fn` (re-run after each sharded
+  merge); `StateMap::take_dyn` → `take_reset` (#216).
+- `Dedup::keep_raw` takes the wire length (#217).
+- `RssConfig::set_symmetric()` returns an `RssGuard` that restores the NIC
+  (#213); `XdpCaptureBuilder::numa_auto(bool)`.
+- `#[non_exhaustive]`: `MonitorHealthSnapshot`, `AggregateSnapshot`,
+  `TlsFingerprint`, `FlowRecord`, and the new `AnomalyRecord`, `Endpoints`,
+  `AggregateOverflow`, `BpfAncillary`, `UmemPlacement`, `RssState`.
+- Behaviour: async reads end with `Error::Io(ENETDOWN)` on a removed
+  interface (#212); `BackendErrorPolicy::SkipSource` / `Reopen` now do
+  what they say; `AsyncInjector::flush` no longer waits for the device
+  (#228); aggregation is capped at 4096 keys per bucket (#214).
+
+### Fixed — capture
+
+- **Capture statistics meant three different things** (#186). An
+  AF_PACKET `stats()` read returned a delta and reset the kernel counters
+  (two readers stole counts from each other), AF_XDP returned totals, and
+  the fan-in aggregates summed the two in `u32`. Every accessor now
+  returns lifetime `u64` totals; AF_PACKET folds each destructive
+  `PACKET_STATISTICS` read into a running total on the `Capture`. With
+  `StreamCapture` and `MultiSource` both in scope,
+  `stream.capture_stats()` compiles again (it was ambiguous, E0034).
+- **Dropping or stopping a `Packets` loop mid-block lost the rest of the
+  block** (#211). The read position lives in the `Capture`: the next
+  `packets()` / `next_batch()` continues with the unread packets.
+- **`snap_len(n)` cut nothing** (#210): it set the ring's frame size,
+  which TPACKET_V3 ignores. The snap length is enforced by the socket
+  filter now (`BpfFilter::with_snap_len`, applied to the builder's
+  filter, every `set_filter` / `detach_filter` and the Monitor's kernel
+  prefilter). `PacketStatus::truncated` reports a cut packet (it read a
+  status bit TPACKET_V3 never sets).
+- **Typed filters cut frames longer than 65535 bytes** (#222): their
+  accept verdict was libpcap's `ret #65535`; `lo`'s 65549-byte frames
+  lost their last 14 bytes.
+- **`vlan()` / `vlan_id(n)` filters matched nothing on live capture**
+  (#208): Linux strips the outer tag before the socket filter runs. They
+  compile to libpcap's two blocks (the stripped tag via the `SKF_AD_VLAN_*`
+  ancillary loads, or an in-frame tag), and the Monitor's packet tier
+  evaluates `vlan(..)` predicates (they were always false).
+- **Captured frames lost their VLAN tag** (#209): flows on different
+  VLANs with the same 5-tuple merged, pcaps lacked the tags tcpdump shows,
+  and `Bridge` stripped every tag it forwarded. The capture re-inserts the
+  tag in place in the ring, as libpcap does (`vlan_reinsert(false)` keeps
+  the kernel's layout). AF_XDP `OwnedPacket`s carry the NIC-stripped tag.
+- **`Packet::direction()` / `source_ll_addr()` / `to_owned()` were
+  undefined behaviour under Stacked Borrows** (the `sockaddr_ll` read
+  through a pointer derived from the 48-byte `&tpacket3_hdr`; miri flagged
+  0.31.3's own test). `Packet` holds its own `&sockaddr_ll` now.
+- **Views lacked the wire length** (#223): `Packet::view()` /
+  `OwnedPacket::view()` carry `original_len()` (`PacketView::wire_len`),
+  so flowscope counts what was on the wire and treats what a snap length
+  cut as a gap; the pcap replay paths report each record's original
+  length too. Packets a snap length cut are tracked (flowscope 0.25
+  skipped them).
+- **AF_XDP NUMA binding didn't apply** (#213): the UMEM was faulted in
+  (`MAP_POPULATE`) before `mbind`, and the nodemask dropped node 63. It is
+  bound first and populated after; `XdpSocket::umem_placement()` /
+  `XdpCapture::umem_placements()` report what took effect.
+- **`RssConfig::set_symmetric()` reported success on NICs it didn't make
+  symmetric** (#213): the key fallback left an XOR / CRC32 hash function in
+  place, and an accepted `SYM_XOR` was never read back. It now verifies,
+  falls back to Toeplitz + the symmetric key, and restores the previous
+  configuration when the returned `RssGuard` drops.
+
+### Fixed — async adapters, TX and the bridge
+
+- **Async reads waited forever on a removed interface** (#212). tokio
+  hands `EPOLLERR` only to `Interest::ERROR` waiters, and some deaths raise
+  no event at all. `AsyncCapture` (and every stream on it),
+  `AsyncXdpSocket`, `AsyncXdpCapture`, `AsyncInjector` (#225) and
+  `Bridge::run_async` watch for errors and probe the source once a second
+  of idle waiting (a `timerfd` on the IO reactor — no tokio time driver
+  needed); a removed interface ends the wait with `Error::Io(ENETDOWN)`,
+  a down one is waited out.
+- **Async kicks blocked the runtime thread on a device that holds frames**
+  (#228): `AsyncInjector::flush` / `send` / `send_stream` and the async
+  `Bridge` loops kicked with a blocking `sendto`, which on a TX ring waits
+  until every frame in flight completes. They use `MSG_DONTWAIT` now;
+  `Injector`'s drop no longer blocks either.
+- **`Injector::wait_drained` spun at 100% CPU** (#226): `poll(POLLOUT)` on a
+  TX-ring socket returns at once whatever the ring holds. It checks the
+  ring every millisecond and sleeps in between.
+
+### Fixed — Monitor
+
+- **`BackendErrorPolicy` didn't cover drain errors, `SkipSource` didn't
+  skip, and `Reopen` re-opened before closing** (#212). Every backend error
+  goes through the policy; `SkipSource` retires the source and runs on the
+  others; `Reopen` drops the failed backend first (an AF_XDP queue was
+  `EBUSY` otherwise) and retries every 500 ms.
+- **Sharded runners left threads running and pinned to the wrong CPUs**
+  (#224, #213, #216): a failed spawn left the started shards detached (and
+  `XdpShardedRunner` dropped the XDP attachment under them), a failed
+  `XdpShardedRunner` shard didn't stop its siblings, and `pin_cpus`
+  ignored the affinity mask. One spawn/join routine, a shared stop, pinning
+  to the mask's CPUs (the NIC's NUMA node first with `numa_auto(true)`).
+- **Sharded merges lost data** (#216): a reply after the 500 ms timeout,
+  the last partial interval, and the configuration of a `state_init`
+  slot; two `merge_state` for one type now fail at build
+  (`BuildError::DuplicateMergeState`, #227).
+- **Events no packet drove claimed capture source 0** (#216): idle-ended
+  flows, parser ticks, ticks. Packets carry their capture leg into
+  flowscope; housekeeping events resolve the flow's leg; ticks have none.
+- **Packet-tier per-flow state leaked** (#216): `ctx.flow` was the
+  packet's directional key, so one slot per direction was never freed.
+- **YARA / nPrint saw raw IP fragments and reported the wrong side**
+  (#214, #215): the accumulators are fed after the tracker (reassembled
+  datagrams, its flow key and side), and YARA has a global memory budget
+  (`yara_memory_budget`, default 256 MiB).
+- **Traffic aggregation grew without bound** (#214): each dimension keeps
+  at most `AggregateConfig::max_keys` (4096) keys per bucket and counts
+  the rest (`AggregateReport::overflow()`); the report tick evicts expired
+  buckets.
+- **`DedupeAnomalies` / `RateLimitAnomalies` measured wall-clock windows**
+  (#216), so a fast replay collapsed an hour into one window; they use
+  packet time.
+- `with_broadcast::<P>()` after `protocol::<P>()` delivered every message
+  twice (#216).
+- The kernel prefilter stays on when IP-fragment reassembly is armed (it
+  was turned off — capture everything): non-first fragments skip only the
+  port terms (`BpfFilterBuilder::pass_ip_fragments`, #217).
+- `Dedup` merged two packets cut to the same bytes with different wire
+  lengths on every path but `keep(&Packet)` (#217).
+- The TLS / QUIC server port (DoT / DoQ classification) follows
+  `Ctx::initiator()`.
+
+### Fixed — outputs name the initiator
+
+- **Every output read the address-sorted flow key as source →
+  destination** (#215): when the client had the higher address, sinks
+  (EVE, OCSF, syslog, stdout / JSON / tracing, `ChannelSink`,
+  `emit_owned`), `FlowRecord`, IPFIX, the flow / session subscription
+  `src_*` filters, the IOC side label, the aggregate traffic matrix, Sigma
+  events and `eve_tls_record` named the server as the source. Anomalies
+  emitted with `ctx.emit(..).with_key(&flow)` are read from the current
+  flow's initiator; the others take it from the stats or `Ctx`.
+- **IPFIX counted captured frame bytes** (#217): IE 1 / 85 are IP octets;
+  the wire bytes go to IE 352 / 353.
+
+### Added
+
+- `CaptureStats::{new, received, drop_ratio, delta_since, saturating_add}`
+  and `Add` / `Sum`; `Capture::snap_len()`, `PacketBatch::losing()`,
+  `BpfFilter::with_snap_len`, `BpfAncillary` +
+  `BpfFilter::matches_with`, `Packet::{vlan, stripped_vlan,
+  bpf_ancillary}`, `CaptureBuilder::vlan_reinsert`, `VlanTag` / `VlanProto`
+  re-exports, `BpfFilterBuilder::pass_ip_fragments`.
+- `PacketSource::check_health` (provided), `XdpSocket::check_health`,
+  `Injector::flush_nonblocking`.
+- `UmemPlacement`, `RssGuard`, `RssState`, `RssConfig::state()`.
+- `AnomalyRecord`, `Endpoints`, `AnomalyWriter::{with_flow,
+  with_initiator, with_endpoints}`, `Ctx::{initiator, endpoints}`,
+  `FlowStarted::{initiator, responder}`, `FlowEnded::{initiator,
+  responder}`, `TlsFingerprint::{client, server}`,
+  `FlowRecord::{from_stats, total_ip_bytes}`.
+- `AggregateConfig::max_keys`, `AggregateOverflow`, `AGG_MAX_KEYS`;
+  `MonitorBuilder::yara_memory_budget`; `MonitorHealth::{accumulator_flows_skipped,
+  yara_bytes_skipped, accumulator_live_flows}`;
+  `XdpShardedRunner::run_until_signal`; `BuildError::DuplicateMergeState`;
+  `ProtocolSlot::next_key` (provided); `AsyncPcapSource::packets_skipped()`;
+  `Dedup::keep_view`.
+
+### Changed
+
+- **flowscope 0.25.3 → 0.26.0.** Byte counts are wire lengths (and
+  `FlowStats` gains `ip_bytes_*`); packets a snap length cut are tracked;
+  `Event::Started.orientation` (so `FlowStarted::orientation`) is the
+  initiator's; detectors read flows from their initiator — a custom
+  `Detector` takes the new `initiator` / `sender` arguments; bounded
+  `BandwidthByKey` / `RollingRate`. See flowscope's CHANGELOG and
+  `migration-0.25-to-0.26.md`.
+- One more fd per async adapter while it idles (the liveness `timerfd`).
+- The 4-byte `PACKET_RESERVE` for VLAN re-insertion moves every packet 4
+  bytes further into its ring frame (read `tp_mac`).
+
+### Docs
+
+- `MIGRATING_0.31_TO_0.32.md`; `Bridge::run` backpressure; the
+  sync-`packets()`-then-async-stream pending-block edge case
+  (`AsyncCapture::get_mut`); emits through `Ctx::sink_mut()` don't know
+  the current flow; `AggregateReport::overflow()` is cumulative.
+
+### netring-exporters 0.9.0
+
+- **Breaking:** depends on netring 0.32. `KafkaSink` and
+  `OtlpAnomalySink` implement the new `AnomalySink::write(&AnomalyRecord)`;
+  Kafka messages gain `src_ip` / `src_port` / `dest_ip` / `dest_port` /
+  `proto` / `directional`, OTLP log records the `source.*` /
+  `destination.*` / `network.transport` attributes.
+- **Breaking:** `ParquetFlowExporter`'s `source.*` columns are the flow's
+  initiator and `destination.*` the responder (they were the
+  address-sorted key's `a` / `b`), with new `source.ip_bytes` /
+  `destination.ip_bytes` columns; `*.bytes` are wire bytes.
+
 ## 0.31.3 — 2026-10-17 — dependency refresh
 
 Patch release: every netring dependency onto its latest release (#220),

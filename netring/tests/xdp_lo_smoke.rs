@@ -775,3 +775,57 @@ fn xdp_sharded_runner_passes_queue_ids_to_build_shard() {
         "build_shard got shard indices, not queue ids"
     );
 }
+
+/// A bare TX-only socket on `lo` (no XDP program — TX needs none).
+fn tx_socket(frame_count: usize) -> XdpSocket {
+    build_with_retry("tx socket on lo", || {
+        XdpSocket::builder()
+            .interface("lo")
+            .queue_id(0)
+            .frame_size(2048)
+            .frame_count(frame_count)
+            .mode(netring::XdpMode::Tx)
+            .build()
+    })
+}
+
+/// A 64-byte Ethernet frame (local experimental EtherType) for TX tests;
+/// the loopback stack drops it after the transmit completes.
+fn tx_frame(i: usize) -> [u8; 64] {
+    let mut f = [0u8; 64];
+    f[12..14].copy_from_slice(&0x88b5u16.to_be_bytes());
+    f[14..22].copy_from_slice(&(i as u64).to_be_bytes());
+    f
+}
+
+/// `send(&[])` must be rejected: the kernel never transmits nor completes a
+/// zero-length TX descriptor (`xp_aligned_validate_desc`), so the UMEM frame
+/// it carried would be lost for good.
+#[test]
+fn afxdp_send_rejects_empty_packet() {
+    wait_lo_free();
+    let mut sock = tx_socket(4);
+
+    let empty: Vec<_> = (0..4).map(|_| sock.send(&[])).collect();
+    sock.flush().expect("flush");
+    std::thread::sleep(Duration::from_millis(50));
+    let invalid = sock.statistics().expect("statistics").tx_invalid_descs;
+
+    // No frame leaked: all 4 still carry real packets.
+    let resent = (0..4)
+        .filter(|&i| sock.send(&tx_frame(i)).expect("send"))
+        .count();
+    assert_eq!(
+        (resent, invalid),
+        (4, 0),
+        "(frames still usable, invalid TX descs) after send(&[]) x4 → {empty:?}"
+    );
+    assert!(
+        empty
+            .iter()
+            .all(|r| matches!(r, Err(netring::Error::Config(_)))),
+        "send(&[]) must be a config error: {empty:?}"
+    );
+    drop(sock);
+    std::thread::sleep(Duration::from_millis(300));
+}

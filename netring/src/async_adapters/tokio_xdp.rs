@@ -174,7 +174,7 @@ impl AsyncXdpSocket {
     ///
     /// # Errors
     ///
-    /// - [`Error::Config`] if `data.len()` exceeds the UMEM frame size.
+    /// - [`Error::Config`] if `data` is empty or exceeds the UMEM frame size.
     /// - [`Error::Io`] if the readiness wait fails.
     pub async fn send(&mut self, data: &[u8]) -> Result<(), Error> {
         loop {

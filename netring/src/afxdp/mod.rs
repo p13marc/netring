@@ -1101,8 +1101,18 @@ impl XdpSocket {
     /// Returns `Ok(true)` on success, `Ok(false)` if the TX ring or UMEM is full.
     ///
     /// Call [`flush`](Self::flush) after one or more `send` calls to kick the kernel.
+    ///
+    /// # Errors
+    ///
+    /// [`Error::Config`] if `data` is empty or longer than the UMEM frame
+    /// size. The kernel discards a zero-length TX descriptor without ever
+    /// completing it (`xp_aligned_validate_desc()`), which would lose the
+    /// frame it carried for good.
     #[cfg(feature = "af-xdp")]
     pub fn send(&mut self, data: &[u8]) -> Result<bool, Error> {
+        if data.is_empty() {
+            return Err(Error::Config("cannot send an empty packet".into()));
+        }
         if data.len() > self.umem.frame_size() {
             return Err(Error::Config(format!(
                 "packet {} bytes exceeds frame size {}",

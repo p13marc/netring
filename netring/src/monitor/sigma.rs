@@ -100,15 +100,20 @@ struct CompiledRule {
     /// `rule.id` if present, else the title — the stable handle for the alert.
     id: String,
     title: String,
-    /// The rule's Sigma level as text (`sigma-rust` doesn't export the enum).
-    level: String,
+    /// The rule's Sigma level as the rule spells it (`high`, …), if it has
+    /// one (`sigma-rust` doesn't export the enum, so this goes through its
+    /// `Debug` name).
+    level: Option<String>,
 }
 
 impl CompiledRule {
     fn new(rule: Rule) -> Self {
         let title = rule.title.clone();
         let id = rule.id.clone().unwrap_or_else(|| title.clone());
-        let level = format!("{:?}", rule.level);
+        let level = rule
+            .level
+            .as_ref()
+            .map(|l| format!("{l:?}").to_ascii_lowercase());
         Self {
             rule,
             id,
@@ -300,10 +305,13 @@ fn eval_bucket(rules: &[CompiledRule], event: &Event, severity: Severity, ctx: &
             if let Some(k) = &key {
                 w = w.with_key(k);
             }
-            w.with("rule", cr.id.clone())
-                .with("title", cr.title.clone())
-                .with("sigma_level", cr.level.clone())
-                .emit();
+            w = w
+                .with("rule", cr.id.clone())
+                .with("title", cr.title.clone());
+            if let Some(level) = &cr.level {
+                w = w.with("sigma_level", level.clone());
+            }
+            w.emit();
         }
     }
 }

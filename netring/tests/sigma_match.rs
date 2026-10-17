@@ -193,6 +193,14 @@ async fn replay_emits_sigma_match_for_flagged_dns_query_only() {
             .any(|(k, v)| *k == "rule" && v == "netring-test-dns"),
         "sigma_match should carry the rule id observation"
     );
+    // The rule's level as the rule spells it (was `"Some(High)"`).
+    assert!(
+        m.observations
+            .iter()
+            .any(|(k, v)| *k == "sigma_level" && v == "high"),
+        "{:?}",
+        m.observations
+    );
     // … and the flow it fired on (IPs, ports — the Community ID pivot).
     assert_eq!(
         (m.dest_ip, m.dest_port),

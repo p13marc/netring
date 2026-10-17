@@ -25,8 +25,8 @@ async fn open_with_filter_attaches_before_first_packet() {
         .build()
         .expect("BpfFilter::builder");
 
-    // `AsyncCapture::open_with_filter` calls `AsyncFd::new` internally,
-    // which needs a running tokio reactor — hence `#[tokio::test]`.
+    // `AsyncCapture::open_with_filter` registers with tokio's reactor,
+    // which needs a running runtime — hence `#[tokio::test]`.
     let mut cap =
         AsyncCapture::open_with_filter(helpers::LOOPBACK, filter).expect("open_with_filter");
 

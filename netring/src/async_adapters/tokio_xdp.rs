@@ -1,4 +1,4 @@
-//! Async wrapper for AF_XDP sockets via tokio [`AsyncFd`].
+//! Async wrapper for AF_XDP sockets via tokio [`AsyncFd`](tokio::io::unix::AsyncFd).
 //!
 //! Mirrors [`AsyncCapture`](crate::AsyncCapture) and
 //! [`AsyncInjector`](crate::AsyncInjector) for the AF_XDP backend, but
@@ -42,8 +42,8 @@ use std::os::fd::{AsFd, AsRawFd, BorrowedFd};
 use std::time::Duration;
 
 use tokio::io::Interest;
-use tokio::io::unix::AsyncFd;
 
+use crate::async_adapters::registered::{ReadyMut, Registered};
 use crate::error::Error;
 use crate::packet::OwnedPacket;
 use crate::{XdpBatch, XdpSocket, XdpStats};
@@ -59,21 +59,23 @@ use crate::{XdpBatch, XdpSocket, XdpStats};
 /// awaits abandons the readiness wait without affecting the kernel
 /// rings — the next call re-arms via tokio's reactor.
 pub struct AsyncXdpSocket {
-    inner: AsyncFd<XdpSocket>,
+    inner: Registered<XdpSocket>,
 }
 
 impl AsyncXdpSocket {
     /// Wrap an [`XdpSocket`] in an async adapter.
     ///
-    /// Registers the fd for both `POLLIN` and `POLLOUT`.
+    /// Registers a duplicate of the socket's fd for both `POLLIN` and
+    /// `POLLOUT`, so the adapter holds one extra fd for its lifetime.
     ///
     /// # Errors
     ///
-    /// Returns [`Error::Io`] if `AsyncFd` registration fails.
+    /// Returns [`Error::Io`] if duplicating the fd or the `AsyncFd`
+    /// registration fails.
     pub fn new(socket: XdpSocket) -> Result<Self, Error> {
-        let fd = AsyncFd::with_interest(socket, Interest::READABLE | Interest::WRITABLE)
-            .map_err(Error::Io)?;
-        Ok(Self { inner: fd })
+        let inner =
+            Registered::new(socket, Interest::READABLE | Interest::WRITABLE).map_err(Error::Io)?;
+        Ok(Self { inner })
     }
 
     /// Open an async XDP socket on `interface` with default settings.
@@ -96,8 +98,7 @@ impl AsyncXdpSocket {
     pub(crate) fn poll_read_ready_mut(
         &mut self,
         cx: &mut std::task::Context<'_>,
-    ) -> std::task::Poll<std::io::Result<tokio::io::unix::AsyncFdReadyMutGuard<'_, XdpSocket>>>
-    {
+    ) -> std::task::Poll<std::io::Result<ReadyMut<'_, XdpSocket>>> {
         self.inner.poll_read_ready_mut(cx)
     }
 
@@ -259,15 +260,14 @@ impl AsRawFd for AsyncXdpSocket {
 
 /// Guard returned by [`AsyncXdpSocket::readable`].
 pub struct XdpReadableGuard<'a> {
-    guard: tokio::io::unix::AsyncFdReadyMutGuard<'a, XdpSocket>,
+    guard: ReadyMut<'a, XdpSocket>,
 }
 
 impl<'a> XdpReadableGuard<'a> {
     /// Try to take the next batch; clears ready on `None` (spurious wakeup).
     pub fn next_batch(&mut self) -> Option<XdpBatch<'_>> {
         // Same polonius workaround as ReadableGuard::next_batch in tokio_adapter.
-        let guard_ptr: *mut tokio::io::unix::AsyncFdReadyMutGuard<'a, XdpSocket> =
-            &raw mut self.guard;
+        let guard_ptr: *mut ReadyMut<'a, XdpSocket> = &raw mut self.guard;
         // SAFETY: guard_ptr came from &mut self.guard; reborrowing once for
         // get_inner_mut() and once for clear_ready() is sequential.
         let batch = unsafe { (*guard_ptr).get_inner_mut().next_batch() };

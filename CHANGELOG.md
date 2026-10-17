@@ -1,5 +1,50 @@
 # Changelog
 
+## 0.31.3 — unreleased — dependency refresh
+
+Patch release: every netring dependency onto its latest release (#220),
+which 0.31.2 should already have had — it shipped with the lockfile its
+audit started from. One of the updates is a soundness migration (#219).
+No API change: the public-API lock is unchanged and cargo-semver-checks
+passes against 0.31.2. Alongside: **flowscope 0.25.3** (its own
+dependency refresh) and **netring-exporters 0.8.0** (arrow / parquet 60).
+
+### Fixed
+
+- **The tokio adapters registered an fd that their safe API lets callers
+  replace** (#219). tokio 1.53.3 deprecates `AsyncFd::new` /
+  `with_interest` as unsound (tokio#8587): the fd an `AsyncFd` registers
+  must stay open, and refer to the same file description, for the whole
+  life of the `AsyncFd`. `AsyncCapture::get_mut`,
+  `ReadableGuard::get_inner_mut` and `AsyncXdpSocket::get_mut` hand out
+  `&mut` to the registered source, so safe code could swap it out from
+  under the registration. `AsyncCapture`, `AsyncInjector`,
+  `AsyncXdpSocket` and `Bridge::run_async` / `run_iterations_async` now
+  register a private duplicate of the source's fd that only the adapter
+  can close. Readiness is per file description, so nothing observable
+  changes except **one extra fd per adapter** — per capture source of a
+  Monitor, per AF_XDP queue of an `AsyncXdpCapture`, two per running
+  async `Bridge`.
+
+### Changed
+
+- **tokio ≥ 1.53.3** (the first release with `AsyncFd::register`).
+- **flowscope 0.25.1 → 0.25.3.** 0.25.2 brought its audit fixes (IPFIX
+  flowEndReason codes, snap-length pcaps, NBNS asset names); 0.25.3 is
+  its dependency refresh, notably etherparse 0.21, so the tree carries
+  one etherparse again. Through it: frames with an integrity-only MACsec
+  header now produce flows; an ARP body, IGMP message or MACsec header
+  that etherparse rejects now drops the packet from flow tracking, as a
+  malformed TCP / UDP / ICMP header already did; `Layers` reads a
+  VLAN-tagged ARP correctly. See flowscope's CHANGELOG.
+- `Cargo.lock` and `netring/fuzz/Cargo.lock`: `cargo update`.
+
+### netring-exporters 0.8.0
+
+- **Breaking:** arrow / parquet 59 → 60.
+  `ParquetFlowExporter::new` returns `parquet::errors::ParquetError`, so
+  code that names that type needs parquet 60 too. Nothing else changes.
+
 ## 0.31.2 — 2026-10-17 — capture statistics, a working TX ring, and a pre-release audit
 
 Patch release: bug fixes, plus a few additive accessors and `BuildError`

@@ -1,6 +1,6 @@
 [package]
 name = "netring-exporters"
-version = "0.7.0"
+version = "0.8.0"
 edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
@@ -38,8 +38,8 @@ tracing = { workspace = true }
 ureq = { version = "3", optional = true, default-features = false, features = ["rustls"] }
 # Kafka producer (heavy C dep, opt-in).
 rdkafka = { version = "0.39", optional = true }
-arrow = { version = "59.0.0", optional = true }
-parquet = { version = "59.0.0", optional = true }
+arrow = { version = "60.0.0", optional = true }
+parquet = { version = "60.0.0", optional = true }
 
 [dev-dependencies]
 serde_json = "1"

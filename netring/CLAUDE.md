@@ -20,6 +20,20 @@ built on AF_PACKET with TPACKET_V3 (block-based mmap ring buffers) and AF_XDP.
 
 ## Implementation Status
 
+**0.31.3 — unreleased** (dependency refresh, #220, milestone "0.31.3 —
+dependency refresh"; patch, CHANGELOG `## 0.31.3`; ships with
+**flowscope 0.25.3** and **netring-exporters 0.8.0** — arrow / parquet 60,
+breaking for exporters because `ParquetFlowExporter::new` returns
+`ParquetError`). The audit follow-ups moved to milestone "0.31.4 — audit
+follow-ups" (#208, #210–#214, #216, #217).
+
+- **tokio ≥ 1.53.3 / `AsyncFd` (#219):** tokio deprecated the safe
+  `AsyncFd::new` / `with_interest` (tokio#8587). The adapters register a
+  private dup of the source's fd (`async_adapters/registered.rs`:
+  `Registered<T>` + `ReadyMut`, `register_dup` for `Bridge`), because
+  `get_mut` / `get_inner_mut` let callers swap the source. One extra fd
+  per adapter. Never register a source's own fd with `AsyncFd` here.
+
 **0.31.2 — RELEASED 2026-10-17** (published to crates.io, tag `0.31.2`; flowscope 0.25.2 published alongside; bug-fix patch, CHANGELOG `## 0.31.2`; PR #218; milestone
 "0.31.2 — capture statistics & pre-release bug hunt", issues #182–#207;
 follow-ups in milestone "0.31.3 — audit follow-ups" #208–#217, breaking
@@ -1269,6 +1283,9 @@ Cargo features unique to 0.21:
   header layout must agree or the kernel never sends (#187)
 - `tpacket_bd_ts.ts_usec` in libc — read as nanoseconds for TPACKET_V3
 - `AsyncCapture` uses `wait_readable()` + `get_mut().next_batch()` for zero-copy, or `recv()` for owned packets, due to borrow-checker limitations with AsyncFd + lending returns
+- tokio readiness goes through a dup of the source fd (`Registered<T>`), never the
+  source's own fd: `AsyncFd::register` is `unsafe` and the adapters expose `&mut` to
+  the source (#219)
 - `MAP_LOCKED` fallback: catches EPERM, ENOMEM, and EAGAIN, retries without MAP_LOCKED
 - Integration tests must use deadline-based loops with `next_batch_blocking()`, NOT `packets()` (which blocks forever on timeout)
 - `xdp-loader` ships a vendored 1 KB ELF (`redirect_all.bpf.o`); regenerating
@@ -1279,17 +1296,18 @@ Cargo features unique to 0.21:
 
 ## Pre-publish checklist
 
-For the `0.31.2` release (a non-breaking patch; flowscope stays 0.25.1).
+For the `0.31.3` release (a non-breaking patch; flowscope 0.25.3 must be on
+crates.io first; `netring-exporters` 0.8.0 is published after netring).
 
-1. Merge the 0.31.2 PR once `ci.yml` and the integration lane are green
+1. Merge the 0.31.3 PR once `ci.yml` and the integration lane are green
    (the integration lane posts failures as a PR comment).
-2. Date the `## 0.31.2` CHANGELOG banner and flip "Implementation Status"
-   above to "RELEASED"; commit on master (`release: mark 0.31.2 released
+2. Date the `## 0.31.3` CHANGELOG banner and flip "Implementation Status"
+   above to "RELEASED"; commit on master (`release: mark 0.31.3 released
    (<date>)`).
-3. `git tag 0.31.2` (no `v` prefix); `release.yml` attaches the tarball +
+3. `git tag 0.31.3` (no `v` prefix); `release.yml` attaches the tarball +
    `SHA256SUMS`.
 4. Publish from the dev host: `cargo publish -p netring --dry-run`, then
-   `cargo publish -p netring` (crates.io credentials live in
+   `cargo publish -p netring`, then `-p netring-exporters` (crates.io credentials live in
    `$CARGO_HOME/credentials.toml`, `CARGO_HOME=/srv/dev/cargo` — not
    `~/.cargo`). A flowscope release goes first when netring needs it.
    `publish-crates.yml` (`workflow_dispatch`, `allow_breaking: no`) also

@@ -256,27 +256,14 @@ impl Bridge {
     where
         F: FnMut(&Packet<'_>, BridgeDirection) -> BridgeAction,
     {
-        use std::os::fd::{AsRawFd, RawFd};
+        use crate::async_adapters::registered::register_dup;
         use tokio::io::Interest;
-        use tokio::io::unix::AsyncFd;
 
-        // Tokio's AsyncFd needs T: AsRawFd by value. Wrap the raw fd in a
-        // POD holder so AsyncFd doesn't borrow from `self`. AsyncFd's Drop
-        // deregisters from epoll without closing — `self.rx_*` retain
-        // ownership of the underlying fd.
-        struct FdHolder(RawFd);
-        impl AsRawFd for FdHolder {
-            fn as_raw_fd(&self) -> RawFd {
-                self.0
-            }
-        }
-
-        let async_a =
-            AsyncFd::with_interest(FdHolder(self.rx_a.as_fd().as_raw_fd()), Interest::READABLE)
-                .map_err(Error::Io)?;
-        let async_b =
-            AsyncFd::with_interest(FdHolder(self.rx_b.as_fd().as_raw_fd()), Interest::READABLE)
-                .map_err(Error::Io)?;
+        // Register dups of the RX fds: an `AsyncFd` must own what it
+        // registers, and owning a dup keeps it from borrowing `self`, which
+        // the drain below needs mutably.
+        let async_a = register_dup(self.rx_a.as_fd(), Interest::READABLE).map_err(Error::Io)?;
+        let async_b = register_dup(self.rx_b.as_fd(), Interest::READABLE).map_err(Error::Io)?;
 
         loop {
             tokio::select! {
@@ -309,23 +296,11 @@ impl Bridge {
     where
         F: FnMut(&Packet<'_>, BridgeDirection) -> BridgeAction,
     {
-        use std::os::fd::{AsRawFd, RawFd};
+        use crate::async_adapters::registered::register_dup;
         use tokio::io::Interest;
-        use tokio::io::unix::AsyncFd;
 
-        struct FdHolder(RawFd);
-        impl AsRawFd for FdHolder {
-            fn as_raw_fd(&self) -> RawFd {
-                self.0
-            }
-        }
-
-        let async_a =
-            AsyncFd::with_interest(FdHolder(self.rx_a.as_fd().as_raw_fd()), Interest::READABLE)
-                .map_err(Error::Io)?;
-        let async_b =
-            AsyncFd::with_interest(FdHolder(self.rx_b.as_fd().as_raw_fd()), Interest::READABLE)
-                .map_err(Error::Io)?;
+        let async_a = register_dup(self.rx_a.as_fd(), Interest::READABLE).map_err(Error::Io)?;
+        let async_b = register_dup(self.rx_b.as_fd(), Interest::READABLE).map_err(Error::Io)?;
 
         for _ in 0..iterations {
             // Bound each iteration with poll_timeout so a quiet bridge still

@@ -9,12 +9,38 @@ use std::sync::atomic::{AtomicU16, Ordering};
 /// Loopback interface name.
 pub const LOOPBACK: &str = "lo";
 
-/// Unique port counter to avoid collisions between parallel tests.
-static PORT_COUNTER: AtomicU16 = AtomicU16::new(30_000);
+/// First port of the test port space — below the kernel's default
+/// ephemeral range (32768–60999), so a test port never collides with a
+/// sender's ephemeral one.
+const PORT_BASE: u16 = 10_000;
+/// Ports each test process owns: [`private_port`] slots `0..16`, then
+/// [`unique_port`]'s counter.
+const PORT_BLOCK: u16 = 128;
+/// Ports handed out by [`unique_port`] start after the private slots.
+const PRIVATE_SLOTS: u16 = 16;
 
-/// Get a unique UDP port for testing.
+/// This process's block of [`PORT_BLOCK`] ports, derived from the pid, so
+/// concurrent test binaries on the shared `lo` (each one restarts its
+/// counter) use different ports — they all started at 30000 before.
+fn port_block_base() -> u16 {
+    let blocks = (32_768 - u32::from(PORT_BASE)) / u32::from(PORT_BLOCK);
+    PORT_BASE + (std::process::id() % blocks) as u16 * PORT_BLOCK
+}
+
+/// Unique port counter within this process's block.
+static PORT_COUNTER: AtomicU16 = AtomicU16::new(0);
+
+/// Get a unique UDP port for testing: distinct within the process, and
+/// from other test processes (see [`port_block_base`]).
 pub fn unique_port() -> u16 {
-    PORT_COUNTER.fetch_add(1, Ordering::Relaxed)
+    let seq = PORT_COUNTER.fetch_add(1, Ordering::Relaxed) % (PORT_BLOCK - PRIVATE_SLOTS);
+    port_block_base() + PRIVATE_SLOTS + seq
+}
+
+/// A fixed port of this process (`slot < 16`), for tests that name their
+/// ports as constants.
+pub fn private_port(slot: u16) -> u16 {
+    port_block_base() + slot % PRIVATE_SLOTS
 }
 
 /// Fanout group counter, so one process never reuses a group id either.

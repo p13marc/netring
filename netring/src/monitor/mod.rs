@@ -2414,7 +2414,7 @@ impl MonitorBuilder {
             }
             self = self.on_ctx::<Dns>(|msg: &flowscope::dns::DnsMessage, ctx: &mut Ctx<'_>| {
                 if let flowscope::dns::DnsMessage::Query(q) = msg
-                    && let Some(name) = q.questions.first().map(|x| x.name.clone())
+                    && let Some(name) = q.questions.first().map(|x| aggregate::name_key(&x.name))
                 {
                     let ts = ctx.ts;
                     if let Some(d) = ctx
@@ -2440,7 +2440,7 @@ impl MonitorBuilder {
             }
             self = self.on_ctx::<TlsHandshake>(
                 |hs: &flowscope::tls::TlsHandshake, ctx: &mut Ctx<'_>| {
-                    if let Some(sni) = hs.sni.clone() {
+                    if let Some(sni) = hs.sni.as_deref().map(aggregate::name_key) {
                         let ts = ctx.ts;
                         if let Some(s) = ctx.state_mut::<aggregate::AggregateState>().sni.as_mut() {
                             s.record(sni, 1, ts);

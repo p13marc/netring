@@ -167,24 +167,35 @@ impl AsyncXdpSocket {
     /// Send a raw packet, awaiting `POLLOUT` if the ring/UMEM is exhausted.
     ///
     /// The sync `XdpSocket::send` returns `Ok(false)` when no UMEM frame
-    /// can be allocated or the TX ring is full; this async variant waits
-    /// for the kernel to reclaim a slot via `POLLOUT` and retries.
+    /// can be allocated or the TX ring is full; this async variant then
+    /// kicks the kernel to transmit what is queued (frames only come back
+    /// once transmitted), retries, and otherwise waits for the kernel to
+    /// complete TX (`POLLOUT`) and retries again.
     ///
-    /// Call [`flush`](Self::flush) afterward to actually kick the kernel.
+    /// Call [`flush`](Self::flush) afterward to actually kick the kernel for
+    /// the frames this call queued.
     ///
     /// # Errors
     ///
     /// - [`Error::Config`] if `data` is empty or exceeds the UMEM frame size.
-    /// - [`Error::Io`] if the readiness wait fails.
+    /// - [`Error::Io`] if the TX kick or the readiness wait fails.
     pub async fn send(&mut self, data: &[u8]) -> Result<(), Error> {
         loop {
             // Try non-blocking first.
             if self.inner.get_mut().send(data)? {
                 return Ok(());
             }
-            // Backpressure: wait for POLLOUT (kernel reclaiming TX
-            // descriptors / completion-ring frames). clear_ready re-arms
-            // tokio's reactor so the next iteration awaits the kernel.
+            // Backpressure. The frames we wait for are in the TX ring, and
+            // nothing transmits frames that were never kicked — POLLOUT
+            // would never come — so kick first. Where TX completes
+            // synchronously (copy mode on lo / veth) a frame is free at once.
+            self.inner.get_ref().flush()?;
+            if self.inner.get_mut().send(data)? {
+                return Ok(());
+            }
+            // Wait for the kernel to complete TX: POLLOUT comes from its
+            // write-space wakeup on completion. clear_ready re-arms tokio's
+            // reactor so the next iteration awaits the kernel.
             let mut guard = self.inner.writable_mut().await.map_err(Error::Io)?;
             guard.clear_ready();
         }

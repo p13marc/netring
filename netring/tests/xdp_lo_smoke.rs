@@ -859,3 +859,39 @@ fn afxdp_flush_transmits_more_than_one_kernel_batch() {
     drop(sock);
     std::thread::sleep(Duration::from_millis(300));
 }
+
+/// `AsyncXdpSocket::send` on a full UMEM must get the queued frames
+/// transmitted itself: it used to wait for `POLLOUT` without ever kicking
+/// TX, so with nothing flushed no frame could complete and the 65th send on
+/// a 64-frame socket hung forever.
+#[cfg(feature = "tokio")]
+#[tokio::test(flavor = "current_thread")]
+async fn async_xdp_send_kicks_tx_when_umem_is_full() {
+    wait_lo_free();
+    let sock = tx_socket(64);
+    let mut xdp = netring::AsyncXdpSocket::new(sock).expect("AsyncXdpSocket");
+    // Let the reactor consume the registration readiness, as any program
+    // that awaits something between opening the socket and sending does.
+    // (While that event is pending, the reactor's epoll_wait re-polls the
+    // socket, and xsk_poll() drives copy-mode TX itself.)
+    tokio::time::sleep(Duration::from_millis(20)).await;
+
+    // 65 is the first send that needs a recycled frame; 200 recycles the
+    // whole UMEM a few times over.
+    let mut sent = 0;
+    let done = tokio::time::timeout(Duration::from_secs(2), async {
+        for i in 0..200 {
+            xdp.send(&tx_frame(i)).await.expect("send");
+            sent += 1;
+        }
+    })
+    .await;
+    assert!(
+        done.is_ok(),
+        "send #{} on a 64-frame socket never completed",
+        sent + 1
+    );
+    xdp.flush().await.expect("flush");
+    drop(xdp);
+    std::thread::sleep(Duration::from_millis(300));
+}

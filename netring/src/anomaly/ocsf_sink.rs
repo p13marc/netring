@@ -161,6 +161,10 @@ impl<W: Write + Send> AnomalySink for OcsfSink<W> {
             let _ = self.out.write_all(b"\n");
         }
     }
+
+    fn flush(&mut self) -> Result<(), std::io::Error> {
+        self.out.flush()
+    }
 }
 
 #[cfg(test)]
@@ -211,6 +215,24 @@ mod tests {
         assert_eq!(v["connection_info"]["protocol_num"], 6);
         assert_eq!(v["unmapped"]["indicator"], "evil.example");
         assert_eq!(v["unmapped"]["score"], 9.5);
+    }
+
+    /// `flush` reaches the wrapped writer (a `BufWriter` / socket would
+    /// otherwise keep the tail when the monitor exits).
+    #[test]
+    fn flush_reaches_the_writer() {
+        let mut sink = OcsfSink::new(std::io::BufWriter::new(Vec::<u8>::new()));
+        sink.write(
+            "k",
+            Severity::Info,
+            Timestamp { sec: 1, nsec: 0 },
+            None,
+            &[],
+            &[],
+        );
+        assert!(sink.out.get_ref().is_empty(), "still buffered");
+        sink.flush().unwrap();
+        assert!(sink.out.get_ref().ends_with(b"}\n"));
     }
 
     #[test]

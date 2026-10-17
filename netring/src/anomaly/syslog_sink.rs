@@ -22,6 +22,10 @@
 //!   empty.
 //! - `MSG` = a short human-readable summary.
 //!
+//! Lines are newline-framed. Control characters in SD values and the MSG
+//! (observation values can come off the wire) are written as `\xNN`, so
+//! no value can end a record early.
+//!
 //! Severity map (netring → RFC 5424 numeric severity):
 //! `Critical → 2` (crit), `Error → 3` (err), `Warning → 4` (warning),
 //! `Info → 6` (info).
@@ -242,7 +246,8 @@ fn render_rfc5424(
     // MSG: a short human summary after a single space.
     let _ = write!(out, " {kind}");
     for (label, value) in observations {
-        let _ = write!(out, " {label}={value}");
+        let _ = write!(out, " {label}=");
+        push_control_escaped(out, value);
     }
 }
 
@@ -252,12 +257,32 @@ fn nilable(s: &str) -> &str {
 }
 
 /// Append `s` to `out`, escaping the three characters RFC 5424 §6.3.3
-/// requires inside a PARAM-VALUE: `"`, `\`, and `]`.
+/// requires inside a PARAM-VALUE: `"`, `\`, and `]` — and control
+/// characters, as for the MSG ([`push_control_escaped`]).
 fn push_sd_escaped(out: &mut String, s: &str) {
     for ch in s.chars() {
         if matches!(ch, '"' | '\\' | ']') {
             out.push('\\');
         }
+        push_char_escaped(out, ch);
+    }
+}
+
+/// Append `s` to `out` with every control character (C0, DEL, C1) as
+/// `\xNN`. Records are newline-framed (RFC 6587), and observation values
+/// come off the wire (DNS names, HTTP hosts, …): a raw LF in one would end
+/// the record and let the rest of the value forge another.
+fn push_control_escaped(out: &mut String, s: &str) {
+    for ch in s.chars() {
+        push_char_escaped(out, ch);
+    }
+}
+
+fn push_char_escaped(out: &mut String, ch: char) {
+    use std::fmt::Write as _;
+    if ch.is_control() {
+        let _ = write!(out, "\\x{:02x}", ch as u32);
+    } else {
         out.push(ch);
     }
 }
@@ -370,6 +395,33 @@ mod tests {
         let mut out = String::new();
         push_sd_escaped(&mut out, r#"a"b\c]d"#);
         assert_eq!(out, r#"a\"b\\c\]d"#);
+    }
+
+    /// Observation values come off the wire (DNS names, HTTP hosts, …):
+    /// a control character in one must not end the record and start a
+    /// forged one, in the SD params or in the MSG.
+    #[test]
+    fn control_characters_cannot_forge_a_record() {
+        let mut sink = SyslogSink::new(Vec::<u8>::new());
+        sink.write(
+            "dga",
+            Severity::Warning,
+            ts_fixed(),
+            None,
+            &[("qname", Cow::Borrowed("x\n<34>1 forged\r\0\u{85}é"))],
+            &[],
+        );
+        let out = String::from_utf8(sink.into_inner()).unwrap();
+        let line = out.strip_suffix('\n').expect("LF-framed");
+        assert!(!line.contains(char::is_control), "{out:?}");
+        assert!(
+            line.contains(r#"qname="x\x0a<34>1 forged\x0d\x00\x85é""#),
+            "{line}"
+        );
+        assert!(
+            line.ends_with(r" dga qname=x\x0a<34>1 forged\x0d\x00\x85é"),
+            "{line}"
+        );
     }
 
     #[test]

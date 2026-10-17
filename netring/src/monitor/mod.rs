@@ -2035,7 +2035,18 @@ impl MonitorBuilder {
     /// `register` — the builder treats that as "no parser slot to
     /// stash; the central tracker covers lifecycle events" and
     /// silently moves on.
+    ///
+    /// Idempotent: declaring `P` again — directly, or through sugar
+    /// that declares it for you (`all_l4`, `on_icmp_error`, `on_dns`,
+    /// `flow_analysis`, …, or [`Self::with_broadcast`]) — keeps the one
+    /// slot. A second slot would deliver every message twice.
     pub fn protocol<P: Protocol>(mut self) -> Self {
+        if self
+            .declared_protocols
+            .contains_key(&std::any::TypeId::of::<P>())
+        {
+            return self;
+        }
         let builder = self
             .driver_builder
             .get_or_insert_with(|| Driver::builder(FiveTuple::bidirectional()));

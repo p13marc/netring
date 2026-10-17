@@ -253,3 +253,102 @@ async fn propagate_policy_stops_on_a_tick_handler_error() {
         .await;
     assert!(res.is_err());
 }
+
+/// An ICMPv4 port-unreachable (192.0.2.2 → 192.0.2.1) quoting a UDP
+/// datagram 10.0.0.1:12345 → 10.0.0.2:53.
+#[cfg(feature = "icmp")]
+fn icmp_port_unreachable() -> Vec<u8> {
+    use etherparse::{Ethernet2Header, IpNumber, Ipv4Header};
+    let mut inner = vec![0x45, 0, 0, 28, 0, 0, 0, 0, 64, 17, 0, 0];
+    inner.extend_from_slice(&[10, 0, 0, 1, 10, 0, 0, 2]);
+    inner.extend_from_slice(&12345u16.to_be_bytes());
+    inner.extend_from_slice(&53u16.to_be_bytes());
+    inner.extend_from_slice(&[0, 8, 0, 0]);
+    let mut icmp = vec![3u8, 3, 0, 0, 0, 0, 0, 0];
+    icmp.extend_from_slice(&inner);
+    let ip = Ipv4Header::new(
+        icmp.len() as u16,
+        64,
+        IpNumber::ICMP,
+        [192, 0, 2, 2],
+        [192, 0, 2, 1],
+    )
+    .unwrap();
+    let eth = Ethernet2Header {
+        destination: [2u8; 6],
+        source: [1u8; 6],
+        ether_type: etherparse::EtherType::IPV4,
+    };
+    let mut frame = Vec::new();
+    eth.write(&mut frame).unwrap();
+    ip.write(&mut frame).unwrap();
+    frame.extend_from_slice(&icmp);
+    frame
+}
+
+/// Declaring a protocol twice — explicitly, or through sugar that
+/// declares it for you — installs one parser slot, not two: every
+/// message used to be delivered once per declaration.
+#[cfg(feature = "icmp")]
+#[tokio::test(flavor = "current_thread")]
+async fn redeclared_protocol_delivers_each_message_once() {
+    use netring::protocol::builtin::Icmp;
+    use netring::protocol::event_typed::IcmpError;
+    let file = pcap(&timed(vec![icmp_port_unreachable()]));
+    let (errors, raw) = (Arc::new(Mutex::new(0)), Arc::new(Mutex::new(0)));
+    let (e, r) = (Arc::clone(&errors), Arc::clone(&raw));
+    Monitor::builder()
+        .pcap_source(file.path())
+        .all_l4()
+        .protocol::<Icmp>()
+        .on_icmp_error(move |_err: &IcmpError, _ctx: &mut Ctx<'_>| {
+            *e.lock().unwrap() += 1;
+            Ok(())
+        })
+        .on::<Icmp>(move |_m: &flowscope::icmp::IcmpMessage| {
+            *r.lock().unwrap() += 1;
+            Ok(())
+        })
+        .build()
+        .unwrap()
+        .replay()
+        .await
+        .unwrap();
+    assert_eq!(*errors.lock().unwrap(), 1);
+    assert_eq!(*raw.lock().unwrap(), 1);
+}
+
+/// A DNS query for `example.test` A, 10.0.0.1:5353 → 10.0.0.2:53.
+#[cfg(feature = "dns")]
+fn dns_query() -> Vec<u8> {
+    let mut q = vec![0x12, 0x34, 0x01, 0x00, 0, 1, 0, 0, 0, 0, 0, 0];
+    q.extend_from_slice(b"\x07example\x04test\x00");
+    q.extend_from_slice(&[0, 1, 0, 1]);
+    ipv4_udp([10, 0, 0, 1], [10, 0, 0, 2], 5353, 53, &q)
+}
+
+/// Same for sugar that auto-declares a parser: `on_dns` then an
+/// explicit `.protocol::<Dns>()` is one DNS slot.
+#[cfg(feature = "dns")]
+#[tokio::test(flavor = "current_thread")]
+async fn on_dns_then_protocol_dns_delivers_each_message_once() {
+    use netring::protocol::builtin::Dns;
+    let file = pcap(&timed(vec![dns_query()]));
+    let seen = Arc::new(Mutex::new(0));
+    let s = Arc::clone(&seen);
+    Monitor::builder()
+        .pcap_source(file.path())
+        .on_dns(move |v, _ctx| {
+            if matches!(v.message, flowscope::dns::DnsMessage::Query(_)) {
+                *s.lock().unwrap() += 1;
+            }
+            Ok(())
+        })
+        .protocol::<Dns>()
+        .build()
+        .unwrap()
+        .replay()
+        .await
+        .unwrap();
+    assert_eq!(*seen.lock().unwrap(), 1);
+}

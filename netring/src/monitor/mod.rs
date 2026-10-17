@@ -4058,11 +4058,15 @@ impl MonitorBuilder {
                         return Ok(());
                     };
                     let ts = ctx.ts;
+                    // The query's sender: the orientation of the packet that
+                    // carried it (flowscope 0.26 reads the key from it).
+                    let sender = ctx.orientation().unwrap_or_default();
                     // Observe into the cell's buffer, then move the emitted
                     // anomalies out before re-borrowing ctx for the sink.
                     let emitted: Vec<flowscope::OwnedAnomaly> = {
                         let cell = ctx.state_mut::<detectors::DetectorCell>();
-                        cell.registry.observe_dns(&key, &qname, ts, &mut cell.out);
+                        cell.registry
+                            .observe_dns(&key, sender, &qname, ts, &mut cell.out);
                         cell.out.drain(..).collect()
                     };
                     if !emitted.is_empty() {

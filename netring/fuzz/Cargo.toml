@@ -20,6 +20,11 @@ netring = { path = "..", features = ["tokio", "flow"] }
 # Detach from the parent workspace.
 [workspace]
 
+# TEMPORARY (0.32 integration): flowscope 0.26.0 from the local release
+# branch until it is published; the integrator removes this.
+[patch.crates-io]
+flowscope = { path = "/srv/dev/repos/flowscope" }
+
 [profile.release]
 debug = 1
 

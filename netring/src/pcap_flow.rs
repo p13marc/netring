@@ -301,8 +301,10 @@ where
                     if let Some(now) = sweep {
                         this.pending.extend(this.tracker.sweep(now));
                     }
-                    this.pending
-                        .extend(this.tracker.track(PacketView::new(&pkt.data, ts)));
+                    this.pending.extend(
+                        this.tracker
+                            .track(PacketView::new(&pkt.data, ts).with_wire_len(pkt.original_len)),
+                    );
                 }
                 Step::Eof => {
                     // End-of-input flush: every still-open flow exceeds
@@ -568,8 +570,10 @@ macro_rules! pcap_l7_stream {
                             if let Some(now) = sweep {
                                 this.driver.sweep_into(now, &mut this.scratch);
                             }
-                            this.driver
-                                .track_into(PacketView::new(&pkt.data, ts), &mut this.scratch);
+                            this.driver.track_into(
+                                PacketView::new(&pkt.data, ts).with_wire_len(pkt.original_len),
+                                &mut this.scratch,
+                            );
                         }
                         Step::Eof => {
                             // End-of-input flush: final `on_tick`, then every

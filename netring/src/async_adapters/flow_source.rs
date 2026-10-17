@@ -128,7 +128,10 @@ pub(crate) fn view_from_parts(
     rx_metadata: flowscope::RxMetadata,
 ) -> PacketView<'_> {
     let ts = ts.unwrap_or_else(crate::async_adapters::flow_stream::current_timestamp);
-    PacketView::new(data, ts).with_rx_metadata(rx_metadata)
+    // AF_XDP frames are never cut: the wire length is the frame's.
+    PacketView::new(data, ts)
+        .with_wire_len(data.len())
+        .with_rx_metadata(rx_metadata)
 }
 
 // ── AF_XDP: AsyncXdpCapture ────────────────────────────────────────────────

@@ -143,7 +143,12 @@ impl AnyBackend {
                     for pkt in &batch {
                         let ts = pkt.timestamp();
                         last_ts = Some(ts);
-                        on_packet(PacketView::new(pkt.data(), ts), pkt.direction());
+                        // The wire length (flowscope 0.26 counts it, and
+                        // gaps what a snap length cut).
+                        on_packet(
+                            PacketView::new(pkt.data(), ts).with_wire_len(pkt.original_len()),
+                            pkt.direction(),
+                        );
                     }
                 }
                 None
@@ -165,7 +170,9 @@ impl AnyBackend {
                         let ts = pkt.timestamp().unwrap_or_else(now_ts);
                         last_ts = Some(ts);
                         on_packet(
-                            PacketView::new(pkt.data(), ts).with_rx_metadata(pkt.rx_metadata()),
+                            PacketView::new(pkt.data(), ts)
+                                .with_wire_len(pkt.data().len())
+                                .with_rx_metadata(pkt.rx_metadata()),
                             PacketDirection::Unknown(0),
                         );
                     }
@@ -203,7 +210,9 @@ impl AnyBackend {
                             let ts = pkt.timestamp().unwrap_or_else(now_ts);
                             last_ts = Some(ts);
                             on_packet(
-                                PacketView::new(pkt.data(), ts).with_rx_metadata(pkt.rx_metadata()),
+                                PacketView::new(pkt.data(), ts)
+                                    .with_wire_len(pkt.data().len())
+                                    .with_rx_metadata(pkt.rx_metadata()),
                                 PacketDirection::Unknown(0),
                             );
                         }

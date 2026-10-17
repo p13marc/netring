@@ -2381,17 +2381,18 @@ impl MonitorBuilder {
                 .protocol::<Tcp>()
                 .protocol::<Udp>()
                 .on_ctx::<FlowPacket>(|evt: &FlowPacket, ctx: &mut Ctx<'_>| {
-                    use crate::flow::FlowSide;
+                    use flowscope::Orientation;
                     let key = evt.key;
                     let len = evt.len as u64;
                     let ts = ctx.ts;
                     let st = ctx.state_mut::<aggregate::AggregateState>();
                     if let Some(t) = st.talkers.as_mut() {
-                        // The sender is the initiator (`a`) or responder (`b`).
-                        let src = if evt.side == FlowSide::Initiator {
-                            key.a.ip()
-                        } else {
-                            key.b.ip()
+                        // The sender, from the packet's canonical direction:
+                        // the key is address-sorted, so `a` is the initiator
+                        // only when it has the lower address.
+                        let src = match evt.orientation {
+                            Orientation::Forward => key.a.ip(),
+                            Orientation::Reverse => key.b.ip(),
                         };
                         t.record_tx(src, len, ts);
                     }

@@ -94,6 +94,62 @@ async fn top_domains_fold_case() {
     }
 }
 
+/// Top talkers attribute bytes to the host that sent them, also when the
+/// flow's initiator has the higher address (the bidirectional key is
+/// address-sorted, so `key.a` is then the responder).
+#[cfg(all(feature = "pcap", feature = "parse"))]
+#[tokio::test(flavor = "current_thread")]
+async fn top_talkers_credit_the_sender() {
+    use std::net::Ipv4Addr;
+    use std::sync::{Arc, Mutex};
+
+    use pcap_file::pcap::{PcapHeader, PcapPacket, PcapWriter};
+
+    // 10.0.0.9 → 10.0.0.1 only: the initiator is `key.b`.
+    let f = flowscope::extract::parse::test_frames::ipv4_udp(
+        [10, 0, 0, 9],
+        [10, 0, 0, 1],
+        40000,
+        53,
+        b"query",
+    );
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("udp.pcap");
+    let header = PcapHeader {
+        datalink: pcap_file::DataLink::ETHERNET,
+        ..Default::default()
+    };
+    let mut w = PcapWriter::with_header(std::fs::File::create(&path).unwrap(), header).unwrap();
+    for ms in [100_000, 100_100, 102_000] {
+        w.write_packet(&PcapPacket::new(
+            Duration::from_millis(ms),
+            f.len() as u32,
+            &f,
+        ))
+        .unwrap();
+    }
+    drop(w);
+
+    let seen = Arc::new(Mutex::new(Vec::new()));
+    let s = Arc::clone(&seen);
+    Monitor::builder()
+        .pcap_source(&path)
+        .on_aggregate(Duration::from_secs(1), move |r| {
+            s.lock().unwrap().extend(r.top_talkers(10));
+            Ok(())
+        })
+        .build()
+        .unwrap()
+        .replay()
+        .await
+        .unwrap();
+    let seen = seen.lock().unwrap();
+    assert!(!seen.is_empty(), "the report ticked");
+    for (ip, _) in seen.iter() {
+        assert_eq!(*ip, Ipv4Addr::new(10, 0, 0, 9), "{seen:?}");
+    }
+}
+
 #[tokio::test(flavor = "current_thread")]
 async fn on_aggregate_reports() {
     let mut cfg = AggregateConfig::default();

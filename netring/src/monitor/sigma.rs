@@ -35,7 +35,6 @@ use sigma_rust::{Event, Rule, rule_from_yaml};
 
 use crate::anomaly::Severity;
 use crate::ctx::Ctx;
-use crate::protocol::FlowKey;
 
 /// Error loading a [`SigmaRuleSet`].
 #[derive(Debug)]
@@ -257,15 +256,29 @@ fn split_yaml_docs(yaml: &str) -> impl Iterator<Item = &str> {
 
 // ── Event construction ──────────────────────────────────────────────────────
 
-/// The 5-tuple fields shared by every event.
-fn base_event(flow: Option<FlowKey>) -> Event {
+/// The 5-tuple fields shared by every event, `src` the flow's initiator
+/// (the client) and `dst` its responder.
+fn base_event(ctx: &Ctx<'_>) -> Event {
     let mut e = Event::new();
-    if let Some(k) = flow {
+    if let Some(k) = ctx.flow {
+        // The key is address-sorted: `a` is the initiator only when it has
+        // the lower address. The message's side and canonical direction
+        // tell: sent by the initiator a→b, or by the responder b→a, means
+        // `a` initiated.
+        let (src, dst) = match (ctx.side(), ctx.orientation()) {
+            (Some(side), Some(orientation))
+                if (side == flowscope::FlowSide::Initiator)
+                    != (orientation == flowscope::Orientation::Forward) =>
+            {
+                (k.b, k.a)
+            }
+            _ => (k.a, k.b),
+        };
         let proto = format!("{:?}", k.proto).to_ascii_lowercase();
-        e.insert("src_ip", k.a.ip().to_string());
-        e.insert("dst_ip", k.b.ip().to_string());
-        e.insert("src_port", k.a.port() as i64);
-        e.insert("dst_port", k.b.port() as i64);
+        e.insert("src_ip", src.ip().to_string());
+        e.insert("dst_ip", dst.ip().to_string());
+        e.insert("src_port", src.port() as i64);
+        e.insert("dst_port", dst.port() as i64);
         e.insert("proto", proto.clone());
         e.insert("network_protocol", proto);
     }
@@ -305,8 +318,7 @@ pub(crate) fn eval_dns(set: &SigmaRuleSet, msg: &flowscope::dns::DnsMessage, ctx
     let Some(question) = q.questions.first() else {
         return;
     };
-    let flow = ctx.flow;
-    let mut event = base_event(flow);
+    let mut event = base_event(ctx);
     event.insert("query", question.name.clone());
     event.insert("dns.question.name", question.name.clone());
     event.insert("record_type", question.qtype as i64);
@@ -319,8 +331,7 @@ pub(crate) fn eval_http(set: &SigmaRuleSet, msg: &flowscope::http::HttpMessage, 
     let flowscope::http::HttpMessage::Request(req) = msg else {
         return;
     };
-    let flow = ctx.flow;
-    let mut event = base_event(flow);
+    let mut event = base_event(ctx);
     if let Some(host) = req.host() {
         event.insert("host", host);
         event.insert("cs-host", host);
@@ -347,8 +358,7 @@ pub(crate) fn eval_http(set: &SigmaRuleSet, msg: &flowscope::http::HttpMessage, 
 /// Evaluate the TLS-category rules against a TLS handshake.
 #[cfg(feature = "tls")]
 pub(crate) fn eval_tls(set: &SigmaRuleSet, hs: &flowscope::tls::TlsHandshake, ctx: &mut Ctx<'_>) {
-    let flow = ctx.flow;
-    let mut event = base_event(flow);
+    let mut event = base_event(ctx);
     if let Some(sni) = hs.sni.as_deref() {
         event.insert("server_name", sni);
         event.insert("sni", sni);

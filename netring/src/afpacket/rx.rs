@@ -6,7 +6,7 @@ use std::mem::ManuallyDrop;
 use std::os::fd::{AsFd, AsRawFd, BorrowedFd, OwnedFd};
 use std::time::{Duration, Instant};
 
-use crate::afpacket::ring::MmapRing;
+use crate::afpacket::ring::{MmapRing, RingGeometry};
 use crate::afpacket::{fanout, ffi, filter, ring, socket};
 use crate::config::{
     BpfFilter, BpfInsn, BusyPollConfig, FanoutFlags, FanoutMode, RingProfile, TimestampSource,
@@ -1053,7 +1053,7 @@ fn build_inner(b: &CaptureBuilder, block_count: usize) -> Result<Capture, Error>
         return Err(Error::Config("block_count must be > 0".into()));
     }
 
-    let frame_nr = (b.block_size / b.frame_size) * block_count;
+    let geometry = RingGeometry::new(b.block_size, block_count, b.frame_size)?;
 
     // Create socket
     let fd = socket::create_packet_socket()?;
@@ -1063,10 +1063,10 @@ fn build_inner(b: &CaptureBuilder, block_count: usize) -> Result<Capture, Error>
 
     // Configure RX ring
     let mut req: ffi::tpacket_req3 = unsafe { std::mem::zeroed() };
-    req.tp_block_size = b.block_size as u32;
-    req.tp_block_nr = block_count as u32;
-    req.tp_frame_size = b.frame_size as u32;
-    req.tp_frame_nr = frame_nr as u32;
+    req.tp_block_size = geometry.block_size;
+    req.tp_block_nr = geometry.block_nr;
+    req.tp_frame_size = geometry.frame_size;
+    req.tp_frame_nr = geometry.frame_nr;
     req.tp_retire_blk_tov = b.block_timeout_ms;
     req.tp_sizeof_priv = 0;
     req.tp_feature_req_word = if b.fill_rxhash {
@@ -1078,8 +1078,7 @@ fn build_inner(b: &CaptureBuilder, block_count: usize) -> Result<Capture, Error>
     socket::set_rx_ring(fd.as_fd(), &req)?;
 
     // mmap
-    let ring_size = b.block_size * block_count;
-    let ring = MmapRing::new(fd.as_fd(), ring_size, b.block_size, block_count)?;
+    let ring = MmapRing::new(fd.as_fd(), geometry.size, b.block_size, block_count)?;
 
     // Bind to interface
     let ifindex = socket::resolve_interface(interface)?;
@@ -1237,6 +1236,21 @@ mod tests {
             .build()
             .unwrap_err();
         assert!(matches!(err, Error::Config(_)));
+    }
+
+    /// A block count whose ring size overflows `usize` (or whose block /
+    /// frame counts do not fit the kernel's `u32` fields) is a config error,
+    /// caught before the socket exists — it used to wrap into a one-block
+    /// kernel ring that `next_batch` walked past.
+    #[test]
+    fn builder_rejects_ring_geometry_overflow() {
+        let err = CaptureBuilder::default()
+            .interface("lo")
+            .block_size(1 << 22)
+            .block_count((1 << 42) + 1)
+            .build()
+            .unwrap_err();
+        assert!(matches!(err, Error::Config(_)), "{err:?}");
     }
 
     #[test]

@@ -15,7 +15,8 @@ use std::os::fd::{AsFd, AsRawFd, BorrowedFd, OwnedFd};
 use std::ptr::NonNull;
 use std::sync::atomic::{AtomicU32, Ordering};
 
-use crate::afpacket::{ffi, ring::MmapRing, socket};
+use crate::afpacket::ring::{MmapRing, RingGeometry};
+use crate::afpacket::{ffi, socket};
 use crate::error::Error;
 
 /// The TX frame header: the socket is set to `TPACKET_V2`.
@@ -566,17 +567,21 @@ impl InjectorBuilder {
         // Each "block" holds 1+ frames. The kernel requires block_size to be a
         // power of 2 and a multiple of PAGE_SIZE.
         let page_size = 4096usize;
-        let block_size = self.frame_size.max(page_size).next_power_of_two();
+        let block_size = self
+            .frame_size
+            .max(page_size)
+            .checked_next_power_of_two()
+            .ok_or_else(|| Error::Config(format!("frame_size {} is too large", self.frame_size)))?;
 
         let frames_per_block = block_size / self.frame_size;
         let block_count = self.frame_count.div_ceil(frames_per_block);
-        let actual_frame_count = block_count * frames_per_block;
+        let geometry = RingGeometry::new(block_size, block_count, self.frame_size)?;
 
         let mut req: ffi::tpacket_req3 = unsafe { std::mem::zeroed() };
-        req.tp_block_size = block_size as u32;
-        req.tp_block_nr = block_count as u32;
-        req.tp_frame_size = self.frame_size as u32;
-        req.tp_frame_nr = actual_frame_count as u32;
+        req.tp_block_size = geometry.block_size;
+        req.tp_block_nr = geometry.block_nr;
+        req.tp_frame_size = geometry.frame_size;
+        req.tp_frame_nr = geometry.frame_nr;
 
         // Create socket, set version, set TX ring, mmap, bind
         let fd = socket::create_packet_socket()?;
@@ -584,8 +589,7 @@ impl InjectorBuilder {
         // V2 reads only the leading `tpacket_req` part of the request.
         socket::set_tx_ring(fd.as_fd(), &req)?;
 
-        let ring_size = block_size * block_count;
-        let ring = MmapRing::new(fd.as_fd(), ring_size, block_size, block_count)?;
+        let ring = MmapRing::new(fd.as_fd(), geometry.size, block_size, block_count)?;
 
         let ifindex = socket::resolve_interface(&interface)?;
         socket::bind_to_interface(fd.as_fd(), ifindex)?;
@@ -634,7 +638,7 @@ impl InjectorBuilder {
             ring,
             fd,
             current_frame: 0,
-            frame_count: actual_frame_count,
+            frame_count: geometry.frame_nr as usize,
             frame_size: self.frame_size,
             data_offset,
             pending: 0,
@@ -670,6 +674,19 @@ mod tests {
             .build()
             .unwrap_err();
         assert!(matches!(err, Error::Config(_)));
+    }
+
+    /// A frame count whose ring size overflows `usize` (or whose block /
+    /// frame counts do not fit the kernel's `u32` fields) is a config error,
+    /// caught before the socket exists.
+    #[test]
+    fn builder_rejects_ring_geometry_overflow() {
+        let err = InjectorBuilder::default()
+            .interface("lo")
+            .frame_count((1 << 53) + 2)
+            .build()
+            .unwrap_err();
+        assert!(matches!(err, Error::Config(_)), "{err:?}");
     }
 
     #[test]

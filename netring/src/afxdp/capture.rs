@@ -322,7 +322,12 @@ mod mq {
             // (queue `q` registers at index `q`), now that `default_program`
             // honors its `max_queues` argument. A caller-supplied program keeps
             // its own map size; registering past it errors at `register`.
-            let map_size = queue_ids.iter().max().map(|&m| m + 1).unwrap_or(1);
+            let map_size = match queue_ids.iter().max() {
+                Some(&m) => m.checked_add(1).ok_or_else(|| {
+                    Error::Config(format!("queue id {m} is out of range for an XSKMAP"))
+                })?,
+                None => 1,
+            };
             let mut prog = match self.program.take() {
                 Some(p) => p,
                 None => default_program(map_size)?,
@@ -545,6 +550,21 @@ mod tests {
         assert_eq!(interface_numa_node("lo"), None);
         // A nonexistent interface is also None (missing path).
         assert_eq!(interface_numa_node("netring-no-such-if0"), None);
+    }
+
+    /// Queue `u32::MAX` would need an XSKMAP of `u32::MAX + 1` entries: a
+    /// config error, reported before any privileged syscall (it used to
+    /// overflow — a panic in debug builds).
+    #[cfg(feature = "xdp-loader")]
+    #[test]
+    fn build_rejects_queue_id_u32_max() {
+        let err = XdpCapture::builder()
+            .interface("lo")
+            .queues(Queues::single(u32::MAX))
+            .build()
+            .err()
+            .expect("queue u32::MAX must not build");
+        assert!(matches!(err, Error::Config(_)), "{err:?}");
     }
 
     #[test]

@@ -52,7 +52,9 @@ use flowscope::{
 use futures_core::Stream;
 
 use crate::async_adapters::flow_source::{AsyncFlowSource, DrainOutcome, SourcePacket};
-use crate::async_adapters::flow_stream::{clamp_now, clamp_view, current_timestamp, poll_sweep};
+use crate::async_adapters::flow_stream::{
+    clamp_now, clamp_view, current_timestamp, poll_sweep, sweep_timer,
+};
 use crate::async_adapters::tokio_adapter::AsyncCapture;
 use crate::dedup::Dedup;
 use crate::error::Error;
@@ -102,7 +104,7 @@ where
         monotonic_ts: Option<Timestamp>,
         #[cfg(feature = "pcap")] tap: Option<crate::pcap_tap::PcapTap>,
     ) -> Self {
-        let sweep = tokio::time::interval(tracker.config().sweep_interval);
+        let sweep = sweep_timer(tracker.config().sweep_interval);
         Self {
             cap,
             driver: DatagramDriver::from_tracker(tracker, parser_factory),
@@ -125,7 +127,7 @@ where
     /// if `sweep_interval` changed. (Reassembly limits don't apply to
     /// datagrams.)
     pub fn with_config(mut self, config: FlowTrackerConfig) -> Self {
-        self.sweep = tokio::time::interval(config.sweep_interval);
+        self.sweep = sweep_timer(config.sweep_interval);
         self.driver.set_config(config);
         self
     }

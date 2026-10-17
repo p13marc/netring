@@ -44,7 +44,9 @@ use futures_core::Stream;
 use tokio::sync::mpsc;
 
 use crate::async_adapters::flow_source::{AsyncFlowSource, DrainOutcome, SourcePacket};
-use crate::async_adapters::flow_stream::{clamp_now, clamp_view, current_timestamp, poll_sweep};
+use crate::async_adapters::flow_stream::{
+    clamp_now, clamp_view, current_timestamp, poll_sweep, sweep_timer,
+};
 use crate::async_adapters::tokio_adapter::AsyncCapture;
 use crate::dedup::Dedup;
 use crate::error::Error;
@@ -288,7 +290,7 @@ where
             queue: pending.into_iter().map(Item::Event).collect(),
             in_flight: None,
             scratch: StreamChunks::new(),
-            sweep: tokio::time::interval(config.sweep_interval),
+            sweep: sweep_timer(config.sweep_interval),
             yield_ended: true,
             dedup,
             monotonic_ts,
@@ -304,7 +306,7 @@ where
     fn apply_config(&mut self, mut config: FlowTrackerConfig) {
         self.yield_ended = !config.suppress_events.contains(EventMask::ENDED);
         config.suppress_events.remove(EventMask::ENDED);
-        self.sweep = tokio::time::interval(config.sweep_interval);
+        self.sweep = sweep_timer(config.sweep_interval);
         self.driver.set_config(config);
     }
 

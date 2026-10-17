@@ -66,7 +66,8 @@ pub enum PcapFormat {
 pub struct AsyncPcapConfig {
     /// Pacing factor.
     ///
-    /// - `0.0` (default) — yield as fast as possible.
+    /// - `0.0` (default) — yield as fast as possible (so do negative,
+    ///   NaN and infinite values).
     /// - `1.0` — replay at packet-recorded wire rate.
     /// - `0.5` / `2.0` — half / double speed.
     ///
@@ -299,17 +300,21 @@ fn pace(
     let first = *first_ts.get_or_insert(ts);
     let started = *start_wall.get_or_insert_with(Instant::now);
     let dt_pcap = timestamp_delta(ts, first);
-    let dt_wall = dt_pcap.div_f32(speed);
-    let target = started + dt_wall;
+    // `None`: so far ahead (a vanishingly small `speed`) that it is
+    // never reached — wait until the receiver is gone. (`div_f32` and
+    // `Instant + Duration` would panic.)
+    let target = Duration::try_from_secs_f64(dt_pcap.as_secs_f64() / f64::from(speed))
+        .ok()
+        .and_then(|dt_wall| started.checked_add(dt_wall));
     loop {
         let now = Instant::now();
-        if target <= now {
+        if target.is_some_and(|t| t <= now) {
             return true;
         }
         if tx.is_closed() {
             return false;
         }
-        std::thread::sleep((target - now).min(PACE_SLICE));
+        std::thread::sleep(target.map_or(PACE_SLICE, |t| (t - now).min(PACE_SLICE)));
     }
 }
 
@@ -675,5 +680,49 @@ mod tests {
         // Don't wait for a reader that is still asleep.
         rt.shutdown_background();
         assert!(ended, "the paced reader ends within 2 s");
+    }
+
+    /// Degenerate replay speeds don't panic the reader: a vanishingly
+    /// small one waits (for ever, until dropped), an infinite one
+    /// doesn't pace.
+    #[test]
+    fn extreme_replay_speeds_do_not_panic_the_reader() {
+        let f = write_legacy_pcap(&[
+            (Timestamp::new(1, 0), vec![0xaa; 60]),
+            (Timestamp::new(2, 0), vec![0xbb; 60]),
+        ]);
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        rt.block_on(async {
+            for speed in [1e-30, f32::MIN_POSITIVE, f32::INFINITY, f32::NAN] {
+                let cfg = AsyncPcapConfig {
+                    replay_speed: speed,
+                    ..Default::default()
+                };
+                let AsyncPcapSource {
+                    mut receiver,
+                    _task,
+                    ..
+                } = AsyncPcapSource::open_with_config(f.path(), cfg)
+                    .await
+                    .unwrap();
+                assert!(receiver.recv().await.unwrap().is_ok(), "{speed}");
+                if speed.is_finite() {
+                    let second =
+                        tokio::time::timeout(Duration::from_millis(300), receiver.recv()).await;
+                    assert!(second.is_err(), "{speed}: still waiting");
+                } else {
+                    assert!(receiver.recv().await.unwrap().is_ok(), "{speed}");
+                }
+                drop(receiver);
+                tokio::time::timeout(Duration::from_secs(2), _task)
+                    .await
+                    .expect("the reader ends")
+                    .expect("the reader did not panic");
+            }
+        });
+        rt.shutdown_background();
     }
 }

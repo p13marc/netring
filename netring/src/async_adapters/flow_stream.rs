@@ -80,7 +80,7 @@ where
             cap,
             tracker,
             pending: VecDeque::new(),
-            sweep: tokio::time::interval(sweep_interval),
+            sweep: sweep_timer(sweep_interval),
             dedup: None,
             monotonic_ts: None,
             #[cfg(feature = "pcap")]
@@ -238,7 +238,7 @@ where
     pub fn with_config(mut self, config: FlowTrackerConfig) -> Self {
         let new_interval = config.sweep_interval;
         self.tracker.set_config(config);
-        self.sweep = tokio::time::interval(new_interval);
+        self.sweep = sweep_timer(new_interval);
         self
     }
 
@@ -522,6 +522,13 @@ pub(crate) fn clamp_view<'a>(
     let mut clamped = view;
     clamped.timestamp = *last;
     clamped
+}
+
+/// The live streams' sweep timer, ticking every `sweep_interval` — at
+/// most every millisecond: a zero interval (valid for the pcap streams,
+/// which sweep on packet time) would panic `tokio::time::interval`.
+pub(crate) fn sweep_timer(sweep_interval: Duration) -> tokio::time::Interval {
+    tokio::time::interval(sweep_interval.max(Duration::from_millis(1)))
 }
 
 /// Poll the sweep timer: `true` when a sweep is due.
@@ -843,6 +850,68 @@ pub(crate) mod monotonic_tests {
         let mut flows = FlowStream::new(one_udp_datagram(), FiveTuple::bidirectional())
             .with_config(quick_idle_config());
         next_until(&mut flows, |ev| matches!(ev, FlowEvent::Ended { .. })).await;
+    }
+
+    /// [`quick_idle_config`] with a zero `sweep_interval` — valid for
+    /// the pcap streams (sweep on every packet).
+    fn zero_sweep_config() -> FlowTrackerConfig {
+        let mut cfg = quick_idle_config();
+        cfg.sweep_interval = Duration::ZERO;
+        cfg
+    }
+
+    /// A zero `sweep_interval` is not a panic in the live streams'
+    /// sweep timer; idle flows still end.
+    #[tokio::test(flavor = "current_thread")]
+    async fn zero_sweep_interval_flow_stream() {
+        let mut flows = FlowStream::new(
+            one_udp_datagram(),
+            flowscope::extract::FiveTuple::bidirectional(),
+        )
+        .with_config(zero_sweep_config());
+        next_until(&mut flows, |ev| matches!(ev, FlowEvent::Ended { .. })).await;
+    }
+
+    /// Same, for the converted streams: a zero interval in the moved
+    /// tracker, or set through their own `with_config`.
+    #[tokio::test(flavor = "current_thread")]
+    async fn zero_sweep_interval_converted_streams() {
+        let zero_flows = || {
+            let mut flows = FlowStream::new(
+                one_udp_datagram(),
+                flowscope::extract::FiveTuple::bidirectional(),
+            );
+            flows.tracker_mut().set_config(zero_sweep_config());
+            flows
+        };
+        let closed = |ev: &flowscope::SessionEvent<_, ()>| {
+            matches!(ev, flowscope::SessionEvent::Closed { .. })
+        };
+        let mut s = zero_flows().session_stream(NopParser);
+        next_until(&mut s, closed).await;
+        let mut s = quick_idle_flows()
+            .session_stream(NopParser)
+            .with_config(zero_sweep_config());
+        next_until(&mut s, closed).await;
+        let mut s = zero_flows().datagram_stream(NopParser);
+        next_until(&mut s, closed).await;
+        let mut s = quick_idle_flows()
+            .datagram_stream(NopParser)
+            .with_config(zero_sweep_config());
+        next_until(&mut s, closed).await;
+        let factory = || {
+            crate::async_adapters::async_reassembler::channel_factory(
+                |_: &flowscope::extract::FiveTupleKey, _: flowscope::FlowSide| {
+                    tokio::sync::mpsc::channel(1).0
+                },
+            )
+        };
+        let mut s = zero_flows().with_async_reassembler(factory());
+        next_until(&mut s, |ev| matches!(ev, FlowEvent::Ended { .. })).await;
+        let mut s = quick_idle_flows()
+            .with_async_reassembler(factory())
+            .with_config(zero_sweep_config());
+        next_until(&mut s, |ev| matches!(ev, FlowEvent::Ended { .. })).await;
     }
 
     /// `with_state` keeps an idle-timeout predicate set before it.

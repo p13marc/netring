@@ -153,6 +153,8 @@ pub struct Injector {
     frames_per_block: usize,
     data_offset: usize,
     pending: u32,
+    /// The device's MTU when the injector was built (`SIOCGIFMTU`).
+    mtu: usize,
 }
 
 impl std::fmt::Debug for Injector {
@@ -232,6 +234,19 @@ impl Injector {
         (0..self.frame_count)
             .filter(|&i| self.read_frame_status(i) == ffi::TP_STATUS_WRONG_FORMAT)
             .count()
+    }
+
+    /// Whether the kernel lets this socket send `frame` on the device as it
+    /// was when the injector was built: at most `mtu + 14` bytes (the
+    /// Ethernet header), or `mtu + 18` when the outermost tag is 802.1Q —
+    /// tpacket_snd()'s limit (`dev->mtu + hard_header_len`, +`VLAN_HLEN`
+    /// only for `ETH_P_8021Q`, packet_extra_vlan_len_allowed()).
+    pub(crate) fn fits_device(&self, frame: &[u8]) -> bool {
+        const ETH_HLEN: usize = 14;
+        const VLAN_HLEN: usize = 4;
+        let len = frame.len();
+        len <= self.mtu + ETH_HLEN
+            || (len <= self.mtu + ETH_HLEN + VLAN_HLEN && frame.get(12..14) == Some(&[0x81, 0x00]))
     }
 
     /// Number of frames queued with [`TxSlot::send`] that no kick has handed
@@ -564,6 +579,7 @@ pub struct InjectorBuilder {
     frame_count: usize,
     qdisc_bypass: bool,
     tx_timestamps: bool,
+    drop_rejected: bool,
 }
 
 impl Default for InjectorBuilder {
@@ -574,6 +590,7 @@ impl Default for InjectorBuilder {
             frame_count: 256,
             qdisc_bypass: false,
             tx_timestamps: false,
+            drop_rejected: true,
         }
     }
 }
@@ -600,6 +617,25 @@ impl InjectorBuilder {
     /// Bypass qdisc layer for lower TX latency. Default: false.
     pub fn qdisc_bypass(mut self, enable: bool) -> Self {
         self.qdisc_bypass = enable;
+        self
+    }
+
+    /// What a kick does with a frame the kernel refuses to send — longer
+    /// than the device accepts (`mtu + 14`, `+ 4` only for an outer 802.1Q
+    /// tag), or with a malformed header. Default: `true`.
+    ///
+    /// - `true` — the kernel **drops** it (`PACKET_LOSS`): its slot becomes
+    ///   available again and the kick goes on with the next frame. Nothing
+    ///   reports the drop; check lengths before sending if you need to know.
+    /// - `false` — the kick **stops** at it with the error (`EMSGSIZE`, …)
+    ///   and leaves its slot `TP_STATUS_WRONG_FORMAT`
+    ///   ([`Injector::rejected_slots`]). The kernel's TX position stays on
+    ///   that slot, so the frames queued after it wait until that slot is
+    ///   queued again — what 0.31 did.
+    ///
+    /// New in 0.32.0.
+    pub fn drop_rejected(mut self, enable: bool) -> Self {
+        self.drop_rejected = enable;
         self
     }
 
@@ -659,6 +695,18 @@ impl InjectorBuilder {
         // packet_parse_headers() takes skb->protocol from the frame.
         let fd = socket::create_packet_socket_proto(0)?;
         socket::set_packet_version(fd.as_fd(), ffi::TPACKET_V2_INT)?;
+        if self.drop_rejected {
+            // Before the ring: the kernel refuses PACKET_LOSS once one is
+            // set up (EBUSY).
+            let on: libc::c_int = 1;
+            crate::sockopt::raw_setsockopt(
+                fd.as_fd(),
+                ffi::SOL_PACKET,
+                libc::PACKET_LOSS,
+                &on,
+                "PACKET_LOSS",
+            )?;
+        }
         // V2 reads only the leading `tpacket_req` part of the request.
         socket::set_tx_ring(fd.as_fd(), &req)?;
 
@@ -666,6 +714,7 @@ impl InjectorBuilder {
 
         let ifindex = socket::resolve_interface(&interface)?;
         socket::bind_to_interface_proto(fd.as_fd(), ifindex, 0)?;
+        let mtu = socket::interface_mtu(fd.as_fd(), &interface)? as usize;
 
         if self.qdisc_bypass {
             // PACKET_QDISC_BYPASS sets a function pointer on the packet_sock
@@ -716,6 +765,7 @@ impl InjectorBuilder {
             frames_per_block,
             data_offset,
             pending: 0,
+            mtu,
         })
     }
 }
@@ -769,6 +819,7 @@ mod tests {
         assert_eq!(b.frame_size, 2048);
         assert_eq!(b.frame_count, 256);
         assert!(!b.qdisc_bypass);
+        assert!(b.drop_rejected);
     }
 
     /// frame_capacity should equal frame_size minus the tpacket2_hdr alignment.

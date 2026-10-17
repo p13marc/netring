@@ -294,3 +294,82 @@ fn wait_drained_does_not_spin() {
         );
     }
 }
+
+/// Review: one frame the kernel refuses (here longer than the device's MTU
+/// allows) stopped the kick with `EMSGSIZE` and left the kernel's TX
+/// position on that slot, so every frame queued after it stayed queued.
+/// Injectors now let the kernel drop a refused frame (`PACKET_LOSS`) and
+/// go on; `drop_rejected(false)` keeps the strict behaviour.
+#[test]
+fn a_refused_frame_does_not_block_the_ring() {
+    let Some(v) = helpers::VethPair::create("nrtxrej0", "nrtxrej1") else {
+        eprintln!("skipping: needs CAP_NET_ADMIN to create veth");
+        return;
+    };
+    let marker = format!("netring_tx_rejected_{}", helpers::unique_port());
+    let mut sink = netring::CaptureBuilder::default()
+        .interface(&v.b)
+        .block_timeout_ms(10)
+        .build()
+        .expect("capture on the peer");
+    let frame = |len: usize, seq: u8| {
+        let mut f = vec![0xffu8; 6];
+        f.extend_from_slice(&[0x02, 0, 0, 0, 0, 0x04]);
+        f.extend_from_slice(&0x88b5u16.to_be_bytes());
+        f.push(seq);
+        f.extend_from_slice(marker.as_bytes());
+        f.resize(len, 0);
+        f
+    };
+    let mut tx = netring::Injector::builder()
+        .interface(&v.a)
+        .frame_count(8)
+        .build()
+        .expect("injector");
+    // 1600 bytes on a 1500-byte MTU, then three ordinary frames.
+    for (len, seq) in [(1600, 0u8), (100, 1), (100, 2), (100, 3)] {
+        let f = frame(len, seq);
+        let mut slot = tx.allocate(f.len()).expect("allocate");
+        slot.data_mut()[..f.len()].copy_from_slice(&f);
+        slot.set_len(f.len());
+        slot.send();
+    }
+    tx.flush()
+        .expect("a refused frame is dropped, not an error");
+    tx.wait_drained(Duration::from_secs(2))
+        .expect("nothing left queued");
+    let mut seen = 0;
+    let deadline = std::time::Instant::now() + Duration::from_secs(2);
+    while std::time::Instant::now() < deadline && seen < 3 {
+        if let Some(batch) = sink.next_batch_blocking(Duration::from_millis(50)).unwrap() {
+            seen += batch
+                .iter()
+                .filter(|p| {
+                    p.data()
+                        .windows(marker.len())
+                        .any(|w| w == marker.as_bytes())
+                })
+                .count();
+        }
+    }
+    assert_eq!(seen, 3, "the frames queued after the refused one");
+
+    // Strict mode: the kick reports the refusal.
+    let mut strict = netring::Injector::builder()
+        .interface(&v.a)
+        .frame_count(8)
+        .drop_rejected(false)
+        .build()
+        .expect("strict injector");
+    let f = frame(1600, 9);
+    let mut slot = strict.allocate(f.len()).expect("allocate");
+    slot.data_mut()[..f.len()].copy_from_slice(&f);
+    slot.set_len(f.len());
+    slot.send();
+    let err = strict.flush().expect_err("EMSGSIZE");
+    assert!(
+        matches!(&err, netring::Error::Io(e) if e.raw_os_error() == Some(libc::EMSGSIZE)),
+        "{err}"
+    );
+    assert_eq!(strict.rejected_slots(), 1);
+}

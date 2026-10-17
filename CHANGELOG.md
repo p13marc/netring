@@ -85,6 +85,10 @@ has an old → new snippet there.
   and `Bridge` stripped every tag it forwarded. The capture re-inserts the
   tag in place in the ring, as libpcap does (`vlan_reinsert(false)` keeps
   the kernel's layout). AF_XDP `OwnedPacket`s carry the NIC-stripped tag.
+  `Bridge` forwards the tag; a frame the other side can't take with it (a
+  full-size frame with an outer 802.1ad tag: longer than `mtu + 14`, the
+  kernel's limit without an outer 802.1Q tag) is dropped and counted too
+  large — `BridgeBuilder::vlan_reinsert(false)` forwards untagged.
 - **`Packet::direction()` / `source_ll_addr()` / `to_owned()` were
   undefined behaviour under Stacked Borrows** (the `sockaddr_ll` read
   through a pointer derived from the 48-byte `&tpacket3_hdr`; miri flagged
@@ -133,6 +137,15 @@ has an old → new snippet there.
   readiness that never clears, so every writability wait resolved at once.
   In that state the waits look at the ring every millisecond (a `timerfd`)
   instead.
+- **One frame the kernel refused blocked an injector's ring**: the kick
+  stopped at it with `EMSGSIZE` (a frame longer than the device accepts,
+  a malformed header) and the kernel's TX position stayed on its slot, so
+  every frame queued after it waited until that slot was queued again —
+  late and out of order — and `Bridge::run` returned the error. Injectors
+  now let the kernel drop a refused frame and go on (`PACKET_LOSS`;
+  `InjectorBuilder::drop_rejected(false)` for the old stop-and-report),
+  and `Bridge` drops (and counts) frames longer than the egress device
+  accepts before queueing them.
 
 ### Fixed — Monitor
 
@@ -200,7 +213,8 @@ has an old → new snippet there.
   re-exports, `BpfFilterBuilder::pass_ip_fragments`.
 - `PacketSource::check_health` (provided), `XdpSocket::check_health`,
   `Injector::flush_nonblocking` (returns the frames the kick handed over),
-  `Injector::queued_count`.
+  `Injector::queued_count`, `InjectorBuilder::drop_rejected`,
+  `BridgeBuilder::vlan_reinsert`.
 - `UmemPlacement`, `RssGuard`, `RssState`, `RssConfig::state()`.
 - `AnomalyRecord`, `Endpoints`, `AnomalyWriter::{with_flow,
   with_initiator, with_endpoints}`, `Ctx::{initiator, endpoints}`,
@@ -226,6 +240,8 @@ has an old → new snippet there.
 - One more fd per async adapter while it idles (the liveness `timerfd`).
 - The 4-byte `PACKET_RESERVE` for VLAN re-insertion moves every packet 4
   bytes further into its ring frame (read `tp_mac`).
+- `Injector` drops a frame the kernel refuses instead of stopping the kick
+  with its error (`InjectorBuilder::drop_rejected`, default `true`).
 
 ### Docs
 

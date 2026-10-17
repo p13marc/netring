@@ -71,11 +71,15 @@ pub struct BridgeStats {
     /// Ring statistics of the capture on B (the B→A direction): totals
     /// since the bridge was created.
     pub b_to_a: CaptureStats,
-    /// A→B packets dropped because the TX frame was too small.
+    /// A→B packets dropped because they didn't fit the TX frame, or were
+    /// longer than interface B accepts (its MTU + the Ethernet header, + 4
+    /// only for an outer 802.1Q tag — a re-inserted 802.1ad tag on a
+    /// full-size frame is too long).
     pub a_to_b_dropped_too_large: u64,
     /// A→B packets dropped because the TX ring was full.
     pub a_to_b_dropped_ring_full: u64,
-    /// B→A packets dropped because the TX frame was too small.
+    /// B→A packets dropped because they didn't fit the TX frame, or were
+    /// longer than interface A accepts (see `a_to_b_dropped_too_large`).
     pub b_to_a_dropped_too_large: u64,
     /// B→A packets dropped because the TX ring was full.
     pub b_to_a_dropped_ring_full: u64,
@@ -490,6 +494,18 @@ impl Bridge {
                     );
                     continue;
                 }
+                // Longer than the egress device takes (e.g. a full-size
+                // frame whose re-inserted tag is 802.1ad): the kernel would
+                // refuse it. Its injector drops refused frames anyway
+                // (PACKET_LOSS) — counting them needs this check.
+                if !tx.fits_device(pkt.data()) {
+                    *too_large += 1;
+                    tracing::debug!(
+                        pkt_len = pkt.len(),
+                        "Bridge: dropping packet — longer than the egress device accepts"
+                    );
+                    continue;
+                }
                 if !queue_frame(tx, pkt.data(), kick)? {
                     *ring_full += 1;
                     tracing::debug!(
@@ -634,6 +650,7 @@ pub struct BridgeBuilder {
     profile: RingProfile,
     promiscuous: bool,
     qdisc_bypass: bool,
+    vlan_reinsert: bool,
     poll_timeout: Duration,
     // Per-direction overrides; None = inherit from profile / global setting.
     a_block_size: Option<usize>,
@@ -658,6 +675,7 @@ impl Default for BridgeBuilder {
             profile: RingProfile::Default,
             promiscuous: true,
             qdisc_bypass: true,
+            vlan_reinsert: true,
             poll_timeout: Duration::from_millis(100),
             a_block_size: None,
             a_block_count: None,
@@ -691,6 +709,17 @@ impl BridgeBuilder {
     /// Set the ring buffer profile for both interfaces. Default: [`RingProfile::Default`].
     pub fn profile(mut self, profile: RingProfile) -> Self {
         self.profile = profile;
+        self
+    }
+
+    /// Forward the VLAN tag the kernel stripped from a received frame
+    /// (the captures re-insert it — [`CaptureBuilder::vlan_reinsert`]).
+    /// Default: `true`. A re-inserted tag makes the frame 4 bytes longer: a
+    /// full-size frame with an outer 802.1ad (QinQ) tag is then longer than
+    /// the other side accepts and is dropped (counted too large); `false`
+    /// forwards frames untagged, as 0.31 did. New in 0.32.0.
+    pub fn vlan_reinsert(mut self, enable: bool) -> Self {
+        self.vlan_reinsert = enable;
         self
     }
 
@@ -825,6 +854,7 @@ impl BridgeBuilder {
             .frame_size(a_fs)
             .block_timeout_ms(a_to)
             .promiscuous(self.promiscuous)
+            .vlan_reinsert(self.vlan_reinsert)
             .build()?;
 
         let mut tx_b_builder = InjectorBuilder::default()
@@ -843,6 +873,7 @@ impl BridgeBuilder {
             .frame_size(b_fs)
             .block_timeout_ms(b_to)
             .promiscuous(self.promiscuous)
+            .vlan_reinsert(self.vlan_reinsert)
             .build()?;
 
         let mut tx_a_builder = InjectorBuilder::default()

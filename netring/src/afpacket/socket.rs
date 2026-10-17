@@ -44,6 +44,39 @@ pub(crate) fn resolve_interface(name: &str) -> Result<i32, Error> {
     }
 }
 
+/// The MTU of interface `name`, read with `SIOCGIFMTU` through `fd` (so in
+/// the socket's network namespace — sysfs may show another one).
+pub(crate) fn interface_mtu(fd: BorrowedFd<'_>, name: &str) -> Result<u32, Error> {
+    /// `struct ifreq` with the `ifr_mtu` member of its union; the full 40
+    /// bytes the kernel copies in and out.
+    #[repr(C)]
+    struct IfreqMtu {
+        name: [libc::c_char; libc::IFNAMSIZ],
+        mtu: libc::c_int,
+        _pad: [u8; 20],
+    }
+    const _: () = assert!(std::mem::size_of::<IfreqMtu>() == 40);
+    let bytes = name.as_bytes();
+    if bytes.len() >= libc::IFNAMSIZ {
+        return Err(Error::InterfaceNotFound(name.to_string()));
+    }
+    let mut req = IfreqMtu {
+        name: [0; libc::IFNAMSIZ],
+        mtu: 0,
+        _pad: [0; 20],
+    };
+    for (d, s) in req.name.iter_mut().zip(bytes) {
+        *d = *s as libc::c_char;
+    }
+    // SAFETY: SIOCGIFMTU reads the name from and writes the MTU into a
+    // full-size `struct ifreq` we own.
+    let rc = unsafe { libc::ioctl(fd.as_raw_fd(), libc::SIOCGIFMTU, &mut req) };
+    if rc < 0 {
+        return Err(Error::Io(std::io::Error::last_os_error()));
+    }
+    Ok(req.mtu.max(0) as u32)
+}
+
 // ── setsockopt wrappers ────────────────────────────────────────────────────
 
 /// Set `PACKET_VERSION` (`ffi::TPACKET_V3_INT` for RX, `ffi::TPACKET_V2_INT`

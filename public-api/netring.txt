@@ -119,6 +119,7 @@ pub fn netring::afpacket::tx::Injector::as_raw_fd(&self) -> std::os::fd::raw::Ra
 pub struct netring::afpacket::tx::InjectorBuilder
 impl netring::afpacket::tx::InjectorBuilder
 pub fn netring::afpacket::tx::InjectorBuilder::build(self) -> core::result::Result<netring::afpacket::tx::Injector, netring::error::Error>
+pub fn netring::afpacket::tx::InjectorBuilder::drop_rejected(self, enable: bool) -> Self
 pub fn netring::afpacket::tx::InjectorBuilder::frame_count(self, n: usize) -> Self
 pub fn netring::afpacket::tx::InjectorBuilder::frame_size(self, bytes: usize) -> Self
 pub fn netring::afpacket::tx::InjectorBuilder::interface(self, name: &str) -> Self
@@ -1786,6 +1787,7 @@ pub fn netring::bridge::BridgeBuilder::tx_a_frame_count(self, n: usize) -> Self
 pub fn netring::bridge::BridgeBuilder::tx_a_frame_size(self, bytes: usize) -> Self
 pub fn netring::bridge::BridgeBuilder::tx_b_frame_count(self, n: usize) -> Self
 pub fn netring::bridge::BridgeBuilder::tx_b_frame_size(self, bytes: usize) -> Self
+pub fn netring::bridge::BridgeBuilder::vlan_reinsert(self, enable: bool) -> Self
 impl core::default::Default for netring::bridge::BridgeBuilder
 pub fn netring::bridge::BridgeBuilder::default() -> Self
 pub struct netring::bridge::BridgeHandles
@@ -9197,6 +9199,7 @@ pub fn netring::bridge::BridgeBuilder::tx_a_frame_count(self, n: usize) -> Self
 pub fn netring::bridge::BridgeBuilder::tx_a_frame_size(self, bytes: usize) -> Self
 pub fn netring::bridge::BridgeBuilder::tx_b_frame_count(self, n: usize) -> Self
 pub fn netring::bridge::BridgeBuilder::tx_b_frame_size(self, bytes: usize) -> Self
+pub fn netring::bridge::BridgeBuilder::vlan_reinsert(self, enable: bool) -> Self
 impl core::default::Default for netring::bridge::BridgeBuilder
 pub fn netring::bridge::BridgeBuilder::default() -> Self
 pub struct netring::BridgeHandles
@@ -9612,6 +9615,7 @@ pub fn netring::afpacket::tx::Injector::as_raw_fd(&self) -> std::os::fd::raw::Ra
 pub struct netring::InjectorBuilder
 impl netring::afpacket::tx::InjectorBuilder
 pub fn netring::afpacket::tx::InjectorBuilder::build(self) -> core::result::Result<netring::afpacket::tx::Injector, netring::error::Error>
+pub fn netring::afpacket::tx::InjectorBuilder::drop_rejected(self, enable: bool) -> Self
 pub fn netring::afpacket::tx::InjectorBuilder::frame_count(self, n: usize) -> Self
 pub fn netring::afpacket::tx::InjectorBuilder::frame_size(self, bytes: usize) -> Self
 pub fn netring::afpacket::tx::InjectorBuilder::interface(self, name: &str) -> Self

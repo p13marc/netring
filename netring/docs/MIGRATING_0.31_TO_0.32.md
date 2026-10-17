@@ -84,7 +84,10 @@ leaves a `ret #snap` filter installed. An eBPF socket filter attached with
 The capture re-inserts the outer VLAN tag the kernel stripped, in front of
 the EtherType, as libpcap does. Tagged frames are 4 bytes longer than in
 0.31 (`len()` stays within the snap length) and carry the `0x8100` /
-`0x88a8` tag at bytes 12..16.
+`0x88a8` tag at bytes 12..16. `Bridge` forwards the tag; a full-size frame
+with an outer 802.1ad tag no longer fits the other side's MTU and is
+dropped (counted in `*_dropped_too_large`) — `BridgeBuilder::vlan_reinsert(false)`
+forwards untagged as 0.31 did.
 
 | 0.31 | 0.32 |
 |---|---|
@@ -323,6 +326,13 @@ started); frames a full send buffer kept back stay queued
 (`Injector::queued_count`) for the next kick. The sync `Injector::flush`
 still waits; `Injector::flush_nonblocking` kicks without waiting. The async `Bridge` loops no longer wait for the device either;
 the blocking `Bridge::run` still does (its backpressure).
+
+A frame the kernel refuses (longer than the device accepts, a malformed
+header) is now dropped by the kernel and the kick goes on — 0.31's kick
+stopped there with `EMSGSIZE` / `EINVAL` and left the frames behind it
+queued. `InjectorBuilder::drop_rejected(false)` restores the
+stop-and-report behaviour (`Injector::rejected_slots()` counts the
+refused slots).
 
 ### Reads, statistics, timing
 

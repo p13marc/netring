@@ -484,3 +484,84 @@ fn async_bridge_does_not_wait_for_a_device_that_holds_frames() {
     result.expect("run_iterations_async");
     assert!(forwarded > 0, "the bridge forwarded nothing A→B");
 }
+
+/// Review: the bridge forwarded re-inserted VLAN tags the egress device
+/// refuses. A full-size 802.1ad frame (1518 bytes on a 1500-byte MTU) is
+/// longer than the kernel lets a packet socket send (`mtu + 14`, +4 only
+/// for an outer 802.1Q tag): the kick failed with `EMSGSIZE`, the bridge
+/// loop returned that error, and the kernel's TX position stuck on the
+/// rejected slot. The bridge now drops such a frame (counted too large),
+/// and its injectors skip a frame the kernel refuses (`PACKET_LOSS`).
+#[test]
+fn bridge_drops_frames_the_egress_refuses_and_keeps_forwarding() {
+    let Some((x, y)) = veth_pairs("v") else {
+        eprintln!("skipping: needs CAP_NET_ADMIN to create veth");
+        return;
+    };
+    // The sender may send 1518-byte frames; the bridge ports keep 1500.
+    let ok = std::process::Command::new("ip")
+        .args(["link", "set", &x.a, "mtu", "1504"])
+        .status()
+        .is_ok_and(|s| s.success());
+    assert!(ok, "set the sender's MTU");
+    let marker = format!("netring_bridge_vlan_{}", helpers::unique_port());
+    let mut sink = netring::CaptureBuilder::default()
+        .interface(&y.a)
+        .block_timeout_ms(10)
+        .build()
+        .expect("capture on y0");
+    let (a, b) = (x.b.clone(), y.b.clone());
+    let (ready_tx, ready_rx) = std::sync::mpsc::channel();
+    let bridge = std::thread::spawn(move || {
+        let mut bridge = Bridge::builder()
+            .interface_a(&a)
+            .interface_b(&b)
+            .poll_timeout(Duration::from_millis(20))
+            .build()
+            .expect("build bridge");
+        ready_tx.send(()).expect("ready");
+        let res = bridge.run_iterations(100, |_pkt, _dir| BridgeAction::Forward);
+        (res.map_err(|e| e.to_string()), bridge.stats().ok())
+    });
+    ready_rx
+        .recv_timeout(Duration::from_secs(10))
+        .expect("bridge never came up");
+
+    // A full-size 802.1ad-tagged frame: 14 + 4 + 1500 bytes.
+    let mut tagged = Vec::with_capacity(1518);
+    tagged.extend_from_slice(&[0xff; 6]);
+    tagged.extend_from_slice(&[0x02, 0, 0, 0, 0, 0x03]);
+    tagged.extend_from_slice(&0x88a8u16.to_be_bytes());
+    tagged.extend_from_slice(&0x0064u16.to_be_bytes());
+    tagged.extend_from_slice(&0x88b5u16.to_be_bytes());
+    tagged.extend_from_slice(marker.as_bytes());
+    tagged.resize(1518, 0x5a);
+    let mut tx = netring::Injector::builder()
+        .interface(&x.a)
+        .frame_count(8)
+        .build()
+        .expect("injector on x0");
+    let mut slot = tx.allocate(tagged.len()).expect("allocate");
+    slot.data_mut()[..tagged.len()].copy_from_slice(&tagged);
+    slot.set_len(tagged.len());
+    slot.send();
+    tx.flush().expect("flush the tagged frame");
+    std::thread::sleep(Duration::from_millis(100));
+    // Then untagged traffic: all of it must get through.
+    const N: u16 = 5;
+    let untagged = format!("{marker}_untagged");
+    inject_marked(&x.a, untagged.as_bytes(), N);
+    let seen = count_marked(&mut sink, untagged.as_bytes(), Duration::from_secs(2));
+    let (res, stats) = bridge.join().expect("bridge thread");
+    assert_eq!(res, Ok(()), "the bridge loop must keep running");
+    assert_eq!(
+        seen,
+        usize::from(N),
+        "untagged frames after the refused one"
+    );
+    let stats = stats.expect("stats");
+    assert!(
+        stats.a_to_b_dropped_too_large >= 1,
+        "the refused frame is counted: {stats}"
+    );
+}

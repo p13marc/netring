@@ -37,7 +37,7 @@ impl VlanLink {
     /// `None` (skip) without privileges or the 8021q module.
     fn create(tag: &str, vid: u16) -> Option<Self> {
         let pid = std::process::id() % 100_000;
-        let veth = match VethPair::create(&format!("s2v{tag}{pid}a"), &format!("s2v{tag}{pid}b")) {
+        let veth = match VethPair::create(&format!("nrv{tag}{pid}a"), &format!("nrv{tag}{pid}b")) {
             Some(v) => v,
             None => {
                 eprintln!("skipping: needs CAP_NET_ADMIN to create veth");
@@ -336,11 +336,11 @@ fn pcap_round_trip_keeps_the_tag() {
 #[test]
 fn qinq_outer_tag_is_reinserted_in_front_of_the_inner_one() {
     let pid = std::process::id() % 100_000;
-    let Some(veth) = VethPair::create(&format!("s2q{pid}a"), &format!("s2q{pid}b")) else {
+    let Some(veth) = VethPair::create(&format!("nrq{pid}a"), &format!("nrq{pid}b")) else {
         eprintln!("skipping: needs CAP_NET_ADMIN to create veth");
         return;
     };
-    let (outer, inner) = (format!("s2q{pid}o"), format!("s2q{pid}i"));
+    let (outer, inner) = (format!("nrq{pid}o"), format!("nrq{pid}i"));
     let ip = |args: &[&str]| {
         Command::new("ip")
             .args(args)

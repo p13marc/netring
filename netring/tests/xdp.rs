@@ -48,7 +48,7 @@ fn symmetric_rss_on_a_veth_is_an_error_and_changes_nothing() {
     use std::process::Command;
 
     let pid = std::process::id() % 100_000;
-    let (a, b) = (format!("s2r{pid}a"), format!("s2r{pid}b"));
+    let (a, b) = (format!("nrr{pid}a"), format!("nrr{pid}b"));
     let created = Command::new("ip")
         .args(["link", "add", &a, "type", "veth", "peer", "name", &b])
         .status()

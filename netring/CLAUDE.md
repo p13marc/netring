@@ -20,7 +20,7 @@ built on AF_PACKET with TPACKET_V3 (block-based mmap ring buffers) and AF_XDP.
 
 ## Implementation Status
 
-**0.31.2 — RELEASED 2026-10-17** (tag `0.31.2`; bug-fix patch, CHANGELOG `## 0.31.2`; PR #218; milestone
+**0.31.2 — RELEASED 2026-10-17** (published to crates.io, tag `0.31.2`; flowscope 0.25.2 published alongside; bug-fix patch, CHANGELOG `## 0.31.2`; PR #218; milestone
 "0.31.2 — capture statistics & pre-release bug hunt", issues #182–#207;
 follow-ups in milestone "0.31.3 — audit follow-ups" #208–#217, breaking
 ones in "0.32" #186 / #209 / #215). Still flowscope 0.25.1 (flowscope 0.25.2
@@ -1288,12 +1288,14 @@ For the `0.31.2` release (a non-breaking patch; flowscope stays 0.25.1).
    (<date>)`).
 3. `git tag 0.31.2` (no `v` prefix); `release.yml` attaches the tarball +
    `SHA256SUMS`.
-4. Publish: dispatch `publish-crates.yml` with `allow_breaking: no` (it runs
-   the tests and `cargo-semver-checks` first and skips `netring-exporters`,
-   whose 0.7.0 is already published). Its `CARGO_REGISTRY_TOKEN` was
-   rejected with a 403 for 0.31.1, and this host has no crates.io
-   credentials — if it fails again the owner runs
-   `cargo publish -p netring` by hand.
+4. Publish from the dev host: `cargo publish -p netring --dry-run`, then
+   `cargo publish -p netring` (crates.io credentials live in
+   `$CARGO_HOME/credentials.toml`, `CARGO_HOME=/srv/dev/cargo` — not
+   `~/.cargo`). A flowscope release goes first when netring needs it.
+   `publish-crates.yml` (`workflow_dispatch`, `allow_breaking: no`) also
+   works once its `CARGO_REGISTRY_TOKEN` secret is valid — it was rejected
+   with a 403 for 0.31.1 and 0.31.2 — and skips versions already on
+   crates.io.
 5. Close the milestone's issues explicitly (`Closes #N` doesn't reliably
    close them on merge here). Planning lives in Forgejo issues at
    <https://git.marcpardo.eu/marcpardo/netring>; GitHub is a synced mirror.

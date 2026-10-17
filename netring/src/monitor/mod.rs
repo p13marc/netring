@@ -320,6 +320,10 @@ pub struct Monitor {
     /// zero cost. Injected by `ShardedRunner::run_inner` via
     /// [`Self::set_merge_rx`].
     pub(crate) merge_rx: Option<tokio::sync::mpsc::UnboundedReceiver<merge::MergeRequest>>,
+    /// The [`ShardedRunner`]'s shared stop when this monitor runs as one of
+    /// its shards: the run loop also stops when a sibling's run ends.
+    /// Injected via [`Self::set_shard_stop`]; `None` otherwise.
+    pub(crate) shard_stop: Option<std::sync::Arc<shard::ShardStop>>,
     /// 0.24 Phase B: what to do when a handler returns `Err`. Default
     /// [`HandlerErrorPolicy::Propagate`] (tear down the monitor — the historic
     /// behavior); [`HandlerErrorPolicy::Isolate`] logs + counts and continues so
@@ -741,6 +745,12 @@ impl Monitor {
         rx: tokio::sync::mpsc::UnboundedReceiver<merge::MergeRequest>,
     ) {
         self.merge_rx = Some(rx);
+    }
+
+    /// Run as a [`ShardedRunner`] shard: stop with the siblings. Called by
+    /// `ShardedRunner::run_inner` after `build`.
+    pub(crate) fn set_shard_stop(&mut self, stop: std::sync::Arc<shard::ShardStop>) {
+        self.shard_stop = Some(stop);
     }
 }
 
@@ -4691,6 +4701,7 @@ impl MonitorBuilder {
                 .label_table
                 .unwrap_or_else(flowscope::well_known::LabelTable::new),
             merge_rx: None,
+            shard_stop: None,
             handler_error_policy: self.handler_error_policy,
             backend_error_policy: self.backend_error_policy,
             capture_stats: self.capture_stats,

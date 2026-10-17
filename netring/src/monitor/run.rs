@@ -212,6 +212,7 @@ pub(crate) async fn run_loop(monitor: Monitor, stop: StopCondition) -> Result<()
         fanout,
         label_table,
         mut merge_rx,
+        shard_stop,
         handler_error_policy,
         backend_error_policy,
         mut capture_stats,
@@ -400,6 +401,8 @@ pub(crate) async fn run_loop(monitor: Monitor, stop: StopCondition) -> Result<()
             let ready = tokio::select! {
                 biased;
                 _ = shutdown.recv(last_event_at) => break,
+                // A `ShardedRunner` sibling's run ended (an error, a signal).
+                _ = sibling_stopped(&shard_stop), if shard_stop.is_some() => break,
                 // Housekeeping, like telemetry: does not reset the idle timer.
                 _ = sweep_timer.tick() => {
                     if let Some(now) = packet_clock.now() {
@@ -920,6 +923,7 @@ pub(crate) async fn replay_loop(
         fanout: _,
         label_table,
         merge_rx: _, // replay is single-shard; no cross-shard merge
+        shard_stop: _,
         handler_error_policy,
         backend_error_policy: _, // replay has no live capture backend
         capture_stats: _,        // pcap replay has no kernel ring to sample
@@ -1449,6 +1453,15 @@ async fn recv_merge(
 ) -> Option<crate::monitor::merge::MergeRequest> {
     match rx {
         Some(r) => r.recv().await,
+        None => std::future::pending().await,
+    }
+}
+
+/// Await the `ShardedRunner` siblings' stop. `None` → never fires (gated
+/// off in the `select!`).
+async fn sibling_stopped(stop: &Option<std::sync::Arc<crate::monitor::shard::ShardStop>>) {
+    match stop {
+        Some(s) => s.stopped().await,
         None => std::future::pending().await,
     }
 }

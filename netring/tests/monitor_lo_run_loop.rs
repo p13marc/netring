@@ -189,3 +189,38 @@ async fn ticks_and_deadline_are_not_starved_by_a_busy_capture() {
     let n = ticks.load(Ordering::SeqCst);
     assert!(n >= 5, "50 ms ticks over 2 s of load: {n}");
 }
+
+/// A `ShardedRunner` shard that fails stops its siblings, so
+/// `run_until_signal` returns the error instead of running the healthy
+/// shards until a signal arrives (the shared stop flag was never set).
+#[test]
+fn a_failing_shard_stops_its_siblings() {
+    use netring::config::FanoutMode;
+    use netring::monitor::shard::ShardedRunner;
+    let group = (std::process::id() as u16).wrapping_mul(31) | 1;
+    let runner = ShardedRunner::new("lo", FanoutMode::Hash, group, 2, move |shard| {
+        if shard == 1 {
+            return Err(netring::Error::Config("shard 1 failed".into()));
+        }
+        Monitor::builder()
+            .interface("lo")
+            .fanout(FanoutMode::Hash, group)
+            .protocol::<Udp>()
+            .drain_timeout(Duration::ZERO)
+            .build()
+    });
+    let (tx, rx) = std::sync::mpsc::channel();
+    std::thread::spawn(move || {
+        let _ = tx.send(runner.run_until_signal());
+    });
+    let res = rx
+        .recv_timeout(Duration::from_secs(5))
+        .expect("the healthy shard stopped with its failed sibling");
+    let err = res.expect_err("the failed shard's error").to_string();
+    // Without CAP_NET_RAW shard 0 fails to open `lo` too; either way the
+    // runner returns an error, promptly.
+    assert!(
+        err.contains("shard 1 failed") || err.contains("privileges"),
+        "{err}"
+    );
+}

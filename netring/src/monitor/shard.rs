@@ -27,17 +27,59 @@
 //! thread; the runner doesn't coordinate them at runtime past
 //! shutdown signaling.
 //!
-//! Shutdown: an `Arc<AtomicBool>` flag tells each shard's monitor
-//! whether to stop. Shards poll the flag through their own
-//! `run_until` deadline path — for a deadline-based run, each
-//! shard runs the same `deadline`, so they exit naturally
-//! together. SIGINT/SIGTERM under `run_until_signal`: each shard
-//! installs its own signal handler; the first one to fire wakes
-//! its shard, which sets the shared flag.
+//! Shutdown: the shards share a stop signal. For a deadline-based
+//! run each shard runs the same `deadline`, so they exit naturally
+//! together; SIGINT/SIGTERM under `run_until_signal` reach every
+//! shard's own signal handler. Whenever a shard's run ends — its stop
+//! condition, or an error (failing to build or open its capture) — it
+//! sets the shared stop and its siblings' run loops stop too, so the
+//! runner returns that error instead of running on without the shard.
 
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, Instant};
+
+/// A [`ShardedRunner`]'s shared stop: set when any shard's run ends,
+/// awaited by every shard's run loop (beside its own stop condition).
+/// Runtime-agnostic — each shard runs its own runtime.
+#[derive(Default)]
+pub(crate) struct ShardStop {
+    stopped: AtomicBool,
+    notify: tokio::sync::Notify,
+}
+
+impl ShardStop {
+    /// Stop every shard.
+    pub(crate) fn stop(&self) {
+        self.stopped.store(true, Ordering::SeqCst);
+        self.notify.notify_waiters();
+    }
+
+    /// Resolves once [`Self::stop`] was called (before or after).
+    pub(crate) async fn stopped(&self) {
+        loop {
+            let notified = self.notify.notified();
+            let mut notified = std::pin::pin!(notified);
+            // Register before checking the flag, so a `stop` between the
+            // two isn't missed.
+            notified.as_mut().enable();
+            if self.stopped.load(Ordering::SeqCst) {
+                return;
+            }
+            notified.await;
+        }
+    }
+}
+
+/// Sets the [`ShardStop`] when dropped: a shard thread holds one, so any
+/// way its run ends (including a panic) stops its siblings.
+struct StopOnExit(Arc<ShardStop>);
+
+impl Drop for StopOnExit {
+    fn drop(&mut self) {
+        self.0.stop();
+    }
+}
 
 use crate::config::FanoutMode;
 use crate::error::Result;
@@ -253,6 +295,7 @@ impl ShardedRunner {
 
     fn run_inner(self, mode: RunMode) -> Result<()> {
         let stop = Arc::new(AtomicBool::new(false));
+        let shard_stop = Arc::new(ShardStop::default());
         let build_shard = self.build_shard;
         let pin_cpus = self.pin_cpus;
         // 0.22 §5.2: share the layer specs across shard threads; each
@@ -276,13 +319,15 @@ impl ShardedRunner {
         };
 
         for cpu in 0..self.num_shards {
-            let stop = Arc::clone(&stop);
+            let shard_stop = Arc::clone(&shard_stop);
             let build = Arc::clone(&build_shard);
             let layer_specs = Arc::clone(&layer_specs);
             let merge_rx = merge_rxs.get_mut(cpu).and_then(Option::take);
             let handle = std::thread::Builder::new()
                 .name(format!("netring-shard-{cpu}"))
                 .spawn(move || -> Result<()> {
+                    // However this shard's run ends, its siblings stop too.
+                    let _stop_siblings = StopOnExit(Arc::clone(&shard_stop));
                     // 0.25 C1: pin this shard's thread to its core before doing
                     // any work, so the runtime + capture ring stay core-local.
                     if pin_cpus && !pin_current_thread_to_core(cpu) {
@@ -303,6 +348,7 @@ impl ShardedRunner {
                     if let Some(rx) = merge_rx {
                         monitor.set_merge_rx(rx);
                     }
+                    monitor.set_shard_stop(shard_stop);
 
                     match mode {
                         RunMode::Deadline(deadline) => {
@@ -316,7 +362,6 @@ impl ShardedRunner {
                             rt.block_on(monitor.run_until_signal())?;
                         }
                     }
-                    let _ = stop;
                     Ok(())
                 })
                 .map_err(crate::error::Error::Io)?;

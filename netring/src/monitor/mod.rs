@@ -3203,11 +3203,7 @@ impl MonitorBuilder {
                 let fp = TlsFingerprint::from_handshake(
                     hs,
                     ctx.flow,
-                    crate::monitor::fingerprint::server_port(
-                        ctx.flow,
-                        ctx.side(),
-                        ctx.orientation(),
-                    ),
+                    crate::monitor::fingerprint::server_port_of(ctx),
                     ctx.endpoints(),
                 );
                 handler(&fp, ctx)
@@ -3309,7 +3305,7 @@ impl MonitorBuilder {
             let fp = QuicFingerprint::from_initial(
                 initial,
                 ctx.flow,
-                crate::monitor::fingerprint::server_port(ctx.flow, ctx.side(), ctx.orientation()),
+                crate::monitor::fingerprint::server_port_of(ctx),
             );
             handler(&fp, ctx)
         })
@@ -3412,11 +3408,7 @@ impl MonitorBuilder {
                 let fp = TlsFingerprint::from_handshake(
                     hs,
                     ctx.flow,
-                    crate::monitor::fingerprint::server_port(
-                        ctx.flow,
-                        ctx.side(),
-                        ctx.orientation(),
-                    ),
+                    crate::monitor::fingerprint::server_port_of(ctx),
                     ctx.endpoints(),
                 );
                 if !fp.app_protocol.is_encrypted_dns() {
@@ -3449,11 +3441,7 @@ impl MonitorBuilder {
                 let fp = QuicFingerprint::from_initial(
                     qi,
                     ctx.flow,
-                    crate::monitor::fingerprint::server_port(
-                        ctx.flow,
-                        ctx.side(),
-                        ctx.orientation(),
-                    ),
+                    crate::monitor::fingerprint::server_port_of(ctx),
                 );
                 if !fp.app_protocol.is_encrypted_dns() {
                     return Ok(());

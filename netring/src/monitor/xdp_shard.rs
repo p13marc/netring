@@ -126,7 +126,7 @@ impl XdpShardedRunner {
             b = b.busy_poll(us).prefer_busy_poll(true);
         }
         if self.numa_auto {
-            b = b.numa_auto();
+            b = b.numa_auto(true);
         }
         let capture = b.build()?;
         let n = capture.socket_count();

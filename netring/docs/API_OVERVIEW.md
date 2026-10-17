@@ -512,7 +512,7 @@ while let Some((queue_id, batch)) = cap.next_batch_blocking(timeout)? {
 | `.next_batch()` / `.next_batch_blocking(t)` | unified round-robin RX → `(queue_id, batch)` |
 | `.into_parts()` | `(Vec<XdpSocket>, XdpCaptureGuard)` for worker-per-queue |
 | `.is_zerocopy()` / `.queue_ids()` / `.socket_count()` | introspection |
-| `.busy_poll(us)` / `.numa_auto()` | **(issue #6)** per-queue `SO_BUSY_POLL` + NIC-NUMA UMEM binding (line-rate levers) |
+| `.busy_poll(us)` / `.numa_auto(true)` | **(issue #6)** per-queue `SO_BUSY_POLL` + NIC-NUMA UMEM binding (line-rate levers; `umem_placements()` reports what each UMEM got) |
 | `netring::xdp::queue_count(iface)` / `interface_numa_node(iface)` | RSS queue count (`ETHTOOL_GCHANNELS`) / NIC NUMA node (sysfs) |
 | `netring::monitor::XdpShardedRunner` | one `Monitor` per RX queue (worker-per-core, busy-poll) — the line-rate tier |
 

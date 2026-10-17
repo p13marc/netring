@@ -60,6 +60,8 @@ pub use capture::{Queues, interface_numa_node, queue_count};
 #[cfg(all(feature = "af-xdp", feature = "xdp-loader"))]
 pub use capture::{XdpCapture, XdpCaptureBuilder, XdpCaptureGuard};
 pub use stats::XdpStats;
+#[cfg(feature = "af-xdp")]
+pub use umem::UmemPlacement;
 
 /// Sum `XDP_STATISTICS` and the RX received counts over a multi-queue
 /// capture's sockets (`XdpCapture` / `AsyncXdpCapture`).
@@ -259,9 +261,11 @@ impl XdpSocketBuilder {
     ///
     /// Requires hugepages reserved on the host
     /// (`sysctl vm.nr_hugepages` / `hugeadm`). Best-effort: if the hugepage
-    /// mapping fails (none reserved), `build()` falls back to regular pages with
-    /// a `warn` rather than failing. The UMEM region is rounded up to a
-    /// hugepage multiple.
+    /// mapping fails (none reserved), or its pages cannot be faulted in (none
+    /// free on the [`numa_node`](Self::numa_node)), `build()` falls back to
+    /// regular pages with a `warn` rather than failing —
+    /// [`XdpSocket::umem_placement`] reports which one it got. The UMEM
+    /// region is rounded up to a hugepage multiple.
     pub fn hugepages(mut self, enable: bool) -> Self {
         self.hugepages = enable;
         self
@@ -269,8 +273,14 @@ impl XdpSocketBuilder {
 
     /// 0.25 W4: bind the UMEM's pages to NUMA `node` (`mbind` / `MPOL_BIND`) —
     /// set this to the NIC's NUMA node to avoid cross-node DMA + cache traffic.
-    /// Best-effort: a binding failure (single-node host, missing privilege) is
-    /// logged at `warn` and ignored.
+    ///
+    /// The UMEM is mapped without pre-faulting, bound, and only then faulted
+    /// in, so the pages really land on `node` (0.32, #213: before, the pages
+    /// were faulted on the allocating CPU's node before the policy was set,
+    /// and `XDP_UMEM_REG` pinned them there). Best-effort: a binding failure
+    /// (unknown node, missing privilege, no memory on the node) is logged at
+    /// `warn` and the UMEM stays unbound — check
+    /// [`XdpSocket::umem_placement`].
     pub fn numa_node(mut self, node: u32) -> Self {
         self.numa_node = Some(node);
         self
@@ -1000,6 +1010,14 @@ impl XdpSocket {
     #[cfg(feature = "af-xdp")]
     pub fn rx_metadata_enabled(&self) -> bool {
         self.rx_metadata
+    }
+
+    /// Where the socket's UMEM pages ended up (#213): whether hugepages
+    /// back it and the NUMA node it is bound to. Both builder options are
+    /// best-effort; this reports what they achieved.
+    #[cfg(feature = "af-xdp")]
+    pub fn umem_placement(&self) -> UmemPlacement {
+        self.umem.placement()
     }
 
     /// Read + parse the RX-metadata struct from the headroom preceding the

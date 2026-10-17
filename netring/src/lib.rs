@@ -111,7 +111,7 @@ pub use traits::{PacketSetFilter, PacketSink, PacketSource};
 
 // AF_XDP
 #[cfg(feature = "af-xdp")]
-pub use afxdp::{XdpBatch, XdpBatchIter, XdpPacket};
+pub use afxdp::{UmemPlacement, XdpBatch, XdpBatchIter, XdpPacket};
 pub use afxdp::{XdpMode, XdpSocket, XdpSocketBuilder, XdpStats};
 
 /// AF_XDP capture surface: queue discovery + multi-queue capture (issue #6) and,
@@ -122,7 +122,7 @@ pub mod xdp {
     pub use crate::afxdp::loader::{
         LoaderError, XdpAttachment, XdpFlags, XdpProgram, default_program, filter_program,
     };
-    pub use crate::afxdp::{Queues, interface_numa_node, queue_count};
+    pub use crate::afxdp::{Queues, UmemPlacement, interface_numa_node, queue_count};
     #[cfg(feature = "xdp-loader")]
     pub use crate::afxdp::{XdpCapture, XdpCaptureBuilder, XdpCaptureGuard};
 

@@ -393,10 +393,13 @@ pub(crate) async fn run_loop(monitor: Monitor, stop: StopCondition) -> Result<()
             // the next tick. The `if !tick_intervals.is_empty()`
             // gate keeps the tick branch from being polled when no
             // handlers are registered (saves one cx wake per loop).
+            // Biased, capture last: under sustained load the capture is
+            // ready every time, and polled earlier it would starve the
+            // timers below (each fires at most once per period, so they
+            // can't starve the capture in turn).
             let ready = tokio::select! {
                 biased;
                 _ = shutdown.recv(last_event_at) => break,
-                idx = ready_capture(&mut caps, &mut rr_anchor) => idx,
                 // Housekeeping, like telemetry: does not reset the idle timer.
                 _ = sweep_timer.tick() => {
                     if let Some(now) = packet_clock.now() {
@@ -521,6 +524,7 @@ pub(crate) async fn run_loop(monitor: Monitor, stop: StopCondition) -> Result<()
                     }
                     continue;
                 }
+                idx = ready_capture(&mut caps, &mut rr_anchor) => idx,
             };
             let i = match ready {
                 Some((i, Ok(()))) => i,
@@ -594,7 +598,7 @@ pub(crate) async fn run_loop(monitor: Monitor, stop: StopCondition) -> Result<()
             let mut packet_err: Option<crate::error::Error> = None;
             // #178: the source's dedup ring, checked first for every frame.
             let mut dedup_i = dedups[i].as_mut();
-            let last_ts = caps[i]
+            let (last_ts, more_ready) = caps[i]
                 .drain_batch(|view, direction| {
                     if let Some(d) = dedup_i.as_deref_mut()
                         && !d.keep_raw(view.frame, direction, view.timestamp)
@@ -818,6 +822,15 @@ pub(crate) async fn run_loop(monitor: Monitor, stop: StopCondition) -> Result<()
             // 0.24 Phase C4: record progress for the health handle — a packet
             // batch was processed; snapshot the tracker's active-flow count.
             health.record_event(driver.tracker().flow_count());
+
+            // The drain budget ran out with packets still waiting: the loop
+            // would go straight back to the capture without ever returning
+            // `Pending`, so the runtime would never turn its timer driver
+            // and the timers above would never fire (on a current-thread
+            // runtime nothing else does). Yield first.
+            if more_ready {
+                tokio::task::yield_now().await;
+            }
         }
         #[allow(unreachable_code)]
         Ok(())

@@ -1,5 +1,6 @@
 //! Live run-loop regressions on `lo` (0.31.2 audit): the handler error
-//! policy on capture-stats handlers, idle stop with a tick handler.
+//! policy on capture-stats handlers, idle stop with a tick handler,
+//! timers under sustained load.
 //!
 //! Need `CAP_NET_RAW` (run as root); without it the monitor can't open
 //! `lo` and each test returns early, like the other `monitor_lo_*`
@@ -119,4 +120,72 @@ async fn run_until_idle_stops_despite_a_faster_tick() {
     res.expect("the monitor went idle").unwrap();
     assert!(elapsed >= window, "stopped early: {elapsed:?}");
     assert!(ticks.load(Ordering::SeqCst) >= 3, "the tick ran meanwhile");
+}
+
+/// Under sustained load — the capture is readable every time the loop
+/// looks, because packets arrive faster than the handlers process them
+/// — ticks keep firing and `run_for` still stops on time. The capture
+/// branch used to win every `select!` and drain until the ring was
+/// empty, which it never was: ticks, sweeps, telemetry and the deadline
+/// all starved until the traffic stopped.
+#[tokio::test(flavor = "current_thread")]
+async fn ticks_and_deadline_are_not_starved_by_a_busy_capture() {
+    use netring::monitor::subscription::packet;
+    let Some(scratch) = ScratchNetns::create("busy") else {
+        return;
+    };
+    // Senders inside the namespace, flooding its `lo` for 4 s.
+    let flood_for = Duration::from_secs(4);
+    let senders: Vec<_> = (0..2)
+        .map(|_| {
+            let sock = scratch
+                .ns
+                .run_in(|| std::net::UdpSocket::bind("127.0.0.1:0").unwrap())
+                .unwrap();
+            std::thread::spawn(move || {
+                let until = Instant::now() + flood_for;
+                while Instant::now() < until {
+                    for _ in 0..256 {
+                        let _ = sock.send_to(b"0123456789abcdef", "127.0.0.1:9");
+                    }
+                }
+            })
+        })
+        .collect();
+    let ticks = Arc::new(AtomicUsize::new(0));
+    let t = Arc::clone(&ticks);
+    let monitor = Monitor::builder()
+        .capture_in_netns("lo", Backend::af_packet(), Arc::clone(&scratch.ns))
+        .drain_timeout(Duration::ZERO)
+        // ~5 µs per packet: slower than the flood arrives.
+        .subscribe(packet().udp().to(|_view, _ctx| {
+            let spin = Instant::now();
+            while spin.elapsed() < Duration::from_micros(5) {}
+            Ok(())
+        }))
+        .tick_ctx(
+            Duration::from_millis(50),
+            move |_ctx: &mut netring::ctx::Ctx<'_>| {
+                t.fetch_add(1, Ordering::SeqCst);
+                Ok(())
+            },
+        )
+        .build()
+        .unwrap();
+    let start = Instant::now();
+    monitor.run_for(Duration::from_secs(2)).await.unwrap();
+    let elapsed = start.elapsed();
+    for s in senders {
+        s.join().unwrap();
+    }
+    eprintln!(
+        "run_for(2 s) took {elapsed:?}, {} ticks",
+        ticks.load(Ordering::SeqCst)
+    );
+    assert!(
+        elapsed < Duration::from_millis(3_000),
+        "run_for(2 s) overran: {elapsed:?}"
+    );
+    let n = ticks.load(Ordering::SeqCst);
+    assert!(n >= 5, "50 ms ticks over 2 s of load: {n}");
 }

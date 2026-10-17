@@ -2125,14 +2125,20 @@ fn apply_handler_error_policy(
 /// idle timeouts right even when packet timestamps come from another
 /// clock (hardware / PHC) than the host's.
 ///
-/// Kept per capture source, since sources' clocks can disagree (two
-/// NICs, a PHC and the host clock): `now` is the source furthest
-/// behind, so a source whose clock runs ahead can't idle-end the other
-/// sources' flows early. Within a source the clock only moves forward,
-/// except across a step: a timestamp more than `step` behind the
-/// source's latest (the host clock was set back) re-anchors it. Holding
+/// Kept per capture source. Within a source the clock only moves
+/// forward, except across a step: a timestamp more than `step` behind the
+/// source's latest (the host clock was set back) re-anchors it — holding
 /// on to the old maximum put `now` that far ahead of every new packet,
 /// and each sweep ended every flow until packet time caught up.
+///
+/// `now` is the latest clock among the sources heard from in the last
+/// two `step`s (else the most recently heard one). Leaving out quiet
+/// sources keeps one that hasn't seen a packet since a host clock step
+/// from holding `now` ahead; taking the latest rather than the earliest
+/// keeps a source whose clock lags (an undisciplined PHC) from freezing
+/// every flow's idle expiry. Sources whose clocks disagree while both
+/// active still share one `now` — the tracker sweeps all flows on a
+/// single clock.
 struct PacketClock {
     sources: Vec<Option<(flowscope::Timestamp, Instant)>>,
     step: Duration,
@@ -2159,14 +2165,21 @@ impl PacketClock {
     }
 
     fn now(&self) -> Option<flowscope::Timestamp> {
-        self.sources
-            .iter()
-            .flatten()
-            .map(|(ts, at)| {
-                let d = ts.to_duration() + at.elapsed();
-                flowscope::Timestamp::new(d.as_secs() as u32, d.subsec_nanos())
-            })
-            .min()
+        self.now_at(Instant::now())
+    }
+
+    fn now_at(&self, wall: Instant) -> Option<flowscope::Timestamp> {
+        let fresh = self.step.max(Duration::from_millis(500)) * 2;
+        let clock = |&(ts, at): &(flowscope::Timestamp, Instant)| {
+            let d = ts.to_duration() + wall.saturating_duration_since(at);
+            flowscope::Timestamp::new(d.as_secs() as u32, d.subsec_nanos())
+        };
+        let anchored = || self.sources.iter().flatten();
+        anchored()
+            .filter(|(_, at)| wall.saturating_duration_since(*at) <= fresh)
+            .map(clock)
+            .max()
+            .or_else(|| anchored().max_by_key(|(_, at)| *at).map(clock))
     }
 }
 
@@ -3686,15 +3699,49 @@ mod packet_clock_tests {
         assert!(now >= secs(1_000) && now < secs(1_001), "{now:?}");
     }
 
+    /// A source whose clock lags (an undisciplined PHC near the epoch)
+    /// must not freeze idle expiry for everyone: the latest active clock
+    /// leads.
     #[test]
-    fn a_source_running_ahead_does_not_lead() {
+    fn a_lagging_source_does_not_hold_time_back() {
         let mut clock = clock(2);
         clock.observe(0, secs(1_000));
-        clock.observe(1, secs(1_100));
+        clock.observe(1, secs(10));
         let now = clock.now().unwrap();
-        assert!(now < secs(1_001), "the source furthest behind: {now:?}");
+        assert!(now >= secs(1_000) && now < secs(1_001), "{now:?}");
         // Out-of-range sources are ignored.
-        clock.observe(5, secs(10));
-        assert!(clock.now().unwrap() >= secs(1_000));
+        clock.observe(5, secs(5_000));
+        assert!(clock.now().unwrap() < secs(1_001));
+    }
+
+    /// After a host clock step back, a source that hasn't seen a packet
+    /// since still projects the old clock; once it has been quiet for two
+    /// step windows it no longer holds `now` ahead of the stepped sources.
+    #[test]
+    fn a_quiet_source_stops_holding_time_ahead() {
+        let mut clock = clock(2);
+        let t0 = std::time::Instant::now();
+        clock.observe(0, secs(1_000));
+        clock.observe(1, secs(1_000));
+        // Host clock set back 500 s; only source 0 sees traffic.
+        clock.observe(0, secs(500));
+        let soon = clock.now_at(t0).unwrap();
+        assert!(soon >= secs(1_000), "both still fresh: {soon:?}");
+        // Source 1 stays quiet, source 0 keeps seeing packets.
+        let later = t0 + Duration::from_secs(5);
+        clock.sources[0] = Some((secs(505), later));
+        let now = clock.now_at(later).unwrap();
+        assert!(now >= secs(505) && now < secs(506), "{now:?}");
+    }
+
+    /// No source heard from recently: the most recently heard one.
+    #[test]
+    fn all_quiet_uses_the_latest_heard_source() {
+        let mut clock = clock(2);
+        let t0 = std::time::Instant::now();
+        clock.sources[0] = Some((secs(2_000), t0));
+        clock.sources[1] = Some((secs(500), t0 + Duration::from_secs(1)));
+        let now = clock.now_at(t0 + Duration::from_secs(60)).unwrap();
+        assert!(now >= secs(559) && now < secs(561), "{now:?}");
     }
 }

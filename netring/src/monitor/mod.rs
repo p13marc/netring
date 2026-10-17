@@ -4179,7 +4179,8 @@ impl MonitorBuilder {
     ///
     /// `None` means **capture everything** (filter in userspace): it's returned
     /// when any consumer wants all traffic (a broad handler, an exporter, a
-    /// tick/report, broadcast, bandwidth, IP-fragment reassembly), the union
+    /// tick/report, broadcast, bandwidth, ML features / nPrint / YARA,
+    /// IP-fragment reassembly), the union
     /// is empty, or it can't be expressed within the cBPF budget. Because the
     /// union is a *superset* of every consumer's interest, the filter never
     /// drops a frame any consumer wants — **fail-open and starvation-free by
@@ -4191,10 +4192,25 @@ impl MonitorBuilder {
         // Broad consumers that need every flow regardless of L4: an exporter,
         // a periodic tick/report, a broadcast subscriber, or bandwidth
         // accounting. Any one forces capture-all (fail-open).
+        //
+        // So do the per-flow dataset / scanning consumers, which are documented
+        // over every (each) flow and fed every delivered frame regardless of
+        // the registered protocols: ML features, nPrint, YARA.
+        #[cfg(feature = "nprint")]
+        let nprint_armed = self.nprint_config.is_some();
+        #[cfg(not(feature = "nprint"))]
+        let nprint_armed = false;
+        #[cfg(feature = "yara")]
+        let yara_armed = self.yara_rules.is_some();
+        #[cfg(not(feature = "yara"))]
+        let yara_armed = false;
         let wants_all = !self.flow_exporters.is_empty()
             || !self.tick_handlers.is_empty()
             || !self.broadcast_handles.is_empty()
             || self.bandwidth_registered
+            || !self.ml_feature_handlers.is_empty()
+            || nprint_armed
+            || yara_armed
             // The IP-fragment reassembler needs every fragment of a datagram,
             // but only fragment 0 carries the ports, and the port templates
             // shed non-first fragments — a narrowed prefilter would starve it.

@@ -338,3 +338,41 @@ fn ip_fragment_reassembly_keeps_trailing_fragments() {
         "an armed reassembler must see every fragment"
     );
 }
+
+// Audit A4: the per-flow dataset / scanning consumers are documented over
+// every (each) flow and are fed every frame the capture delivers — a protocol
+// registered next to them must not narrow what they see.
+#[cfg(feature = "ml-features")]
+#[test]
+fn ml_features_force_capture_all() {
+    let pf = Monitor::builder()
+        .interface("lo")
+        .protocol::<Dns>()
+        .on_ml_features(|_f: &flowscope::CicFlowFeatures| {})
+        .kernel_prefilter();
+    assert!(pf.is_none(), "on_ml_features wants every flow");
+}
+
+#[cfg(feature = "nprint")]
+#[test]
+fn nprint_forces_capture_all() {
+    let pf = Monitor::builder()
+        .interface("lo")
+        .protocol::<Dns>()
+        .nprint(flowscope::nprint::NPrintConfig::default())
+        .kernel_prefilter();
+    assert!(pf.is_none(), "nprint accumulates every tracked flow");
+}
+
+#[cfg(feature = "yara")]
+#[test]
+fn yara_forces_capture_all() {
+    let rules = netring::monitor::yara::YaraRules::compile("rule never { condition: false }")
+        .expect("trivial rule compiles");
+    let pf = Monitor::builder()
+        .interface("lo")
+        .protocol::<Dns>()
+        .yara(rules)
+        .kernel_prefilter();
+    assert!(pf.is_none(), "yara scans each flow's payload");
+}

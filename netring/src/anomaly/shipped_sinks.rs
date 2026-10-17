@@ -292,7 +292,8 @@ impl ChannelSink {
     /// Returns `(sink, receiver, dropped)`. The capture task **never blocks**:
     /// when the channel is full, `write` drops the anomaly and increments the
     /// returned `dropped` counter (surface it through telemetry / metrics). The
-    /// caller drains the receiver in a spawned task.
+    /// caller drains the receiver in a spawned task. `capacity` is at least 1
+    /// (`0` is taken as `1`).
     pub fn bounded(
         capacity: usize,
     ) -> (
@@ -300,7 +301,8 @@ impl ChannelSink {
         tokio::sync::mpsc::Receiver<flowscope::OwnedAnomaly>,
         Arc<AtomicU64>,
     ) {
-        let (tx, rx) = tokio::sync::mpsc::channel(capacity);
+        // tokio's bounded channel panics on a zero capacity.
+        let (tx, rx) = tokio::sync::mpsc::channel(capacity.max(1));
         let dropped = Arc::new(AtomicU64::new(0));
         (
             Self {
@@ -394,6 +396,17 @@ mod tests {
         }
         // Receiver never drained: 2 fit in the buffer, the other 3 are dropped.
         assert_eq!(dropped.load(Ordering::Relaxed), 3);
+    }
+
+    /// A zero capacity is a one-slot channel, not a tokio panic.
+    #[test]
+    fn bounded_channel_sink_with_zero_capacity_holds_one() {
+        let (mut sink, mut rx, dropped) = ChannelSink::bounded(0);
+        for _ in 0..2 {
+            sink.write("T", Severity::Info, Timestamp::new(0, 0), None, &[], &[]);
+        }
+        assert_eq!(dropped.load(Ordering::Relaxed), 1);
+        assert!(rx.try_recv().is_ok());
     }
 
     #[test]

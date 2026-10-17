@@ -197,6 +197,16 @@ pub enum BuildError {
         /// The builder method the zero period was passed to.
         what: &'static str,
     },
+
+    /// More capture sources (AF_PACKET + AF_XDP interfaces) than the
+    /// monitor's `SourceIdx` — a `u8` — can number.
+    #[error("too many capture sources: limit {limit}, found {actual}")]
+    TooManyCaptureSources {
+        /// Maximum number of capture sources per monitor.
+        limit: usize,
+        /// Capture sources on the builder.
+        actual: usize,
+    },
 }
 
 #[cfg(test)]

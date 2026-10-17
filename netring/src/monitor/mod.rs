@@ -94,6 +94,8 @@ pub mod yara;
 /// trailing payload is not scanned (bounds adversarial buffering).
 #[cfg(feature = "yara")]
 pub const DEFAULT_YARA_SCAN_BYTES: usize = 1024 * 1024;
+/// Capture sources a monitor can number with its `u8` [`SourceIdx`](crate::ctx::SourceIdx).
+const MAX_CAPTURE_SOURCES: usize = u8::MAX as usize + 1;
 #[cfg(feature = "ndp")]
 pub mod ndp;
 #[cfg(feature = "p0f")]
@@ -4529,6 +4531,19 @@ impl MonitorBuilder {
         let no_capture_source = self.interfaces.is_empty();
         if interface_required && no_capture_source {
             return Err(BuildError::NoInterface.into());
+        }
+        // Every source is numbered by a `u8` `SourceIdx` — a 257th would wrap.
+        #[cfg(feature = "af-xdp")]
+        let source_count =
+            self.interfaces.len() + self.xdp_interfaces.len() + self.injected_xdp.len();
+        #[cfg(not(feature = "af-xdp"))]
+        let source_count = self.interfaces.len();
+        if source_count > MAX_CAPTURE_SOURCES {
+            return Err(BuildError::TooManyCaptureSources {
+                limit: MAX_CAPTURE_SOURCES,
+                actual: source_count,
+            }
+            .into());
         }
         // Issue #135: an explicit AF_XDP backend on a namespaced source. The
         // builder methods return `Self`, so this is the first place it can be

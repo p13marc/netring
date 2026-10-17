@@ -600,3 +600,22 @@ async fn run_for_duration_max_does_not_overflow() {
         .await;
     assert!(res.is_err(), "the missing interface fails the open");
 }
+
+/// `SourceIdx` is a `u8`: more than 256 capture sources is a build
+/// error (source 256 used to wrap to `SourceIdx(0)`).
+#[test]
+fn more_than_256_capture_sources_is_a_build_error() {
+    use netring::protocol::builtin::Udp;
+    let build = |n: usize| {
+        Monitor::builder()
+            .interfaces(vec!["lo"; n])
+            .protocol::<Udp>()
+            .build()
+    };
+    assert_eq!(build(256).unwrap().capture_sources().len(), 256);
+    let Err(err) = build(257) else {
+        panic!("257 capture sources built");
+    };
+    let err = err.to_string();
+    assert!(err.contains("256") && err.contains("257"), "{err}");
+}

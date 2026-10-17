@@ -680,6 +680,7 @@ fn counting_effect<P>(
 }
 
 /// An async handler that counts its calls.
+#[cfg(any(feature = "dns", feature = "icmp"))]
 fn counting_async<P>(
     calls: &Calls,
     name: &'static str,

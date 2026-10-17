@@ -154,3 +154,51 @@ async fn unified_pipeline_via_generic_function() {
     let started = count_started(events).await;
     assert_eq!(started, 1);
 }
+
+/// A pcap of `link_type` (DLT number) holding `frames`.
+fn write_pcap_with_link(link_type: u32, frames: &[(Timestamp, Vec<u8>)]) -> NamedTempFile {
+    use pcap_file::pcap::{PcapHeader, PcapPacket, PcapWriter};
+    let file = NamedTempFile::new().expect("tempfile");
+    let header = PcapHeader {
+        datalink: pcap_file::DataLink::from(link_type),
+        ts_resolution: pcap_file::TsResolution::NanoSecond,
+        ..Default::default()
+    };
+    let mut w = PcapWriter::with_header(file.reopen().unwrap(), header).expect("writer");
+    for (ts, data) in frames {
+        let pkt = PcapPacket::new_owned(
+            Duration::new(ts.sec as u64, ts.nsec),
+            data.len() as u32,
+            data.clone(),
+        );
+        w.write_packet(&pkt).expect("write");
+    }
+    drop(w);
+    file
+}
+
+/// #217: frames of a link type that can't be turned into Ethernet (here
+/// IEEE 802.11, DLT 105) are skipped — and now counted, so an all-802.11
+/// capture no longer replays as a silently empty, successful stream.
+#[tokio::test]
+async fn unsupported_link_type_frames_are_counted_as_skipped() {
+    // 802.11 data-frame headers: frame control, duration, three addresses.
+    let frames: Vec<(Timestamp, Vec<u8>)> = (0..4u8)
+        .map(|i| {
+            let mut f = vec![0x08, 0x00, 0x00, 0x00];
+            f.extend_from_slice(&[i; 18]);
+            f.extend_from_slice(&[0, 0]);
+            (Timestamp::new(100 + u32::from(i), 0), f)
+        })
+        .collect();
+    let f = write_pcap_with_link(105, &frames);
+    let mut source = AsyncPcapSource::open(f.path()).await.expect("open");
+    let mut yielded = 0;
+    while let Some(item) = source.next().await {
+        item.expect("skipping is not an error");
+        yielded += 1;
+    }
+    assert_eq!(yielded, 0);
+    assert_eq!(source.packets_yielded(), 0);
+    assert_eq!(source.packets_skipped(), 4);
+}

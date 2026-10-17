@@ -177,10 +177,10 @@ impl Bridge {
         loop {
             let [a_ready, b_ready] = self.poll_both(self.poll_timeout)?;
             if a_ready {
-                self.drain_direction(&mut filter, BridgeDirection::AtoB)?;
+                self.drain_direction(&mut filter, BridgeDirection::AtoB, Kick::Wait)?;
             }
             if b_ready {
-                self.drain_direction(&mut filter, BridgeDirection::BtoA)?;
+                self.drain_direction(&mut filter, BridgeDirection::BtoA, Kick::Wait)?;
             }
         }
     }
@@ -196,10 +196,10 @@ impl Bridge {
         for _ in 0..iterations {
             let [a_ready, b_ready] = self.poll_both(self.poll_timeout)?;
             if a_ready {
-                self.drain_direction(&mut filter, BridgeDirection::AtoB)?;
+                self.drain_direction(&mut filter, BridgeDirection::AtoB, Kick::Wait)?;
             }
             if b_ready {
-                self.drain_direction(&mut filter, BridgeDirection::BtoA)?;
+                self.drain_direction(&mut filter, BridgeDirection::BtoA, Kick::Wait)?;
             }
         }
         Ok(())
@@ -241,6 +241,15 @@ impl Bridge {
     /// runtime: it avoids the bridge's own poll loop and reuses the runtime's
     /// epoll registration.
     ///
+    /// The TX rings are kicked without waiting for the device (`MSG_DONTWAIT`,
+    /// 0.32 #228): [`run`](Self::run)'s kick waits until every frame it handed
+    /// over is transmitted, which on a device that holds frames (a qdisc that
+    /// queues or shapes, with [`qdisc_bypass`](BridgeBuilder::qdisc_bypass)
+    /// off) would block the runtime thread. Frames a full TX ring can't take
+    /// are dropped and counted, as in `run`; frames a kick could not hand over
+    /// (the socket's send buffer full) are kicked again on the next batch or
+    /// within a second.
+    ///
     /// # Examples
     ///
     /// ```no_run
@@ -259,7 +268,7 @@ impl Bridge {
     ///
     /// # Errors
     ///
-    /// Returns [`Error::Io`] if `AsyncFd` registration or a `flush()` fails,
+    /// Returns [`Error::Io`] if `AsyncFd` registration or a TX kick fails,
     /// or with `ENETDOWN` when either interface is removed (noticed on the
     /// kernel's error event, or within a second when the interface was
     /// already down). A side that is merely down is waited out, as with
@@ -294,6 +303,7 @@ impl Bridge {
                 tick = probe.tick() => {
                     tick.map_err(Error::Io)?;
                     self.check_health()?;
+                    self.kick_queued()?;
                 }
             }
         }
@@ -336,6 +346,7 @@ impl Bridge {
                 tick = probe.tick() => {
                     tick.map_err(Error::Io)?;
                     self.check_health()?;
+                    self.kick_queued()?;
                 }
                 _ = tokio::time::sleep(self.poll_timeout) => {
                     // Idle iteration — fall through to next loop pass.
@@ -375,7 +386,7 @@ impl Bridge {
         // drain leaves it set so the backlog is resumed (epoll is
         // edge-triggered: no new edge would come).
         if (ready.is_readable() || ready.is_read_closed())
-            && self.drain_direction(filter, direction)?
+            && self.drain_direction(filter, direction, Kick::NoWait)?
         {
             guard.clear_ready_matching(Ready::READABLE | Ready::READ_CLOSED);
         }
@@ -390,17 +401,29 @@ impl Bridge {
         crate::afpacket::socket::check_health(self.rx_b.as_fd())
     }
 
+    /// Kick frames a non-blocking kick left queued (it stops when the
+    /// socket's send buffer is full) — the async loops do this once a
+    /// second, so a backlog doesn't wait for the next forwarded batch.
+    #[cfg(feature = "tokio")]
+    fn kick_queued(&mut self) -> Result<(), Error> {
+        self.tx_a.flush_nonblocking()?;
+        self.tx_b.flush_nonblocking()?;
+        Ok(())
+    }
+
     /// Drain retired blocks from one direction, forwarding through the filter.
     ///
     /// Takes up to [`DRAIN_BATCHES`] blocks, then returns so the other
     /// direction gets its turn: draining until empty never ends while one
     /// side is under sustained load, starving the other. Returns `true` when
     /// the direction had nothing more retired. The leftover backlog keeps
-    /// the RX fd readable, so the next `poll(2)` returns at once.
+    /// the RX fd readable, so the next `poll(2)` returns at once. `kick`
+    /// says whether handing frames to the kernel waits for the device.
     fn drain_direction<F>(
         &mut self,
         filter: &mut F,
         direction: BridgeDirection,
+        kick: Kick,
     ) -> Result<bool, Error>
     where
         F: FnMut(&Packet<'_>, BridgeDirection) -> BridgeAction,
@@ -447,7 +470,7 @@ impl Bridge {
                     );
                     continue;
                 }
-                if !queue_frame(tx, pkt.data())? {
+                if !queue_frame(tx, pkt.data(), kick)? {
                     *ring_full += 1;
                     tracing::debug!(
                         pkt_len = pkt.len(),
@@ -455,7 +478,7 @@ impl Bridge {
                     );
                 }
             }
-            tx.flush()?;
+            kick.kick(tx)?;
         }
         Ok(false)
     }
@@ -524,11 +547,35 @@ impl Bridge {
 /// Blocks one direction forwards before the other gets its turn.
 const DRAIN_BATCHES: usize = 4;
 
+/// How a drain hands its queued frames to the kernel.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Kick {
+    /// [`Injector::flush`]: wait until the device completed every frame —
+    /// the blocking loops' backpressure.
+    Wait,
+    /// [`Injector::flush_nonblocking`]: return once they are handed over.
+    /// The async loops must not block the runtime thread on a device that
+    /// holds frames (#228).
+    #[cfg_attr(not(feature = "tokio"), allow(dead_code))]
+    NoWait,
+}
+
+impl Kick {
+    fn kick(self, tx: &mut Injector) -> Result<(), Error> {
+        match self {
+            Kick::Wait => tx.flush()?,
+            Kick::NoWait => tx.flush_nonblocking()?,
+        };
+        Ok(())
+    }
+}
+
 /// Copy `data` into a TX slot and queue it. A batch can hold more packets
 /// than the TX ring has frames, and queued frames only leave the ring on a
-/// kick (`tpacket_snd()` runs from `sendto()`), so a full ring is flushed
-/// and the allocation retried once. `false`: still no free frame.
-fn queue_frame(tx: &mut Injector, data: &[u8]) -> Result<bool, Error> {
+/// kick (`tpacket_snd()` runs from `sendto()`), so a full ring is kicked
+/// and the allocation retried once. `false`: still no free frame (with
+/// [`Kick::NoWait`], the frames handed over may not be transmitted yet).
+fn queue_frame(tx: &mut Injector, data: &[u8], kick: Kick) -> Result<bool, Error> {
     for attempt in 0..2 {
         if let Some(mut slot) = tx.allocate(data.len()) {
             slot.data_mut()[..data.len()].copy_from_slice(data);
@@ -537,7 +584,7 @@ fn queue_frame(tx: &mut Injector, data: &[u8]) -> Result<bool, Error> {
             return Ok(true);
         }
         if attempt == 0 {
-            tx.flush()?;
+            kick.kick(tx)?;
         }
     }
     Ok(false)

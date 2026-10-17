@@ -391,3 +391,96 @@ async fn bridge_async_resumes_a_backlog() {
         .expect("run_iterations_async");
     assert_eq!(seen, usize::from(N), "the async bridge stopped mid-backlog");
 }
+
+/// #228: the async bridge does not wait for the device. It forwarded each
+/// batch with a blocking kick (a flags-0 `sendto` on the TX ring, which
+/// waits until every frame it handed over completes — tpacket_snd()
+/// `need_wait`), so a device that holds frames, here side B's `plug`
+/// qdisc with the bridge going through the qdisc (`qdisc_bypass(false)`),
+/// stalled `run_iterations_async` inside the syscall: the loop, the
+/// other direction and the runtime thread with it. It now kicks with
+/// `MSG_DONTWAIT`.
+#[cfg(feature = "tokio")]
+#[test]
+fn async_bridge_does_not_wait_for_a_device_that_holds_frames() {
+    use helpers::PluggedDummy;
+    use netring::Injector;
+    use std::sync::mpsc;
+    use std::time::Instant;
+
+    let Some(x) = VethPair::create("nrtest_p0", "nrtest_p1") else {
+        eprintln!("skipping: needs CAP_NET_ADMIN to create veth");
+        return;
+    };
+    let Some(plugged) = PluggedDummy::create_named("nrtest_plug") else {
+        eprintln!("skipping: cannot create a plugged dummy (CAP_NET_ADMIN, sch_plug)");
+        return;
+    };
+
+    let (a, b) = (x.b.clone(), plugged.0.clone());
+    let (ready_tx, ready_rx) = mpsc::channel();
+    let (done_tx, done_rx) = mpsc::channel();
+    let bridge_thread = std::thread::spawn(move || {
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .expect("runtime");
+        rt.block_on(async {
+            // Through the qdisc (the default bypasses it, and a direct
+            // transmit never holds a frame): a bridge that shapes or
+            // queues its traffic.
+            let mut bridge = Bridge::builder()
+                .interface_a(&a)
+                .interface_b(&b)
+                .qdisc_bypass(false)
+                .poll_timeout(Duration::from_millis(20))
+                .build()
+                .expect("build bridge");
+            ready_tx.send(()).expect("signal ready");
+            let mut forwarded = 0u32;
+            let result = bridge
+                .run_iterations_async(60, |_pkt, dir| {
+                    if dir == BridgeDirection::AtoB {
+                        forwarded += 1;
+                    }
+                    BridgeAction::Forward
+                })
+                .await;
+            let _ = done_tx.send((result.map_err(|e| e.to_string()), forwarded));
+        });
+    });
+    ready_rx
+        .recv_timeout(Duration::from_secs(10))
+        .expect("bridge never came up");
+
+    // Frames into side A (x1), forwarded out of side B, where the qdisc
+    // holds them.
+    let mut tx = Injector::open(&x.a).expect("injector on p0");
+    for seq in 0..8u16 {
+        let mut frame = vec![0xff; 6];
+        frame.extend_from_slice(&[0x02, 0, 0, 0, 0, 0x02]);
+        frame.extend_from_slice(&0x88b5u16.to_be_bytes());
+        frame.extend_from_slice(&seq.to_be_bytes());
+        frame.resize(60, 0);
+        let mut slot = tx.allocate(frame.len()).expect("allocate");
+        slot.data_mut()[..frame.len()].copy_from_slice(&frame);
+        slot.set_len(frame.len());
+        slot.send();
+    }
+    tx.flush().expect("flush");
+
+    // 60 iterations of at most 20 ms each: well under 10 s unless a kick
+    // blocks.
+    let start = Instant::now();
+    let outcome = done_rx.recv_timeout(Duration::from_secs(10));
+    let elapsed = start.elapsed();
+    // Deleting the plugged device releases its frames, so a blocked kick
+    // returns and the thread can be joined either way.
+    drop(plugged);
+    bridge_thread.join().expect("bridge thread");
+    let (result, forwarded) = outcome.unwrap_or_else(|_| {
+        panic!("run_iterations_async stalled for {elapsed:?} on a device holding frames")
+    });
+    result.expect("run_iterations_async");
+    assert!(forwarded > 0, "the bridge forwarded nothing A→B");
+}

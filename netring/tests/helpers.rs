@@ -106,6 +106,119 @@ impl Drop for VethPair {
     }
 }
 
+/// A dummy interface, up, whose root qdisc is `plug` — it holds every frame
+/// until released, so the frames an injector sends stay in flight. Deleted
+/// on drop.
+pub struct PluggedDummy(pub String);
+
+impl PluggedDummy {
+    /// `nrplug<pid>`; `None` without CAP_NET_ADMIN or `sch_plug`.
+    pub fn create() -> Option<Self> {
+        Self::create_named(&format!("nrplug{}", std::process::id() % 100_000))
+    }
+
+    /// The interface `name` (≤ 15 bytes).
+    pub fn create_named(name: &str) -> Option<Self> {
+        use std::process::Command;
+        let name = name.to_string();
+        let _ = Command::new("ip").args(["link", "delete", &name]).output();
+        let ok = |args: &[&str]| {
+            Command::new("ip")
+                .args(args)
+                .status()
+                .is_ok_and(|s| s.success())
+        };
+        if !ok(&["link", "add", &name, "type", "dummy"]) {
+            return None;
+        }
+        let d = Self(name);
+        if !ok(&["link", "set", &d.0, "up"]) {
+            return None;
+        }
+        let ifindex = nix::net::if_::if_nametoindex(d.0.as_str()).ok()?;
+        add_plug_qdisc(ifindex).ok()?;
+        Some(d)
+    }
+}
+
+impl Drop for PluggedDummy {
+    fn drop(&mut self) {
+        let _ = std::process::Command::new("ip")
+            .args(["link", "delete", &self.0])
+            .output();
+    }
+}
+
+/// `tc qdisc add dev <ifindex> root plug limit 1MiB`, over rtnetlink (no
+/// `tc` binary needed). `plug` starts out holding (sch_plug: plug_init
+/// throttles): every frame is queued until a release that never comes.
+pub fn add_plug_qdisc(ifindex: u32) -> std::io::Result<()> {
+    use std::os::fd::{AsRawFd, FromRawFd, OwnedFd};
+
+    fn attr(buf: &mut Vec<u8>, kind: u16, data: &[u8]) {
+        let len = 4 + data.len();
+        buf.extend_from_slice(&(len as u16).to_ne_bytes());
+        buf.extend_from_slice(&kind.to_ne_bytes());
+        buf.extend_from_slice(data);
+        buf.resize(buf.len().next_multiple_of(4), 0);
+    }
+
+    const RTM_NEWQDISC: u16 = 36;
+    const TCA_KIND: u16 = 1;
+    const TCA_OPTIONS: u16 = 2;
+    let mut body = Vec::new();
+    // struct tcmsg { family: u8, pad: [u8; 3], ifindex: i32, handle: u32,
+    // parent: u32, info: u32 }
+    body.extend_from_slice(&[libc::AF_UNSPEC as u8, 0, 0, 0]);
+    body.extend_from_slice(&(ifindex as i32).to_ne_bytes());
+    body.extend_from_slice(&0x0001_0000u32.to_ne_bytes()); // handle 1:
+    body.extend_from_slice(&0xffff_ffffu32.to_ne_bytes()); // TC_H_ROOT
+    body.extend_from_slice(&0u32.to_ne_bytes());
+    attr(&mut body, TCA_KIND, b"plug\0");
+    // struct tc_plug_qopt { action: i32 (TCQ_PLUG_BUFFER = 0), limit: u32 }
+    let mut qopt = Vec::new();
+    qopt.extend_from_slice(&0i32.to_ne_bytes());
+    qopt.extend_from_slice(&(1u32 << 20).to_ne_bytes());
+    attr(&mut body, TCA_OPTIONS, &qopt);
+
+    let flags =
+        (libc::NLM_F_REQUEST | libc::NLM_F_ACK | libc::NLM_F_CREATE | libc::NLM_F_EXCL) as u16;
+    let mut msg = Vec::new();
+    msg.extend_from_slice(&((16 + body.len()) as u32).to_ne_bytes());
+    msg.extend_from_slice(&RTM_NEWQDISC.to_ne_bytes());
+    msg.extend_from_slice(&flags.to_ne_bytes());
+    msg.extend_from_slice(&1u32.to_ne_bytes()); // seq
+    msg.extend_from_slice(&0u32.to_ne_bytes()); // pid
+    msg.extend_from_slice(&body);
+
+    // SAFETY: plain syscalls on a fresh fd we own; buffers sized as passed.
+    unsafe {
+        let raw = libc::socket(
+            libc::AF_NETLINK,
+            libc::SOCK_RAW | libc::SOCK_CLOEXEC,
+            libc::NETLINK_ROUTE,
+        );
+        if raw < 0 {
+            return Err(std::io::Error::last_os_error());
+        }
+        let fd = OwnedFd::from_raw_fd(raw);
+        if libc::send(fd.as_raw_fd(), msg.as_ptr().cast(), msg.len(), 0) < 0 {
+            return Err(std::io::Error::last_os_error());
+        }
+        let mut ack = [0u8; 256];
+        let n = libc::recv(fd.as_raw_fd(), ack.as_mut_ptr().cast(), ack.len(), 0);
+        if n < 20 {
+            return Err(std::io::Error::other("short netlink ack"));
+        }
+        // nlmsgerr: the error code follows the 16-byte header.
+        let errno = i32::from_ne_bytes([ack[16], ack[17], ack[18], ack[19]]);
+        if errno != 0 {
+            return Err(std::io::Error::from_raw_os_error(-errno));
+        }
+    }
+    Ok(())
+}
+
 /// Synthetic captures for the replay (no-privilege) tests.
 #[cfg(all(
     feature = "tokio",

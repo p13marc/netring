@@ -93,8 +93,8 @@ impl<S: PacketSource + AsRawFd> AsyncCapture<S> {
     /// Returns [`Error::Io`] if duplicating the fd or the `AsyncFd`
     /// registration fails.
     pub fn new(source: S) -> Result<Self, Error> {
-        let inner = Registered::new_rx(source, Interest::READABLE, source_health::<S>)
-            .map_err(Error::Io)?;
+        let inner =
+            Registered::new(source, Interest::READABLE, source_health::<S>).map_err(Error::Io)?;
         Ok(Self { inner })
     }
 }

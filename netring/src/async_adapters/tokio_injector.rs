@@ -21,7 +21,7 @@ use std::os::fd::{AsFd, AsRawFd, BorrowedFd};
 use std::time::Duration;
 
 use crate::afpacket::tx::Injector;
-use crate::async_adapters::registered::Registered;
+use crate::async_adapters::registered::{Registered, health_io};
 use crate::error::Error;
 
 /// Async wrapper around [`Injector`] using tokio's [`AsyncFd`](tokio::io::unix::AsyncFd).
@@ -44,6 +44,13 @@ pub struct AsyncInjector {
     inner: Registered<Injector>,
 }
 
+/// The registration's liveness check: `ENETDOWN` once the injector's
+/// interface was removed (#225).
+fn sink_health(tx: &Injector) -> std::io::Result<()> {
+    use std::os::fd::AsFd;
+    health_io(crate::afpacket::socket::check_health(tx.as_fd()))
+}
+
 impl AsyncInjector {
     /// Wrap an [`Injector`] in an async adapter.
     ///
@@ -51,12 +58,20 @@ impl AsyncInjector {
     /// `POLLOUT` (the kernel signals slot reclamation via `POLLOUT`), so the
     /// adapter holds one extra fd for its lifetime.
     ///
+    /// Write waits ([`send`](Self::send) when the ring is full,
+    /// [`wait_drained`](Self::wait_drained), [`send_stream`](Self::send_stream))
+    /// end with `ENETDOWN` once the injector's interface is removed: queued
+    /// frames can never drain then, and the kernel raises no event for a TX
+    /// socket. The wait checks every second of idle waiting, on a timerfd
+    /// opened on its first idle wait (#225).
+    ///
     /// # Errors
     ///
     /// Returns [`Error::Io`] if duplicating the fd or the `AsyncFd`
     /// registration fails.
     pub fn new(tx: Injector) -> Result<Self, Error> {
-        let inner = Registered::new_tx(tx, tokio::io::Interest::WRITABLE).map_err(Error::Io)?;
+        let inner =
+            Registered::new(tx, tokio::io::Interest::WRITABLE, sink_health).map_err(Error::Io)?;
         Ok(Self { inner })
     }
 
@@ -143,6 +158,12 @@ impl AsyncInjector {
     /// [`Injector::pending_count`] until it hits zero or `timeout`
     /// elapses. Use before drop when you need to observe transmission
     /// failures or guarantee the kernel has finished.
+    ///
+    /// # Errors
+    ///
+    /// [`Error::Io`] with `TimedOut` when `timeout` elapses first, with
+    /// `ENETDOWN` once the interface was removed (frames still queued can
+    /// never drain then), or when the readiness wait fails.
     pub async fn wait_drained(&mut self, timeout: Duration) -> Result<(), Error> {
         let deadline = tokio::time::Instant::now() + timeout;
         loop {

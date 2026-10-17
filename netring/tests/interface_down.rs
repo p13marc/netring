@@ -344,3 +344,64 @@ async fn bridge_run_async_reports_removal() {
     let err = res.expect_err("side B was removed");
     assert!(is_enetdown(&err), "{err:?}");
 }
+
+#[cfg(feature = "tokio")]
+fn async_injector_on(iface: &str) -> netring::AsyncInjector {
+    let tx = netring::Injector::builder()
+        .interface(iface)
+        .frame_count(8)
+        .build()
+        .expect("build injector");
+    netring::AsyncInjector::new(tx).expect("register with tokio")
+}
+
+/// #225: `AsyncInjector::wait_drained` on a removed interface ends with
+/// ENETDOWN, promptly. Frames queued but not yet kicked can never drain
+/// once the interface is gone, and a protocol-0 TX socket gets no error
+/// report (it isn't running): the wait used to sit out its whole timeout.
+#[cfg(feature = "tokio")]
+#[tokio::test(flavor = "current_thread")]
+async fn async_injector_wait_drained_reports_removed_interface() {
+    let Some(dummy) = DownDummy::create_tagged("ti") else {
+        eprintln!("skip: cannot create a dummy interface (need CAP_NET_ADMIN)");
+        return;
+    };
+    assert!(ip(&["link", "set", &dummy.0, "up"]));
+    let mut tx = async_injector_on(&dummy.0);
+    let frame = marker_frame(b"netring-tx-liveness");
+    for _ in 0..3 {
+        tx.send(&frame).await.expect("queue a frame");
+    }
+    assert!(tx.pending_count() > 0, "queued, not kicked");
+    assert!(ip(&["link", "delete", &dummy.0]), "delete {}", dummy.0);
+    let start = Instant::now();
+    let res = tx.wait_drained(Duration::from_secs(10)).await;
+    let elapsed = start.elapsed();
+    let err = res.expect_err("frames on a removed interface never drain");
+    assert!(is_enetdown(&err), "{err:?} after {elapsed:?}");
+    assert!(elapsed < Duration::from_secs(3), "took {elapsed:?}");
+}
+
+/// A `send` that has to wait for a free slot after the interface was
+/// removed fails at once: the kick it makes first (`sendto`) finds no
+/// device (ENXIO). Never a hang.
+#[cfg(feature = "tokio")]
+#[tokio::test(flavor = "current_thread")]
+async fn async_injector_send_fails_on_removed_interface() {
+    let Some(dummy) = DownDummy::create_tagged("ts") else {
+        eprintln!("skip: cannot create a dummy interface (need CAP_NET_ADMIN)");
+        return;
+    };
+    assert!(ip(&["link", "set", &dummy.0, "up"]));
+    let mut tx = async_injector_on(&dummy.0);
+    let frame = marker_frame(b"netring-tx-liveness");
+    // Fill the ring with queued, un-kicked frames.
+    while tx.available_slots() > 0 {
+        tx.send(&frame).await.expect("queue a frame");
+    }
+    assert!(ip(&["link", "delete", &dummy.0]), "delete {}", dummy.0);
+    let res = tokio::time::timeout(Duration::from_secs(3), tx.send(&frame))
+        .await
+        .expect("send still waiting 3 s after the interface was removed");
+    assert!(res.is_err(), "the ring is full and the device gone");
+}

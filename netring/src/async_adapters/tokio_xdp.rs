@@ -85,7 +85,7 @@ impl AsyncXdpSocket {
     /// Returns [`Error::Io`] if duplicating the fd or the `AsyncFd`
     /// registration fails.
     pub fn new(socket: XdpSocket) -> Result<Self, Error> {
-        let inner = Registered::new_rx(
+        let inner = Registered::new(
             socket,
             Interest::READABLE | Interest::WRITABLE,
             socket_health,

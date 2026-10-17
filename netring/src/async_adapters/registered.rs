@@ -11,8 +11,8 @@
 //!
 //! ## Liveness (#212)
 //!
-//! A reader registered with [`Registered::new_rx`] also learns when its
-//! source died. Two things make that necessary:
+//! A registration also learns when its source died, so a wait — read or
+//! write — ends instead of hanging. Two things make that necessary:
 //!
 //! - The kernel reports a socket error (`sk_err`) as `EPOLLERR`, which mio
 //!   maps to error / write-closed readiness — never read readiness — and
@@ -24,9 +24,13 @@
 //!   error), an AF_XDP socket whose device is unregistered (xsk_poll()
 //!   reports nothing once the socket is unbound).
 //!
-//! So a reader registers `Interest::ERROR` too and, while it waits, watches
-//! for an error event and re-checks the source every [`LIVENESS_PROBE`] of
-//! idle waiting. Either way the source's [`HealthFn`] decides: `Err` ends
+//! - A TX socket raises nothing either: an AF_PACKET injector (protocol
+//!   0) isn't running, so packet_notifier() sets no error, and frames
+//!   queued but not kicked never complete once the device is gone (#225).
+//!
+//! So every registration includes `Interest::ERROR` and, while it waits,
+//! watches for an error event and re-checks the source every
+//! [`LIVENESS_PROBE`] of idle waiting. Either way the source's [`HealthFn`] decides: `Err` ends
 //! the wait with that error, `Ok` (e.g. the interface is merely down) keeps
 //! waiting. Under load the read readiness is set whenever the reader looks,
 //! so neither check runs on the hot path.
@@ -178,7 +182,7 @@ enum Probe {
     Unavailable,
 }
 
-/// The read side's death detection (see the module docs).
+/// A registration's death detection (see the module docs).
 struct Liveness<T> {
     health: HealthFn<T>,
     /// Holds a clone of the registration's `Arc`.
@@ -240,7 +244,7 @@ pub(crate) struct Registered<T> {
     // Declared before `inner`, so the dup is deregistered and closed (when
     // the last `Arc` — `liveness` holds one — drops) before `inner` drops.
     ready: Arc<AsyncFd<OwnedFd>>,
-    liveness: Option<Liveness<T>>,
+    liveness: Liveness<T>,
     inner: T,
 }
 
@@ -249,28 +253,17 @@ impl<T: AsFd> Registered<T> {
     /// Waits end with an error once `health` reports the source dead —
     /// checked on an error event and every [`LIVENESS_PROBE`] of idle
     /// waiting.
-    pub(crate) fn new_rx(inner: T, interest: Interest, health: HealthFn<T>) -> io::Result<Self> {
+    pub(crate) fn new(inner: T, interest: Interest, health: HealthFn<T>) -> io::Result<Self> {
         let ready = Arc::new(register_dup(inner.as_fd(), interest | Interest::ERROR)?);
-        let liveness = Some(Liveness {
+        let liveness = Liveness {
             health,
             errors: watch_errors(&ready),
             probe: Probe::Unarmed,
             probe_every: LIVENESS_PROBE,
-        });
+        };
         Ok(Self {
             ready,
             liveness,
-            inner,
-        })
-    }
-
-    /// Register a dup of `inner`'s fd for `interest`, without liveness
-    /// checks.
-    pub(crate) fn new_tx(inner: T, interest: Interest) -> io::Result<Self> {
-        let ready = Arc::new(register_dup(inner.as_fd(), interest)?);
-        Ok(Self {
-            ready,
-            liveness: None,
             inner,
         })
     }
@@ -300,9 +293,7 @@ impl<T> Registered<T> {
     /// Shorten the liveness probe period (tests).
     #[cfg(test)]
     fn with_probe_every(mut self, every: Duration) -> Self {
-        if let Some(l) = self.liveness.as_mut() {
-            l.probe_every = every;
-        }
+        self.liveness.probe_every = every;
         self
     }
 
@@ -324,10 +315,7 @@ impl<T> Registered<T> {
         if let Poll::Ready(res) = polled {
             return Poll::Ready(res.map(|guard| ReadyMut { guard, inner }));
         }
-        match liveness {
-            Some(l) => l.poll_dead(ready, inner, cx).map(Err),
-            None => Poll::Pending,
-        }
+        liveness.poll_dead(ready, inner, cx).map(Err)
     }
 
     /// Wait for `dir` readiness (or the source's death), then take its
@@ -346,21 +334,20 @@ impl<T> Registered<T> {
         })
     }
 
-    /// Wait for read readiness. With liveness checks ([`Self::new_rx`]),
-    /// ends with the source's error once it is found dead.
+    /// Wait for read readiness; ends with the source's error once it is
+    /// found dead.
     pub(crate) async fn readable_mut(&mut self) -> io::Result<ReadyMut<'_, T>> {
         self.ready_mut(Direction::Read).await
     }
 
-    /// Wait for write readiness. With liveness checks ([`Self::new_rx`]),
-    /// ends with the source's error once it is found dead.
+    /// Wait for write readiness; ends with the source's error once it is
+    /// found dead.
     pub(crate) async fn writable_mut(&mut self) -> io::Result<ReadyMut<'_, T>> {
         self.ready_mut(Direction::Write).await
     }
 
     /// Poll for read readiness (same waker rules as
-    /// `AsyncFd::poll_read_ready`), or — with liveness checks — for the
-    /// source's death.
+    /// `AsyncFd::poll_read_ready`), or for the source's death.
     pub(crate) fn poll_read_ready_mut(
         &mut self,
         cx: &mut Context<'_>,
@@ -404,7 +391,7 @@ mod tests {
     async fn readiness_follows_the_source_after_it_is_swapped_out() {
         let (a, b) = UnixDatagram::pair().unwrap();
         a.set_nonblocking(true).unwrap();
-        let mut reg = Registered::new_rx(a, Interest::READABLE, healthy).unwrap();
+        let mut reg = Registered::new(a, Interest::READABLE, healthy).unwrap();
         // The registration is on a dup, not on the source's own fd.
         assert_ne!(reg.ready.as_raw_fd(), reg.get_ref().as_raw_fd());
 
@@ -465,7 +452,7 @@ mod tests {
     #[tokio::test]
     async fn error_readiness_wakes_a_reader() {
         let s = udp_with_pending_error();
-        let mut reg = Registered::new_rx(s, Interest::READABLE, take_error).unwrap();
+        let mut reg = Registered::new(s, Interest::READABLE, take_error).unwrap();
         match tokio::time::timeout(Duration::from_secs(2), reg.readable_mut()).await {
             Ok(Err(e)) => assert_eq!(e.raw_os_error(), Some(libc::ECONNREFUSED)),
             Ok(Ok(_)) => panic!("readable without data"),
@@ -502,7 +489,7 @@ mod tests {
                 Ok(())
             }
         };
-        let mut reg = Registered::new_rx(src, Interest::READABLE, dies_on_third)
+        let mut reg = Registered::new(src, Interest::READABLE, dies_on_third)
             .unwrap()
             .with_probe_every(Duration::from_millis(50));
         let start = Instant::now();
@@ -540,7 +527,7 @@ mod tests {
                     Ok(())
                 }
             };
-            let mut reg = Registered::new_rx(src, Interest::READABLE, dies_on_second)
+            let mut reg = Registered::new(src, Interest::READABLE, dies_on_second)
                 .unwrap()
                 .with_probe_every(Duration::from_millis(50));
             let (watchdog, release) = UnixDatagram::pair().unwrap();
@@ -574,7 +561,7 @@ mod tests {
             c.calls.fetch_add(1, Ordering::SeqCst);
             Ok(())
         };
-        let mut reg = Registered::new_rx(src, Interest::READABLE, counts)
+        let mut reg = Registered::new(src, Interest::READABLE, counts)
             .unwrap()
             .with_probe_every(Duration::from_secs(3600));
         let waited = tokio::time::timeout(Duration::from_millis(300), reg.readable_mut()).await;
@@ -582,13 +569,32 @@ mod tests {
         assert_eq!(reg.get_ref().calls.load(Ordering::SeqCst), 1);
     }
 
-    /// A registration without liveness checks keeps waiting through an
-    /// error event (what every reader did before #212).
+    /// Write waits are watched too (#225): a sink that is never writable
+    /// and dies without an event ends its write wait.
     #[tokio::test]
-    async fn tx_registration_has_no_health_checks() {
-        let s = udp_with_pending_error();
-        let mut reg = Registered::new_tx(s, Interest::READABLE).unwrap();
-        let waited = tokio::time::timeout(Duration::from_millis(200), reg.readable_mut()).await;
-        assert!(waited.is_err());
+    async fn idle_write_wait_is_probed() {
+        let (a, _b) = UnixDatagram::pair().unwrap();
+        a.set_nonblocking(true).unwrap();
+        // Fill the peer's queue: `a` stops being writable.
+        while a.send(&[0u8; 1024]).is_ok() {}
+        let src = Counted {
+            sock: a,
+            calls: AtomicUsize::new(0),
+        };
+        let dies_on_second = |c: &Counted<UnixDatagram>| {
+            if c.calls.fetch_add(1, Ordering::SeqCst) + 1 >= 2 {
+                Err(io::Error::from_raw_os_error(libc::ENETDOWN))
+            } else {
+                Ok(())
+            }
+        };
+        let mut reg = Registered::new(src, Interest::WRITABLE, dies_on_second)
+            .unwrap()
+            .with_probe_every(Duration::from_millis(50));
+        match tokio::time::timeout(Duration::from_secs(1), reg.writable_mut()).await {
+            Ok(Err(e)) => assert_eq!(e.raw_os_error(), Some(libc::ENETDOWN)),
+            Ok(Ok(_)) => panic!("writable with a full peer queue"),
+            Err(_) => panic!("write wait not probed"),
+        }
     }
 }

@@ -194,8 +194,11 @@ struct Exported {
 }
 
 /// A baseline not refreshed for this long (record time) is dropped — its
-/// flow is long gone without a final record.
-const BASELINE_STALE: std::time::Duration = std::time::Duration::from_secs(3600);
+/// flow is long gone without a final record. A floor: the threshold also
+/// grows to 3× the longest interval seen between two records of a flow,
+/// so a long active timeout keeps its baselines. (Final records remove
+/// theirs, so this only catches flows that never got one.)
+const BASELINE_STALE: std::time::Duration = std::time::Duration::from_secs(24 * 3600);
 
 /// Baselines kept before the first stale-entry sweep.
 const BASELINE_PRUNE_MIN: usize = 1024;
@@ -220,6 +223,9 @@ pub struct IpfixExporter<W: Write + Send> {
     exported: HashMap<FlowId, Exported>,
     /// Map size that triggers the next stale-baseline sweep.
     prune_at: usize,
+    /// Longest interval seen between two records of one flow (record
+    /// time) — the sweep keeps baselines at least 3× this old.
+    longest_interval: std::time::Duration,
 }
 
 impl<W: Write + Send> IpfixExporter<W> {
@@ -238,6 +244,7 @@ impl<W: Write + Send> IpfixExporter<W> {
             template_sent: false,
             exported: HashMap::new(),
             prune_at: BASELINE_PRUNE_MIN,
+            longest_interval: std::time::Duration::ZERO,
         }
     }
 
@@ -290,10 +297,15 @@ impl<W: Write + Send> IpfixExporter<W> {
             self.exported.remove(&id);
             return;
         }
+        if let Some(prev) = self.exported.get(&id) {
+            let interval = record.end.saturating_sub(prev.at);
+            self.longest_interval = self.longest_interval.max(interval);
+        }
         if self.exported.len() >= self.prune_at {
             let now = record.end;
+            let stale = BASELINE_STALE.max(self.longest_interval.saturating_mul(3));
             self.exported
-                .retain(|_, e| now.saturating_sub(e.at) <= BASELINE_STALE);
+                .retain(|_, e| now.saturating_sub(e.at) <= stale);
             self.prune_at = (self.exported.len() * 2).max(BASELINE_PRUNE_MIN);
         }
         self.exported.insert(
@@ -603,6 +615,46 @@ mod tests {
         assert_eq!(counts(msgs[2]), (40, 1, 40));
     }
 
+    /// A long active timeout (interim records 2 h apart) with many
+    /// concurrent flows must keep every flow's baseline: a pruned one
+    /// would make the next interim delta the flow's cumulative count.
+    #[test]
+    fn a_long_active_timeout_keeps_its_baselines() {
+        let key = |port| {
+            FlowKey::new(
+                L4Proto::Udp,
+                SocketAddr::new(IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1)), port),
+                SocketAddr::new(IpAddr::V4(Ipv4Addr::new(10, 0, 0, 2)), 53),
+            )
+        };
+        let mut exporter = IpfixExporter::new(std::io::sink(), 1);
+        let mut records = vec![0u64; 4500];
+        let mut export = |exporter: &mut IpfixExporter<std::io::Sink>, port: u16, round: u32| {
+            records[usize::from(port)] += 1;
+            let mut s = FlowStats::default();
+            s.started = Timestamp::from_unix_f64(1000.0);
+            s.last_seen = Timestamp::from_unix_f64(1000.0 + 7200.0 * f64::from(round));
+            s.bytes_initiator = 100 * records[usize::from(port)];
+            let rec = FlowRecord::from_active(&key(port), &s);
+            let delta = exporter.delta_record(&rec).octet_delta_count_initiator;
+            exporter.export(&rec);
+            delta
+        };
+        // Each round (2 h of record time apart) new flows arrive first —
+        // growing the map past its sweep threshold — then the earlier
+        // flows send their next interim record.
+        for round in 0..3u32 {
+            let new = (round as u16 * 1500)..((round as u16 + 1) * 1500);
+            for port in new.clone() {
+                export(&mut exporter, port, round);
+            }
+            for port in 0..new.start {
+                let delta = export(&mut exporter, port, round);
+                assert_eq!(delta, 100, "round {round} port {port}: baseline lost");
+            }
+        }
+    }
+
     /// The per-flow baselines go with the final record, and those of
     /// flows that never get one are dropped once stale.
     #[test]
@@ -626,8 +678,8 @@ mod tests {
             exporter.export(&FlowRecord::from_active(&key(port), &s));
         }
         assert!(exporter.exported.len() <= 2000);
-        // Two hours later the old interim baselines are pruned.
-        s.started = Timestamp::from_unix_f64(1000.0 + 7200.0);
+        // Two days later the old interim baselines are pruned.
+        s.started = Timestamp::from_unix_f64(1000.0 + 2.0 * 86_400.0);
         s.last_seen = s.started;
         for port in 0..2000 {
             exporter.export(&FlowRecord::from_active(&key(port), &s));

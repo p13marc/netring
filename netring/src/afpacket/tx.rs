@@ -583,8 +583,13 @@ impl InjectorBuilder {
         req.tp_frame_size = geometry.frame_size;
         req.tp_frame_nr = geometry.frame_nr;
 
-        // Create socket, set version, set TX ring, mmap, bind
-        let fd = socket::create_packet_socket()?;
+        // Create socket, set version, set TX ring, mmap, bind. Protocol 0
+        // throughout: the injector never reads, and a socket bound to
+        // ETH_P_ALL without an RX ring gets a copy of every packet on the
+        // interface queued (packet_rcv()) until its rcvbuf fills. TX does
+        // not need it — tpacket_snd() sends on the bound device and
+        // packet_parse_headers() takes skb->protocol from the frame.
+        let fd = socket::create_packet_socket_proto(0)?;
         socket::set_packet_version(fd.as_fd(), ffi::TPACKET_V2_INT)?;
         // V2 reads only the leading `tpacket_req` part of the request.
         socket::set_tx_ring(fd.as_fd(), &req)?;
@@ -592,7 +597,7 @@ impl InjectorBuilder {
         let ring = MmapRing::new(fd.as_fd(), geometry.size, block_size, block_count)?;
 
         let ifindex = socket::resolve_interface(&interface)?;
-        socket::bind_to_interface(fd.as_fd(), ifindex)?;
+        socket::bind_to_interface_proto(fd.as_fd(), ifindex, 0)?;
 
         if self.qdisc_bypass {
             // PACKET_QDISC_BYPASS sets a function pointer on the packet_sock

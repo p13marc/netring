@@ -34,11 +34,6 @@ pub(crate) fn create_packet_socket_proto(protocol: u16) -> Result<OwnedFd, Error
     Ok(unsafe { OwnedFd::from_raw_fd(fd) })
 }
 
-/// Create an AF_PACKET raw socket with `SOCK_CLOEXEC`, bound to `ETH_P_ALL`.
-pub(crate) fn create_packet_socket() -> Result<OwnedFd, Error> {
-    create_packet_socket_proto(ffi::ETH_P_ALL as u16)
-}
-
 // ── Interface resolution ───────────────────────────────────────────────────
 
 /// Resolve an interface name to its index.
@@ -86,11 +81,22 @@ pub(crate) fn set_tx_ring(fd: BorrowedFd<'_>, req: &ffi::tpacket_req3) -> Result
     )
 }
 
-/// Bind the socket to a specific interface.
+/// Bind the socket to a specific interface, receiving every protocol
+/// (`ETH_P_ALL`). Reception starts here.
 pub(crate) fn bind_to_interface(fd: BorrowedFd<'_>, ifindex: i32) -> Result<(), Error> {
+    bind_to_interface_proto(fd, ifindex, ffi::ETH_P_ALL as u16)
+}
+
+/// Bind the socket to a specific interface and `protocol` (host order);
+/// `0` sets the interface for sending without receiving anything.
+pub(crate) fn bind_to_interface_proto(
+    fd: BorrowedFd<'_>,
+    ifindex: i32,
+    protocol: u16,
+) -> Result<(), Error> {
     let mut sll: ffi::sockaddr_ll = unsafe { std::mem::zeroed() };
     sll.sll_family = libc::AF_PACKET as u16;
-    sll.sll_protocol = (ffi::ETH_P_ALL as u16).to_be();
+    sll.sll_protocol = protocol.to_be();
     sll.sll_ifindex = ifindex;
 
     let ret = unsafe {

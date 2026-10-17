@@ -160,3 +160,26 @@ fn inject_drop_without_send() {
     let flushed = tx.flush().expect("flush");
     assert_eq!(flushed, 0);
 }
+
+/// An injector has no RX ring, so it must not receive either: a socket
+/// bound to `ETH_P_ALL` gets a copy of every packet on the interface
+/// queued on its receive queue (until `rcvbuf` fills, then a drop per
+/// packet) that nothing ever reads.
+#[test]
+fn injector_does_not_queue_received_traffic() {
+    use std::os::fd::AsRawFd;
+
+    let tx = Injector::builder()
+        .interface(helpers::LOOPBACK)
+        .build()
+        .expect("build injector");
+    helpers::send_udp_to_loopback(helpers::unique_port(), b"netring_tx_rx", 16);
+    std::thread::sleep(Duration::from_millis(50));
+
+    let mut queued: libc::c_int = 0;
+    // SAFETY: SIOCINQ (= FIONREAD) writes one int, the length of the
+    // head of the receive queue, into `queued`.
+    let rc = unsafe { libc::ioctl(tx.as_raw_fd(), libc::FIONREAD, &mut queued) };
+    assert_eq!(rc, 0, "SIOCINQ: {}", std::io::Error::last_os_error());
+    assert_eq!(queued, 0, "the TX socket queued received packets");
+}

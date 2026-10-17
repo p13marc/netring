@@ -127,9 +127,10 @@ impl AsyncInjector {
                 return Ok(());
             }
             // Ring full. Frames queued since the last flush leave the ring
-            // only on a kick (tpacket_snd() runs from sendto()): kick, and
-            // retry before waiting for a slot that would never come.
-            if self.inner.get_mut().flush()? > 0 {
+            // only on a kick (tpacket_snd() runs from sendto()): kick —
+            // without waiting for the device (#228) — and retry before
+            // waiting for a slot that would never come.
+            if self.inner.get_mut().flush_nonblocking()? > 0 {
                 continue;
             }
             // Ring full: wait for kernel to reclaim a slot via POLLOUT.
@@ -142,14 +143,17 @@ impl AsyncInjector {
         }
     }
 
-    /// Kick the kernel to transmit queued frames.
+    /// Kick the kernel to transmit queued frames, without waiting for the
+    /// device to complete them: forwards to
+    /// [`Injector::flush_nonblocking`] (`MSG_DONTWAIT`). The blocking
+    /// [`Injector::flush`] would wait for every frame in flight — on the
+    /// runtime's thread, possibly forever on a device that holds frames
+    /// (#228). Await [`wait_drained`](Self::wait_drained) to wait for
+    /// completion.
     ///
-    /// Forwards to [`Injector::flush`]; awaits no I/O readiness today
-    /// (the underlying syscall is non-blocking with `EAGAIN`/`ENOBUFS`
-    /// reported as transient success). Async signature reserves room for
-    /// future enhancements.
+    /// Returns the number of frames queued when the kick started.
     pub async fn flush(&mut self) -> Result<usize, Error> {
-        self.inner.get_mut().flush()
+        self.inner.get_mut().flush_nonblocking()
     }
 
     /// Wait until every queued frame has been transmitted.

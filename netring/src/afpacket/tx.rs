@@ -427,15 +427,20 @@ impl Injector {
         unsafe { &*ptr }.store(ffi::TP_STATUS_AVAILABLE, Ordering::Release);
     }
 
-    /// Kick the kernel to transmit all frames queued via [`TxSlot::send()`].
+    /// Kick the kernel to transmit all frames queued via [`TxSlot::send()`],
+    /// and **wait** until the device has completed every frame it handed
+    /// over: a blocking `sendto` on a TX ring (tpacket_snd(), `need_wait`)
+    /// returns once no frame is in flight — on a device that holds frames
+    /// (a stalled queue, a qdisc that delays or holds them) that may take
+    /// long, or forever. [`flush_nonblocking`](Self::flush_nonblocking) kicks
+    /// without waiting; the async [`AsyncInjector`](crate::AsyncInjector)
+    /// only uses that one (#228).
     ///
     /// Returns the number of frames that were *queued* (had
     /// `TP_STATUS_SEND_REQUEST` set) when this call started. **This is not
-    /// necessarily the number of frames transmitted** — the kernel may take
-    /// additional time to process them, may reject frames with malformed
-    /// headers (`TP_STATUS_WRONG_FORMAT`), or may not yet have reclaimed
-    /// their slots (`TP_STATUS_SENDING`). Inspect slot status afterward to
-    /// distinguish queued from transmitted.
+    /// necessarily the number of frames transmitted** — the kernel may
+    /// reject frames with malformed headers (`TP_STATUS_WRONG_FORMAT`).
+    /// Inspect slot status afterward to distinguish queued from transmitted.
     ///
     /// EINTR is handled internally; transient `EAGAIN` and `ENOBUFS` are
     /// reported as success since the kernel will absorb the kick on the
@@ -454,6 +459,37 @@ impl Injector {
 
         let count = self.pending as usize;
         self.pending = 0;
+        Ok(count)
+    }
+
+    /// Kick the kernel to transmit all frames queued via [`TxSlot::send()`]
+    /// **without waiting** for them (`MSG_DONTWAIT`): returns once the
+    /// kernel has handed them to the device (`TP_STATUS_SENDING`). Their
+    /// slots come back as the device completes them — watch
+    /// [`pending_count`](Self::pending_count) or wait with
+    /// [`wait_drained`](Self::wait_drained). New in 0.32.0 (#228).
+    ///
+    /// When the kernel stops early (`EAGAIN`: the socket's send buffer is
+    /// full) the remaining frames stay queued, and the next flush kicks
+    /// again.
+    ///
+    /// Returns the number of frames queued when this call started.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`Error::Io`] if the underlying `sendto` syscall fails with
+    /// a non-transient error.
+    pub fn flush_nonblocking(&mut self) -> Result<usize, Error> {
+        if self.pending == 0 {
+            return Ok(0);
+        }
+        let stopped_early =
+            crate::syscall::sendto_kick_status(self.fd.as_raw_fd(), libc::MSG_DONTWAIT)
+                .map_err(Error::Io)?;
+        let count = self.pending as usize;
+        if !stopped_early {
+            self.pending = 0;
+        }
         Ok(count)
     }
 }
@@ -482,11 +518,13 @@ impl crate::traits::PacketSink for Injector {
 
 impl Drop for Injector {
     fn drop(&mut self) {
-        // Best-effort flush before unmapping. Errors are logged at warn
-        // level rather than discarded silently — explicit `flush()` before
-        // drop remains the only way to observe transmission failures
-        // (Drop can't return Result).
-        if let Err(e) = self.flush() {
+        // Best-effort, non-blocking kick before unmapping (#228): a blocking
+        // one would wait for the device to complete every frame, possibly
+        // forever. Frames in flight keep their own page references. Errors
+        // are logged at warn level rather than discarded silently — an
+        // explicit `flush()` before drop remains the only way to observe
+        // transmission failures (Drop can't return Result).
+        if let Err(e) = self.flush_nonblocking() {
             tracing::warn!(error = %e, "Injector::drop final flush failed");
         }
     }

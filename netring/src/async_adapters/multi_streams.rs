@@ -1814,8 +1814,10 @@ mod merged_tests {
         use crate::async_adapters::flow_stream::monotonic_tests::{
             next_until, one_udp_datagram, quick_idle_config,
         };
-        let mut config = super::super::multi_config::MultiStreamConfig::default();
-        config.tracker_config = quick_idle_config();
+        let config = super::super::multi_config::MultiStreamConfig {
+            tracker_config: quick_idle_config(),
+            ..Default::default()
+        };
         let mut merged = super::MergedFlowStream::new_with_config(
             vec![one_udp_datagram(), one_udp_datagram()],
             vec!["a".into(), "b".into()],
@@ -1832,9 +1834,12 @@ mod merged_tests {
         use crate::async_adapters::flow_stream::monotonic_tests::{
             next_until, one_udp_datagram, quick_idle_config,
         };
-        let mut config = super::super::multi_config::MultiStreamConfig::default();
-        config.tracker_config = quick_idle_config();
-        config.tracker_config.sweep_interval = std::time::Duration::ZERO;
+        let mut tracker_config = quick_idle_config();
+        tracker_config.sweep_interval = std::time::Duration::ZERO;
+        let config = super::super::multi_config::MultiStreamConfig {
+            tracker_config,
+            ..Default::default()
+        };
         let mut merged = super::MergedFlowStream::new_with_config(
             vec![one_udp_datagram()],
             vec!["a".into()],

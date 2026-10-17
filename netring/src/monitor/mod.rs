@@ -1979,8 +1979,12 @@ impl MonitorBuilder {
     /// exporter. The final end-of-flow record (reason `Some(_)`) still fires on
     /// `FlowEnded` as before. No-op unless at least one exporter is registered.
     ///
-    /// Counters in interim records are cumulative-to-date (not per-interval
-    /// deltas), matching IPFIX active-timeout semantics.
+    /// Counters in [`FlowRecord`](crate::export::FlowRecord)s are
+    /// cumulative-to-date, interim and final alike.
+    /// `IpfixExporter` (feature `ipfix`) turns them into IPFIX
+    /// delta counts (IE 1/2: what is new since the flow's previous record,
+    /// so a collector's sum is the flow's total) and keeps the running totals
+    /// in IE 85/86; a custom exporter that reports deltas must do the same.
     pub fn export_active_timeout(mut self, period: std::time::Duration) -> Self {
         self.flow_active_timeout = Some(period);
         self

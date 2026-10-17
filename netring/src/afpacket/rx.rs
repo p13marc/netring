@@ -68,6 +68,9 @@ pub struct Capture {
     busy_poll: BusyPollConfig,
     /// Created by [`Capture::stop_handle`]; polled with the socket.
     stop: Option<std::sync::Arc<StopSignal>>,
+    /// The snap length every installed socket filter is clamped to
+    /// ([`CaptureBuilder::snap_len`]).
+    snap_len: Option<u32>,
 }
 
 /// The cursor into a user-owned block that has packets left to read.
@@ -302,11 +305,25 @@ impl Capture {
 
     // ── Filter / fanout management ───────────────────────────────────────
 
+    /// The snap length set with [`CaptureBuilder::snap_len`]: every
+    /// classic filter this capture installs ([`set_filter`](Self::set_filter),
+    /// [`detach_filter`](Self::detach_filter), the builder's filter) cuts
+    /// accepted packets to at most this many bytes. `None`: whole packets.
+    pub fn snap_len(&self) -> Option<u32> {
+        self.snap_len
+    }
+
     /// Attach an eBPF socket filter program.
     ///
     /// Replaces any existing filter (classic BPF or eBPF). The program
     /// must be `BPF_PROG_TYPE_SOCKET_FILTER`. Packets not accepted by
     /// the program are dropped before reaching the ring.
+    ///
+    /// The program's return value **is the capture length**: the kernel
+    /// keeps `min(packet length, return value)` bytes (`0` drops). It
+    /// replaces the classic filter that carried the
+    /// [`snap_len`](CaptureBuilder::snap_len) clamp, so to keep a snap
+    /// length return `min(len, snap)` from the program yourself.
     ///
     /// `prog` is borrowed for the call — the kernel keeps its own
     /// reference until you detach or close the socket.
@@ -323,8 +340,12 @@ impl Capture {
     }
 
     /// Detach any attached BPF/eBPF filter.
+    ///
+    /// With a [`snap_len`](CaptureBuilder::snap_len) set, the socket keeps
+    /// a one-instruction `ret #snap_len` filter instead, so every packet is
+    /// still captured — cut to the snap length.
     pub fn detach_filter(&self) -> Result<(), Error> {
-        filter::detach_bpf_filter(self.fd.as_fd())
+        self.install_filter(None)
     }
 
     /// Plan 21: replace the BPF filter on this capture without
@@ -341,8 +362,16 @@ impl Capture {
     /// strict cutover, drain a few batches after `set_filter` or
     /// install a `(old OR new)` filter first, drain old matches,
     /// then narrow.
+    ///
+    /// With a [`snap_len`](CaptureBuilder::snap_len) set, the filter is
+    /// installed through [`BpfFilter::with_snap_len`].
     pub fn set_filter(&self, filter: &crate::config::BpfFilter) -> Result<(), Error> {
-        filter::attach_bpf_filter(self.fd.as_fd(), filter)
+        self.install_filter(Some(filter))
+    }
+
+    /// Install `f` (or no filter), clamped to the capture's snap length.
+    fn install_filter(&self, f: Option<&BpfFilter>) -> Result<(), Error> {
+        install_filter(self.fd.as_fd(), f, self.snap_len)
     }
 
     // ── Busy-poll introspection ──────────────────────────────────────────
@@ -851,7 +880,8 @@ pub struct CaptureBuilder {
     poll_timeout: Duration,
     fanout: Option<(FanoutMode, u16)>,
     fanout_flags: FanoutFlags,
-    bpf_filter: Option<Vec<BpfInsn>>,
+    bpf_filter: Option<BpfFilter>,
+    snap_len: Option<u32>,
 }
 
 impl Default for CaptureBuilder {
@@ -876,6 +906,7 @@ impl Default for CaptureBuilder {
             fanout: None,
             fanout_flags: FanoutFlags::empty(),
             bpf_filter: None,
+            snap_len: None,
         }
     }
 }
@@ -899,10 +930,23 @@ impl CaptureBuilder {
 
     /// Capture only the first `len` bytes of each packet (snap length).
     ///
-    /// Internally sets `frame_size` to `snap_len + TPACKET3_HDRLEN` (aligned).
+    /// Enforced by the socket filter, the only per-packet capture length
+    /// TPACKET_V3 honours: the kernel keeps `min(packet length, filter
+    /// return value)` bytes. The builder's [`bpf_filter`](Self::bpf_filter)
+    /// — and every later [`Capture::set_filter`] /
+    /// [`Capture::detach_filter`] — is installed through
+    /// [`BpfFilter::with_snap_len`]; without a filter the socket gets a
+    /// one-instruction `ret #len`. A cut packet has
+    /// [`Packet::len`] < [`Packet::original_len`] and
+    /// [`PacketStatus::truncated`](crate::PacketStatus::truncated) set.
+    ///
+    /// Before 0.32 this set the ring's `frame_size`, which TPACKET_V3
+    /// ignores for the capture length (#210). An eBPF filter
+    /// ([`Capture::attach_ebpf_filter`]) sets the length itself.
+    ///
+    /// `build()` fails with [`Error::Config`] for `len == 0`.
     pub fn snap_len(mut self, len: u32) -> Self {
-        let frame = ffi::tpacket_align(ffi::TPACKET3_HDRLEN + len as usize);
-        self.frame_size = frame;
+        self.snap_len = Some(len);
         self
     }
 
@@ -1049,7 +1093,7 @@ impl CaptureBuilder {
     /// To attach pre-built bytecode (e.g. from `tcpdump -dd`), wrap it
     /// in [`BpfFilter::new`] first.
     pub fn bpf_filter(mut self, filter: BpfFilter) -> Self {
-        self.bpf_filter = Some(filter.into_instructions());
+        self.bpf_filter = Some(filter);
         self
     }
 
@@ -1109,15 +1153,31 @@ fn is_enomem(e: &std::io::Error) -> bool {
     e.raw_os_error() == Some(libc::ENOMEM)
 }
 
-/// A classic BPF program that drops every packet (`ret #0`).
-fn reject_all_filter() -> BpfFilter {
-    let ret_0 = BpfInsn {
+/// A one-instruction classic BPF program: `ret #k` (`0` drops every
+/// packet; `k > 0` accepts every packet, cut to `k` bytes).
+fn ret_k_filter(k: u32) -> BpfFilter {
+    let ret_k = BpfInsn {
         code: 0x06, // BPF_RET | BPF_K
         jt: 0,
         jf: 0,
-        k: 0,
+        k,
     };
-    BpfFilter::new(vec![ret_0]).expect("one instruction")
+    BpfFilter::new(vec![ret_k]).expect("one instruction")
+}
+
+/// Install the socket filter of a capture: `f` clamped to `snap`, a bare
+/// `ret #snap` when only a snap length is set, or no filter at all.
+fn install_filter(
+    fd: BorrowedFd<'_>,
+    f: Option<&BpfFilter>,
+    snap: Option<u32>,
+) -> Result<(), Error> {
+    match (f, snap) {
+        (Some(f), Some(snap)) => filter::attach_bpf_filter(fd, &f.with_snap_len(snap)?),
+        (Some(f), None) => filter::attach_bpf_filter(fd, f),
+        (None, Some(snap)) => filter::attach_bpf_filter(fd, &ret_k_filter(snap)),
+        (None, None) => filter::detach_bpf_filter(fd),
+    }
 }
 
 /// Single attempt at building a Capture with `block_count` blocks.
@@ -1153,6 +1213,12 @@ fn build_inner(b: &CaptureBuilder, block_count: usize) -> Result<Capture, Error>
 
     if block_count == 0 {
         return Err(Error::Config("block_count must be > 0".into()));
+    }
+
+    if b.snap_len == Some(0) {
+        return Err(Error::Config(
+            "snap_len must be > 0 (a 0-byte snap length drops every packet)".into(),
+        ));
     }
 
     let geometry = RingGeometry::new(b.block_size, block_count, b.frame_size)?;
@@ -1212,18 +1278,14 @@ fn build_inner(b: &CaptureBuilder, block_count: usize) -> Result<Capture, Error>
     if b.timestamp_source != TimestampSource::Software {
         socket::set_timestamp_source(fd.as_fd(), b.timestamp_source)?;
     }
-    let bpf_filter = b
-        .bpf_filter
-        .as_ref()
-        .map(|insns| BpfFilter::new(insns.clone()))
-        .transpose()?;
+    let bpf_filter = b.bpf_filter.as_ref();
     if b.fanout.is_some() {
         // PACKET_FANOUT needs a bound socket, and until it joins the group
         // the socket gets every packet on the interface: drop them all
         // until the group decides what this member sees.
-        filter::attach_bpf_filter(fd.as_fd(), &reject_all_filter())?;
-    } else if let Some(filt) = &bpf_filter {
-        filter::attach_bpf_filter(fd.as_fd(), filt)?;
+        filter::attach_bpf_filter(fd.as_fd(), &ret_k_filter(0))?;
+    } else if bpf_filter.is_some() || b.snap_len.is_some() {
+        install_filter(fd.as_fd(), bpf_filter, b.snap_len)?;
     }
 
     // Bind to interface: the socket starts receiving here.
@@ -1235,10 +1297,8 @@ fn build_inner(b: &CaptureBuilder, block_count: usize) -> Result<Capture, Error>
     }
     if let Some((mode, group_id)) = b.fanout {
         fanout::join_fanout(fd.as_fd(), group_id, mode, b.fanout_flags)?;
-        match &bpf_filter {
-            Some(filt) => filter::attach_bpf_filter(fd.as_fd(), filt)?,
-            None => filter::detach_bpf_filter(fd.as_fd())?,
-        }
+        // Replaces the reject-all filter (or removes it).
+        install_filter(fd.as_fd(), bpf_filter, b.snap_len)?;
     }
 
     let busy_poll = BusyPollConfig {
@@ -1267,6 +1327,7 @@ fn build_inner(b: &CaptureBuilder, block_count: usize) -> Result<Capture, Error>
         cumulative: Cell::new(CaptureStats::default()),
         busy_poll,
         stop: None,
+        snap_len: b.snap_len,
     })
 }
 
@@ -1418,6 +1479,31 @@ mod tests {
             .build()
             .unwrap_err();
         assert!(matches!(err, Error::Config(_)), "{err:?}");
+    }
+
+    /// #210: a zero snap length would drop every packet — a config error,
+    /// caught before the socket exists.
+    #[test]
+    fn builder_rejects_zero_snap_len() {
+        let err = CaptureBuilder::default()
+            .interface("lo")
+            .snap_len(0)
+            .build()
+            .unwrap_err();
+        assert!(
+            matches!(err, Error::Config(ref m) if m.contains("snap_len")),
+            "{err:?}"
+        );
+    }
+
+    /// #210: the snap length no longer rides on `frame_size` (TPACKET_V3
+    /// ignores it for the capture length); it is kept for the filter.
+    #[test]
+    fn builder_snap_len_is_kept_apart_from_frame_size() {
+        let b = CaptureBuilder::default().snap_len(96);
+        assert_eq!(b.snap_len, Some(96));
+        assert_eq!(b.frame_size, 2048);
+        assert_eq!(CaptureBuilder::default().snap_len, None);
     }
 
     #[test]

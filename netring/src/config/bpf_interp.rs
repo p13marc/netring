@@ -9,13 +9,14 @@
 
 use super::bpf::BpfFilter;
 use super::bpf_compile::{
-    BPF_ALU_AND_K, BPF_JMP_JA, BPF_JMP_JEQ_K, BPF_JMP_JSET_K, BPF_LD_B_ABS, BPF_LD_H_ABS,
-    BPF_LD_H_IND, BPF_LD_W_ABS, BPF_LDX_B_MSH, BPF_RET_K,
+    BPF_ALU_AND_K, BPF_JMP_JA, BPF_JMP_JEQ_K, BPF_JMP_JGT_K, BPF_JMP_JSET_K, BPF_LD_B_ABS,
+    BPF_LD_H_ABS, BPF_LD_H_IND, BPF_LD_W_ABS, BPF_LDX_B_MSH, BPF_MISC_TXA, BPF_RET_A, BPF_RET_K,
+    BPF_RET_X,
 };
 
 impl BpfFilter {
     /// Run this filter against `frame` in software. Returns true
-    /// iff the program would `ret #non-zero`.
+    /// iff the program would return a non-zero verdict (accept).
     ///
     /// Out-of-bounds loads, instruction-counter overruns, and
     /// opcodes outside the supported subset return `false`
@@ -24,8 +25,9 @@ impl BpfFilter {
     /// rejects the program before it ever runs.
     ///
     /// Supported opcodes (exactly what
-    /// [`BpfFilterBuilder`](crate::config::BpfFilterBuilder)
-    /// emits, plus a few forward-compatible additions):
+    /// [`BpfFilterBuilder`](crate::config::BpfFilterBuilder) and
+    /// [`with_snap_len`](Self::with_snap_len) emit, plus a few
+    /// forward-compatible additions):
     ///
     /// - `BPF_LD | BPF_W | BPF_ABS` (0x20) — load 32-bit at offset k
     /// - `BPF_LD | BPF_H | BPF_ABS` (0x28) — load 16-bit at offset k
@@ -33,18 +35,27 @@ impl BpfFilter {
     /// - `BPF_LD | BPF_H | BPF_IND` (0x48) — load 16-bit at X+k
     /// - `BPF_LDX | BPF_B | BPF_MSH` (0xb1) — X = 4 * (mem\[k\] & 0xf)
     /// - `BPF_ALU | BPF_AND | BPF_K` (0x54) — A &= k
+    /// - `BPF_MISC | BPF_TXA` (0x87) — A = X
     /// - `BPF_JMP | BPF_JEQ | BPF_K` (0x15) — pc += jt if A==k else pc += jf
+    /// - `BPF_JMP | BPF_JGT | BPF_K` (0x25) — pc += jt if A>k else pc += jf
     /// - `BPF_JMP | BPF_JSET | BPF_K` (0x45) — pc += jt if A&k!=0 else pc += jf
     /// - `BPF_JMP | BPF_JA` (0x05) — pc += k (32-bit relative)
     /// - `BPF_RET | BPF_K` (0x06) — return k (0 = drop, non-zero = accept)
+    /// - `BPF_RET | BPF_A` (0x16), `BPF_RET | BPF_X` (0x0e) — return A / X
     ///
     /// Hand-rolled programs from [`BpfFilter::new`] that use
     /// opcodes outside this set will match nothing under
     /// `matches`; the kernel remains the source of truth.
     pub fn matches(&self, frame: &[u8]) -> bool {
+        self.verdict(frame) != 0
+    }
+
+    /// The program's return value for `frame`: what the kernel uses as the
+    /// number of bytes to capture (`0` drops). Fail-closed paths return `0`.
+    pub(crate) fn verdict(&self, frame: &[u8]) -> u32 {
         let insns = self.instructions();
         if insns.is_empty() {
-            return false;
+            return 0;
         }
         // cBPF programs are bounded by BPF_MAXINSNS (4096); we
         // cap iteration at 2× that to be safe against malformed
@@ -57,59 +68,56 @@ impl BpfFilter {
         let mut x: u32 = 0;
         let mut steps: usize = 0;
 
+        // Conditional jump: `jt` when `taken`, else `jf`.
+        let branch = |pc: usize, taken: bool, jt: u8, jf: u8| -> Option<usize> {
+            let off = usize::from(if taken { jt } else { jf });
+            pc.checked_add(off + 1)
+        };
+
         while steps < max_steps {
             steps += 1;
             let Some(insn) = insns.get(pc) else {
-                return false; // ran off the end without RET
+                return 0; // ran off the end without RET
             };
             match insn.code {
                 BPF_LD_W_ABS => match load_word(frame, insn.k as usize) {
                     Some(v) => a = v,
-                    None => return false,
+                    None => return 0,
                 },
                 BPF_LD_H_ABS => match load_half(frame, insn.k as usize) {
                     Some(v) => a = u32::from(v),
-                    None => return false,
+                    None => return 0,
                 },
                 BPF_LD_B_ABS => match load_byte(frame, insn.k as usize) {
                     Some(v) => a = u32::from(v),
-                    None => return false,
+                    None => return 0,
                 },
                 BPF_LD_H_IND => {
                     let off = (x as usize).checked_add(insn.k as usize);
                     match off.and_then(|o| load_half(frame, o)) {
                         Some(v) => a = u32::from(v),
-                        None => return false,
+                        None => return 0,
                     }
                 }
                 BPF_LDX_B_MSH => match load_byte(frame, insn.k as usize) {
                     Some(b) => x = 4 * u32::from(b & 0x0F),
-                    None => return false,
+                    None => return 0,
                 },
                 BPF_ALU_AND_K => {
                     a &= insn.k;
                 }
-                BPF_JMP_JEQ_K => {
-                    let off = if a == insn.k {
-                        usize::from(insn.jt)
-                    } else {
-                        usize::from(insn.jf)
-                    };
-                    pc = match pc.checked_add(off + 1) {
-                        Some(p) => p,
-                        None => return false,
-                    };
-                    continue;
+                BPF_MISC_TXA => {
+                    a = x;
                 }
-                BPF_JMP_JSET_K => {
-                    let off = if (a & insn.k) != 0 {
-                        usize::from(insn.jt)
-                    } else {
-                        usize::from(insn.jf)
+                BPF_JMP_JEQ_K | BPF_JMP_JGT_K | BPF_JMP_JSET_K => {
+                    let taken = match insn.code {
+                        BPF_JMP_JEQ_K => a == insn.k,
+                        BPF_JMP_JGT_K => a > insn.k,
+                        _ => (a & insn.k) != 0,
                     };
-                    pc = match pc.checked_add(off + 1) {
+                    pc = match branch(pc, taken, insn.jt, insn.jf) {
                         Some(p) => p,
-                        None => return false,
+                        None => return 0,
                     };
                     continue;
                 }
@@ -117,18 +125,18 @@ impl BpfFilter {
                     // Unconditional 32-bit relative offset (k).
                     pc = match pc.checked_add(insn.k as usize + 1) {
                         Some(p) => p,
-                        None => return false,
+                        None => return 0,
                     };
                     continue;
                 }
-                BPF_RET_K => {
-                    return insn.k != 0;
-                }
-                _ => return false, // unknown opcode → fail-closed
+                BPF_RET_K => return insn.k,
+                BPF_RET_A => return a,
+                BPF_RET_X => return x,
+                _ => return 0, // unknown opcode → fail-closed
             }
             pc += 1;
         }
-        false
+        0
     }
 }
 
@@ -199,7 +207,7 @@ mod tests {
             code: BPF_RET_K,
             jt: 0,
             jf: 0,
-            k: 0xFFFF,
+            k: u32::MAX,
         }])
         .unwrap();
         assert!(f.matches(&[0u8; 64]));
@@ -520,7 +528,7 @@ mod tests {
                 code: BPF_RET_K,
                 jt: 0,
                 jf: 0,
-                k: 0xFFFF,
+                k: u32::MAX,
             },
         ])
         .unwrap();

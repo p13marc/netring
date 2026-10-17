@@ -470,8 +470,8 @@ impl From<Timestamp> for Duration { /* ... */ }
 /// Decoded per-packet status flags.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct PacketStatus {
-    pub truncated: bool,
-    pub losing: bool,
+    pub truncated: bool, // tp_snaplen < tp_len (0.32; V3 never sets TP_STATUS_COPY)
+    // `losing` moved to PacketBatch::losing() in 0.32: V3 reports loss per block
     pub vlan_valid: bool,
     pub vlan_tpid_valid: bool,
     pub csum_valid: bool,
@@ -514,6 +514,10 @@ impl<'a> PacketBatch<'a> {
 
     /// Whether the block was retired via timeout (partially filled).
     pub fn timed_out(&self) -> bool;
+
+    /// TP_STATUS_LOSING on the block: drops since the previous kernel
+    /// stats read (0.32).
+    pub fn losing(&self) -> bool;
 
     /// Monotonic block sequence number. Gaps indicate dropped blocks.
     pub fn seq_num(&self) -> u64;

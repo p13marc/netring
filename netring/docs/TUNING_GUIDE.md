@@ -113,7 +113,7 @@ sudo ethtool -T eth0
 | `.reuseport(true)` | `SO_REUSEPORT`; allow cooperating processes to share an iface |
 | `.rcvbuf(bytes)` | `SO_RCVBUF` (capped at `net.core.rmem_max`) |
 | `.rcvbuf_force(true)` | Use `SO_RCVBUFFORCE` (CAP_NET_ADMIN, bypasses rmem_max) |
-| `.snap_len(n)` | Capture only the first `n` bytes of each packet |
+| `.snap_len(n)` | Capture only the first `n` bytes of each packet (enforced by the socket filter; survives `set_filter` / `detach_filter`; cut packets have `status().truncated`) |
 | `.poll_timeout(d)` | Default poll timeout used by the `packets()` iterator |
 
 ## Monitoring

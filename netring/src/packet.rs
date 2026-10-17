@@ -9,13 +9,18 @@ use crate::afpacket::ring::{self, MmapRing};
 pub use flowscope::Timestamp;
 
 /// Decoded per-packet status flags from `tpacket3_hdr.tp_status`.
+///
+/// Drop notification is per **block** on TPACKET_V3 (the kernel sets
+/// `TP_STATUS_LOSING` only on the block status, in `prb_close_block`):
+/// see [`PacketBatch::losing`].
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 #[non_exhaustive]
 pub struct PacketStatus {
-    /// Frame was truncated (too large for the ring frame).
+    /// Fewer bytes were captured than the packet had on the wire
+    /// ([`Packet::len`] < [`Packet::original_len`]): cut by a
+    /// [snap length](crate::CaptureBuilder::snap_len) or a socket filter's
+    /// return value. Always `false` for AF_XDP and pcap-replay packets.
     pub truncated: bool,
-    /// Packet drops are occurring.
-    pub losing: bool,
     /// VLAN TCI field is valid.
     pub vlan_valid: bool,
     /// VLAN TPID field is valid.
@@ -30,11 +35,14 @@ pub struct PacketStatus {
 
 impl PacketStatus {
     /// Decode status flags from the raw `tp_status` bitmask.
+    ///
+    /// Only the bits: `truncated` here is `TP_STATUS_COPY`, which the
+    /// kernel sets on TPACKET_V1/V2 only. [`Packet::status`] derives
+    /// `truncated` from the captured and wire lengths instead.
     #[inline]
     pub fn from_raw(status: u32) -> Self {
         Self {
             truncated: status & ffi::TP_STATUS_COPY != 0,
-            losing: status & ffi::TP_STATUS_LOSING != 0,
             vlan_valid: status & ffi::TP_STATUS_VLAN_VALID != 0,
             vlan_tpid_valid: status & ffi::TP_STATUS_VLAN_TPID_VALID != 0,
             csum_valid: status & ffi::TP_STATUS_CSUM_VALID != 0,
@@ -233,10 +241,13 @@ impl<'a> Packet<'a> {
         self.hdr.tp_len as usize
     }
 
-    /// Per-packet status flags.
+    /// Per-packet status flags. `truncated` is `len() < original_len()`.
     #[inline]
     pub fn status(&self) -> PacketStatus {
-        PacketStatus::from_raw(self.hdr.tp_status)
+        PacketStatus {
+            truncated: self.hdr.tp_snaplen < self.hdr.tp_len,
+            ..PacketStatus::from_raw(self.hdr.tp_status)
+        }
     }
 
     /// RX flow hash (requires `fill_rxhash` — enabled by default).
@@ -498,6 +509,15 @@ impl<'a> PacketBatch<'a> {
         self.block_status & ffi::TP_STATUS_BLK_TMO != 0
     }
 
+    /// Whether the socket was dropping packets when the kernel closed this
+    /// block: `TP_STATUS_LOSING` on the block status, set when the drop
+    /// counter was non-zero — that is, packets were dropped **since the
+    /// previous kernel statistics read** ([`Capture::stats`](crate::Capture::stats)
+    /// resets it). TPACKET_V3 reports loss per block, not per packet.
+    pub fn losing(&self) -> bool {
+        self.block_status & ffi::TP_STATUS_LOSING != 0
+    }
+
     /// Monotonic block sequence number. Gaps indicate dropped blocks.
     pub fn seq_num(&self) -> u64 {
         self.seq_num
@@ -690,7 +710,6 @@ mod tests {
     fn packet_status_from_raw_empty() {
         let s = PacketStatus::from_raw(0);
         assert!(!s.truncated);
-        assert!(!s.losing);
         assert!(!s.vlan_valid);
         assert!(!s.csum_valid);
         assert!(!s.gso_tcp);
@@ -700,7 +719,6 @@ mod tests {
     fn packet_status_from_raw_truncated() {
         let s = PacketStatus::from_raw(ffi::TP_STATUS_COPY);
         assert!(s.truncated);
-        assert!(!s.losing);
     }
 
     #[test]
@@ -712,7 +730,6 @@ mod tests {
             | ffi::TP_STATUS_GSO_TCP;
         let s = PacketStatus::from_raw(bits);
         assert!(s.truncated);
-        assert!(s.losing);
         assert!(s.vlan_valid);
         assert!(s.csum_valid);
         assert!(s.gso_tcp);
@@ -1074,6 +1091,53 @@ mod tests {
         let whole = unsafe { PacketBatch::new(bd) };
         assert_eq!(whole.len(), 4);
         std::mem::forget(whole);
+    }
+
+    /// #210: a packet cut by a snap length (socket-filter return value)
+    /// has `tp_snaplen < tp_len`; TPACKET_V3 never sets `TP_STATUS_COPY`,
+    /// so that is what `truncated` reports.
+    #[test]
+    fn truncated_is_snaplen_below_len() {
+        let mut block = build_synthetic_block(&[b"0123456789", b"whole"], ffi::TP_STATUS_USER);
+        let (bd, off, n, blk_len) = block_start(&mut block);
+        // The first packet was 1000 bytes on the wire, 10 captured.
+        let hdr = bd
+            .as_ptr()
+            .cast::<u8>()
+            .wrapping_add(off as usize)
+            .cast::<ffi::tpacket3_hdr>();
+        // SAFETY: the first header lies inside the synthetic block; written
+        // through the block's mutable provenance before any reference to it.
+        unsafe { (*hdr).tp_len = 1000 };
+
+        // SAFETY: `block` outlives the iterator.
+        let mut it = unsafe { BatchIter::at(bd, off, n, blk_len) };
+        let cut = it.next().unwrap();
+        assert_eq!((cut.len(), cut.original_len()), (10, 1000));
+        assert!(cut.status().truncated);
+        assert!(cut.to_owned().status.truncated);
+        assert_eq!(cut.to_owned().original_len, 1000);
+        let whole = it.next().unwrap();
+        assert!(!whole.status().truncated);
+        assert!(!whole.to_owned().status.truncated);
+    }
+
+    #[test]
+    fn batch_losing_reads_block_status() {
+        let block = build_synthetic_block(&[b"x"], ffi::TP_STATUS_USER | ffi::TP_STATUS_LOSING);
+        let bd = NonNull::new(block.as_ptr() as *mut ffi::tpacket_block_desc).unwrap();
+        // SAFETY: synthetic user-owned block, forgotten below (no release).
+        let batch = unsafe { PacketBatch::new(bd) };
+        assert!(batch.losing());
+        assert!(!batch.timed_out());
+        std::mem::forget(batch);
+
+        let block = build_synthetic_block(&[b"x"], ffi::TP_STATUS_USER | ffi::TP_STATUS_BLK_TMO);
+        let bd = NonNull::new(block.as_ptr() as *mut ffi::tpacket_block_desc).unwrap();
+        // SAFETY: as above.
+        let batch = unsafe { PacketBatch::new(bd) };
+        assert!(!batch.losing());
+        std::mem::forget(batch);
     }
 
     #[test]

@@ -43,9 +43,22 @@ pub(crate) const BPF_JMP_JSET_K: u16 = 0x45;
 pub(crate) const BPF_JMP_JA: u16 = 0x05;
 // `RET | K` — return constant `k` (0 = drop, non-zero = accept).
 pub(crate) const BPF_RET_K: u16 = 0x06;
+// `RET | A` — return the accumulator.
+pub(crate) const BPF_RET_A: u16 = 0x16;
+// `RET | X` — return the index register.
+pub(crate) const BPF_RET_X: u16 = 0x0e;
+// `MISC | TXA` — A = X.
+pub(crate) const BPF_MISC_TXA: u16 = 0x87;
+// `JMP | JGT | K` — pc += jt if A > k else pc += jf.
+pub(crate) const BPF_JMP_JGT_K: u16 = 0x25;
 
-/// Accept verdict. `0xFFFF` matches libpcap's default snap length.
-pub(crate) const ACCEPT_RETVAL: u32 = 0xFFFF;
+/// Accept verdict: the **whole packet**. A socket filter's return value is
+/// the number of bytes to keep (v6.12 net/packet/af_packet.c tpacket_rcv():
+/// `if (snaplen > res) snaplen = res;`), so libpcap's `0xFFFF` truncated
+/// every frame longer than 65535 bytes — `lo`'s 65536-byte MTU makes
+/// 65549-byte frames (#222). The snap length is a separate, explicit
+/// clamp: [`BpfFilter::with_snap_len`](super::BpfFilter::with_snap_len).
+pub(crate) const ACCEPT_RETVAL: u32 = u32::MAX;
 /// Drop verdict. The kernel discards the packet.
 #[allow(dead_code)]
 pub(crate) const DROP_RETVAL: u32 = 0;

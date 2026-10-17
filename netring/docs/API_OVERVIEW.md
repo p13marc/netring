@@ -437,7 +437,7 @@ runner.run_until_signal().await?;
 | `.block_size(bytes)` | 4 MiB | Block size (power of 2, multiple of PAGE_SIZE) |
 | `.block_count(n)` | 64 | Number of blocks |
 | `.frame_size(bytes)` | 2048 | Min frame size (multiple of 16, ≥ 68) |
-| `.snap_len(bytes)` | unset | Shortcut: sets frame_size to fit only the first N bytes |
+| `.snap_len(bytes)` | unset | Capture only the first N bytes of each packet — enforced by the socket filter (every installed classic filter goes through `BpfFilter::with_snap_len`; without one a `ret #N` is installed) |
 | `.block_timeout_ms(ms)` | 60 | Block retirement timeout |
 | `.fill_rxhash(bool)` | true | Kernel populates `tp_rxhash` |
 | `.promiscuous(bool)` | false | Promiscuous mode |

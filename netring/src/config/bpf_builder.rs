@@ -66,8 +66,9 @@ pub struct BpfFilterBuilder {
 }
 
 impl BpfFilterBuilder {
-    /// Empty builder — accepts every packet (compiles to a single
-    /// `ret #65535`).
+    /// Empty builder — accepts every packet, whole (compiles to a single
+    /// `ret #4294967295`: a socket filter's return value is the number of
+    /// bytes to keep, so this never truncates).
     pub fn new() -> Self {
         Self::default()
     }
@@ -305,7 +306,7 @@ mod tests {
     fn empty_builder_compiles() {
         // The empty builder accepts every packet — see compile() docs.
         let f = BpfFilterBuilder::new().build().unwrap();
-        assert!(!f.is_empty()); // at minimum a `ret #65535`
+        assert!(!f.is_empty()); // at minimum a `ret #4294967295`
     }
 
     #[test]

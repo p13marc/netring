@@ -71,6 +71,10 @@ pub struct Capture {
 struct StopSignal {
     fd: OwnedFd,
     stopped: std::sync::atomic::AtomicBool,
+    /// Held across each update of `stopped` + the eventfd counter, so a
+    /// `raise` racing a `clear` cannot leave the flag clear while the
+    /// eventfd stays readable (every poll would then return at once).
+    update: std::sync::Mutex<()>,
 }
 
 impl StopSignal {
@@ -85,10 +89,12 @@ impl StopSignal {
         Ok(Self {
             fd,
             stopped: std::sync::atomic::AtomicBool::new(false),
+            update: std::sync::Mutex::new(()),
         })
     }
 
     fn raise(&self) {
+        let _update = self.update.lock().unwrap_or_else(|e| e.into_inner());
         self.stopped
             .store(true, std::sync::atomic::Ordering::SeqCst);
         let one: u64 = 1;
@@ -108,6 +114,7 @@ impl StopSignal {
     }
 
     fn clear(&self) {
+        let _update = self.update.lock().unwrap_or_else(|e| e.into_inner());
         let mut v: u64 = 0;
         // SAFETY: 8-byte read from a non-blocking eventfd we own.
         unsafe {
@@ -1220,6 +1227,51 @@ mod tests {
         sig.clear();
         assert!(!handle.is_stopped());
         assert!(!readable(&sig, 0), "cleared");
+    }
+
+    /// A `stop()` racing `clear_stop()` leaves the signal raised or
+    /// cleared, never the flag clear with the eventfd still readable —
+    /// which made every `next_batch_blocking` poll return at once (a spin).
+    #[test]
+    fn stop_signal_raise_racing_clear_stays_consistent() {
+        use std::sync::{Arc, Barrier};
+
+        const ROUNDS: usize = 20_000;
+        let sig = Arc::new(StopSignal::new().unwrap());
+        let barrier = Arc::new(Barrier::new(3));
+        let spawn = |raise: bool| {
+            let (sig, barrier) = (Arc::clone(&sig), Arc::clone(&barrier));
+            std::thread::spawn(move || {
+                for _ in 0..ROUNDS {
+                    barrier.wait();
+                    if raise {
+                        sig.raise();
+                    } else {
+                        sig.clear();
+                    }
+                    barrier.wait();
+                }
+            })
+        };
+        let (raiser, clearer) = (spawn(true), spawn(false));
+        let mut inconsistent = 0;
+        for round in 0..ROUNDS {
+            if round % 2 == 0 {
+                sig.raise(); // start half the rounds raised
+            }
+            barrier.wait();
+            barrier.wait();
+            if sig.is_raised() != readable(&sig, 0) {
+                inconsistent += 1;
+            }
+            sig.clear();
+        }
+        raiser.join().unwrap();
+        clearer.join().unwrap();
+        assert_eq!(
+            inconsistent, 0,
+            "flag and eventfd disagreed in {inconsistent} rounds"
+        );
     }
 
     #[test]

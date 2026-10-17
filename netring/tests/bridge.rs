@@ -107,6 +107,7 @@ fn bridge_forwards_frames_a_to_b() {
         .expect("build capture on y0");
 
     let (a, b) = (x.b.clone(), y.b.clone());
+    let (ready_tx, ready_rx) = std::sync::mpsc::channel();
     let bridge_thread = std::thread::spawn(move || {
         let mut bridge = Bridge::builder()
             .interface_a(&a)
@@ -114,12 +115,15 @@ fn bridge_forwards_frames_a_to_b() {
             .poll_timeout(Duration::from_millis(20))
             .build()
             .expect("build bridge");
+        // Built = both RX sockets bound and receiving.
+        ready_tx.send(()).expect("signal ready");
         bridge
             .run_iterations(100, |_pkt, _dir| BridgeAction::Forward)
             .expect("run_iterations");
     });
-    // Let the bridge open its sockets before traffic starts.
-    std::thread::sleep(Duration::from_millis(200));
+    ready_rx
+        .recv_timeout(Duration::from_secs(10))
+        .expect("bridge never came up");
 
     let mut tx = Injector::open(&x.a).expect("injector on x0");
     const N: u16 = 4;

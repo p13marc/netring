@@ -147,6 +147,10 @@ pub struct Injector {
     current_frame: usize,
     frame_count: usize,
     frame_size: usize,
+    /// Frames per ring block: the kernel never lets a frame cross a block,
+    /// so with a `frame_size` that does not divide the block the tail of
+    /// each block is unused.
+    frames_per_block: usize,
     data_offset: usize,
     pending: u32,
 }
@@ -174,10 +178,15 @@ impl Injector {
         InjectorBuilder::default()
     }
 
+    /// Frame `index`, where the kernel looks for it: frame
+    /// `index % frames_per_block` of block `index / frames_per_block`
+    /// (packet_lookup_frame()), not `index * frame_size`.
     fn frame_ptr(&self, index: usize) -> NonNull<u8> {
-        let offset = index * self.frame_size;
-        let ptr = self.ring.base().as_ptr().map_addr(|a| a + offset);
-        // SAFETY: offset is within ring (index < frame_count).
+        let block = self.ring.block_ptr(index / self.frames_per_block);
+        let offset = (index % self.frames_per_block) * self.frame_size;
+        let ptr = block.as_ptr().cast::<u8>().map_addr(|a| a + offset);
+        // SAFETY: block_ptr is in the ring and `offset + frame_size` is at
+        // most `frames_per_block * frame_size <= block_size`.
         unsafe { NonNull::new_unchecked(ptr) }
     }
 
@@ -645,6 +654,7 @@ impl InjectorBuilder {
             current_frame: 0,
             frame_count: geometry.frame_nr as usize,
             frame_size: self.frame_size,
+            frames_per_block,
             data_offset,
             pending: 0,
         })

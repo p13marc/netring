@@ -75,6 +75,45 @@ fn injected_frames_are_transmitted() {
     );
 }
 
+/// A frame size that does not divide the ring's block size (here one
+/// 3008-byte frame per 4096-byte block) still transmits every frame: the
+/// kernel lays frames out per block, not back to back.
+#[test]
+fn injected_frames_with_an_odd_frame_size_are_transmitted() {
+    let marker = format!("netring_txodd_{}", helpers::unique_port());
+    let mut rx = CaptureBuilder::default()
+        .interface(helpers::LOOPBACK)
+        .block_timeout_ms(10)
+        .build()
+        .expect("build rx");
+    let mut tx = Injector::builder()
+        .interface(helpers::LOOPBACK)
+        .frame_size(3008)
+        .frame_count(8)
+        .build()
+        .expect("build injector");
+
+    const N: u16 = 8;
+    for seq in 0..N {
+        let frame = marked_frame(marker.as_bytes(), seq);
+        let mut slot = tx.allocate(frame.len()).expect("allocate slot");
+        slot.data_mut()[..frame.len()].copy_from_slice(&frame);
+        slot.set_len(frame.len());
+        slot.send();
+    }
+    tx.flush().expect("flush");
+    tx.wait_drained(Duration::from_secs(2))
+        .expect("kernel never reclaimed the TX slots");
+
+    // lo shows each frame twice (outgoing + incoming).
+    let found = count_marked(&mut rx, marker.as_bytes(), 2 * N as usize);
+    assert_eq!(
+        found,
+        2 * N as usize,
+        "captured {found} of {N} injected frames, twice each"
+    );
+}
+
 /// A frame filling the whole advertised capacity is transmitted intact.
 #[test]
 fn injected_frame_at_full_capacity_is_transmitted() {

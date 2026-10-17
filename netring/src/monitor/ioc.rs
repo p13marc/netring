@@ -97,14 +97,16 @@ impl IocSetExt for IocSet {
 
 // ── Internal match-and-emit helpers (used by `MonitorBuilder::ioc`) ──────────
 
-/// Emit one `ioc_match` anomaly for a hit, carrying the indicator kind, the
-/// matched indicator, and (when the feed provided them) `source` +
-/// `reputation`. `observed` is the concrete value that hit (the queried FQDN,
-/// the SNI, …) when it differs from the stored indicator.
+/// Emit one `ioc_match` anomaly for a hit, carrying the flow it was seen on
+/// (the L7 message's flow — IPs, ports, Community ID downstream), the
+/// indicator kind, the matched indicator, and (when the feed provided them)
+/// `source` + `reputation`. `observed` is the concrete value that hit (the
+/// queried FQDN, the SNI, …) when it differs from the stored indicator.
 #[cfg(any(feature = "dns", feature = "tls", feature = "http"))]
-fn emit_match(ctx: &mut Ctx<'_>, key: Option<&FlowKey>, m: &IocMatch, observed: Option<&str>) {
+fn emit_match(ctx: &mut Ctx<'_>, m: &IocMatch, observed: Option<&str>) {
+    let key = ctx.flow;
     let mut w = ctx.emit("ioc_match", Severity::Critical);
-    if let Some(k) = key {
+    if let Some(k) = &key {
         w = w.with_key(k);
     }
     w = w.with("ioc_kind", m.kind.as_str());
@@ -156,7 +158,7 @@ pub(crate) fn check_dns(set: &IocSet, msg: &flowscope::dns::DnsMessage, ctx: &mu
     if let Some(name) = q.questions.first().map(|x| x.name.as_str())
         && let Some(m) = set.contains_domain(name)
     {
-        emit_match(ctx, None, &m, Some(name));
+        emit_match(ctx, &m, Some(name));
     }
 }
 
@@ -173,7 +175,7 @@ pub(crate) fn check_tls(set: &IocSet, hs: &flowscope::tls::TlsHandshake, ctx: &m
         } else {
             None
         };
-        emit_match(ctx, None, &m, obs);
+        emit_match(ctx, &m, obs);
     }
 }
 
@@ -184,7 +186,7 @@ pub(crate) fn check_http(set: &IocSet, msg: &flowscope::http::HttpMessage, ctx: 
         && let Some(host) = req.host()
         && let Some(m) = set.contains_domain(host)
     {
-        emit_match(ctx, None, &m, Some(host));
+        emit_match(ctx, &m, Some(host));
     }
 }
 

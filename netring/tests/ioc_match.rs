@@ -120,4 +120,10 @@ async fn replay_emits_ioc_matches_for_ip_and_domain() {
         "expected one IP + one DNS ioc_match, got {}",
         kinds.len()
     );
+    // Both carry the flow they fired on — the DNS (L7) hit included — so
+    // EVE / OCSF / syslog consumers get IPs, ports and the Community ID.
+    for a in &kinds {
+        assert_eq!(a.src_ip, Some(Ipv4Addr::new(10, 0, 0, 1).into()), "{a:?}");
+        assert!(a.dest_ip.is_some() && a.dest_port.is_some(), "{a:?}");
+    }
 }

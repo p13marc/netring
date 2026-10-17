@@ -136,4 +136,11 @@ async fn replay_emits_sigma_match_for_flagged_dns_query_only() {
             .any(|(k, v)| *k == "rule" && v == "netring-test-dns"),
         "sigma_match should carry the rule id observation"
     );
+    // … and the flow it fired on (IPs, ports — the Community ID pivot).
+    assert_eq!(
+        (m.dest_ip, m.dest_port),
+        (Some(Ipv4Addr::new(10, 0, 0, 2).into()), Some(53)),
+        "{m:?}"
+    );
+    assert_eq!(m.src_ip, Some(Ipv4Addr::new(10, 0, 0, 1).into()));
 }

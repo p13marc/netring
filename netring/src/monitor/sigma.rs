@@ -275,13 +275,19 @@ fn base_event(flow: Option<FlowKey>) -> Event {
 // ── Match-and-emit helpers (used by `MonitorBuilder::sigma`) ─────────────────
 
 fn eval_bucket(rules: &[CompiledRule], event: &Event, severity: Severity, ctx: &mut Ctx<'_>) {
+    // The flow the message was seen on: the alert carries it (IPs, ports,
+    // Community ID downstream), like the event the rule matched.
+    let key = ctx.flow;
     for cr in rules {
         if cr.rule.is_match(event) {
             // Keep to <=8 observations (the AnomalyWriter inline cap). Owned
             // Strings (cheap, only on a match) — never `with_dynamic`, which
             // would leak the label.
-            ctx.emit("sigma_match", severity)
-                .with("rule", cr.id.clone())
+            let mut w = ctx.emit("sigma_match", severity);
+            if let Some(k) = &key {
+                w = w.with_key(k);
+            }
+            w.with("rule", cr.id.clone())
                 .with("title", cr.title.clone())
                 .with("sigma_level", cr.level.clone())
                 .emit();

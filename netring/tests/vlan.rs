@@ -4,7 +4,8 @@
 //! metadata (veth has VLAN TX offload) and the receiving end `B` hands it to
 //! packet taps that way too — Linux strips / keeps the outer tag out of the
 //! frame before the socket filter runs. So a `vlan` filter must read the tag
-//! from the metadata (#208).
+//! from the metadata (#208), and the ring holds the frame without it unless
+//! netring puts it back (#209, libpcap's behaviour, on by default).
 //!
 //! Needs `CAP_NET_ADMIN` (veth + vlan) and `CAP_NET_RAW`; skips without
 //! them or without the `8021q` module.
@@ -17,7 +18,10 @@ use std::process::Command;
 use std::time::{Duration, Instant};
 
 use helpers::VethPair;
-use netring::{BpfFilter, Capture, CaptureBuilder, Error, Injector};
+use netring::{
+    BpfFilter, Capture, CaptureBuilder, Error, Injector, OwnedPacket, PacketDirection, VlanProto,
+    VlanTag,
+};
 
 const MARKER: &[u8; 8] = b"NRVLANTS";
 /// Ethernet + IPv4 + UDP headers in front of the payload (untagged frame).
@@ -118,9 +122,9 @@ fn inject(iface: &str, port: u16, n: u32) {
 }
 
 /// Whether `data` carries our marker (after the untagged headers, or after
-/// one in-frame tag).
+/// one or two in-frame tags).
 fn is_ours(data: &[u8]) -> bool {
-    [PAYLOAD_OFF, PAYLOAD_OFF + 4]
+    [PAYLOAD_OFF, PAYLOAD_OFF + 4, PAYLOAD_OFF + 8]
         .iter()
         .any(|&o| data.get(o..o + MARKER.len()) == Some(&MARKER[..]))
 }
@@ -181,4 +185,207 @@ fn vlan_filter_matches_the_kernel_stripped_tag() {
         0,
         "vlan 101 does not"
     );
+}
+
+/// The first of our frames on `cap` within 2 s, copied out.
+fn first_ours(cap: &mut Capture) -> Option<OwnedPacket> {
+    let mut pkts = cap.packets_for(Duration::from_secs(2));
+    while let Some(pkt) = pkts.next_packet() {
+        if is_ours(pkt.data()) {
+            return Some(pkt.to_owned());
+        }
+    }
+    None
+}
+
+/// #209: by default the stripped tag is back in the data — the frame as it
+/// was on the wire — and both the offline verdict and the kernel's agree.
+/// 0.31 handed out the frame without the tag (data[12..14] == 08 00).
+#[test]
+fn default_capture_reinserts_the_tag() {
+    let Some(link) = VlanLink::create("r", 100) else {
+        return;
+    };
+    let port = 42_000 + (std::process::id() % 1_000) as u16;
+    let Some(mut cap) = open(
+        Capture::builder()
+            .interface(&link.veth.b)
+            .block_timeout_ms(10)
+            .poll_timeout(Duration::from_millis(50)),
+    ) else {
+        return;
+    };
+    assert!(cap.vlan_reinsert(), "on by default");
+    inject(&link.vlan, port, 1);
+    let pkt = first_ours(&mut cap).expect("our frame");
+
+    assert_eq!(&pkt.data[12..18], &[0x81, 0x00, 0x00, 0x64, 0x08, 0x00]);
+    let tag = VlanTag::new(100, VlanProto::Dot1Q);
+    assert_eq!(pkt.vlan, Some(tag));
+    assert!(pkt.status.vlan_reinserted);
+    assert_eq!(pkt.stripped_vlan(), None);
+    assert_eq!(pkt.data.len(), udp_frame(port, 0).len() + 4);
+    assert_eq!(pkt.original_len, pkt.data.len());
+
+    let f = vlan_filter(100, port);
+    assert!(f.matches(&pkt.data), "offline: the tag is in the frame");
+    assert!(
+        f.matches_with(&pkt.data, &pkt.bpf_ancillary()),
+        "the kernel's verdict"
+    );
+    assert!(!vlan_filter(101, port).matches_with(&pkt.data, &pkt.bpf_ancillary()));
+}
+
+/// `vlan_reinsert(false)`: the ring as the kernel wrote it, the tag in the
+/// metadata only.
+#[test]
+fn reinsert_off_reports_the_stripped_tag() {
+    let Some(link) = VlanLink::create("o", 100) else {
+        return;
+    };
+    let port = 43_000 + (std::process::id() % 1_000) as u16;
+    let Some(mut cap) = open(
+        Capture::builder()
+            .interface(&link.veth.b)
+            .vlan_reinsert(false)
+            .block_timeout_ms(10)
+            .poll_timeout(Duration::from_millis(50)),
+    ) else {
+        return;
+    };
+    assert!(!cap.vlan_reinsert());
+    inject(&link.vlan, port, 1);
+    let pkt = first_ours(&mut cap).expect("our frame");
+
+    assert_eq!(&pkt.data[12..14], &[0x08, 0x00], "untagged data");
+    let tag = VlanTag::new(100, VlanProto::Dot1Q);
+    assert_eq!(pkt.stripped_vlan(), Some(tag));
+    assert!(!pkt.status.vlan_reinserted);
+    assert_eq!(pkt.view().rx_metadata.vlan, Some(tag));
+    let f = vlan_filter(100, port);
+    assert!(f.matches_with(&pkt.data, &pkt.bpf_ancillary()));
+    assert!(
+        !f.matches(&pkt.data),
+        "offline the untagged frame has no tag"
+    );
+}
+
+/// The transmitting side: the parent `A` sees the outgoing frames with the
+/// tag in the metadata too (veth VLAN TX offload); they come out tagged.
+#[test]
+fn outgoing_frames_on_the_parent_are_tagged() {
+    let Some(link) = VlanLink::create("t", 100) else {
+        return;
+    };
+    let port = 44_000 + (std::process::id() % 1_000) as u16;
+    let Some(mut cap) = open(
+        Capture::builder()
+            .interface(&link.veth.a)
+            .block_timeout_ms(10)
+            .poll_timeout(Duration::from_millis(50)),
+    ) else {
+        return;
+    };
+    inject(&link.vlan, port, 1);
+    let pkt = first_ours(&mut cap).expect("our frame");
+    assert_eq!(pkt.direction, PacketDirection::Outgoing);
+    assert_eq!(&pkt.data[12..16], &[0x81, 0x00, 0x00, 0x64]);
+}
+
+/// A pcap written from the capture holds the tagged frame (what tcpdump /
+/// Wireshark would have recorded).
+#[cfg(feature = "pcap")]
+#[test]
+fn pcap_round_trip_keeps_the_tag() {
+    use netring::pcap::CaptureWriter;
+    use pcap_file::pcap::PcapReader;
+
+    let Some(link) = VlanLink::create("p", 100) else {
+        return;
+    };
+    let port = 45_000 + (std::process::id() % 1_000) as u16;
+    let Some(mut cap) = open(
+        Capture::builder()
+            .interface(&link.veth.b)
+            .block_timeout_ms(10)
+            .poll_timeout(Duration::from_millis(50)),
+    ) else {
+        return;
+    };
+    inject(&link.vlan, port, 1);
+    let mut writer = CaptureWriter::create(Vec::new()).expect("writer");
+    {
+        let mut pkts = cap.packets_for(Duration::from_secs(2));
+        while let Some(pkt) = pkts.next_packet() {
+            if is_ours(pkt.data()) {
+                writer.write_packet(&pkt).expect("write");
+                break;
+            }
+        }
+    }
+    let bytes = writer.into_inner();
+    let mut reader = PcapReader::new(&bytes[..]).expect("reader");
+    let rec = reader.next_packet().expect("a packet").expect("readable");
+    assert_eq!(&rec.data[12..16], &[0x81, 0x00, 0x00, 0x64]);
+    assert_eq!(rec.orig_len as usize, rec.data.len());
+}
+
+/// QinQ: an 802.1ad outer tag (100) on `A`, an 802.1Q inner tag (200) on
+/// top. The kernel strips only the outer tag: `vlan_id(100)` matches it,
+/// and userspace sees both tags back in place.
+#[test]
+fn qinq_outer_tag_is_reinserted_in_front_of_the_inner_one() {
+    let pid = std::process::id() % 100_000;
+    let Some(veth) = VethPair::create(&format!("s2q{pid}a"), &format!("s2q{pid}b")) else {
+        eprintln!("skipping: needs CAP_NET_ADMIN to create veth");
+        return;
+    };
+    let (outer, inner) = (format!("s2q{pid}o"), format!("s2q{pid}i"));
+    let ip = |args: &[&str]| {
+        Command::new("ip")
+            .args(args)
+            .status()
+            .is_ok_and(|s| s.success())
+    };
+    let ok = ip(&[
+        "link", "add", "link", &veth.a, "name", &outer, "type", "vlan", "proto", "802.1ad", "id",
+        "100",
+    ]) && ip(&[
+        "link", "add", "link", &outer, "name", &inner, "type", "vlan", "id", "200",
+    ]) && ip(&["link", "set", &outer, "up"])
+        && ip(&["link", "set", &inner, "up"]);
+    let cleanup = || {
+        let _ = Command::new("ip").args(["link", "delete", &inner]).output();
+        let _ = Command::new("ip").args(["link", "delete", &outer]).output();
+    };
+    if !ok {
+        cleanup();
+        eprintln!("skipping: cannot create stacked 802.1ad / 802.1Q devices");
+        return;
+    }
+    let port = 46_000 + (std::process::id() % 1_000) as u16;
+    let filter = BpfFilter::builder()
+        .vlan()
+        .vlan_id(100)
+        .build()
+        .expect("filter");
+    let Some(mut cap) = open(
+        Capture::builder()
+            .interface(&veth.b)
+            .bpf_filter(filter)
+            .block_timeout_ms(10)
+            .poll_timeout(Duration::from_millis(50)),
+    ) else {
+        cleanup();
+        return;
+    };
+    inject(&inner, port, 1);
+    let pkt = first_ours(&mut cap);
+    cleanup();
+    let pkt = pkt.expect("vlan_id(100) matches the stripped outer tag");
+    assert_eq!(
+        &pkt.data[12..22],
+        &[0x88, 0xa8, 0x00, 0x64, 0x81, 0x00, 0x00, 0xc8, 0x08, 0x00]
+    );
+    assert_eq!(pkt.vlan, Some(VlanTag::new(100, VlanProto::Dot1Ad)));
 }

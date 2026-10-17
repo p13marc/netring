@@ -114,9 +114,10 @@ impl AnyBackend {
                 {
                     delivered += batch.len();
                     for pkt in &batch {
-                        let ts = pkt.timestamp();
-                        last_ts = Some(ts);
-                        on_packet(PacketView::new(pkt.data(), ts), pkt.direction());
+                        last_ts = Some(pkt.timestamp());
+                        // `view()` carries a stripped VLAN tag that is not
+                        // in the data (re-insertion off / impossible).
+                        on_packet(pkt.view(), pkt.direction());
                     }
                 }
             }

@@ -137,6 +137,13 @@ is the remaining piece, tracked in
 exercises only the software-timestamp degrade path). Other deferred upstream items
 are tracked in [issue #117](https://github.com/p13marc/netring/issues/117).
 
+**VLAN tags.** A NIC with RX VLAN stripping delivers the frame without its
+outer tag; the tag reaches userspace only through the RX metadata
+(`XdpPacket::stripped_vlan()` / `OwnedPacket::vlan`). Unlike AF_PACKET (which
+re-inserts the tag into the ring, libpcap-style, since 0.32), AF_XDP hands
+out the frame as the NIC delivered it. To keep tags in the frame, turn the
+stripping off: `ethtool -K <if> rxvlan off`.
+
 ## Performance
 
 The userspace ring protocol is identical to the `libxdp`-backed ecosystem

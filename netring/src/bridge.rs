@@ -106,6 +106,12 @@ impl std::fmt::Display for BridgeStats {
 /// the bridge's own forwards and anything the host itself sends there — are
 /// skipped (and not shown to the filter), so the two directions cannot
 /// bounce a frame back and forth.
+///
+/// VLAN tags are forwarded (0.32, #209): the receiving kernel strips a
+/// frame's outer 802.1Q / 802.1ad tag before the capture sees it, and the
+/// RX captures re-insert it ([`CaptureBuilder::vlan_reinsert`], on by
+/// default), so the frame leaves the other side tagged, as it arrived.
+/// Before 0.32 the bridge forwarded every tagged frame untagged.
 #[must_use]
 pub struct Bridge {
     rx_a: Capture,

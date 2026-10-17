@@ -346,8 +346,8 @@ fn owned_packet(
         // the capture did not record it.
         direction,
         rxhash: 0,
-        vlan_tci: 0,
-        vlan_tpid: 0,
+        // A pcap file keeps VLAN tags in the frame.
+        vlan: None,
         // EtherType is encoded in the frame itself; the wrapper
         // doesn't need a separate ll_protocol for parsing.
         ll_protocol: 0x0800,

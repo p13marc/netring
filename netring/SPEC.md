@@ -434,11 +434,15 @@ impl<'a> Packet<'a> {
     /// RX flow hash (requires `fill_rxhash` — enabled by default).
     pub fn rxhash(&self) -> u32;
 
-    /// Raw VLAN TCI from kernel header. Check `status().vlan_valid` first.
-    pub fn vlan_tci(&self) -> u16;
+    /// The outer VLAN tag the kernel stripped (0.32; re-inserted into
+    /// `data()` by default — `status().vlan_reinserted`).
+    pub fn vlan(&self) -> Option<VlanTag>;
 
-    /// Raw VLAN TPID from kernel header. Check `status().vlan_tpid_valid` first.
-    pub fn vlan_tpid(&self) -> u16;
+    /// That tag when it is *not* in `data()`.
+    pub fn stripped_vlan(&self) -> Option<VlanTag>;
+
+    /// What the socket filter saw: `filter.matches_with(data, &anc)`.
+    pub fn bpf_ancillary(&self) -> BpfAncillary;
 
     /// Copy packet data out of the ring for long-lived storage.
     pub fn to_owned(&self) -> OwnedPacket;
@@ -1284,7 +1288,9 @@ while let Some(pkt) = pkts.next_packet() {
 
 9. **TX now**: frame-ring TX through `Injector` — imperfect but usable without waiting for AF_XDP.
 
-10. **Raw VLAN fields**: Users decode `vlan_tci()` / `vlan_tpid()` themselves.
+10. **VLAN tags re-inserted** (0.32): the kernel strips the outer tag before
+    the tap; the ring re-inserts it in front of the EtherType, libpcap-style
+    (`CaptureBuilder::vlan_reinsert`, default on).
 
 11. **No auto huge pages**: Users call `madvise` on `ring_ptr()` if they want THP.
 

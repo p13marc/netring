@@ -11,7 +11,7 @@ use crate::config::{
     BpfFilter, BpfInsn, BusyPollConfig, FanoutFlags, FanoutMode, RingProfile, TimestampSource,
 };
 use crate::error::Error;
-use crate::packet::{BatchIter, Packet, PacketBatch};
+use crate::packet::{BatchIter, Packet, PacketBatch, VlanMode};
 use crate::stats::CaptureStats;
 use crate::traits::PacketSource;
 
@@ -71,6 +71,8 @@ pub struct Capture {
     /// The snap length every installed socket filter is clamped to
     /// ([`CaptureBuilder::snap_len`]).
     snap_len: Option<u32>,
+    /// Re-insert stripped VLAN tags ([`CaptureBuilder::vlan_reinsert`]).
+    vlan_mode: VlanMode,
 }
 
 /// The cursor into a user-owned block that has packets left to read.
@@ -313,6 +315,12 @@ impl Capture {
         self.snap_len
     }
 
+    /// Whether this capture re-inserts the VLAN tag the kernel stripped
+    /// into each packet's data ([`CaptureBuilder::vlan_reinsert`]).
+    pub fn vlan_reinsert(&self) -> bool {
+        matches!(self.vlan_mode, VlanMode::Reinsert { .. })
+    }
+
     /// Attach an eBPF socket filter program.
     ///
     /// Replaces any existing filter (classic BPF or eBPF). The program
@@ -425,7 +433,10 @@ impl Capture {
         // borrows `&mut self`, so it is the only user of the block and
         // releases it on drop. `offset` / `remaining` came from the block
         // header or a `BatchIter::position` over this block.
-        Some(unsafe { PacketBatch::resume(bd, p.offset, p.remaining) })
+        Some(
+            unsafe { PacketBatch::resume(bd, p.offset, p.remaining) }
+                .with_vlan_mode(self.vlan_mode),
+        )
     }
 
     /// Make sure a user-owned block with unread packets is pending: `true`
@@ -497,7 +508,8 @@ impl Capture {
             // SAFETY: as above; the iterator and the packet it lends
             // borrow `&mut self`, so the block cannot be released while
             // the packet lives.
-            let mut it = unsafe { BatchIter::at(bd, p.offset, p.remaining, blk_len) };
+            let mut it = unsafe { BatchIter::at(bd, p.offset, p.remaining, blk_len) }
+                .with_vlan_mode(self.vlan_mode);
             if let Some(pkt) = it.next() {
                 let (offset, remaining) = it.position(bd);
                 self.pending = Some(PendingBlock {
@@ -882,6 +894,7 @@ pub struct CaptureBuilder {
     fanout_flags: FanoutFlags,
     bpf_filter: Option<BpfFilter>,
     snap_len: Option<u32>,
+    vlan_reinsert: bool,
 }
 
 impl Default for CaptureBuilder {
@@ -907,6 +920,7 @@ impl Default for CaptureBuilder {
             fanout_flags: FanoutFlags::empty(),
             bpf_filter: None,
             snap_len: None,
+            vlan_reinsert: true,
         }
     }
 }
@@ -947,6 +961,30 @@ impl CaptureBuilder {
     /// `build()` fails with [`Error::Config`] for `len == 0`.
     pub fn snap_len(mut self, len: u32) -> Self {
         self.snap_len = Some(len);
+        self
+    }
+
+    /// Re-insert the VLAN tag the kernel stripped into each packet's data.
+    /// Default: `true` — libpcap's behaviour.
+    ///
+    /// Linux removes the outer 802.1Q / 802.1ad tag of a received frame
+    /// before packet taps run (and a device with VLAN offload never had it
+    /// in the frame), reporting it in the ring header instead (#209). With
+    /// re-insertion on, every packet is handed out as it was on the wire:
+    /// the tag is moved back in front of the EtherType, in place in the
+    /// ring, the first time the packet is read (`len()` / `original_len()`
+    /// grow by 4, `len()` capped at the [snap length](Self::snap_len)), so
+    /// parsers, flow extractors, pcap files and a [`Bridge`](crate::Bridge)
+    /// see the tag. [`Packet::vlan`](crate::Packet::vlan) reports it either
+    /// way; [`Packet::stripped_vlan`](crate::Packet::stripped_vlan) is the
+    /// tag when it is *not* in the data.
+    ///
+    /// Re-insertion needs 4 bytes of headroom in front of each frame, which
+    /// the builder reserves with `PACKET_RESERVE`. Packets of non-Ethernet
+    /// devices, and packets with fewer than 12 bytes captured, are left as
+    /// they are.
+    pub fn vlan_reinsert(mut self, enable: bool) -> Self {
+        self.vlan_reinsert = enable;
         self
     }
 
@@ -1234,6 +1272,12 @@ fn build_inner(b: &CaptureBuilder, block_count: usize) -> Result<Capture, Error>
     // Set TPACKET_V3
     socket::set_packet_version(fd.as_fd(), ffi::TPACKET_V3_INT)?;
 
+    // Headroom for re-inserting a stripped VLAN tag. Only before the ring
+    // exists: the kernel answers PACKET_RESERVE with EBUSY afterwards.
+    if b.vlan_reinsert {
+        socket::set_packet_reserve(fd.as_fd(), ffi::VLAN_TAG_LEN as u32)?;
+    }
+
     // Configure RX ring
     let mut req: ffi::tpacket_req3 = unsafe { std::mem::zeroed() };
     req.tp_block_size = geometry.block_size;
@@ -1328,6 +1372,13 @@ fn build_inner(b: &CaptureBuilder, block_count: usize) -> Result<Capture, Error>
         busy_poll,
         stop: None,
         snap_len: b.snap_len,
+        vlan_mode: if b.vlan_reinsert {
+            VlanMode::Reinsert {
+                snap_cap: b.snap_len.unwrap_or(u32::MAX),
+            }
+        } else {
+            VlanMode::Off
+        },
     })
 }
 
@@ -1517,6 +1568,8 @@ mod tests {
         assert!(!b.promiscuous);
         assert!(!b.ignore_outgoing);
         assert_eq!(b.poll_timeout, Duration::from_millis(100));
+        assert!(b.vlan_reinsert, "libpcap's default");
+        assert!(!CaptureBuilder::default().vlan_reinsert(false).vlan_reinsert);
     }
 
     #[test]

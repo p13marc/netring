@@ -1068,23 +1068,7 @@ impl XdpSocket {
             let desc: libc::xdp_desc = self.rx.read_at(tok, i);
             let meta = self.read_rx_metadata(desc.addr);
             match self.umem.data_checked(desc.addr, desc.len as usize) {
-                Some(data) => packets.push(OwnedPacket {
-                    data: data.to_vec(),
-                    timestamp: meta.hw_timestamp.unwrap_or_default(),
-                    timestamp_clock: match meta.hw_timestamp {
-                        Some(_) => crate::packet::TimestampClock::RawHardware,
-                        None => crate::packet::TimestampClock::None,
-                    },
-                    original_len: desc.len as usize,
-                    status: crate::packet::PacketStatus::default(),
-                    direction: crate::packet::PacketDirection::Unknown(0),
-                    rxhash: meta.rx_hash.map_or(0, |h| h.value),
-                    vlan_tci: 0,
-                    vlan_tpid: 0,
-                    ll_protocol: 0,
-                    source_ll_addr: [0u8; 8],
-                    source_ll_addr_len: 0,
-                }),
+                Some(data) => packets.push(batch::owned_from_xdp(data, desc.len as usize, &meta)),
                 None => {
                     // Defense in depth: a misbehaving kernel shouldn't
                     // panic the consumer.

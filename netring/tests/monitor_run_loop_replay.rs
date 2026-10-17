@@ -619,3 +619,200 @@ fn more_than_256_capture_sources_is_a_build_error() {
     let err = err.to_string();
     assert!(err.contains("256") && err.contains("257"), "{err}");
 }
+
+/// Counts handler invocations by name.
+#[derive(Clone, Default)]
+struct Calls(Arc<Mutex<std::collections::BTreeMap<&'static str, usize>>>);
+
+impl Calls {
+    fn hit(&self, name: &'static str) {
+        *self.0.lock().unwrap().entry(name).or_default() += 1;
+    }
+    fn get(&self, name: &'static str) -> usize {
+        self.0.lock().unwrap().get(name).copied().unwrap_or(0)
+    }
+}
+
+/// An effect handler that counts its calls and emits nothing.
+fn counting_effect<P>(
+    calls: &Calls,
+    name: &'static str,
+) -> impl Fn(
+    &P,
+    &Ctx<'_>,
+) -> std::future::Ready<netring::error::Result<netring::monitor::effect::Effects>>
++ Send
++ Sync
++ 'static {
+    let calls = calls.clone();
+    move |_p: &P, _ctx: &Ctx<'_>| {
+        calls.hit(name);
+        std::future::ready(Ok(netring::monitor::effect::Effects::none()))
+    }
+}
+
+/// An async handler that counts its calls.
+fn counting_async<P>(
+    calls: &Calls,
+    name: &'static str,
+) -> impl Fn(&P) -> std::future::Ready<netring::error::Result<()>> + Send + Sync + 'static {
+    let calls = calls.clone();
+    move |_p: &P| {
+        calls.hit(name);
+        std::future::ready(Ok(()))
+    }
+}
+
+/// `on_async` / `on_effect` handlers fire for parser messages — they
+/// were only ever registered: L7 messages went through the sync pass
+/// alone.
+#[cfg(feature = "dns")]
+#[tokio::test(flavor = "current_thread")]
+async fn async_and_effect_handlers_receive_parser_messages() {
+    use flowscope::dns::DnsMessage;
+    use netring::protocol::builtin::Dns;
+    let file = pcap(&timed(vec![
+        dns_query(),
+        dns_response(0x1234, [192, 0, 2, 10]),
+    ]));
+    let calls = Calls::default();
+    let c = calls.clone();
+    Monitor::builder()
+        .pcap_source(file.path())
+        .protocol::<Dns>()
+        .on::<Dns>(move |_m: &DnsMessage| {
+            c.hit("sync");
+            Ok(())
+        })
+        .on_async::<Dns, _>(counting_async::<DnsMessage>(&calls, "async"))
+        .on_effect::<Dns>(counting_effect::<DnsMessage>(&calls, "effect"))
+        .build()
+        .unwrap()
+        .replay()
+        .await
+        .unwrap();
+    assert!(calls.get("sync") >= 2, "query + response");
+    assert_eq!(calls.get("async"), calls.get("sync"));
+    assert_eq!(calls.get("effect"), calls.get("sync"));
+}
+
+/// Same for the ICMP slot's two message types.
+#[cfg(feature = "icmp")]
+#[tokio::test(flavor = "current_thread")]
+async fn async_and_effect_handlers_receive_icmp_messages_and_errors() {
+    use netring::protocol::builtin::Icmp;
+    use netring::protocol::event_typed::IcmpError;
+    let file = pcap(&timed(vec![icmp_port_unreachable()]));
+    let calls = Calls::default();
+    Monitor::builder()
+        .pcap_source(file.path())
+        .protocol::<Icmp>()
+        .on_async::<Icmp, _>(counting_async::<flowscope::icmp::IcmpMessage>(
+            &calls,
+            "msg async",
+        ))
+        .on_effect::<Icmp>(counting_effect::<flowscope::icmp::IcmpMessage>(
+            &calls,
+            "msg effect",
+        ))
+        .on_async::<IcmpError, _>(counting_async::<IcmpError>(&calls, "err async"))
+        .on_effect::<IcmpError>(counting_effect::<IcmpError>(&calls, "err effect"))
+        .build()
+        .unwrap()
+        .replay()
+        .await
+        .unwrap();
+    for name in ["msg async", "msg effect", "err async", "err effect"] {
+        assert_eq!(calls.get(name), 1, "{name}");
+    }
+}
+
+/// `on_effect::<Tick>` handlers fire on ticks (only the sync and async
+/// passes ran).
+#[tokio::test(flavor = "current_thread")]
+async fn effect_handlers_receive_ticks() {
+    use netring::protocol::builtin::Udp;
+    use netring::protocol::event_typed::Tick;
+    let frames: Vec<_> = (1..=5)
+        .map(|t| {
+            (
+                Duration::from_secs(t),
+                ipv4_udp([10, 0, 0, 1], [10, 0, 0, 2], 5000, 53, b"query"),
+            )
+        })
+        .collect();
+    let file = pcap(&frames);
+    let calls = Calls::default();
+    Monitor::builder()
+        .pcap_source(file.path())
+        .protocol::<Udp>()
+        .tick_ctx(Duration::from_secs(1), |_ctx: &mut Ctx<'_>| Ok(()))
+        .on_effect::<Tick>(counting_effect::<Tick>(&calls, "tick"))
+        .build()
+        .unwrap()
+        .replay()
+        .await
+        .unwrap();
+    assert_eq!(calls.get("tick"), 4, "due at 2, 3, 4, 5 s");
+}
+
+/// HTTP request split in two reversed segments with a 16-byte memcap:
+/// the HTTP parser's initiator side stops (see `monitor_parser_routing`).
+#[cfg(feature = "http")]
+fn http_flow_with_reversed_request() -> Vec<Vec<u8>> {
+    const REQ: &[u8] = b"GET /index.html HTTP/1.1\r\nHost: example.test\r\nUser-Agent: t\r\n\r\n";
+    const RESP: &[u8] = b"HTTP/1.1 200 OK\r\nContent-Length: 2\r\n\r\nok";
+    let (c, s, m) = ([10, 0, 0, 1], [10, 0, 0, 2], [0u8; 6]);
+    let (ci, si) = (100u32, 900u32);
+    let (head, tail) = REQ.split_at(10);
+    let cend = ci + 1 + REQ.len() as u32;
+    let send = si + 1 + RESP.len() as u32;
+    vec![
+        ipv4_tcp(m, m, c, s, 40000, 80, ci, 0, 0x02, &[]),
+        ipv4_tcp(m, m, s, c, 80, 40000, si, ci + 1, 0x12, &[]),
+        ipv4_tcp(m, m, c, s, 40000, 80, ci + 1, si + 1, 0x10, &[]),
+        ipv4_tcp(m, m, c, s, 40000, 80, ci + 11, si + 1, 0x18, tail),
+        ipv4_tcp(m, m, c, s, 40000, 80, ci + 1, si + 1, 0x18, head),
+        ipv4_tcp(m, m, s, c, 80, 40000, si + 1, cend, 0x18, RESP),
+        ipv4_tcp(m, m, c, s, 40000, 80, cend, send, 0x11, &[]),
+        ipv4_tcp(m, m, s, c, 80, 40000, send, cend + 1, 0x11, &[]),
+        ipv4_tcp(m, m, c, s, 40000, 80, cend + 1, send + 1, 0x10, &[]),
+    ]
+}
+
+/// `on_effect` handlers fire for parser closes and side stops — of the
+/// parser's protocol (`ParserClosed<Http>`) and of the transport
+/// (`ParserSideStopped<Tcp>`, which the effect pass had no arm for).
+#[cfg(feature = "http")]
+#[tokio::test(flavor = "current_thread")]
+async fn effect_handlers_receive_parser_events() {
+    use flowscope::MemcapPolicy;
+    use netring::protocol::builtin::{Http, Tcp};
+    use netring::protocol::event_typed::{ParserClosed, ParserSideStopped};
+    let file = pcap(&timed(http_flow_with_reversed_request()));
+    let calls = Calls::default();
+    Monitor::builder()
+        .pcap_source(file.path())
+        .protocol::<Tcp>()
+        .protocol::<Http>()
+        .reassembly_memcap(16, MemcapPolicy::PassThrough)
+        .on_effect::<ParserClosed<Http>>(counting_effect::<ParserClosed<Http>>(
+            &calls,
+            "closed http",
+        ))
+        .on_effect::<ParserSideStopped<Http>>(counting_effect::<ParserSideStopped<Http>>(
+            &calls,
+            "side http",
+        ))
+        .on_effect::<ParserSideStopped<Tcp>>(counting_effect::<ParserSideStopped<Tcp>>(
+            &calls, "side tcp",
+        ))
+        .build()
+        .unwrap()
+        .replay()
+        .await
+        .unwrap();
+    assert_eq!(calls.get("side http"), 1);
+    assert_eq!(calls.get("side tcp"), 1);
+    assert_eq!(calls.get("closed http"), 1);
+}

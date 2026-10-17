@@ -371,6 +371,32 @@ pub trait ProtocolSlot: Send + Sync {
     ) -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<()>> + Send + 'a>> {
         Box::pin(async { Ok(()) })
     }
+
+    /// Effect counterpart of [`Self::dispatch_parser_event`]: the
+    /// `on_effect::<ParserClosed<P>>` / `ParserSideStopped<P>` handlers.
+    /// New in 0.31.2.
+    fn dispatch_parser_event_effects<'a>(
+        &'a self,
+        _dispatcher: &'a mut Dispatcher,
+        _ctx: &'a mut Ctx<'_>,
+        _event: ParserEvent<'a>,
+    ) -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<()>> + Send + 'a>> {
+        Box::pin(async { Ok(()) })
+    }
+
+    /// The async and effect passes for the message the last
+    /// [`Self::dispatch_next`] dispatched: its `on_async::<P>` then its
+    /// `on_effect::<P>` handlers, `ctx` stamped as for the sync pass.
+    /// `None` when there is nothing to run (the sync pass failed, or no
+    /// async / effect handler takes the message). New in 0.31.2.
+    #[allow(clippy::type_complexity)]
+    fn dispatch_async_effects<'a>(
+        &'a mut self,
+        _dispatcher: &'a mut Dispatcher,
+        _ctx: &'a mut Ctx<'_>,
+    ) -> Option<std::pin::Pin<Box<dyn std::future::Future<Output = Result<()>> + Send + 'a>>> {
+        None
+    }
 }
 
 /// A parser close or side stop, as the run loop routes it to the
@@ -480,6 +506,41 @@ fn dispatch_typed_parser_event_async<'a, P: Protocol>(
     })
 }
 
+fn dispatch_typed_parser_event_effects<'a, P: Protocol>(
+    dispatcher: &'a mut Dispatcher,
+    ctx: &'a mut Ctx<'_>,
+    e: ParserEvent<'a>,
+) -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<()>> + Send + 'a>> {
+    use crate::protocol::event_typed::{ParserClosed, ParserSideStopped};
+    Box::pin(async move {
+        let handled = match e.side {
+            None => dispatcher.handles_effects::<ParserClosed<P>>(),
+            Some(_) => dispatcher.handles_effects::<ParserSideStopped<P>>(),
+        };
+        if !handled || is_transport_marker::<P>() {
+            return Ok(());
+        }
+        let detail = e.detail.map(str::to_owned);
+        let (flow, ts) = (ctx.flow, ctx.ts);
+        ctx.flow = Some(e.key);
+        ctx.ts = e.ts;
+        let r = match e.side {
+            None => {
+                let ev = ParserClosed::<P>::new(e.key, e.parser_kind, e.reason, detail, e.ts);
+                dispatcher.dispatch_effects(&ev, ctx).await
+            }
+            Some(side) => {
+                let ev =
+                    ParserSideStopped::<P>::new(e.key, e.parser_kind, side, e.reason, detail, e.ts);
+                dispatcher.dispatch_effects(&ev, ctx).await
+            }
+        };
+        ctx.flow = flow;
+        ctx.ts = ts;
+        r
+    })
+}
+
 type Pending<M> = std::collections::VecDeque<SlotMessage<M, flowscope::extract::FiveTupleKey>>;
 
 fn order_of<M>(pending: &Pending<M>) -> Option<(u64, u64)> {
@@ -506,12 +567,41 @@ fn with_message_ctx<M, R>(
     r
 }
 
+/// The async and effect passes for `payload` — a slot message, or what
+/// the slot derived from it — with `ctx` stamped for `msg` as in the sync
+/// pass ([`with_message_ctx`]).
+async fn async_effect_passes<M: Sync, T: Send + Sync + 'static>(
+    dispatcher: &mut Dispatcher,
+    ctx: &mut Ctx<'_>,
+    msg: &SlotMessage<M, flowscope::extract::FiveTupleKey>,
+    payload: &T,
+) -> Result<()> {
+    dispatcher.dispatch_async::<T>(payload).await?;
+    let saved = (ctx.flow, ctx.ts, ctx.side, ctx.orientation);
+    ctx.flow = Some(msg.key);
+    ctx.ts = msg.ts;
+    ctx.side = Some(msg.side);
+    ctx.orientation = Some(msg.orientation);
+    let r = dispatcher.dispatch_effects::<T>(payload, ctx).await;
+    (ctx.flow, ctx.ts, ctx.side, ctx.orientation) = saved;
+    r
+}
+
+/// Whether `T` has async or effect handlers — whether a dispatched
+/// message must be kept for [`ProtocolSlot::dispatch_async_effects`].
+fn has_async_effects<T: 'static>(dispatcher: &Dispatcher) -> bool {
+    dispatcher.handles_async::<T>() || dispatcher.handles_effects::<T>()
+}
+
 /// Generic, concrete impl: holds the flowscope `SlotHandle` for a
 /// `Protocol` `P` plus the messages fetched but not yet dispatched.
 pub struct TypedProtocolSlot<P: Protocol> {
     handle: SlotHandle<P::Message, flowscope::extract::FiveTupleKey>,
     scratch: Vec<SlotMessage<P::Message, flowscope::extract::FiveTupleKey>>,
     pending: Pending<P::Message>,
+    /// The message the sync pass just dispatched, kept for its async /
+    /// effect handlers (only when it has some).
+    last: Option<SlotMessage<P::Message, flowscope::extract::FiveTupleKey>>,
     _marker: PhantomData<fn() -> P>,
 }
 
@@ -522,6 +612,7 @@ impl<P: Protocol> TypedProtocolSlot<P> {
             handle,
             scratch: Vec::new(),
             pending: Pending::new(),
+            last: None,
             _marker: PhantomData,
         }
     }
@@ -544,12 +635,28 @@ impl<P: Protocol> ProtocolSlot for TypedProtocolSlot<P> {
     }
 
     fn dispatch_next(&mut self, dispatcher: &mut Dispatcher, ctx: &mut Ctx<'_>) -> Result<()> {
+        self.last = None;
         let Some(msg) = self.pending.pop_front() else {
             return Ok(());
         };
         with_message_ctx(ctx, &msg, |ctx| {
             dispatcher.dispatch::<P::Message>(&msg.message, ctx)
-        })
+        })?;
+        if has_async_effects::<P::Message>(dispatcher) {
+            self.last = Some(msg);
+        }
+        Ok(())
+    }
+
+    fn dispatch_async_effects<'a>(
+        &'a mut self,
+        dispatcher: &'a mut Dispatcher,
+        ctx: &'a mut Ctx<'_>,
+    ) -> Option<std::pin::Pin<Box<dyn std::future::Future<Output = Result<()>> + Send + 'a>>> {
+        let msg = self.last.take()?;
+        Some(Box::pin(async move {
+            async_effect_passes(dispatcher, ctx, &msg, &msg.message).await
+        }))
     }
 
     fn slot_id(&self) -> Option<flowscope::SlotId> {
@@ -572,6 +679,15 @@ impl<P: Protocol> ProtocolSlot for TypedProtocolSlot<P> {
     ) -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<()>> + Send + 'a>> {
         dispatch_typed_parser_event_async::<P>(dispatcher, event)
     }
+
+    fn dispatch_parser_event_effects<'a>(
+        &'a self,
+        dispatcher: &'a mut Dispatcher,
+        ctx: &'a mut Ctx<'_>,
+        event: ParserEvent<'a>,
+    ) -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<()>> + Send + 'a>> {
+        dispatch_typed_parser_event_effects::<P>(dispatcher, ctx, event)
+    }
 }
 
 /// 0.22 §2.5: ICMP drain slot. A strict superset of
@@ -587,6 +703,13 @@ pub struct IcmpSlot {
     handle: SlotHandle<flowscope::icmp::IcmpMessage, flowscope::extract::FiveTupleKey>,
     scratch: Vec<SlotMessage<flowscope::icmp::IcmpMessage, flowscope::extract::FiveTupleKey>>,
     pending: Pending<flowscope::icmp::IcmpMessage>,
+    /// The message (and the `IcmpError` derived from it) the sync pass
+    /// just dispatched, kept for their async / effect handlers.
+    #[allow(clippy::type_complexity)]
+    last: Option<(
+        SlotMessage<flowscope::icmp::IcmpMessage, flowscope::extract::FiveTupleKey>,
+        Option<crate::protocol::event_typed::IcmpError>,
+    )>,
 }
 
 #[cfg(feature = "icmp")]
@@ -599,6 +722,7 @@ impl IcmpSlot {
             handle,
             scratch: Vec::new(),
             pending: Pending::new(),
+            last: None,
         }
     }
 }
@@ -618,32 +742,55 @@ impl ProtocolSlot for IcmpSlot {
     fn dispatch_next(&mut self, dispatcher: &mut Dispatcher, ctx: &mut Ctx<'_>) -> Result<()> {
         use crate::protocol::event_typed::{IcmpError, classify_icmp_error};
 
+        self.last = None;
         let Some(slot_msg) = self.pending.pop_front() else {
             return Ok(());
         };
-        with_message_ctx(ctx, &slot_msg, |ctx| {
+        let err = with_message_ctx(ctx, &slot_msg, |ctx| -> Result<Option<IcmpError>> {
             // (1) raw message → `on::<Icmp>` handlers.
             dispatcher.dispatch::<flowscope::icmp::IcmpMessage>(&slot_msg.message, ctx)?;
 
             // (2) typed IcmpError → `on_icmp_error` handlers. Build only
             // for error messages; dispatch is a no-op when no IcmpError
             // handler is registered.
-            if let Some(kind) = classify_icmp_error(&slot_msg.message) {
-                let inner = slot_msg.message.error_inner().map(|(_, i)| i);
-                let correlated_flow =
-                    inner.and_then(flowscope::extract::FiveTupleKey::from_inner_canonical);
-                let stats = inner.and_then(|i| ctx.lookup_icmp_flow(i).map(|(_, s)| s));
-                let err = IcmpError {
-                    family: slot_msg.message.family,
-                    kind,
-                    correlated_flow,
-                    stats,
-                    ts: slot_msg.ts,
-                };
-                dispatcher.dispatch::<IcmpError>(&err, ctx)?;
+            let Some(kind) = classify_icmp_error(&slot_msg.message) else {
+                return Ok(None);
+            };
+            let inner = slot_msg.message.error_inner().map(|(_, i)| i);
+            let correlated_flow =
+                inner.and_then(flowscope::extract::FiveTupleKey::from_inner_canonical);
+            let stats = inner.and_then(|i| ctx.lookup_icmp_flow(i).map(|(_, s)| s));
+            let err = IcmpError {
+                family: slot_msg.message.family,
+                kind,
+                correlated_flow,
+                stats,
+                ts: slot_msg.ts,
+            };
+            dispatcher.dispatch::<IcmpError>(&err, ctx)?;
+            Ok(Some(err))
+        })?;
+        if has_async_effects::<flowscope::icmp::IcmpMessage>(dispatcher)
+            || (err.is_some() && has_async_effects::<IcmpError>(dispatcher))
+        {
+            self.last = Some((slot_msg, err));
+        }
+        Ok(())
+    }
+
+    fn dispatch_async_effects<'a>(
+        &'a mut self,
+        dispatcher: &'a mut Dispatcher,
+        ctx: &'a mut Ctx<'_>,
+    ) -> Option<std::pin::Pin<Box<dyn std::future::Future<Output = Result<()>> + Send + 'a>>> {
+        let (msg, err) = self.last.take()?;
+        Some(Box::pin(async move {
+            async_effect_passes(dispatcher, ctx, &msg, &msg.message).await?;
+            match err {
+                Some(err) => async_effect_passes(dispatcher, ctx, &msg, &err).await,
+                None => Ok(()),
             }
-            Ok(())
-        })
+        }))
     }
 
     // `Icmp` is a transport marker: the run loop hands it every ICMP
@@ -662,6 +809,8 @@ where
     handle: BroadcastSlotHandle<P::Message, flowscope::extract::FiveTupleKey>,
     scratch: Vec<SlotMessage<P::Message, flowscope::extract::FiveTupleKey>>,
     pending: Pending<P::Message>,
+    /// As [`TypedProtocolSlot`]'s.
+    last: Option<SlotMessage<P::Message, flowscope::extract::FiveTupleKey>>,
     _marker: PhantomData<fn() -> P>,
 }
 
@@ -677,6 +826,7 @@ where
             handle,
             scratch: Vec::new(),
             pending: Pending::new(),
+            last: None,
             _marker: PhantomData,
         }
     }
@@ -697,12 +847,28 @@ where
     }
 
     fn dispatch_next(&mut self, dispatcher: &mut Dispatcher, ctx: &mut Ctx<'_>) -> Result<()> {
+        self.last = None;
         let Some(msg) = self.pending.pop_front() else {
             return Ok(());
         };
         with_message_ctx(ctx, &msg, |ctx| {
             dispatcher.dispatch::<P::Message>(&msg.message, ctx)
-        })
+        })?;
+        if has_async_effects::<P::Message>(dispatcher) {
+            self.last = Some(msg);
+        }
+        Ok(())
+    }
+
+    fn dispatch_async_effects<'a>(
+        &'a mut self,
+        dispatcher: &'a mut Dispatcher,
+        ctx: &'a mut Ctx<'_>,
+    ) -> Option<std::pin::Pin<Box<dyn std::future::Future<Output = Result<()>> + Send + 'a>>> {
+        let msg = self.last.take()?;
+        Some(Box::pin(async move {
+            async_effect_passes(dispatcher, ctx, &msg, &msg.message).await
+        }))
     }
 
     fn slot_id(&self) -> Option<flowscope::SlotId> {
@@ -724,6 +890,15 @@ where
         event: ParserEvent<'a>,
     ) -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<()>> + Send + 'a>> {
         dispatch_typed_parser_event_async::<P>(dispatcher, event)
+    }
+
+    fn dispatch_parser_event_effects<'a>(
+        &'a self,
+        dispatcher: &'a mut Dispatcher,
+        ctx: &'a mut Ctx<'_>,
+        event: ParserEvent<'a>,
+    ) -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<()>> + Send + 'a>> {
+        dispatch_typed_parser_event_effects::<P>(dispatcher, ctx, event)
     }
 }
 

@@ -1643,7 +1643,8 @@ async fn dispatch_batch(
             health,
             arp_table,
             base + i as u64,
-        )?;
+        )
+        .await?;
         dispatch_tracked_event(
             dispatcher,
             protocol_slots,
@@ -1682,12 +1683,14 @@ async fn dispatch_batch(
         arp_table,
         u64::MAX,
     )
+    .await
 }
 
 /// Dispatch the protocol slots' pending messages positioned at or
-/// before lifecycle event `upto`, across slots in engine order.
+/// before lifecycle event `upto`, across slots in engine order: each
+/// message's sync handlers, then its async and effect handlers.
 #[allow(clippy::too_many_arguments)]
-fn dispatch_slot_messages(
+async fn dispatch_slot_messages(
     dispatcher: &mut Dispatcher,
     protocol_slots: &mut [Box<dyn crate::monitor::ProtocolSlot>],
     driver: &flowscope::driver::Driver<FiveTuple>,
@@ -1730,7 +1733,20 @@ fn dispatch_slot_messages(
         ctx.tracker = Some(driver.tracker());
         // Issue #23: cross-protocol IP→MAC lookup for L7 (TLS/HTTP/DNS) handlers.
         ctx.arp_table = arp_table;
-        if let Err(e) = protocol_slots[i].dispatch_next(dispatcher, &mut ctx) {
+        let res = protocol_slots[i].dispatch_next(dispatcher, &mut ctx);
+        // The async / effect passes run only when such handlers exist (the
+        // slot keeps the message only if its type has some): no future is
+        // boxed otherwise.
+        let res = match res {
+            Ok(()) if dispatcher.async_handler_count() + dispatcher.effect_handler_count() > 0 => {
+                match protocol_slots[i].dispatch_async_effects(dispatcher, &mut ctx) {
+                    Some(passes) => passes.await,
+                    None => Ok(()),
+                }
+            }
+            res => res,
+        };
+        if let Err(e) = res {
             match policy {
                 HandlerErrorPolicy::Propagate => return Err(e),
                 HandlerErrorPolicy::Isolate => {
@@ -1866,6 +1882,7 @@ async fn dispatch_tracked_event(
             detail,
             ts,
         };
+        // Sync, async, then effect handlers, the first error ending it.
         let res = {
             let mut ctx = Ctx::new(
                 Some(key),
@@ -1878,11 +1895,16 @@ async fn dispatch_tracked_event(
             );
             ctx.monitor_name = monitor_name;
             ctx.label_table = label_table;
-            owner.dispatch_parser_event(dispatcher, &mut ctx, &pe)
-        };
-        let res = match res {
-            Ok(()) => owner.dispatch_parser_event_async(dispatcher, pe).await,
-            e => e,
+            let mut res = owner.dispatch_parser_event(dispatcher, &mut ctx, &pe);
+            if res.is_ok() {
+                res = owner.dispatch_parser_event_async(dispatcher, pe).await;
+            }
+            if res.is_ok() && dispatcher.effect_handler_count() > 0 {
+                res = owner
+                    .dispatch_parser_event_effects(dispatcher, &mut ctx, pe)
+                    .await;
+            }
+            res
         };
         if let Err(e) = res {
             match policy {
@@ -1979,9 +2001,9 @@ async fn dispatch_tracked_event(
 /// 1. The `.tick(period, handler)` registration's boxed closure —
 ///    drives the period scheduling and is the ergonomic
 ///    registration form.
-/// 2. The dispatcher's typed `Tick` slot (sync + async) — so
-///    users who registered via `.on::<Tick>(...)` also receive
-///    the event.
+/// 2. The dispatcher's typed `Tick` slot (sync, async, effects) —
+///    so users who registered via `.on::<Tick>(...)` (or `on_async` /
+///    `on_effect`) also receive the event.
 ///
 /// Both run in the order: closure first, then dispatcher. Errors go
 /// through the [`HandlerErrorPolicy`] like every other handler's: the
@@ -2025,24 +2047,24 @@ async fn fire_tick(
         }
     };
     apply_handler_error_policy(res, policy, health, "tick")?;
-    let res = {
-        let mut ctx = Ctx::new(
-            None,
-            tick.now,
-            SourceIdx(0),
-            state_map,
-            sink,
-            counters,
-            flow_states,
-        );
-        ctx.monitor_name = monitor_name;
-        ctx.label_table = label_table;
-        dispatcher.dispatch::<Tick>(&tick, &mut ctx)
-    };
-    let res = match res {
-        Ok(()) => dispatcher.dispatch_async::<Tick>(&tick).await,
-        e => e,
-    };
+    let mut ctx = Ctx::new(
+        None,
+        tick.now,
+        SourceIdx(0),
+        state_map,
+        sink,
+        counters,
+        flow_states,
+    );
+    ctx.monitor_name = monitor_name;
+    ctx.label_table = label_table;
+    let mut res = dispatcher.dispatch::<Tick>(&tick, &mut ctx);
+    if res.is_ok() {
+        res = dispatcher.dispatch_async::<Tick>(&tick).await;
+    }
+    if res.is_ok() {
+        res = dispatcher.dispatch_effects::<Tick>(&tick, &mut ctx).await;
+    }
     apply_handler_error_policy(res, policy, health, "tick")
 }
 
@@ -3439,6 +3461,33 @@ async fn dispatch_lifecycle_effects(
                 dispatch_one!(
                     ParserClosed<Icmp>,
                     ParserClosed::<Icmp>::new(key, parser_kind, reason, detail, ts),
+                    Some(key),
+                    ts
+                );
+            }
+            _ => {}
+        },
+        FsEvent::ParserSideStopped {
+            key,
+            parser_kind,
+            side,
+            reason,
+            detail,
+            ts,
+            ..
+        } => match key.proto {
+            L4Proto::Tcp => {
+                dispatch_one!(
+                    ParserSideStopped<Tcp>,
+                    ParserSideStopped::<Tcp>::new(key, parser_kind, side, reason, detail, ts),
+                    Some(key),
+                    ts
+                );
+            }
+            L4Proto::Udp => {
+                dispatch_one!(
+                    ParserSideStopped<Udp>,
+                    ParserSideStopped::<Udp>::new(key, parser_kind, side, reason, detail, ts),
                     Some(key),
                     ts
                 );

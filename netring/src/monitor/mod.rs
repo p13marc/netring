@@ -495,11 +495,9 @@ impl Monitor {
     ///
     /// Single-source: pcap replay doesn't fan in across multiple
     /// files (use a small driver loop yourself if you need that).
-    /// Tick handlers registered on the builder are NOT fired —
-    /// pcap timestamps drift from wall-clock, so scheduling
-    /// ticks against them is ambiguous. Use `.on::<Tick>(...)`
-    /// for capture-time-based aggregation in live mode; for
-    /// pcap, hook the lifecycle events directly.
+    /// Time runs on the capture's packet timestamps (since 0.31):
+    /// flows sweep and tick handlers fire every period of packet
+    /// time, however fast the file is read.
     ///
     /// Returns
     /// [`crate::error::BuildError::PcapSourceRequired`] when

@@ -73,30 +73,20 @@ impl AnomalySink for RateLimitAnomaliesLayered {
         metrics: &[(&'static str, f64)],
     ) {
         let now = Instant::now();
-        let allow = match self.buckets.get_mut(kind) {
-            Some(bucket) => {
-                if now.duration_since(bucket.window_start) >= self.period {
-                    bucket.window_start = now;
-                    bucket.count = 1;
-                    true
-                } else if bucket.count < self.max_per_period {
-                    bucket.count += 1;
-                    true
-                } else {
-                    false
-                }
-            }
-            None => {
-                self.buckets.insert(
-                    kind,
-                    Bucket {
-                        window_start: now,
-                        count: 1,
-                    },
-                );
-                true
-            }
-        };
+        let bucket = self.buckets.entry(kind).or_insert(Bucket {
+            window_start: now,
+            count: 0,
+        });
+        if now.duration_since(bucket.window_start) >= self.period {
+            bucket.window_start = now;
+            bucket.count = 0;
+        }
+        // Every anomaly — a kind's first, a period's first — spends
+        // budget, so a zero budget drops them all.
+        let allow = bucket.count < self.max_per_period;
+        if allow {
+            bucket.count += 1;
+        }
         if allow {
             self.inner
                 .write(kind, severity, ts, key, observations, metrics);
@@ -163,6 +153,22 @@ mod tests {
         }
         // 2 from A + 2 from B
         assert_eq!(*n.lock().unwrap(), 4);
+    }
+
+    /// A zero budget drops everything — the first anomaly of a kind
+    /// (or of a new period) included.
+    #[test]
+    fn zero_budget_drops_everything() {
+        let inner = Capture::default();
+        let n = inner.n();
+        let mut sink: Box<dyn AnomalySink> =
+            Box::new(RateLimitAnomalies::new(0, Duration::from_millis(10))).wrap(Box::new(inner));
+        for _ in 0..3 {
+            sink.begin("X", Severity::Info, Timestamp::new(0, 0)).emit();
+        }
+        sleep(Duration::from_millis(20));
+        sink.begin("X", Severity::Info, Timestamp::new(0, 0)).emit();
+        assert_eq!(*n.lock().unwrap(), 0);
     }
 
     #[test]

@@ -17,6 +17,8 @@
 //! use [`aya`](https://crates.io/crates/aya) and attach to the
 //! socket fd via `AsFd`.
 
+pub use flowscope::{VlanProto, VlanTag};
+
 /// A single classic BPF instruction.
 ///
 /// Identical memory layout to `libc::sock_filter` so that
@@ -55,6 +57,76 @@ impl From<libc::sock_filter> for BpfInsn {
             jf: sf.jf,
             k: sf.k,
         }
+    }
+}
+
+/// The per-packet metadata a socket filter can read besides the frame
+/// bytes — the kernel's BPF "ancillary data" (`SKF_AD_*` loads) — for
+/// [`BpfFilter::matches_with`].
+///
+/// Linux strips the **outer** 802.1Q / 802.1ad tag from a received frame
+/// before packet taps see it (v6.12 net/core/dev.c
+/// `__netif_receive_skb_core`: `if (eth_type_vlan(skb->protocol)) skb =
+/// skb_vlan_untag(skb);`, ahead of the `ptype_all` delivery; a NIC with VLAN
+/// offload strips it in hardware), so the socket filter sees the frame
+/// without it and reads the tag through `SKF_AD_VLAN_TAG` /
+/// `SKF_AD_VLAN_TAG_PRESENT` / `SKF_AD_VLAN_TPID`. netring re-inserts the
+/// tag in the ring by default (libpcap's behaviour,
+/// [`CaptureBuilder::vlan_reinsert`](crate::CaptureBuilder)), so the bytes
+/// userspace sees can differ from the ones the filter ran on: this struct
+/// says how.
+///
+/// - [`NONE`](Self::NONE): no tag outside the frame — tcpdump-offline
+///   semantics (`matches`).
+/// - [`stripped(tag)`](Self::stripped): the kernel stripped `tag`; the frame
+///   passed to `matches_with` is the one without it (what the filter saw).
+/// - [`reinserted(tag)`](Self::reinserted): the kernel stripped `tag` and
+///   it was put back at bytes 12..16 of the frame passed to `matches_with`;
+///   the interpreter reads the frame as if those four bytes were absent.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+#[non_exhaustive]
+pub struct BpfAncillary {
+    /// The VLAN tag the kernel took out of the frame, if any.
+    pub vlan: Option<VlanTag>,
+    /// The tag is back in the frame (at bytes 12..16): the filter ran on
+    /// the frame without those four bytes.
+    pub vlan_in_frame: bool,
+}
+
+impl BpfAncillary {
+    /// No ancillary data: every tag is in the frame.
+    pub const NONE: Self = Self {
+        vlan: None,
+        vlan_in_frame: false,
+    };
+
+    /// The kernel stripped `tag`; the frame is the one without it.
+    pub const fn stripped(tag: VlanTag) -> Self {
+        Self {
+            vlan: Some(tag),
+            vlan_in_frame: false,
+        }
+    }
+
+    /// The kernel stripped `tag` and it was re-inserted at bytes 12..16 of
+    /// the frame (netring's and libpcap's default on capture).
+    pub const fn reinserted(tag: VlanTag) -> Self {
+        Self {
+            vlan: Some(tag),
+            vlan_in_frame: true,
+        }
+    }
+}
+
+/// The TPID (EtherType) of a VLAN protocol.
+pub(crate) fn vlan_tpid(proto: VlanProto) -> u16 {
+    match proto {
+        VlanProto::Dot1Q => 0x8100,
+        VlanProto::Dot1Ad => 0x88a8,
+        VlanProto::Other(tpid) => tpid,
+        // flowscope's `VlanProto` is non-exhaustive; a future named variant
+        // is reported as the 802.1Q default.
+        _ => 0x8100,
     }
 }
 

@@ -19,10 +19,17 @@ use super::ipnet::IpNet;
 pub(crate) enum MatchFrag {
     /// Ethertype check at offset 12 (or 16 if VLAN-shifted).
     EthType(u16),
-    /// Marker fragment — adjusts subsequent offsets by +4 to
-    /// account for the 802.1Q VLAN tag.
+    /// "Has a VLAN tag" — the builder's `.vlan()`. The compiler splits a
+    /// chain holding it into a [`Self::VlanMeta`] chain and a
+    /// [`Self::VlanInFrame`] chain (OR blocks).
     Vlan,
-    /// VLAN ID match (low 12 bits of offset 14, post-shift).
+    /// Compiler-internal: the outer tag the kernel stripped into the skb
+    /// metadata (`SKF_AD_VLAN_TAG_PRESENT`); later loads stay unshifted.
+    VlanMeta,
+    /// Compiler-internal: no stripped tag, an 802.1Q / 802.1ad / `0x9100`
+    /// tag in the frame; later loads are shifted by +4.
+    VlanInFrame,
+    /// VLAN ID match (low 12 bits of the outermost tag's TCI).
     /// Only meaningful after [`Self::Vlan`].
     VlanId(u16),
     /// IP protocol byte match. Caller composes with `EthType`.
@@ -76,8 +83,13 @@ impl BpfFilterBuilder {
     // ── Ethertype / link layer ──────────────────────────────
 
     /// Match a specific ethertype. Common values:
-    /// `0x0800` (IPv4), `0x86dd` (IPv6), `0x0806` (ARP),
-    /// `0x8100` (802.1Q VLAN).
+    /// `0x0800` (IPv4), `0x86dd` (IPv6), `0x0806` (ARP).
+    ///
+    /// The EtherType is read from the frame, so `eth_type(0x8100)` matches
+    /// only a tag that is **in the frame** — on a live capture Linux strips
+    /// the outer 802.1Q / 802.1ad tag before the socket filter runs (it
+    /// matches a QinQ inner tag, or a tag sent by a device without VLAN TX
+    /// offload). Use [`vlan`](Self::vlan) to match tagged traffic.
     pub fn eth_type(mut self, ty: u16) -> Self {
         self.fragments.push(MatchFrag::EthType(ty));
         self
@@ -98,14 +110,29 @@ impl BpfFilterBuilder {
         self.eth_type(0x0806)
     }
 
-    /// Match 802.1Q VLAN-tagged traffic. Subsequent IP/L4 fragments
-    /// emit bytecode shifted by +4 bytes to step over the VLAN tag.
+    /// Match VLAN-tagged traffic — libpcap's `vlan`, outermost tag.
+    ///
+    /// On a live capture Linux strips the outer 802.1Q / 802.1ad tag before
+    /// the socket filter runs and keeps it in the packet metadata, so the
+    /// compiled program checks two cases (#208):
+    ///
+    /// - a stripped tag (`SKF_AD_VLAN_TAG_PRESENT`): the rest of the chain
+    ///   reads the frame at untagged offsets;
+    /// - no stripped tag, but an 802.1Q / 802.1ad / `0x9100` tag in the
+    ///   frame (a pcap file, a `0x9100` tag, a frame sent by a device
+    ///   without VLAN TX offload): the rest of the chain reads past it (+4).
+    ///
+    /// With a stripped tag present the in-frame case is not tried, so on a
+    /// QinQ frame `vlan` / `vlan_id` look at the outer (stripped) tag, as
+    /// libpcap does. Offline ([`BpfFilter::matches`]) only the in-frame
+    /// case can match; [`BpfFilter::matches_with`] supplies the metadata.
     pub fn vlan(mut self) -> Self {
         self.fragments.push(MatchFrag::Vlan);
         self
     }
 
-    /// Match a specific VLAN ID. Only meaningful after [`Self::vlan`].
+    /// Match a specific VLAN ID (the low 12 bits of the outermost tag's
+    /// TCI). Only meaningful after [`Self::vlan`].
     pub fn vlan_id(mut self, id: u16) -> Self {
         self.fragments.push(MatchFrag::VlanId(id));
         self

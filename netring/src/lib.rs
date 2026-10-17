@@ -94,8 +94,8 @@ pub use bridge::{
     Bridge, BridgeAction, BridgeBuilder, BridgeDirection, BridgeHandles, BridgeStats,
 };
 pub use config::{
-    BpfBuildError, BpfFilter, BpfFilterBuilder, BpfInsn, BusyPollConfig, FanoutFlags, FanoutMode,
-    IpNet, ParseIpNetError, RingProfile, TimestampSource,
+    BpfAncillary, BpfBuildError, BpfFilter, BpfFilterBuilder, BpfInsn, BusyPollConfig, FanoutFlags,
+    FanoutMode, IpNet, ParseIpNetError, RingProfile, TimestampSource, VlanProto, VlanTag,
 };
 pub use dedup::Dedup;
 pub use error::Error;

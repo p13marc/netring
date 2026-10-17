@@ -13,12 +13,19 @@
 //! 8. `BpfFilter::new(builder.instructions().to_vec())`
 //!    round-trips (escape hatch consumes builder output cleanly).
 //!
+//! 9. (#208) A frame whose outer VLAN tag the kernel stripped gets the
+//!    same verdict whether the interpreter sees the stripped frame plus the
+//!    tag as metadata, or the tag re-inserted (`BpfAncillary::reinserted`).
+//! 10. (#208) For a chain starting with `.vlan()`, matching the frame with
+//!     the tag in-band offline equals the kernel's verdict on the stripped
+//!     frame — the metadata block and the in-frame block agree.
+//!
 //! Each property runs at proptest's default 256 cases. Run with
 //! `PROPTEST_CASES=10000 cargo test ...` to stress.
 
 use std::net::IpAddr;
 
-use netring::{BpfFilter, BpfFilterBuilder, IpNet};
+use netring::{BpfAncillary, BpfFilter, BpfFilterBuilder, IpNet, VlanProto, VlanTag};
 use proptest::prelude::*;
 
 // ── Strategies ───────────────────────────────────────────────
@@ -87,6 +94,66 @@ fn arb_tcp_packet() -> impl Strategy<Value = Vec<u8>> {
         arb_port(),
     )
         .prop_map(|(s, d, sp, dp)| synth_eth_ipv4_tcp(s, d, sp, dp))
+}
+
+/// A VLAN tag Linux strips into the metadata: 802.1Q or 802.1ad, any TCI.
+fn arb_stripped_tag() -> impl Strategy<Value = VlanTag> {
+    (any::<u16>(), any::<bool>()).prop_map(|(tci, ad)| {
+        VlanTag::new(
+            tci,
+            if ad {
+                VlanProto::Dot1Ad
+            } else {
+                VlanProto::Dot1Q
+            },
+        )
+    })
+}
+
+fn tpid_of(tag: &VlanTag) -> u16 {
+    if tag.proto == VlanProto::Dot1Ad {
+        0x88a8
+    } else {
+        0x8100
+    }
+}
+
+/// `frame` with `tag` inserted at bytes 12..16.
+fn reinsert(frame: &[u8], tag: &VlanTag) -> Vec<u8> {
+    let mut f = frame[..12].to_vec();
+    f.extend_from_slice(&tpid_of(tag).to_be_bytes());
+    f.extend_from_slice(&tag.tci.to_be_bytes());
+    f.extend_from_slice(&frame[12..]);
+    f
+}
+
+/// A small builder chain over the strategies above: `(vlan?, vlan_id?,
+/// l4 port?, host?, negate?)`.
+fn arb_chain() -> impl Strategy<Value = BpfFilterBuilder> {
+    (
+        any::<bool>(),
+        prop::option::of(0u16..4096),
+        prop::option::of(arb_port()),
+        prop::option::of(arb_ipv4_addr()),
+        any::<bool>(),
+    )
+        .prop_map(|(vlan, vid, port, host, negate)| {
+            let mut b = BpfFilter::builder();
+            if vlan || vid.is_some() {
+                b = b.vlan();
+            }
+            if let Some(v) = vid {
+                b = b.vlan_id(v);
+            }
+            b = b.tcp();
+            if let Some(p) = port {
+                b = b.dst_port(p);
+            }
+            if let Some(h) = host {
+                b = b.host(h);
+            }
+            if negate { b.negate() } else { b }
+        })
 }
 
 // ── Properties ───────────────────────────────────────────────
@@ -326,6 +393,44 @@ proptest! {
             .build()
             .unwrap();
         prop_assert_eq!(g.matches(&pkt), [3, 4].contains(&dp) || sp == 1);
+    }
+
+    /// 15. (#208) Stripped and re-inserted views of the same frame agree.
+    #[test]
+    fn stripped_and_reinserted_tags_agree(
+        chain in arb_chain(),
+        pkt in arb_tcp_packet(),
+        tag in arb_stripped_tag(),
+    ) {
+        let f = chain.build().unwrap();
+        prop_assert_eq!(
+            f.matches_with(&pkt, &BpfAncillary::stripped(tag)),
+            f.matches_with(&reinsert(&pkt, &tag), &BpfAncillary::reinserted(tag))
+        );
+    }
+
+    /// 16. (#208) For a `.vlan()` chain, the offline verdict on the tagged
+    /// frame equals the kernel's on the stripped one.
+    #[test]
+    fn vlan_chain_offline_equals_kernel_stripped(
+        vid in prop::option::of(0u16..4096),
+        port in prop::option::of(arb_port()),
+        pkt in arb_tcp_packet(),
+        tag in arb_stripped_tag(),
+    ) {
+        let mut b = BpfFilter::builder().vlan();
+        if let Some(v) = vid {
+            b = b.vlan_id(v);
+        }
+        b = b.tcp();
+        if let Some(p) = port {
+            b = b.dst_port(p);
+        }
+        let f = b.build().unwrap();
+        prop_assert_eq!(
+            f.matches(&reinsert(&pkt, &tag)),
+            f.matches_with(&pkt, &BpfAncillary::stripped(tag))
+        );
     }
 }
 

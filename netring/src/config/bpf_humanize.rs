@@ -71,7 +71,7 @@ fn frag_to_string(frag: &MatchFrag) -> String {
         MatchFrag::EthType(0x86DD) => "ip6".to_string(),
         MatchFrag::EthType(0x0806) => "arp".to_string(),
         MatchFrag::EthType(n) => format!("ether proto 0x{n:04x}"),
-        MatchFrag::Vlan => "vlan".to_string(),
+        MatchFrag::Vlan | MatchFrag::VlanMeta | MatchFrag::VlanInFrame => "vlan".to_string(),
         MatchFrag::VlanId(id) => format!("vlan {id}"),
         MatchFrag::IpProto(6) => "tcp".to_string(),
         MatchFrag::IpProto(17) => "udp".to_string(),

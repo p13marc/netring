@@ -19,6 +19,7 @@ use netring::monitor::Monitor;
 use netring::monitor::subscription::packet;
 use netring::protocol::builtin::{Dns, Tcp, Tls, Udp};
 use netring::protocol::event_typed::{FlowPacket, FlowStarted};
+use netring::{BpfAncillary, VlanProto, VlanTag};
 
 /// Minimal Ethernet/IPv4 frame for `proto` to `dst_port`.
 fn frame(proto: u8, dst_port: u16) -> Vec<u8> {
@@ -324,6 +325,49 @@ fn in_frame_vlan_tags_pass_the_prefilter() {
     );
     assert!(bpf.matches(&tagged(&frame(UDP, 53), &[0x9100])), "0x9100");
     assert!(!bpf.matches(&frame(TCP, 80)), "untagged tcp/80 still shed");
+
+    // #208, the live-capture case: the kernel stripped the outer tag before
+    // the filter ran (it reads it as metadata), userspace sees it
+    // re-inserted. A QinQ frame keeps its inner tag in the frame.
+    let dot1q = BpfAncillary::stripped(VlanTag::new(100, VlanProto::Dot1Q));
+    let dot1ad = BpfAncillary::stripped(VlanTag::new(100, VlanProto::Dot1Ad));
+    assert!(bpf.matches_with(&frame(UDP, 53), &dot1q), "stripped 802.1Q");
+    assert!(
+        bpf.matches_with(&tagged(&frame(UDP, 53), &[0x8100]), &dot1ad),
+        "stripped QinQ outer tag"
+    );
+    assert!(
+        !bpf.matches_with(&frame(TCP, 80), &dot1q),
+        "tcp/80 still shed"
+    );
+}
+
+/// #208: a `vlan 100` packet sub narrows the prefilter to VLAN 100 — the
+/// tag the kernel stripped (metadata) or an in-frame one. 0.31 compiled
+/// only the in-frame shape, so on a live capture (the kernel strips the
+/// outer tag before the filter runs) the sub received nothing.
+#[test]
+fn vlan_packet_sub_passes_stripped_and_in_frame_tags() {
+    let bpf = Monitor::builder()
+        .interface("lo")
+        .subscribe(packet().vlan(100).to(|_v, _c| Ok(())))
+        .kernel_prefilter()
+        .expect("vlan 100 is a real filter");
+    let stripped = |tci| BpfAncillary::stripped(VlanTag::new(tci, VlanProto::Dot1Q));
+    assert!(bpf.matches_with(&frame(UDP, 53), &stripped(100)));
+    assert!(
+        bpf.matches_with(&frame(UDP, 53), &stripped(0xa000 | 100)),
+        "PCP bits"
+    );
+    assert!(!bpf.matches_with(&frame(UDP, 53), &stripped(101)));
+    assert!(
+        bpf.matches(&tagged(&frame(UDP, 53), &[0x8100])),
+        "in-frame 100"
+    );
+    assert!(!bpf.matches(&frame(UDP, 53)), "untagged");
+    // The re-inserted view agrees with the stripped one.
+    let reinserted = BpfAncillary::reinserted(VlanTag::new(100, VlanProto::Dot1Q));
+    assert!(bpf.matches_with(&tagged(&frame(UDP, 53), &[0x8100]), &reinserted));
 }
 
 #[cfg(feature = "arp")]

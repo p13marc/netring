@@ -15,7 +15,7 @@
 //! cannot loop forever).
 use arbitrary::Arbitrary;
 use libfuzzer_sys::fuzz_target;
-use netring::config::{BpfFilter, BpfInsn};
+use netring::config::{BpfAncillary, BpfFilter, BpfInsn, VlanProto, VlanTag};
 
 #[derive(Arbitrary, Debug)]
 struct Input {
@@ -23,6 +23,9 @@ struct Input {
     insns: Vec<(u16, u8, u8, u32)>,
     /// The untrusted frame the program runs over.
     frame: Vec<u8>,
+    /// An arbitrary stripped VLAN tag `(tci, tpid)` for the ancillary
+    /// (`SKF_AD_*`) loads, if any.
+    vlan: Option<(u16, u16)>,
 }
 
 fuzz_target!(|input: Input| {
@@ -44,4 +47,34 @@ fuzz_target!(|input: Input| {
     // Matching is a pure function of (program, frame).
     let b = filter.matches(&input.frame);
     assert_eq!(a, b);
+
+    // The same with ancillary data — including the re-inserted view, whose
+    // packet loads skip four bytes of the frame.
+    let Some((tci, tpid)) = input.vlan else {
+        return;
+    };
+    let proto = match tpid {
+        0x8100 => VlanProto::Dot1Q,
+        0x88a8 => VlanProto::Dot1Ad,
+        other => VlanProto::Other(other),
+    };
+    let tag = VlanTag::new(tci, proto);
+    let stripped = filter.matches_with(&input.frame, &BpfAncillary::stripped(tag));
+    assert_eq!(
+        stripped,
+        filter.matches_with(&input.frame, &BpfAncillary::stripped(tag))
+    );
+    let _ = filter.matches_with(&input.frame, &BpfAncillary::reinserted(tag));
+    // For any program: the stripped frame and the same frame with the tag
+    // re-inserted at bytes 12..16 get one verdict.
+    if input.frame.len() >= 12 {
+        let mut re = input.frame[..12].to_vec();
+        re.extend_from_slice(&tpid.to_be_bytes());
+        re.extend_from_slice(&tci.to_be_bytes());
+        re.extend_from_slice(&input.frame[12..]);
+        assert_eq!(
+            stripped,
+            filter.matches_with(&re, &BpfAncillary::reinserted(tag))
+        );
+    }
 });

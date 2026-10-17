@@ -30,7 +30,9 @@ use flowscope::SessionEvent;
 use crate::Capture;
 use crate::async_adapters::datagram_stream::DatagramStream;
 use crate::async_adapters::flow_source::{AsyncFlowSource, DrainOutcome, SourcePacket};
-use crate::async_adapters::flow_stream::{FlowStream, clamp_now, clamp_view, current_timestamp};
+use crate::async_adapters::flow_stream::{
+    FlowStream, clamp_now, clamp_view, current_timestamp, poll_sweep,
+};
 use crate::async_adapters::multi_source::MultiSource;
 use crate::async_adapters::session_stream::SessionStream;
 use crate::async_adapters::tokio_adapter::AsyncCapture;
@@ -1054,7 +1056,7 @@ where
 
             // One shared sweep timer drives idle/active timeouts on the
             // merged tracker.
-            if this.sweep.poll_tick(cx).is_ready() {
+            if poll_sweep(&mut this.sweep, cx) {
                 let now = clamp_now(current_timestamp(), &mut this.monotonic_ts);
                 for ev in this.tracker.sweep(now) {
                     this.pending.push_back(ev);
@@ -1803,6 +1805,24 @@ mod merged_tests {
                 .capture_leg_inconsistent,
             "a second, different leg for a bound direction must trip the flag",
         );
+    }
+
+    /// The merged stream's sweep timer stays armed after a tick
+    /// that ends nothing, so an idle flow ends on quiet sources.
+    #[tokio::test(flavor = "current_thread")]
+    async fn idle_flow_ends_on_quiet_sources() {
+        use crate::async_adapters::flow_stream::monotonic_tests::{
+            next_until, one_udp_datagram, quick_idle_config,
+        };
+        let mut config = super::super::multi_config::MultiStreamConfig::default();
+        config.tracker_config = quick_idle_config();
+        let mut merged = super::MergedFlowStream::new_with_config(
+            vec![one_udp_datagram(), one_udp_datagram()],
+            vec!["a".into(), "b".into()],
+            FiveTuple::bidirectional(),
+            config,
+        );
+        next_until(&mut merged, |ev| matches!(ev, FlowEvent::Ended { .. })).await;
     }
 }
 

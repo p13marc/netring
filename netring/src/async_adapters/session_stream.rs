@@ -73,7 +73,7 @@ use flowscope::{
 use futures_core::Stream;
 
 use crate::async_adapters::flow_source::{AsyncFlowSource, DrainOutcome, SourcePacket};
-use crate::async_adapters::flow_stream::{clamp_now, clamp_view, current_timestamp};
+use crate::async_adapters::flow_stream::{clamp_now, clamp_view, current_timestamp, poll_sweep};
 use crate::async_adapters::tokio_adapter::AsyncCapture;
 use crate::dedup::Dedup;
 use crate::error::Error;
@@ -313,7 +313,7 @@ where
                 return Poll::Ready(Some(Ok(ev)));
             }
 
-            if this.sweep.poll_tick(cx).is_ready() {
+            if poll_sweep(&mut this.sweep, cx) {
                 let now = clamp_now(current_timestamp(), &mut this.monotonic_ts);
                 this.driver.sweep_into(now, &mut this.scratch);
                 this.pending.extend(this.scratch.drain(..));

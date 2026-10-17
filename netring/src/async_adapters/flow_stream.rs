@@ -422,7 +422,7 @@ where
                 return Poll::Ready(Some(Ok(evt)));
             }
 
-            if this.sweep.poll_tick(cx).is_ready() {
+            if poll_sweep(&mut this.sweep, cx) {
                 let now = clamp_now(current_timestamp(), &mut this.monotonic_ts);
                 for ev in this.tracker.sweep(now) {
                     this.pending.push_back(ev);
@@ -507,6 +507,22 @@ pub(crate) fn clamp_view<'a>(
     let mut clamped = view;
     clamped.timestamp = *last;
     clamped
+}
+
+/// Poll the sweep timer: `true` when a sweep is due.
+///
+/// When `Interval::poll_tick` returns `Ready` it re-arms its sleep
+/// *without* registering it with the timer (tokio's
+/// `reset_without_timer`); only a later `Pending` poll does. Poll on
+/// until `Pending`, so the next tick wakes the task even if the source
+/// stays quiet — otherwise a tick that ends nothing leaves no timer
+/// armed and idle flows never end. Missed ticks fold into one sweep.
+pub(crate) fn poll_sweep(sweep: &mut tokio::time::Interval, cx: &mut Context<'_>) -> bool {
+    if sweep.poll_tick(cx).is_pending() {
+        return false;
+    }
+    while sweep.poll_tick(cx).is_ready() {}
+    true
 }
 
 /// Plan 19: clamp a sweep `now` argument against a running max if
@@ -667,7 +683,7 @@ where
 }
 
 #[cfg(test)]
-mod monotonic_tests {
+pub(crate) mod monotonic_tests {
     use super::*;
 
     #[test]
@@ -756,6 +772,117 @@ mod monotonic_tests {
             matches!(next, SessionEvent::Started { key, .. } if key.a.port().max(key.b.port()) == 6000),
             "{next:?}"
         );
+    }
+
+    /// Idle timeouts short enough for a test, swept every 50 ms.
+    pub(crate) fn quick_idle_config() -> FlowTrackerConfig {
+        let mut cfg = FlowTrackerConfig::default();
+        cfg.idle_timeout_tcp = Duration::from_millis(300);
+        cfg.idle_timeout_udp = Duration::from_millis(300);
+        cfg.idle_timeout_other = Duration::from_millis(300);
+        cfg.sweep_interval = Duration::from_millis(50);
+        cfg
+    }
+
+    /// One UDP datagram stamped now, from a source that then stays
+    /// quiet (and never wakes the task).
+    pub(crate) fn one_udp_datagram() -> crate::async_adapters::flow_source::VecSource {
+        use flowscope::extract::parse::test_frames::ipv4_udp;
+        crate::async_adapters::flow_source::VecSource(
+            [(
+                ipv4_udp([10, 0, 0, 1], [10, 0, 0, 2], 5000, 53, b"q"),
+                current_timestamp(),
+            )]
+            .into(),
+        )
+    }
+
+    /// Poll `s` until `done` matches an event; panics if the stream
+    /// goes silent for 3 s first. (Not `tokio::time::timeout`: its own
+    /// timer would re-poll the stream and mask a disarmed sweep timer.)
+    pub(crate) async fn next_until<S, T>(s: &mut S, done: impl Fn(&T) -> bool)
+    where
+        S: Stream<Item = Result<T, Error>> + Unpin,
+        T: std::fmt::Debug,
+    {
+        use futures::StreamExt;
+        let deadline = tokio::time::sleep(Duration::from_secs(3));
+        tokio::pin!(deadline);
+        loop {
+            let ev = tokio::select! {
+                biased;
+                () = &mut deadline => panic!("the sweep timer must keep firing on a quiet source"),
+                ev = s.next() => ev.expect("a live stream never ends").unwrap(),
+            };
+            if done(&ev) {
+                return;
+            }
+        }
+    }
+
+    /// A sweep tick that produces no event must leave the timer
+    /// armed, so an idle flow still ends while the source stays quiet.
+    #[tokio::test(flavor = "current_thread")]
+    async fn idle_flow_ends_on_a_quiet_source() {
+        use flowscope::extract::FiveTuple;
+        let mut flows = FlowStream::new(one_udp_datagram(), FiveTuple::bidirectional())
+            .with_config(quick_idle_config());
+        next_until(&mut flows, |ev| matches!(ev, FlowEvent::Ended { .. })).await;
+    }
+
+    #[derive(Clone, Default)]
+    struct NopParser;
+    impl flowscope::DatagramParser for NopParser {
+        type Message = ();
+        fn parse(&mut self, _: &[u8], _: flowscope::FlowSide, _: Timestamp, _: &mut Vec<()>) {}
+    }
+    impl flowscope::SessionParser for NopParser {
+        type Message = ();
+        fn feed_initiator(&mut self, _: &[u8], _: Timestamp, _: &mut Vec<()>) {}
+        fn feed_responder(&mut self, _: &[u8], _: Timestamp, _: &mut Vec<()>) {}
+    }
+
+    fn quick_idle_flows()
+    -> FlowStream<crate::async_adapters::flow_source::VecSource, flowscope::extract::FiveTuple>
+    {
+        FlowStream::new(
+            one_udp_datagram(),
+            flowscope::extract::FiveTuple::bidirectional(),
+        )
+        .with_config(quick_idle_config())
+    }
+
+    /// Same, for the session stream.
+    #[tokio::test(flavor = "current_thread")]
+    async fn idle_session_closes_on_a_quiet_source() {
+        let mut s = quick_idle_flows().session_stream(NopParser);
+        next_until(&mut s, |ev| {
+            matches!(ev, flowscope::SessionEvent::Closed { .. })
+        })
+        .await;
+    }
+
+    /// Same, for the datagram stream.
+    #[tokio::test(flavor = "current_thread")]
+    async fn idle_datagram_flow_closes_on_a_quiet_source() {
+        let mut s = quick_idle_flows().datagram_stream(NopParser);
+        next_until(&mut s, |ev| {
+            matches!(ev, flowscope::SessionEvent::Closed { .. })
+        })
+        .await;
+    }
+
+    /// Same, for the reassembly stream.
+    #[tokio::test(flavor = "current_thread")]
+    async fn idle_reassembled_flow_ends_on_a_quiet_source() {
+        let mut s = quick_idle_flows().with_async_reassembler(
+            crate::async_adapters::async_reassembler::channel_factory(
+                |_: &flowscope::extract::FiveTupleKey, _: flowscope::FlowSide| {
+                    tokio::sync::mpsc::channel(1).0
+                },
+            ),
+        );
+        next_until(&mut s, |ev| matches!(ev, FlowEvent::Ended { .. })).await;
     }
 
     #[test]

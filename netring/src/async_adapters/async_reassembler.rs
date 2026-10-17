@@ -44,7 +44,7 @@ use futures_core::Stream;
 use tokio::sync::mpsc;
 
 use crate::async_adapters::flow_source::{AsyncFlowSource, DrainOutcome, SourcePacket};
-use crate::async_adapters::flow_stream::{clamp_now, clamp_view, current_timestamp};
+use crate::async_adapters::flow_stream::{clamp_now, clamp_view, current_timestamp, poll_sweep};
 use crate::async_adapters::tokio_adapter::AsyncCapture;
 use crate::dedup::Dedup;
 use crate::error::Error;
@@ -524,7 +524,7 @@ where
             }
 
             // 3. Periodic sweep: idle flows end, expired holes release.
-            if this.sweep.poll_tick(cx).is_ready() {
+            if poll_sweep(&mut this.sweep, cx) {
                 let now = clamp_now(current_timestamp(), &mut this.monotonic_ts);
                 let queue = &mut this.queue;
                 let events =

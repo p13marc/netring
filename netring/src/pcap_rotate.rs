@@ -57,8 +57,8 @@ pub struct RotatingConfig {
     pub max_duration: Option<Duration>,
     /// Keep at most this many files; older ones are deleted. `None` = unbounded.
     pub max_files: Option<usize>,
-    /// Keep at most this many bytes across all files; oldest deleted first.
-    /// `None` = unbounded.
+    /// Keep at most this many bytes across all files, the one being written
+    /// included; oldest deleted first. `None` = unbounded.
     pub max_total_bytes: Option<u64>,
     /// File naming scheme.
     pub naming: FileNaming,
@@ -100,26 +100,39 @@ pub struct RotatingPcapWriter {
     current_bytes: u64,
     /// Closed + current files, oldest first, for retention accounting.
     files: VecDeque<FileRecord>,
+    /// Sum of `files[..].bytes` (the open file's record counts 0 until it
+    /// is closed; its size is `current_bytes`).
+    closed_bytes: u64,
 }
 
 impl RotatingPcapWriter {
     /// Create a rotating writer under `dir` with file basename `base`. Files are
     /// opened lazily on the first packet. The directory must exist.
+    ///
+    /// Files a previous writer left under the same basename
+    /// (`<base>-<number>.pcap`, `<base>-<number>-<number>.pcap`) are adopted,
+    /// oldest first: retention counts them, and [`FileNaming::Sequence`]
+    /// continues after the highest number instead of overwriting them.
     pub fn create(
         dir: impl AsRef<Path>,
         base: impl Into<String>,
         config: RotatingConfig,
     ) -> std::io::Result<Self> {
+        let dir = dir.as_ref().to_path_buf();
+        let base = base.into();
+        let (files, seq) = adopt_existing(&dir, &base)?;
+        let closed_bytes = files.iter().map(|r| r.bytes).sum();
         Ok(Self {
-            dir: dir.as_ref().to_path_buf(),
-            base: base.into(),
+            dir,
+            base,
             config,
-            seq: 0,
+            seq,
             current: None,
             current_path: None,
             opened_at: None,
             current_bytes: 0,
-            files: VecDeque::new(),
+            files,
+            closed_bytes,
         })
     }
 
@@ -143,11 +156,22 @@ impl RotatingPcapWriter {
         self.dir.join(name)
     }
 
-    /// Open a fresh file, recording the previous one's final size.
+    /// Open a fresh file, recording the previous one's final size. Never
+    /// truncates an existing file: a taken name moves on to the next one.
     fn open_new(&mut self) -> std::io::Result<()> {
         self.finish_current()?;
-        let path = self.next_path();
-        let file = BufWriter::new(File::create(&path)?);
+        let mut attempts = 0;
+        let (path, file) = loop {
+            let path = self.next_path();
+            match File::options().write(true).create_new(true).open(&path) {
+                Ok(f) => break (path, f),
+                Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists && attempts < 1000 => {
+                    attempts += 1;
+                }
+                Err(e) => return Err(e),
+            }
+        };
+        let file = BufWriter::new(file);
         let writer = CaptureWriter::new_with_linktype(file, self.config.linktype)
             .map_err(std::io::Error::other)?;
         self.current = Some(writer);
@@ -167,6 +191,7 @@ impl RotatingPcapWriter {
             drop(inner);
             if let Some(rec) = self.files.back_mut() {
                 rec.bytes = std::fs::metadata(&rec.path).map(|m| m.len()).unwrap_or(0);
+                self.closed_bytes += rec.bytes;
             }
         }
         self.current_path = None;
@@ -175,32 +200,36 @@ impl RotatingPcapWriter {
         Ok(())
     }
 
-    /// Delete oldest files until the count / total-bytes bounds hold.
+    /// Delete oldest files until the count / total-bytes bounds hold. The
+    /// total includes the open file's bytes; the open file itself is never
+    /// deleted.
     fn enforce_retention(&mut self) -> std::io::Result<()> {
         if let Some(max) = self.config.max_files {
             while self.files.len() > max.max(1) {
-                if let Some(rec) = self.files.pop_front() {
-                    // Warn-and-continue on delete errors (a locked/held file
-                    // must not stall the capture).
-                    if let Err(e) = std::fs::remove_file(&rec.path) {
-                        tracing::warn!(path = %rec.path.display(), error = %e, "pcap rotate: failed to delete old file");
-                    }
-                }
+                self.delete_oldest();
             }
         }
-        if let Some(max) = self.config.max_total_bytes {
-            let total: u64 = self.files.iter().map(|r| r.bytes).sum();
-            let mut total = total;
-            while total > max && self.files.len() > 1 {
-                if let Some(rec) = self.files.pop_front() {
-                    total = total.saturating_sub(rec.bytes);
-                    if let Err(e) = std::fs::remove_file(&rec.path) {
-                        tracing::warn!(path = %rec.path.display(), error = %e, "pcap rotate: failed to delete old file");
-                    }
-                }
-            }
+        while self.over_total_bytes() && self.files.len() > 1 {
+            self.delete_oldest();
         }
         Ok(())
+    }
+
+    fn over_total_bytes(&self) -> bool {
+        self.config
+            .max_total_bytes
+            .is_some_and(|max| self.closed_bytes + self.current_bytes > max)
+    }
+
+    fn delete_oldest(&mut self) {
+        if let Some(rec) = self.files.pop_front() {
+            self.closed_bytes = self.closed_bytes.saturating_sub(rec.bytes);
+            // Warn-and-continue on delete errors (a locked/held file must not
+            // stall the capture).
+            if let Err(e) = std::fs::remove_file(&rec.path) {
+                tracing::warn!(path = %rec.path.display(), error = %e, "pcap rotate: failed to delete old file");
+            }
+        }
     }
 
     /// Whether the current file has crossed a rotation trigger.
@@ -262,6 +291,9 @@ impl RotatingPcapWriter {
         }
         .map_err(std::io::Error::other)?;
         self.current_bytes += PCAP_RECORD_HEADER_BYTES + caplen as u64;
+        if self.over_total_bytes() {
+            self.enforce_retention()?;
+        }
         Ok(())
     }
 
@@ -284,6 +316,9 @@ impl RotatingPcapWriter {
             .write_raw(data, ts, original_len, snaplen)
             .map_err(std::io::Error::other)?;
         self.current_bytes += PCAP_RECORD_HEADER_BYTES + caplen as u64;
+        if self.over_total_bytes() {
+            self.enforce_retention()?;
+        }
         Ok(())
     }
 
@@ -291,6 +326,50 @@ impl RotatingPcapWriter {
     pub fn sync_and_close(&mut self) -> std::io::Result<()> {
         self.finish_current()
     }
+}
+
+/// The files a previous writer left in `dir` under `base`
+/// (`<base>-<number>.pcap` or `<base>-<number>-<number>.pcap`), oldest first,
+/// plus the highest leading number (where a [`FileNaming::Sequence`] writer
+/// continues).
+fn adopt_existing(dir: &Path, base: &str) -> std::io::Result<(VecDeque<FileRecord>, u64)> {
+    let prefix = format!("{base}-");
+    let mut found = Vec::new();
+    let mut max_seq = 0;
+    for entry in std::fs::read_dir(dir)? {
+        let entry = entry?;
+        let name = entry.file_name();
+        let Some(name) = name.to_str() else { continue };
+        let Some(stem) = name
+            .strip_prefix(&prefix)
+            .and_then(|r| r.strip_suffix(".pcap"))
+        else {
+            continue;
+        };
+        let mut parts = stem.split('-');
+        let Some(Ok(first)) = parts.next().map(str::parse::<u64>) else {
+            continue;
+        };
+        if !parts.all(|p| !p.is_empty() && p.bytes().all(|b| b.is_ascii_digit())) {
+            continue;
+        }
+        let meta = entry.metadata()?;
+        if !meta.is_file() {
+            continue;
+        }
+        max_seq = max_seq.max(first);
+        let modified = meta.modified().unwrap_or(std::time::UNIX_EPOCH);
+        found.push((modified, name.to_owned(), meta.len()));
+    }
+    found.sort();
+    let files = found
+        .into_iter()
+        .map(|(_, name, bytes)| FileRecord {
+            path: dir.join(name),
+            bytes,
+        })
+        .collect();
+    Ok((files, max_seq))
 }
 
 /// A bytes-bounded ring of buffered packets — the pre-trigger window (issue
@@ -459,6 +538,93 @@ mod tests {
             on_disk <= 2,
             "retention should cap files at 2, got {on_disk}"
         );
+    }
+
+    fn seq_cfg(max_files: Option<usize>, max_total_bytes: Option<u64>) -> RotatingConfig {
+        RotatingConfig {
+            max_bytes: Some(200),
+            max_duration: None,
+            max_files,
+            max_total_bytes,
+            naming: FileNaming::Sequence,
+            linktype: LINKTYPE_ETHERNET,
+        }
+    }
+
+    fn names(dir: &Path) -> Vec<String> {
+        let mut v: Vec<String> = std::fs::read_dir(dir)
+            .unwrap()
+            .map(|e| e.unwrap().file_name().into_string().unwrap())
+            .collect();
+        v.sort();
+        v
+    }
+
+    /// A restarted writer must not truncate the previous run's files: it
+    /// continues the sequence after them. (A 200-byte record fills a file
+    /// past the 200-byte trigger, so each write after the first rotates.)
+    #[test]
+    fn a_restarted_writer_keeps_the_previous_runs_files() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut w = RotatingPcapWriter::create(dir.path(), "cap", seq_cfg(None, None)).unwrap();
+        for i in 0..2 {
+            w.write_raw(&raw(200), ts(i), 200, None).unwrap();
+        }
+        w.sync_and_close().unwrap();
+        let first = std::fs::read(dir.path().join("cap-000001.pcap")).unwrap();
+
+        let mut w = RotatingPcapWriter::create(dir.path(), "cap", seq_cfg(None, None)).unwrap();
+        w.write_raw(&raw(200), ts(9), 200, None).unwrap();
+        w.sync_and_close().unwrap();
+        assert_eq!(
+            names(dir.path()),
+            ["cap-000001.pcap", "cap-000002.pcap", "cap-000003.pcap"]
+        );
+        assert_eq!(
+            std::fs::read(dir.path().join("cap-000001.pcap")).unwrap(),
+            first,
+            "the previous run's first file was overwritten"
+        );
+    }
+
+    /// Retention covers the files a previous run left behind.
+    #[test]
+    fn retention_counts_the_previous_runs_files() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut w = RotatingPcapWriter::create(dir.path(), "cap", seq_cfg(Some(2), None)).unwrap();
+        for i in 0..2 {
+            w.write_raw(&raw(200), ts(i), 200, None).unwrap();
+        }
+        w.sync_and_close().unwrap();
+        let mut w = RotatingPcapWriter::create(dir.path(), "cap", seq_cfg(Some(2), None)).unwrap();
+        w.write_raw(&raw(200), ts(9), 200, None).unwrap();
+        w.sync_and_close().unwrap();
+        assert_eq!(names(dir.path()), ["cap-000002.pcap", "cap-000003.pcap"]);
+        // Files that don't follow the naming scheme are left alone.
+        std::fs::write(dir.path().join("cap-notes.txt"), b"x").unwrap();
+        let w = RotatingPcapWriter::create(dir.path(), "cap", seq_cfg(Some(2), None)).unwrap();
+        assert_eq!(w.file_paths().len(), 2);
+    }
+
+    /// `max_total_bytes` bounds every file, the open one included, while it
+    /// is being written — not only at the next rotation.
+    #[test]
+    fn total_bytes_bound_includes_the_open_file() {
+        let dir = tempfile::tempdir().unwrap();
+        let cfg = RotatingConfig {
+            max_bytes: Some(1000),
+            ..seq_cfg(None, Some(1500))
+        };
+        let mut w = RotatingPcapWriter::create(dir.path(), "cap", cfg).unwrap();
+        for i in 0..40 {
+            w.write_raw(&raw(84), ts(i), 84, None).unwrap();
+            let closed: u64 = w.files.iter().map(|r| r.bytes).sum();
+            assert!(
+                closed + w.current_bytes <= 1500,
+                "after packet {i}: {closed} closed + {} open > 1500",
+                w.current_bytes
+            );
+        }
     }
 
     #[test]

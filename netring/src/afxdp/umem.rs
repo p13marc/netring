@@ -38,7 +38,7 @@ pub(crate) struct Umem {
 /// 0.25 W4: UMEM placement options for AF_XDP zero-copy tuning.
 #[derive(Debug, Clone, Copy, Default)]
 pub(crate) struct UmemOptions {
-    /// Back the UMEM with `MAP_HUGETLB` (default 2 MiB) hugepages to cut TLB
+    /// Back the UMEM with `MAP_HUGETLB` 2 MiB hugepages to cut TLB
     /// misses on the per-frame DMA path. Falls back to regular pages (with a
     /// `warn`) if hugepages aren't reserved.
     pub(crate) hugepages: bool,
@@ -92,6 +92,10 @@ impl Umem {
         // MAP_PRIVATE | MAP_ANONYMOUS — kernel pins pages via GUP regardless.
         // MAP_POPULATE faults pages in up front. MAP_HUGETLB (0.25 W4) backs the
         // region with hugepages; if that fails (none reserved) retry without it.
+        // MAP_HUGE_2MB pins the page size `alloc_size` was rounded to: bare
+        // MAP_HUGETLB takes the host's *default* hugepage size, and with a
+        // 1 GiB default the kernel would map (and charge) a whole 1 GiB page
+        // that the 2 MiB-sized munmap in Drop cannot unmap (EINVAL) — a leak.
         // `mapped_len` tracks the ACTUAL mapping length so Drop's `munmap` never
         // exceeds it (a too-large munmap would unmap adjacent allocations →
         // memory corruption / SIGSEGV).
@@ -116,7 +120,7 @@ impl Umem {
                     None,
                     nz_size,
                     ProtFlags::PROT_READ | ProtFlags::PROT_WRITE,
-                    base_flags | MapFlags::MAP_HUGETLB,
+                    base_flags | MapFlags::MAP_HUGETLB | MapFlags::MAP_HUGE_2MB,
                 )
             } {
                 Ok(b) => (b, alloc_size),

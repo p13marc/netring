@@ -51,12 +51,9 @@ async fn main() -> Result<(), netring::Error> {
     // Final stats — read after we've stopped capturing so the totals
     // include everything we observed. AsyncCapture exposes a direct
     // passthrough so we don't need `use netring::PacketSource;`.
-    let stats = cap.cumulative_stats()?;
+    let stats = cap.stats()?;
     eprintln!("packets seen: {packets}, bytes: {bytes}");
-    eprintln!(
-        "kernel stats:  packets: {}, drops: {}, freezes: {}",
-        stats.packets, stats.drops, stats.freeze_count
-    );
+    eprintln!("kernel stats:  {stats}");
     Ok(())
 }
 

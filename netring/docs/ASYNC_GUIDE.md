@@ -255,7 +255,7 @@ loop {
         _ = tokio::signal::ctrl_c() => break,
     }
 }
-let stats = cap.cumulative_stats()?;
+let stats = cap.stats()?; // totals since the capture was opened
 println!("done: {stats}");
 ```
 
@@ -276,9 +276,9 @@ loop {
             }
         }
         _ = tick.tick() => {
-            // delta since last tick — feeds into Prometheus etc.
-            let delta = cap.stats()?;
-            netring::metrics::record_capture_delta("eth0", &delta);
+            // lifetime totals, published as absolute counter values —
+            // feeds into Prometheus etc. without double counting.
+            netring::metrics::record_capture_stats("eth0", &cap.stats()?);
         }
     }
 }

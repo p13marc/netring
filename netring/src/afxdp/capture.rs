@@ -461,10 +461,11 @@ mod mq {
         }
 
         /// Unified [`CaptureStats`](crate::CaptureStats) summed across the
-        /// per-queue sockets — see [`XdpSocket::capture_stats`].
+        /// per-queue sockets: totals since the capture was opened — see
+        /// [`XdpSocket::capture_stats`].
         pub fn capture_stats(&self) -> Result<crate::CaptureStats, Error> {
             let (stats, received) = crate::afxdp::sum_socket_stats(&self.sockets)?;
-            Ok(stats.to_capture_stats(received))
+            Ok(stats.capture_stats(received))
         }
 
         /// Non-blocking unified RX: round-robins the queues and returns the next

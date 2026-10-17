@@ -221,7 +221,7 @@ impl AsyncInjector {
         self.inner.get_ref().read_tx_timestamp()
     }
 
-    /// Borrow the inner sink (e.g., for `cumulative_stats`-style accessors).
+    /// Borrow the inner sink (e.g. for sink-level accessors).
     pub fn get_ref(&self) -> &Injector {
         self.inner.get_ref()
     }

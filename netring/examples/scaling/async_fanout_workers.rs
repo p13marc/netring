@@ -63,12 +63,12 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     eprintln!("\n[per-source capture stats]");
     for (label, stats) in stream.per_source_capture_stats() {
         match stats {
-            Some(Ok(s)) => eprintln!("  [{label}] packets={} drops={}", s.packets, s.drops),
+            Some(Ok(s)) => eprintln!("  [{label}] {s}"),
             Some(Err(e)) => eprintln!("  [{label}] error: {e}"),
-            None => eprintln!("  [{label}] exhausted"),
+            None => eprintln!("  [{label}] no kernel ring"),
         }
     }
-    eprintln!("[aggregate] {:?}", stream.capture_stats());
+    eprintln!("[aggregate] {}", stream.capture_stats());
 
     Ok(())
 }

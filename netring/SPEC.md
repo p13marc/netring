@@ -810,13 +810,17 @@ pub enum TimestampSource {
     SysHardware,
 }
 
-/// Capture statistics. Reading resets kernel counters.
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+/// Capture statistics: totals since the source was opened (0.32, #186).
+/// Reading never resets them — AF_PACKET's destructive
+/// `PACKET_STATISTICS` reads are folded into a running total.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Hash)]
+#[non_exhaustive]
 pub struct CaptureStats {
-    pub packets: u32,
-    pub drops: u32,
-    pub freeze_count: u32,
+    pub delivered: u64, // placed in the ring (passed filter, not dropped)
+    pub drops: u64,     // passed filter, dropped for lack of ring space
+    pub freezes: u64,   // AF_PACKET only
 }
+// received() = delivered + drops; drop_ratio(); delta_since(&earlier)
 ```
 
 ### 7.4 Errors

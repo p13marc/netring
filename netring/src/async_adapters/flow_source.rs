@@ -64,11 +64,11 @@ pub(crate) trait AsyncFlowSource {
         sink: &mut dyn FnMut(SourcePacket<'_>),
     ) -> Poll<std::io::Result<DrainOutcome>>;
 
-    /// Kernel-ring statistics when the source has a ring (AF_PACKET,
-    /// AF_XDP); `None` otherwise. Backs
-    /// [`MultiSource::capture_stats`](super::multi_source::MultiSource::capture_stats)
+    /// Kernel-ring statistics (totals since the source was opened) when the
+    /// source has a ring (AF_PACKET, AF_XDP); `None` otherwise. Backs
+    /// [`MultiSource::ring_stats`](super::multi_source::MultiSource::ring_stats)
     /// for the live streams.
-    fn capture_stats(&self) -> Option<Result<crate::stats::CaptureStats, crate::error::Error>> {
+    fn ring_stats(&self) -> Option<Result<crate::stats::CaptureStats, crate::error::Error>> {
         None
     }
 }
@@ -112,7 +112,7 @@ where
         }
     }
 
-    fn capture_stats(&self) -> Option<Result<crate::stats::CaptureStats, crate::error::Error>> {
+    fn ring_stats(&self) -> Option<Result<crate::stats::CaptureStats, crate::error::Error>> {
         Some(self.stats())
     }
 }
@@ -153,7 +153,7 @@ impl AsyncFlowSource for crate::AsyncXdpCapture {
         }
     }
 
-    fn capture_stats(&self) -> Option<Result<crate::stats::CaptureStats, crate::error::Error>> {
+    fn ring_stats(&self) -> Option<Result<crate::stats::CaptureStats, crate::error::Error>> {
         Some(self.capture_stats())
     }
 }

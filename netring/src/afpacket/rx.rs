@@ -13,7 +13,7 @@ use crate::config::{
 };
 use crate::error::Error;
 use crate::packet::{BatchIter, Packet, PacketBatch};
-use crate::stats::{CaptureStats, SourceCounters};
+use crate::stats::CaptureStats;
 use crate::traits::PacketSource;
 
 /// AF_PACKET TPACKET_V3 packet capture.
@@ -55,9 +55,9 @@ pub struct Capture {
     /// Default poll timeout used by [`packets()`](Self::packets).
     /// Configured via [`CaptureBuilder::poll_timeout`].
     poll_timeout: Duration,
-    /// Running totals across calls to [`cumulative_stats`](Self::cumulative_stats).
-    /// `stats()` (the destructive variant) does not touch this.
-    cumulative: Cell<SourceCounters>,
+    /// Running totals behind [`stats`](Self::stats): every destructive
+    /// `PACKET_STATISTICS` read is folded in here.
+    cumulative: Cell<CaptureStats>,
     /// Busy-poll trio applied at build time. Inspected via
     /// [`busy_poll_config`](Self::busy_poll_config). Empty (all
     /// `None`) when no busy-poll knobs were set.
@@ -189,34 +189,22 @@ impl Capture {
 
     // ── Stats ────────────────────────────────────────────────────────────
 
-    /// Capture statistics since the last call. **Resets kernel counters.**
+    /// Capture statistics: totals since this capture was opened.
     ///
-    /// For monotonic totals (no kernel-counter reset), use
-    /// [`cumulative_stats`](Self::cumulative_stats).
+    /// Reads (and thereby resets) the kernel's `PACKET_STATISTICS`
+    /// counters, folds them into a running total kept on the capture and
+    /// returns that total, so the result never goes backwards and repeated
+    /// calls never lose a count. Two reads with no traffic in between are
+    /// equal; the counts of a window are
+    /// [`later.delta_since(&earlier)`](CaptureStats::delta_since). See
+    /// [`CaptureStats`] for the meaning of each field.
+    ///
+    /// # Errors
+    ///
+    /// [`Error::SockOpt`] if `getsockopt(PACKET_STATISTICS)` fails.
     pub fn stats(&self) -> Result<CaptureStats, Error> {
         let raw = socket::get_packet_stats(self.fd.as_fd())?;
-        Ok(CaptureStats::from(raw))
-    }
-
-    /// Accumulated statistics since this capture was opened.
-    ///
-    /// Internally calls `stats()` (which resets kernel counters) and adds
-    /// the delta to a running total stored on `self`. Returned counters
-    /// are monotonically non-decreasing across calls (and saturate at
-    /// `u32::MAX`). **Do not mix with `stats()` on the same capture** — each
-    /// `stats()` call also resets the kernel counter and bypasses the
-    /// running total.
-    pub fn cumulative_stats(&self) -> Result<CaptureStats, Error> {
-        self.cumulative_counters()
-            .map(SourceCounters::to_capture_stats)
-    }
-
-    /// The running totals behind [`cumulative_stats`](Self::cumulative_stats)
-    /// in `u64`, with delivered packets split from drops — what the Monitor
-    /// telemetry reads (#183, #184).
-    pub(crate) fn cumulative_counters(&self) -> Result<SourceCounters, Error> {
-        let delta = socket::get_packet_stats(self.fd.as_fd())?;
-        let total = self.cumulative.get().add_tpacket_v3(delta);
+        let total = self.cumulative.get().add_tpacket_v3(raw);
         self.cumulative.set(total);
         Ok(total)
     }
@@ -493,10 +481,6 @@ impl PacketSource for Capture {
 
     fn stats(&self) -> Result<CaptureStats, Error> {
         Capture::stats(self)
-    }
-
-    fn cumulative_stats(&self) -> Result<CaptureStats, Error> {
-        Capture::cumulative_stats(self)
     }
 }
 
@@ -1190,7 +1174,7 @@ fn build_inner(b: &CaptureBuilder, block_count: usize) -> Result<Capture, Error>
         current_block: 0,
         expected_seq: 0,
         poll_timeout: b.poll_timeout,
-        cumulative: Cell::new(SourceCounters::default()),
+        cumulative: Cell::new(CaptureStats::default()),
         busy_poll,
         stop: None,
     })

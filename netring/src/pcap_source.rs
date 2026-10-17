@@ -148,8 +148,8 @@ impl AsyncPcapSource {
     }
 
     /// Number of packets yielded so far (analog to
-    /// [`CaptureStats::packets`](crate::stats::CaptureStats) for live
-    /// captures).
+    /// [`CaptureStats::delivered`](crate::stats::CaptureStats::delivered)
+    /// for live captures).
     pub fn packets_yielded(&self) -> u64 {
         self.packets_yielded.load(Ordering::Relaxed)
     }

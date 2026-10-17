@@ -1231,14 +1231,14 @@ impl XdpSocket {
     }
 
     /// Unified [`CaptureStats`](crate::CaptureStats) for this socket, with
-    /// the same meaning as on AF_PACKET: `packets` = packets received
-    /// (placed in the RX ring, counted in userspace since `XDP_STATISTICS`
-    /// has none) **plus** the dropped ones, `drops` = `rx_dropped +
-    /// rx_ring_full`. Monotonic; each field saturates at `u32::MAX`. For
-    /// the per-cause counters use [`statistics`](Self::statistics).
+    /// the same meaning as on AF_PACKET — totals since the socket was
+    /// opened: `delivered` = packets placed in the RX ring (counted in
+    /// userspace, since `XDP_STATISTICS` has no RX count), `drops` =
+    /// `rx_dropped + rx_ring_full`, `freezes` = 0. Never resets. For the
+    /// per-cause counters use [`statistics`](Self::statistics).
     #[cfg(feature = "af-xdp")]
     pub fn capture_stats(&self) -> Result<crate::CaptureStats, Error> {
-        Ok(self.statistics()?.to_capture_stats(self.rx_received()))
+        Ok(self.statistics()?.capture_stats(self.rx_received()))
     }
 
     /// Packets the kernel has placed in this socket's RX ring so far

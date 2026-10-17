@@ -41,7 +41,7 @@ fn bridge_run_iterations_smoke() {
         })
         .expect("run_iterations");
 
-    let stats = bridge.cumulative_stats().expect("stats");
+    let stats = bridge.stats().expect("stats");
     eprintln!(
         "bridge_run_iterations_smoke: saw {total_seen} packets, drops a→b={} b→a={}",
         stats.a_to_b.drops, stats.b_to_a.drops
@@ -255,7 +255,7 @@ fn bridge_forwards_a_block_larger_than_the_tx_ring() {
         .run_iterations(40, |_pkt, _dir| BridgeAction::Forward)
         .expect("run_iterations");
 
-    let stats = bridge.cumulative_stats().expect("stats");
+    let stats = bridge.stats().expect("stats");
     assert_eq!(stats.a_to_b_dropped_ring_full, 0, "{stats}");
     let found = count_marked(&mut sink, marker.as_bytes(), Duration::from_millis(500));
     assert_eq!(

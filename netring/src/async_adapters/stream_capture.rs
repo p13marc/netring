@@ -32,9 +32,8 @@
 //! ```
 //!
 //! The trait's default methods cover the common cases
-//! ([`capture_stats`](StreamCapture::capture_stats),
-//! [`capture_cumulative_stats`](StreamCapture::capture_cumulative_stats));
-//! impls supply only the [`capture`](StreamCapture::capture) hook.
+//! ([`capture_stats`](StreamCapture::capture_stats)); impls supply only the
+//! [`capture`](StreamCapture::capture) hook.
 
 use std::os::unix::io::AsRawFd;
 
@@ -70,15 +69,12 @@ pub trait StreamCapture: Sealed {
     /// includes `set_filter` (plan 21), `detach_filter`, etc.
     fn capture(&self) -> &AsyncCapture<Self::Source>;
 
-    /// Kernel ring statistics for the underlying capture.
+    /// Kernel ring statistics for the underlying capture: totals since the
+    /// capture was opened (see [`CaptureStats`]).
     ///
-    /// **Resets the kernel counters** on read (AF_PACKET semantics).
-    /// Pair with [`capture_cumulative_stats`](Self::capture_cumulative_stats)
-    /// if you want monotonic totals.
-    ///
-    /// For offline sources (plan 23's `AsyncPcapSource`), this
-    /// returns `packets = #packets read so far`, `drops = 0`,
-    /// `freeze_count = 0`.
+    /// Never resets — two reads with no traffic in between are equal, and
+    /// the counts of a window are
+    /// [`later.delta_since(&earlier)`](CaptureStats::delta_since).
     ///
     /// # Errors
     ///
@@ -87,13 +83,6 @@ pub trait StreamCapture: Sealed {
     /// the socket has been closed.
     fn capture_stats(&self) -> Result<CaptureStats, Error> {
         self.capture().stats()
-    }
-
-    /// Monotonic counterpart of [`capture_stats`](Self::capture_stats).
-    /// Accumulates across reads, so callers polling on a timer see
-    /// non-decreasing values.
-    fn capture_cumulative_stats(&self) -> Result<CaptureStats, Error> {
-        self.capture().cumulative_stats()
     }
 
     /// Borrow the embedded loopback dedup, if one was attached via

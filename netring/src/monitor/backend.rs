@@ -31,7 +31,7 @@ use flowscope::{PacketView, Timestamp};
 use crate::AsyncCapture;
 use crate::error::{Error, Result};
 use crate::packet::PacketDirection;
-use crate::stats::SourceCounters;
+use crate::stats::CaptureStats;
 
 /// Packets one [`AnyBackend::drain_batch`] call delivers before it returns
 /// to the run loop — checked between batches, which are never split (an
@@ -173,22 +173,22 @@ impl AnyBackend {
         Ok((last_ts, delivered >= DRAIN_BUDGET))
     }
 
-    /// Cumulative `u64` counters (delivered packets split from drops)
+    /// Cumulative [`CaptureStats`] (lifetime totals of the current backend)
     /// **plus** the per-source [`DropBreakdown`](crate::stats::DropBreakdown)
     /// — the un-collapsed "where did packets drop" detail (issue #39).
     /// Returns both from a single counter read so AF_PACKET's destructive
     /// `PACKET_STATISTICS` read isn't double-consumed.
-    pub(crate) fn counters(&self) -> Result<(SourceCounters, crate::stats::DropBreakdown)> {
+    pub(crate) fn counters(&self) -> Result<(CaptureStats, crate::stats::DropBreakdown)> {
         match self {
             AnyBackend::AfPacket(cap) => {
-                let c = cap.get_ref().cumulative_counters()?;
+                let c = cap.get_ref().stats()?;
                 let detail = crate::stats::DropBreakdown::AfPacket { freezes: c.freezes };
                 Ok((c, detail))
             }
             #[cfg(feature = "af-xdp")]
             AnyBackend::Xdp(xdp) => {
                 let s = xdp.statistics()?;
-                Ok((s.counters(xdp.get_ref().rx_received()), s.into()))
+                Ok((s.capture_stats(xdp.get_ref().rx_received()), s.into()))
             }
             #[cfg(all(feature = "af-xdp", feature = "xdp-loader"))]
             AnyBackend::XdpMq(cap) => cap.counters(),

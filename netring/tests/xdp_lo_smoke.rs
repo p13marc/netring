@@ -680,10 +680,9 @@ fn afxdp_lo_capture_stats_counts_each_drop_once() {
     let raw = sock.statistics().expect("statistics");
     let cs = sock.capture_stats().expect("capture_stats");
     eprintln!("raw: {raw}; capture_stats: {cs}");
-    let (packets, drops) = (cs.packets as usize, cs.drops as usize);
+    let (delivered, drops) = (cs.delivered as usize, cs.drops as usize);
     assert!(drops >= N / 2, "the socket should have overflowed: {cs}");
     assert!(drops <= N + 256, "drops counted twice? {cs} for {N} sent");
-    let delivered = packets - drops;
     assert!(
         delivered > 0 && delivered <= 64,
         "only the 64 prefilled frames can hold packets: {cs}"
@@ -701,7 +700,7 @@ fn afxdp_lo_capture_stats_counts_each_drop_once() {
     }
     assert!(drained <= 64, "drained {drained}");
     let after = sock.capture_stats().expect("capture_stats");
-    assert!(after.packets >= cs.packets, "{after} < {cs}");
+    assert!(after.received() >= cs.received(), "{after} < {cs}");
     drop(sock);
     std::thread::sleep(Duration::from_millis(300));
 }

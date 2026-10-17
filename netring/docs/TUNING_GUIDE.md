@@ -118,30 +118,34 @@ sudo ethtool -T eth0
 
 ## Monitoring
 
-### Capture statistics — destructive vs cumulative
+### Capture statistics — lifetime totals
 
 ```rust
-let delta = cap.stats()?;             // since last call (resets kernel counters)
-let total = cap.cumulative_stats()?;  // monotonic since open
+let earlier = cap.stats()?;               // totals since the capture was opened
+// ... a second later ...
+let now = cap.stats()?;                   // never resets: reading is free
+let window = now.delta_since(&earlier);   // what that second saw
 ```
 
-| Field | Meaning |
+| Field / method | Meaning |
 |-------|---------|
-| `packets` | Packets received (passed BPF filter), **including** the dropped ones (kernel convention) |
-| `drops` | Packets dropped because the ring was full — the loss fraction is `drops / packets` |
-| `freeze_count` | Times the ring was frozen (queue depth exceeded) |
+| `delivered` | Packets placed in the ring for userspace (passed the BPF filter, not dropped) |
+| `drops` | Packets that passed the filter but were dropped because the ring was full |
+| `freezes` | Times the ring was frozen (AF_PACKET; 0 on AF_XDP) |
+| `received()` | `delivered + drops` — every packet that reached the socket (the kernel's `tp_packets`) |
+| `drop_ratio()` | `drops / received()` — the loss fraction, `0.0` with no traffic |
 
-**`stats()` resets kernel counters.** **Don't mix `stats()` and
-`cumulative_stats()`** on the same capture — each `stats()` call also
-resets the kernel counter and bypasses the running total.
+Every accessor (`Capture::stats`, `AsyncCapture::stats`,
+`StreamCapture::capture_stats`, the fan-ins' `capture_stats`,
+`XdpSocket::capture_stats`, `Bridge::stats`) returns the same lifetime
+totals on both backends; none of them resets anything (0.32, #186).
 
 ### Metrics integration (feature: `metrics`)
 
 ```rust
-use netring::metrics::record_capture_delta;
+use netring::metrics::record_capture_stats;
 loop {
-    let delta = cap.stats()?;
-    record_capture_delta("eth0", &delta);  // → metrics::counter!
+    record_capture_stats("eth0", &cap.stats()?);  // → absolute counter values
     std::thread::sleep(Duration::from_secs(1));
 }
 ```

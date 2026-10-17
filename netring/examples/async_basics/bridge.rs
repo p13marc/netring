@@ -58,7 +58,7 @@ async fn main() -> Result<(), netring::Error> {
         }
     }
 
-    let stats = bridge.cumulative_stats()?;
+    let stats = bridge.stats()?;
     eprintln!("Final: {stats}");
     Ok(())
 }

@@ -44,12 +44,14 @@ Started from GitHub #138 (AF_XDP drops double-counted) and became a
 whole-crate audit: five read-only subsystem reviews, then fixes each pinned
 by a test that fails on 0.31.1. Things worth knowing when touching the code:
 
-- **Capture statistics** (`stats.rs`): `CaptureStats::packets` includes
-  drops on both backends (the kernel's AF_PACKET convention); the Monitor
-  reads crate-internal `SourceCounters` (`u64`, delivered split from drops
-  per kernel read) and `TelemetrySampler` rebases across Reopen. AF_XDP
-  counts received packets in the RX ring (`XdpRing::received_total`,
-  counted at release).
+- **Capture statistics** (`stats.rs`, 0.32 #186): `CaptureStats` is
+  `u64` `delivered` / `drops` / `freezes`, totals since open on every
+  accessor; `received()` = delivered + drops (the kernel's `tp_packets`).
+  `Capture::stats` folds each destructive `PACKET_STATISTICS` read into
+  `Capture.cumulative` (delivered split from drops per read). The Monitor
+  reads the same totals and `TelemetrySampler` rebases across Reopen.
+  AF_XDP counts received packets in the RX ring
+  (`XdpRing::received_total`, counted at release).
 - **TX ring** (`afpacket/tx.rs`): `TPACKET_V2` + `tpacket2_hdr`, frames
   addressed per block; the version and the header must agree (#187).
 - **AF_PACKET RX** (`afpacket/rx.rs`): socket created with protocol 0,
@@ -75,7 +77,7 @@ Depends on **flowscope 0.25.1**; `netring-exporters` stays 0.7.0.
 
 - **`MultiSource`** (`async_adapters/multi_source.rs`, sealed):
   per-source introspection of every source stream (tracker, flow
-  snapshots, dedup, `capture_stats` = None for replay, `packets_read`
+  snapshots, dedup, `ring_stats` = None for replay, `packets_read`
   = None for kernel sources). The `Multi*Stream` fan-ins hold
   `SelectState<AnySource<E, Native, Ev>>` — the constructor's concrete
   stream or a boxed `push_source`d one — and expose `source(idx)` /

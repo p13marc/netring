@@ -94,23 +94,13 @@ impl XdpStats {
         self.rx_dropped.saturating_add(self.rx_ring_full)
     }
 
-    /// The Monitor's `u64` counters for a socket that has `received`
-    /// packets placed in its RX ring (`XDP_STATISTICS` has no RX count; the
-    /// RX ring keeps one, see `XdpRing::received_total`).
-    pub(crate) fn counters(self, received: u64) -> crate::stats::SourceCounters {
-        crate::stats::SourceCounters {
-            delivered: received,
-            drops: self.rx_packet_drops(),
-            freezes: 0,
-        }
-    }
-
-    /// Project to the unified [`CaptureStats`](crate::stats::CaptureStats):
-    /// `packets = received + drops` (every packet the socket got, as on
-    /// AF_PACKET) and `drops` = [`rx_packet_drops`](Self::rx_packet_drops),
-    /// each clamped at `u32::MAX`.
-    pub(crate) fn to_capture_stats(self, received: u64) -> crate::stats::CaptureStats {
-        self.counters(received).to_capture_stats()
+    /// The unified [`CaptureStats`](crate::stats::CaptureStats) of a socket
+    /// that has had `received` packets placed in its RX ring
+    /// (`XDP_STATISTICS` has no RX count; the RX ring keeps one, see
+    /// `XdpRing::received_total`): `delivered = received`, `drops` =
+    /// [`rx_packet_drops`](Self::rx_packet_drops), `freezes = 0`.
+    pub(crate) fn capture_stats(self, received: u64) -> crate::stats::CaptureStats {
+        crate::stats::CaptureStats::new(received, self.rx_packet_drops(), 0)
     }
 }
 
@@ -177,7 +167,7 @@ mod tests {
     }
 
     #[test]
-    fn to_capture_stats_drops_are_lost_packets_only() {
+    fn capture_stats_drops_are_lost_packets_only() {
         // Neither the invalid-desc count nor the fill-ring starvation count
         // is a lost packet of its own: drops = rx_dropped + rx_ring_full.
         let s = XdpStats {
@@ -188,10 +178,9 @@ mod tests {
             tx_invalid_descs: 9,
             tx_ring_empty_descs: 9,
         };
-        let cs = s.to_capture_stats(10);
-        assert_eq!(cs.drops, 3, "1 + 2");
-        assert_eq!(cs.packets, 13, "10 received + 3 dropped");
-        assert_eq!(cs.freeze_count, 0);
+        let cs = s.capture_stats(10);
+        assert_eq!(cs, crate::stats::CaptureStats::new(10, 3, 0));
+        assert_eq!(cs.received(), 13, "10 received + 3 dropped");
         // The full picture is still reachable via the breakdown.
         let b = crate::stats::DropBreakdown::from(s);
         assert_eq!(b.total_rx_drops(), 1003);
@@ -207,9 +196,9 @@ mod tests {
             rx_fill_ring_empty_descs: 2_110_908,
             ..XdpStats::default()
         };
-        let cs = s.to_capture_stats(4_092);
+        let cs = s.capture_stats(4_092);
         assert_eq!(cs.drops, 2_110_908);
-        assert_eq!(cs.packets, 2_115_000);
+        assert_eq!(cs.received(), 2_115_000);
     }
 
     /// Zero-copy: failed refill batches bump the fill-ring counter with no
@@ -220,21 +209,20 @@ mod tests {
             rx_fill_ring_empty_descs: 50_000,
             ..XdpStats::default()
         };
-        let cs = s.to_capture_stats(1_000);
-        assert_eq!((cs.packets, cs.drops), (1_000, 0));
+        let cs = s.capture_stats(1_000);
+        assert_eq!((cs.delivered, cs.drops), (1_000, 0));
     }
 
-    /// The Monitor's counters are not clamped; the public view is, and
-    /// keeps `drops <= packets`.
+    /// #186: no `u32` clamp — the unified view is `u64` end to end.
     #[test]
-    fn counters_are_u64_and_the_public_view_clamps() {
+    fn capture_stats_are_not_clamped() {
         let s = XdpStats {
             rx_dropped: 5_000_000_000,
             ..XdpStats::default()
         };
-        assert_eq!(s.counters(7).drops, 5_000_000_000);
-        let cs = s.to_capture_stats(7);
-        assert_eq!((cs.packets, cs.drops), (u32::MAX, u32::MAX));
+        let cs = s.capture_stats(7);
+        assert_eq!((cs.delivered, cs.drops), (7, 5_000_000_000));
+        assert_eq!(cs.received(), 5_000_000_007);
     }
 
     #[test]

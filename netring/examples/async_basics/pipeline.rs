@@ -4,7 +4,7 @@
 //! ring), N worker tasks consume `OwnedPacket`s from a bounded channel
 //! and do CPU-heavy work. Backpressure flows back automatically — when
 //! workers fall behind, `tx.send().await` blocks the capture task; when
-//! the OS ring fills up, you'll see drops surface in `cumulative_stats`.
+//! the OS ring fills up, you'll see drops surface in `stats().drops`.
 //!
 //! Usage: cargo run --example async_pipeline --features tokio -- [iface] [workers] [duration_secs]
 
@@ -100,7 +100,7 @@ async fn main() -> Result<(), netring::Error> {
                             // tx.send().await applies backpressure if the
                             // channel is full — slowing the capture loop,
                             // which surfaces as kernel-side drops in
-                            // cumulative_stats.
+                            // stats().drops.
                             if tx.send(pkt).await.is_err() {
                                 return; // workers all exited
                             }

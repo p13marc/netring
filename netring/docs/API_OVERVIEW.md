@@ -68,8 +68,9 @@ while let Some(batch) = cap.next_batch_blocking(Duration::from_millis(100))? {
 ### Stats
 
 ```rust,no_run
-let s = cap.stats()?;             // since last call (resets kernel counters)
-let s2 = cap.cumulative_stats()?; // since open (monotonic)
+let s = cap.stats()?;             // totals since open; never resets
+// s.delivered / s.drops / s.freezes, s.received(), s.drop_ratio()
+let window = cap.stats()?.delta_since(&s); // counts between two reads
 ```
 
 ## Injector (TX)
@@ -234,8 +235,8 @@ Each stream chain accepts the same builder knobs:
 - `.snapshot_flow_stats()` — live `(K, FlowStats)` pairs, owned (the same shape on every stream).
 
 The [`StreamCapture`](https://docs.rs/netring/latest/netring/trait.StreamCapture.html)
-trait gives all four stream types `capture()`, `capture_stats()`, and
-`capture_cumulative_stats()` for out-of-band ring observability +
+trait gives all four stream types `capture()` and `capture_stats()`
+(lifetime ring totals) for out-of-band ring observability +
 plan-21 `stream.capture().set_filter(...)` BPF swap.
 
 Parsers (`SessionParser` / `DatagramParser`) get a periodic

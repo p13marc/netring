@@ -17,7 +17,7 @@ use std::time::Duration;
 
 use crate::ctx::{Ctx, SourceIdx};
 use crate::error::Result;
-use crate::stats::{DropBreakdown, SourceCounters};
+use crate::stats::{CaptureStats, DropBreakdown};
 
 /// A per-source snapshot of capture health, delivered to an
 /// [`on_capture_stats`](crate::monitor::MonitorBuilder::on_capture_stats)
@@ -41,8 +41,7 @@ pub struct CaptureTelemetry {
     pub source: SourceIdx,
     /// Cumulative packets delivered to userspace: passed the kernel BPF
     /// filter and were placed in the ring. Excludes [`drops`](Self::drops)
-    /// (unlike [`CaptureStats::packets`](crate::CaptureStats::packets),
-    /// which follows the kernel's AF_PACKET convention of including them).
+    /// — the same meaning as [`CaptureStats::delivered`](crate::CaptureStats::delivered).
     pub packets: u64,
     /// Cumulative packets the kernel dropped because the ring had no room
     /// for them (AF_PACKET: `tp_drops`; AF_XDP: `rx_dropped +
@@ -195,7 +194,7 @@ impl From<CaptureTelemetry> for CaptureHealth {
 }
 
 /// Internal per-source accumulator that turns the backends' cumulative
-/// [`SourceCounters`] into a [`CaptureTelemetry`] with a *windowed*
+/// [`CaptureStats`] into a [`CaptureTelemetry`] with a *windowed*
 /// `drop_rate`. One slot per capture source.
 ///
 /// A backend's counters restart from zero when the source is reopened
@@ -212,24 +211,24 @@ pub(crate) struct TelemetrySampler {
 #[derive(Default, Clone, Copy)]
 struct SamplerSlot {
     /// Totals carried over from retired backends.
-    base: SourceCounters,
+    base: CaptureStats,
     base_detail: Option<DropBreakdown>,
     /// The current backend's last reading.
-    last_raw: SourceCounters,
+    last_raw: CaptureStats,
     last_raw_detail: Option<DropBreakdown>,
     /// The last cumulative value reported (`base + last_raw`).
-    last_cum: SourceCounters,
+    last_cum: CaptureStats,
 }
 
 impl SamplerSlot {
     /// Fold the current backend's counters into `base` and start over.
-    fn rebase(&mut self, fin: SourceCounters, fin_detail: Option<DropBreakdown>) {
+    fn rebase(&mut self, fin: CaptureStats, fin_detail: Option<DropBreakdown>) {
         self.base = self.base.saturating_add(fin);
         self.base_detail = match (self.base_detail, fin_detail) {
             (Some(b), Some(f)) => Some(b.saturating_add(f)),
             (b, f) => f.or(b),
         };
-        self.last_raw = SourceCounters::default();
+        self.last_raw = CaptureStats::default();
         self.last_raw_detail = None;
     }
 }
@@ -250,7 +249,7 @@ impl TelemetrySampler {
     pub(crate) fn sample(
         &mut self,
         source: usize,
-        raw: SourceCounters,
+        raw: CaptureStats,
         detail: DropBreakdown,
     ) -> CaptureTelemetry {
         let slot = &mut self.slots[source];
@@ -262,7 +261,7 @@ impl TelemetrySampler {
             slot.rebase(last, last_detail);
         }
         let cum = slot.base.saturating_add(raw);
-        let window = cum.saturating_sub(slot.last_cum);
+        let window = cum.delta_since(&slot.last_cum);
         slot.last_raw = raw;
         slot.last_raw_detail = Some(detail);
         slot.last_cum = cum;
@@ -292,7 +291,7 @@ impl TelemetrySampler {
     /// fold its final reading — or, if that couldn't be read, its last
     /// sampled one — into the source's base. A no-op when telemetry isn't
     /// armed (no slots).
-    pub(crate) fn retire(&mut self, source: usize, fin: Option<(SourceCounters, DropBreakdown)>) {
+    pub(crate) fn retire(&mut self, source: usize, fin: Option<(CaptureStats, DropBreakdown)>) {
         let Some(slot) = self.slots.get_mut(source) else {
             return;
         };
@@ -307,7 +306,7 @@ impl TelemetrySampler {
 
     /// The last cumulative totals reported for `source` (for a sample whose
     /// read failed, so the health totals don't dip).
-    pub(crate) fn last_cumulative(&self, source: usize) -> Option<SourceCounters> {
+    pub(crate) fn last_cumulative(&self, source: usize) -> Option<CaptureStats> {
         self.slots.get(source).map(|s| s.last_cum)
     }
 }
@@ -342,12 +341,8 @@ mod tests {
     use super::*;
 
     /// A backend's cumulative counters: `delivered` excludes `drops`.
-    fn stats(delivered: u64, drops: u64, freezes: u64) -> SourceCounters {
-        SourceCounters {
-            delivered,
-            drops,
-            freezes,
-        }
+    fn stats(delivered: u64, drops: u64, freezes: u64) -> CaptureStats {
+        CaptureStats::new(delivered, drops, freezes)
     }
 
     /// AF_PACKET drop breakdown for a given freeze count — the detail
@@ -359,8 +354,8 @@ mod tests {
     /// The counters an AF_PACKET backend reports after one kernel read of
     /// `tp_packets` / `tp_drops` (the kernel includes the drops in
     /// `tp_packets`).
-    fn afp_read(tp_packets: u32, tp_drops: u32) -> SourceCounters {
-        SourceCounters::default().add_tpacket_v3(crate::afpacket::ffi::tpacket_stats_v3 {
+    fn afp_read(tp_packets: u32, tp_drops: u32) -> CaptureStats {
+        CaptureStats::default().add_tpacket_v3(crate::afpacket::ffi::tpacket_stats_v3 {
             tp_packets,
             tp_drops,
             tp_freeze_q_cnt: 0,
@@ -434,7 +429,7 @@ mod tests {
                 rx_dropped: d,
                 ..Default::default()
             }
-            .counters(n)
+            .capture_stats(n)
         };
         let _ = s.sample(0, xdp(0, 0), afp(0));
         let t = s.sample(0, xdp(900, 100), afp(0));

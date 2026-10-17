@@ -367,20 +367,13 @@ impl<S: PacketSource + AsRawFd> AsyncCapture<S> {
         PacketStream::new(self)
     }
 
-    /// Capture statistics — passthrough to [`PacketSource::stats`].
+    /// Capture statistics: totals since the source was opened —
+    /// passthrough to [`PacketSource::stats`].
     ///
-    /// Saves `use netring::PacketSource;` at the call site. **Resets kernel
-    /// counters on each read** — see [`PacketSource::stats`] for the full
-    /// contract or [`cumulative_stats`](Self::cumulative_stats) for monotonic
-    /// totals.
+    /// Saves `use netring::PacketSource;` at the call site. Never resets;
+    /// see [`PacketSource::stats`] for the full contract.
     pub fn stats(&self) -> Result<crate::stats::CaptureStats, Error> {
         self.inner.get_ref().stats()
-    }
-
-    /// Accumulated statistics since the source was created — passthrough to
-    /// [`PacketSource::cumulative_stats`].
-    pub fn cumulative_stats(&self) -> Result<crate::stats::CaptureStats, Error> {
-        self.inner.get_ref().cumulative_stats()
     }
 }
 

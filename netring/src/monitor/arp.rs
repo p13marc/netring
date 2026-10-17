@@ -210,6 +210,12 @@ impl ArpWatch {
         let first = *self.first_seen.get_or_insert(ts);
         let in_warmup = ts.saturating_sub(first) < self.config.warmup;
 
+        // An ARP probe (RFC 5227 §2.1.1: sender IP 0.0.0.0) claims no
+        // address — nothing to learn, nothing to compare.
+        if msg.sender_ip.is_unspecified() {
+            return None;
+        }
+
         // Self-contained packet property — fires regardless of learning or
         // warm-up. Allowlisted (ip, mac) pairs are trusted and never alert.
         let allowed = self.config.allow.contains(&(msg.sender_ip, msg.sender));
@@ -363,6 +369,22 @@ mod tests {
         let m = build_arp(ArpOp::Reply, mac(0xaa), ip(4), mac(0xbb), ip(4));
         assert!(m.is_likely_spoof());
         assert!(w.observe(&m, ts(0)).is_none());
+    }
+
+    /// RFC 5227 §2.1.1: an ARP probe (sender IP 0.0.0.0) claims no
+    /// address — two hosts probing are not 0.0.0.0 changing MAC.
+    #[test]
+    fn probes_teach_no_binding() {
+        let cfg = ArpConfig {
+            report_new_binding: true,
+            ..Default::default()
+        };
+        let mut w = ArpWatch::new(cfg);
+        assert!(w.observe(&reply(ip(1), mac(1), ip(9)), ts(0)).is_none());
+        let probe = |m: MacAddr| build_arp(ArpOp::Request, m, Ipv4Addr::UNSPECIFIED, mac(0), ip(7));
+        assert!(w.observe(&probe(mac(0xa)), ts(10)).is_none());
+        assert!(w.observe(&probe(mac(0xb)), ts(11)).is_none());
+        assert!(w.table.peek(&Ipv4Addr::UNSPECIFIED, ts(11)).is_none());
     }
 
     #[test]

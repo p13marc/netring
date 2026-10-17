@@ -2854,7 +2854,10 @@ fn absorb_frame_assets(
 
     #[cfg(feature = "arp")]
     if let Ok(m) = flowscope::arp::parse_frame(view.frame) {
-        feed!(flowscope::Asset::from_arp(&m));
+        let mut a = flowscope::Asset::from_arp(&m);
+        // An ARP probe's sender IP 0.0.0.0 (RFC 5227) is no address.
+        a.ipv4.retain(|ip| !ip.is_unspecified());
+        feed!(a);
     }
     #[cfg(feature = "ndp")]
     if let Ok(layers) = view.layers()

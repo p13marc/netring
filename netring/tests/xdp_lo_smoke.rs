@@ -89,6 +89,11 @@ fn afxdp_lo_redirect_all_captures_loopback_traffic() {
             .xdp_attach_flags(XdpFlags::SKB_MODE)
             .build()
     });
+    // A self-attached SKB-mode program binds the socket with XDP_COPY.
+    assert!(
+        !sock.is_zerocopy(),
+        "SKB-mode attach must bind in copy mode"
+    );
 
     // Generate loopback ingress: UDP to 127.0.0.1 is transmitted on `lo` and
     // received back on `lo`, where generic XDP redirects it to our socket

@@ -288,8 +288,9 @@ mod mq {
             self
         }
 
-        /// XDP attach mode. Default: `SKB_MODE` (works everywhere incl. `lo`).
-        /// Use `DRV_MODE` for native-driver zero-copy on a real NIC.
+        /// XDP attach mode. Default: `SKB_MODE` (works everywhere incl. `lo`;
+        /// the sockets then bind in copy mode, `XDP_COPY`). Use `DRV_MODE`
+        /// for native-driver zero-copy on a real NIC.
         pub fn attach_flags(mut self, flags: XdpFlags) -> Self {
             self.attach_flags = flags;
             self
@@ -343,26 +344,7 @@ mod mq {
             // registered at its queue index in the shared XSKMAP.
             let mut sockets = Vec::with_capacity(queue_ids.len());
             for &q in &queue_ids {
-                let mut b = XdpSocketBuilder::default()
-                    .interface(&iface)
-                    .queue_id(q)
-                    .mode(self.mode)
-                    .frame_size(self.frame_size)
-                    .frame_count(self.frame_count)
-                    .hugepages(self.hugepages);
-                if let Some(node) = numa_node {
-                    b = b.numa_node(node);
-                }
-                if let Some(us) = self.busy_poll_us {
-                    b = b.busy_poll_us(us);
-                }
-                if let Some(prefer) = self.prefer_busy_poll {
-                    b = b.prefer_busy_poll(prefer);
-                }
-                if let Some(budget) = self.busy_poll_budget {
-                    b = b.busy_poll_budget(budget);
-                }
-                let sock = b.build()?;
+                let sock = self.queue_socket(&iface, q, numa_node).build()?;
                 prog.register(q, &sock)?;
                 sockets.push(sock);
             }
@@ -386,6 +368,39 @@ mod mq {
                 _attachment: attachment,
                 _promisc: promisc,
             })
+        }
+    }
+
+    impl XdpCaptureBuilder {
+        /// The bare builder for queue `q`'s socket (the program is attached
+        /// once, by `build()`).
+        pub(super) fn queue_socket(
+            &self,
+            iface: &str,
+            q: u32,
+            numa_node: Option<u32>,
+        ) -> XdpSocketBuilder {
+            let mut b = XdpSocketBuilder::default()
+                .interface(iface)
+                .queue_id(q)
+                .mode(self.mode)
+                .frame_size(self.frame_size)
+                .frame_count(self.frame_count)
+                .hugepages(self.hugepages)
+                .copy_mode(self.attach_flags.is_generic());
+            if let Some(node) = numa_node {
+                b = b.numa_node(node);
+            }
+            if let Some(us) = self.busy_poll_us {
+                b = b.busy_poll_us(us);
+            }
+            if let Some(prefer) = self.prefer_busy_poll {
+                b = b.prefer_busy_poll(prefer);
+            }
+            if let Some(budget) = self.busy_poll_budget {
+                b = b.busy_poll_budget(budget);
+            }
+            b
         }
     }
 
@@ -587,6 +602,23 @@ mod tests {
         assert_eq!(rx_queue_count(&ch(0, 2)), 2);
         assert_eq!(rx_queue_count(&ch(0, 0)), 1);
         assert_eq!(rx_queue_count(&ch(u32::MAX, 1)), u32::MAX);
+    }
+
+    /// `XdpCapture` attaches its program itself; in SKB mode (the default)
+    /// every per-queue socket must bind with `XDP_COPY`.
+    #[cfg(feature = "xdp-loader")]
+    #[test]
+    fn queue_sockets_bind_copy_for_generic_attach() {
+        use crate::xdp::XdpFlags;
+        let copy = |b: XdpCaptureBuilder| {
+            b.queue_socket("eth0", 1, None).bind_flags() & ffi::XDP_COPY != 0
+        };
+        assert!(copy(XdpCapture::builder()));
+        assert!(copy(XdpCapture::builder().attach_flags(XdpFlags::SKB_MODE)));
+        assert!(!copy(
+            XdpCapture::builder().attach_flags(XdpFlags::DRV_MODE)
+        ));
+        assert!(!copy(XdpCapture::builder().attach_flags(XdpFlags::empty())));
     }
 
     #[test]

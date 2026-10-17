@@ -188,6 +188,10 @@ pub struct XdpSocketBuilder {
     attach_flags: loader::XdpFlags,
     #[cfg(feature = "xdp-loader")]
     force_replace: bool,
+    /// Bind with `XDP_COPY` because a program attached in generic mode
+    /// outside this builder feeds the socket (`XdpCapture`).
+    #[cfg(feature = "xdp-loader")]
+    copy_mode: bool,
     /// Caller-supplied XDP program to register + attach during `build()`.
     /// Mutually exclusive with `attach_default`.
     #[cfg(feature = "xdp-loader")]
@@ -217,6 +221,8 @@ impl Default for XdpSocketBuilder {
             attach_flags: loader::XdpFlags::SKB_MODE, // safest default; works on lo
             #[cfg(feature = "xdp-loader")]
             force_replace: false,
+            #[cfg(feature = "xdp-loader")]
+            copy_mode: false,
             #[cfg(feature = "xdp-loader")]
             program: None,
         }
@@ -374,8 +380,9 @@ impl XdpSocketBuilder {
     /// detached from the interface and the map fd is closed.
     ///
     /// Default attach mode is `SKB_MODE` (works on every interface
-    /// including `lo`). Override with [`xdp_attach_flags`](Self::xdp_attach_flags)
-    /// for `DRV_MODE` on supported NICs.
+    /// including `lo`), and the socket then binds in copy mode (`XDP_COPY`).
+    /// Override with [`xdp_attach_flags`](Self::xdp_attach_flags) for
+    /// `DRV_MODE` on supported NICs.
     ///
     /// If a program is already attached to the interface, `build()`
     /// fails with an error suggesting [`force_replace`](Self::force_replace).
@@ -433,11 +440,24 @@ impl XdpSocketBuilder {
         self
     }
 
-    /// Set the XDP attach flags used by [`with_default_program`](Self::with_default_program).
-    /// Default: `SKB_MODE`.
+    /// Set the XDP attach flags used by [`with_default_program`](Self::with_default_program)
+    /// and [`with_program`](Self::with_program). Default: `SKB_MODE`.
+    ///
+    /// When the program attaches in `SKB_MODE` (generic XDP) the socket binds
+    /// with `XDP_COPY`: generic XDP only ever hands it copies, and a socket
+    /// left to negotiate would bind zero-copy on a ZC-capable driver whose
+    /// native XDP is off — where every wakeup fails, so TX never starts.
     #[cfg(feature = "xdp-loader")]
     pub fn xdp_attach_flags(mut self, flags: loader::XdpFlags) -> Self {
         self.attach_flags = flags;
+        self
+    }
+
+    /// Bind with `XDP_COPY` (for sockets fed by a generic-mode program that
+    /// is attached outside this builder, as `XdpCapture` does).
+    #[cfg(feature = "xdp-loader")]
+    pub(crate) fn copy_mode(mut self, on: bool) -> Self {
+        self.copy_mode = on;
         self
     }
 
@@ -654,13 +674,7 @@ impl XdpSocketBuilder {
         }
 
         // 8. Bind to interface + queue
-        // flags=0: auto-negotiate (kernel tries zero-copy, falls back to copy)
-        // XDP_USE_NEED_WAKEUP enables wakeup optimization
-        let mut bind_flags: u16 = 0;
-        if self.need_wakeup {
-            bind_flags |= ffi::XDP_USE_NEED_WAKEUP;
-        }
-        socket::bind_xdp(fd.as_fd(), ifindex, self.queue_id, bind_flags)?;
+        socket::bind_xdp(fd.as_fd(), ifindex, self.queue_id, self.bind_flags())?;
 
         // 0.25 W4 / issue #6 F2: read the bind mode. On a fast NIC the per-frame
         // copy of COPY mode dominates; the operator should know to switch to a
@@ -761,6 +775,48 @@ impl XdpSocketBuilder {
         }
 
         Ok(socket)
+    }
+
+    /// `sxdp_flags` for the bind: `0` auto-negotiates (the kernel tries
+    /// zero-copy and falls back to copy); `XDP_USE_NEED_WAKEUP` enables the
+    /// wakeup optimization; `XDP_COPY` forces copy mode (see
+    /// [`copy_bind`](Self::copy_bind)).
+    #[cfg(feature = "af-xdp")]
+    fn bind_flags(&self) -> u16 {
+        let mut flags: u16 = 0;
+        if self.need_wakeup {
+            flags |= ffi::XDP_USE_NEED_WAKEUP;
+        }
+        if self.copy_bind() {
+            flags |= ffi::XDP_COPY;
+        }
+        flags
+    }
+
+    /// Whether to bind with `XDP_COPY`: the socket is fed by a program
+    /// netring attaches in generic (SKB) mode — here through
+    /// `with_default_program` / `with_program`, or by `XdpCapture`
+    /// ([`copy_mode`](Self::copy_mode)).
+    ///
+    /// Generic XDP hands the socket copies anyway. Left to negotiate, the
+    /// bind goes zero-copy on any driver advertising XSK support —
+    /// `xp_assign_dev()` checks the driver's feature bits, not that native
+    /// XDP is running — and such a driver then fails every wakeup:
+    /// `i40e_xsk_wakeup()` returns `EINVAL` while its VSI has no native XDP
+    /// program, so TX never starts and `flush()` errors (xdpsock's `-S` sets
+    /// `XDP_COPY` for the same reason).
+    #[cfg(feature = "af-xdp")]
+    fn copy_bind(&self) -> bool {
+        #[cfg(feature = "xdp-loader")]
+        {
+            self.copy_mode
+                || ((self.attach_default || self.program.is_some())
+                    && self.attach_flags.is_generic())
+        }
+        #[cfg(not(feature = "xdp-loader"))]
+        {
+            false
+        }
     }
 
     /// Build the XDP socket (stub without `af-xdp` feature).
@@ -1357,6 +1413,43 @@ mod tests {
         // Both set is the only conflict.
         let err = check_program_conflict(true, true).unwrap_err();
         assert!(format!("{err}").contains("conflicts"));
+    }
+
+    /// A program netring attaches in generic (SKB) mode only redirects
+    /// copies, so the socket must bind with `XDP_COPY`: left to negotiate,
+    /// the kernel binds zero-copy on a ZC-capable driver whose native XDP is
+    /// off, and every wakeup then fails (`i40e_xsk_wakeup`: `EINVAL`).
+    #[cfg(feature = "xdp-loader")]
+    #[test]
+    fn bind_flags_force_copy_for_generic_attach() {
+        let copy = |b: XdpSocketBuilder| b.bind_flags() & ffi::XDP_COPY != 0;
+        let base = || XdpSocketBuilder::default().interface("eth0");
+
+        // Self-attached in SKB mode (the default) → copy.
+        assert!(copy(base().with_default_program()));
+        assert!(copy(
+            base()
+                .with_default_program()
+                .xdp_attach_flags(loader::XdpFlags::SKB_MODE)
+        ));
+        // Native / offload / kernel-chosen attach → negotiate.
+        for flags in [
+            loader::XdpFlags::DRV_MODE,
+            loader::XdpFlags::HW_MODE,
+            loader::XdpFlags::empty(),
+        ] {
+            assert!(!copy(base().with_default_program().xdp_attach_flags(flags)));
+        }
+        // No program attached by netring → negotiate.
+        assert!(!copy(base()));
+        // need_wakeup is independent.
+        let f = base()
+            .with_default_program()
+            .need_wakeup(false)
+            .bind_flags();
+        assert_eq!(f, ffi::XDP_COPY);
+        let f = base().with_default_program().bind_flags();
+        assert_eq!(f, ffi::XDP_COPY | ffi::XDP_USE_NEED_WAKEUP);
     }
 
     #[cfg(feature = "xdp-loader")]

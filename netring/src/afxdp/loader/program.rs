@@ -59,6 +59,12 @@ impl XdpFlags {
             AyaXdpMode::Default
         }
     }
+
+    /// Whether these flags attach in generic (SKB) mode — the mode
+    /// [`to_aya`](Self::to_aya) resolves them to.
+    pub(crate) fn is_generic(self) -> bool {
+        self.to_aya() == AyaXdpMode::Skb
+    }
 }
 
 /// Key for the table-driven filter program's `filter_map` (0.25 W1a). Layout

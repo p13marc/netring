@@ -319,10 +319,10 @@ pub(crate) async fn run_loop(monitor: Monitor, stop: StopCondition) -> Result<()
     let mut dedups: Vec<Option<crate::dedup::Dedup>> =
         specs.iter().map(|_| dedup.clone()).collect();
     // 0.24 Phase C4: all sockets are open and the loop is about to run —
-    // readiness flips true. `mark_started` stamps the uptime/liveness
-    // clock now (not at build time).
+    // readiness flips true, until the loop stops. `mark_started` stamps the
+    // uptime/liveness clock now (not at build time).
     health.mark_started();
-    health.mark_sockets_open();
+    let ready = health.ready_while_running();
 
     let mut events: Vec<FsEvent<FlowKey>> = Vec::with_capacity(64);
     let mut shutdown = ShutdownSignal::new(stop);
@@ -838,6 +838,8 @@ pub(crate) async fn run_loop(monitor: Monitor, stop: StopCondition) -> Result<()
         Ok(())
     }
     .await;
+    // The loop no longer services the sockets: not ready.
+    drop(ready);
 
     // 0.21 D.2: graceful drain phase. After the stop condition
     // fires, flush in-flight flows out of the central tracker,
@@ -979,7 +981,7 @@ pub(crate) async fn replay_loop(
     // 0.24 Phase C4: the pcap source is open and replay is starting — the
     // same readiness/liveness handle works for offline replay.
     health.mark_started();
-    health.mark_sockets_open();
+    let ready = health.ready_while_running();
 
     // Every exit — stop condition, EOF, or an error — reaches the
     // output flush below.
@@ -1249,6 +1251,7 @@ pub(crate) async fn replay_loop(
         Ok(())
     }
     .await;
+    drop(ready);
 
     // EOF reached. Run the drain phase to land any trailing
     // events (flowscope's `finish()` synthesises FlowEnded

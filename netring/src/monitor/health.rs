@@ -95,6 +95,15 @@ impl HealthState {
         self.sockets_open.store(true, Ordering::Relaxed);
     }
 
+    /// Mark the capture sockets open (readiness true) until the returned
+    /// guard drops — the run loop holds it while it services them, so every
+    /// way out of the loop (stop condition, EOF, an error, the run future
+    /// being dropped) flips readiness back to false.
+    pub(crate) fn ready_while_running(&self) -> ReadyGuard<'_> {
+        self.mark_sockets_open();
+        ReadyGuard(self)
+    }
+
     /// Record that an event (packet batch or tick) was just processed,
     /// with the tracker's current active-flow count.
     pub(crate) fn record_event(&self, active_flows: usize) {
@@ -131,6 +140,15 @@ impl HealthState {
         // `uptime - last_event_elapsed`, floored at zero (the two reads
         // race, so uptime can momentarily read smaller than `last`).
         Some(self.uptime().saturating_sub(last))
+    }
+}
+
+/// Readiness for as long as it lives; see [`HealthState::ready_while_running`].
+pub(crate) struct ReadyGuard<'a>(&'a HealthState);
+
+impl Drop for ReadyGuard<'_> {
+    fn drop(&mut self) {
+        self.0.sockets_open.store(false, Ordering::Relaxed);
     }
 }
 
@@ -206,7 +224,9 @@ impl MonitorHealth {
 
     /// **Readiness**: the capture sockets are open and the run loop is
     /// servicing them. The `/readyz` signal — `false` before the loop
-    /// has opened its sockets, `true` for the rest of the run.
+    /// has opened its sockets, `true` for the rest of the run, `false`
+    /// again once the loop has stopped (before its drain phase), whether
+    /// it stopped cleanly or not.
     pub fn is_ready(&self) -> bool {
         self.inner.sockets_open.load(Ordering::Relaxed)
     }
@@ -320,6 +340,17 @@ mod tests {
             "ready once sockets open, even with no traffic"
         );
         assert!(!h.has_seen_traffic());
+    }
+
+    #[test]
+    fn readiness_ends_when_the_run_guard_drops() {
+        let state = HealthState::new();
+        let h = MonitorHealth::new(state.clone());
+        state.mark_started();
+        let ready = state.ready_while_running();
+        assert!(h.is_ready());
+        drop(ready);
+        assert!(!h.is_ready(), "not ready once the loop stopped");
     }
 
     #[test]

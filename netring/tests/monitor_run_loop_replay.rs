@@ -484,3 +484,44 @@ async fn panicking_on_name_handler_does_not_poison_later_names() {
     assert_eq!(calls.load(Ordering::SeqCst), 2);
     assert_eq!(health.handler_errors(), 1);
 }
+
+/// Readiness ends with the run: `is_ready()` is true while the loop
+/// services its source and false once it has returned (it used to stay
+/// true forever), whether it ended cleanly or with an error.
+#[tokio::test(flavor = "current_thread")]
+async fn health_is_not_ready_after_the_run_returns() {
+    use netring::protocol::builtin::Udp;
+    use netring::protocol::event_typed::FlowStarted;
+    let file = pcap(&two_udp_flows());
+    let ready_during = Arc::new(Mutex::new(Vec::new()));
+    let r = Arc::clone(&ready_during);
+    let health_cell = Arc::new(Mutex::new(None::<netring::monitor::MonitorHealth>));
+    let h = Arc::clone(&health_cell);
+    let monitor = Monitor::builder()
+        .pcap_source(file.path())
+        .protocol::<Udp>()
+        .on::<FlowStarted<Udp>>(move |_e: &FlowStarted<Udp>| {
+            let ready = h.lock().unwrap().as_ref().unwrap().is_ready();
+            r.lock().unwrap().push(ready);
+            Ok(())
+        })
+        .build()
+        .unwrap();
+    let health = monitor.health();
+    *health_cell.lock().unwrap() = Some(health.clone());
+    assert!(!health.is_ready(), "not ready before the run");
+    monitor.replay().await.unwrap();
+    assert_eq!(*ready_during.lock().unwrap(), vec![true, true]);
+    assert!(!health.is_ready(), "not ready once the run returned");
+
+    // An error exit too.
+    let monitor = Monitor::builder()
+        .pcap_source(file.path())
+        .protocol::<Udp>()
+        .on::<FlowStarted<Udp>>(|_e: &FlowStarted<Udp>| Err(netring::Error::Config("stop".into())))
+        .build()
+        .unwrap();
+    let health = monitor.health();
+    assert!(monitor.replay().await.is_err());
+    assert!(!health.is_ready());
+}

@@ -1039,8 +1039,8 @@ impl XdpSocket {
                     );
                 }
             }
-            // Return frame to free list (will be refilled below) regardless.
-            self.umem.free_frame(desc.addr);
+            // Return the frame to the RX pool (refilled below) regardless.
+            self.umem.recycle_rx_frame(desc.addr);
         }
 
         // 3. Release consumed RX descriptors
@@ -1164,22 +1164,24 @@ impl XdpSocket {
         self.comp.consumer_release(tok);
     }
 
-    /// Refill the fill ring with available UMEM frames.
+    /// Refill the fill ring with frames the RX path has released. Only the
+    /// RX pool feeds the fill ring, so the TX share of the UMEM (per
+    /// [`XdpMode`]) stays available to `send()`.
     #[cfg(feature = "af-xdp")]
     fn refill(&mut self) {
-        let want = self.umem.available().min(64) as u32;
+        let want = self.umem.rx_available().min(64) as u32;
         if want == 0 {
             return;
         }
         if let Some(tok) = self.fill.producer_reserve(want) {
             let mut filled = 0u32;
             for i in 0..tok.n {
-                if let Some(addr) = self.umem.alloc_frame() {
+                if let Some(addr) = self.umem.take_rx_frame() {
                     self.fill.write_at(tok, i, addr);
                     filled += 1;
                 }
             }
-            // `want` was bounded by umem.available() so all reservations get
+            // `want` was bounded by umem.rx_available() so all reservations get
             // filled; the assertion documents the invariant.
             debug_assert_eq!(filled, tok.n);
             if filled > 0 {

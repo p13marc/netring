@@ -543,3 +543,100 @@ fn afxdp_lo_filter_program_redirects_configured_tuple() {
     // Settle so the next test in this binary finds queue 0 free.
     std::thread::sleep(Duration::from_millis(300));
 }
+
+/// Flood `lo` with `n` small UDP datagrams (redirected into the socket by
+/// the redirect-all program; no listener needed).
+fn flood_lo(n: usize) {
+    let tx = UdpSocket::bind("127.0.0.1:0").expect("bind udp tx");
+    for _ in 0..n {
+        let _ = tx.send_to(b"netring-afxdp-rxtx", "127.0.0.1:65112");
+    }
+}
+
+/// `XdpMode::RxTx` keeps half the UMEM for TX. Receiving must not hand
+/// those TX frames to the fill ring: after several RX batches, `send()`
+/// still finds a frame.
+#[test]
+fn afxdp_rxtx_send_still_allocates_after_rx() {
+    wait_lo_free();
+    let mut sock = build_with_retry("rxtx socket on lo", || {
+        XdpSocket::builder()
+            .interface("lo")
+            .queue_id(0)
+            .frame_size(2048)
+            .frame_count(128)
+            .mode(netring::XdpMode::RxTx)
+            .with_default_program()
+            .xdp_attach_flags(XdpFlags::SKB_MODE)
+            .build()
+    });
+
+    let mut batches = 0;
+    let deadline = Instant::now() + Duration::from_secs(10);
+    while batches < 4 && Instant::now() < deadline {
+        flood_lo(16);
+        std::thread::sleep(Duration::from_millis(20));
+        if !sock.recv().expect("recv").is_empty() {
+            batches += 1;
+        }
+    }
+    assert_eq!(batches, 4, "never received 4 RX batches");
+
+    let frame = [0x5au8; 64];
+    assert!(
+        sock.send(&frame).expect("send"),
+        "send() found no free UMEM frame after RX (the TX half was refilled into the fill ring)"
+    );
+    drop(sock);
+    std::thread::sleep(Duration::from_millis(300));
+}
+
+/// RX descriptors carry the packet's data address (chunk start +
+/// XDP_PACKET_HEADROOM), not the chunk start. Frames recycled from RX must
+/// go back to the free list as whole chunks, so a full-size `send()` that
+/// reuses one neither crosses into the next chunk (the kernel would reject
+/// the descriptor and never complete the frame) nor runs off the UMEM end.
+#[test]
+fn afxdp_send_full_frame_after_rx_recycles_whole_chunks() {
+    wait_lo_free();
+    let mut sock = build_with_retry("rxtx socket on lo", || {
+        XdpSocket::builder()
+            .interface("lo")
+            .queue_id(0)
+            .frame_size(2048)
+            .frame_count(128)
+            .mode(netring::XdpMode::RxTx)
+            .with_default_program()
+            .xdp_attach_flags(XdpFlags::SKB_MODE)
+            .build()
+    });
+
+    // Overfill the RX side (64 prefilled frames) so a single recv() drains a
+    // full batch and its frames are recycled.
+    let deadline = Instant::now() + Duration::from_secs(10);
+    let mut got = 0;
+    while got == 0 && Instant::now() < deadline {
+        flood_lo(200);
+        std::thread::sleep(Duration::from_millis(50));
+        got = sock.recv().expect("recv").len();
+    }
+    assert!(got > 0, "no RX traffic");
+
+    // Send full-size frames until the free list runs dry.
+    let frame = vec![0xa5u8; 2048];
+    let mut sent = 0;
+    while sent < 128 && sock.send(&frame).expect("send") {
+        sent += 1;
+    }
+    assert!(sent > 0, "send() found no free UMEM frame after RX");
+    sock.flush().expect("flush");
+    std::thread::sleep(Duration::from_millis(200));
+    let st = sock.statistics().expect("statistics");
+    assert_eq!(
+        st.tx_invalid_descs, 0,
+        "kernel rejected {} of {sent} full-size TX descriptors",
+        st.tx_invalid_descs
+    );
+    drop(sock);
+    std::thread::sleep(Duration::from_millis(300));
+}

@@ -2579,9 +2579,11 @@ impl MonitorBuilder {
     /// fragments (teardrop / RFC 5722) are dropped, so an evasion payload behind
     /// an overlap never reassembles.
     ///
-    /// Arming reassembly turns the automatic kernel prefilter off (capture
-    /// everything): its port checks can't see the ports of a non-first
-    /// fragment, so they would drop the fragments the reassembler needs.
+    /// Arming reassembly keeps the automatic kernel prefilter, but its port
+    /// checks let non-first IPv4 fragments through (they carry no ports; the
+    /// address and protocol checks still apply), so the reassembler gets
+    /// every fragment it needs. (0.31.2–0.31.3 turned the prefilter off
+    /// entirely instead.)
     pub fn reassemble_ip_fragments(self) -> Self {
         self.reassemble_ip_fragments_with(ip_frag::IpFragConfig::default())
     }
@@ -4279,11 +4281,14 @@ impl MonitorBuilder {
             || self.bandwidth_registered
             || !self.ml_feature_handlers.is_empty()
             || nprint_armed
-            || yara_armed
-            // The IP-fragment reassembler needs every fragment of a datagram,
-            // but only fragment 0 carries the ports, and the port templates
-            // shed non-first fragments — a narrowed prefilter would starve it.
-            || self.ip_frag_config.is_some();
+            || yara_armed;
+        // The IP-fragment reassembler needs every fragment of a datagram, but
+        // only fragment 0 carries the ports: with it armed, non-first IPv4
+        // fragments pass the port terms (host / protocol terms still apply)
+        // instead of forcing capture-all (#217).
+        let opts = subscription::kernel_filter::KernelOpts {
+            pass_ip_fragments: self.ip_frag_config.is_some(),
+        };
 
         let interests = self
             .handlers
@@ -4313,7 +4318,7 @@ impl MonitorBuilder {
             .chain(self.p0f_interest())
             .chain(wants_all.then_some(subscription::Predicate::Always));
 
-        subscription::kernel_filter::compile_union(interests)
+        subscription::kernel_filter::compile_union(interests, opts)
     }
 
     /// Pre-register a `T: Default` state slot. Optional —

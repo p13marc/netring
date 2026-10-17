@@ -152,6 +152,9 @@ struct CompileCtx {
     /// +4 behind an in-frame tag, else 0.
     vlan_offset: u8,
     l3: L3Family,
+    /// Non-first IPv4 fragments skip the port terms
+    /// ([`BpfFilterBuilder::pass_ip_fragments`]).
+    pass_ip_fragments: bool,
 }
 
 // ── Public entry point ────────────────────────────────────────
@@ -166,7 +169,10 @@ pub(crate) fn compile(builder: BpfFilterBuilder) -> Result<BpfFilter, BpfBuildEr
         fragments,
         or_branches,
         negated,
+        pass_ip_fragments,
     } = builder;
+    // A whole-filter setting, like `negate`.
+    let pass_ip_fragments = pass_ip_fragments || or_branches.iter().any(|b| b.pass_ip_fragments);
 
     // Special case: empty builder with no branches → accept-all.
     if fragments.is_empty() && or_branches.is_empty() {
@@ -207,7 +213,7 @@ pub(crate) fn compile(builder: BpfFilterBuilder) -> Result<BpfFilter, BpfBuildEr
     }
     let mut blocks: Vec<Vec<SymInsn>> = Vec::with_capacity(chains.len());
     for chain in &chains {
-        blocks.push(compile_block(chain)?);
+        blocks.push(compile_block(chain, pass_ip_fragments)?);
     }
 
     // Stitch blocks: each block's body, followed by `JA Accept`
@@ -344,9 +350,15 @@ fn expand_vlan(chains: Vec<Vec<MatchFrag>>) -> Result<Vec<Vec<MatchFrag>>, BpfBu
     Ok(out)
 }
 
-fn compile_block(fragments: &[MatchFrag]) -> Result<Vec<SymInsn>, BpfBuildError> {
+fn compile_block(
+    fragments: &[MatchFrag],
+    pass_ip_fragments: bool,
+) -> Result<Vec<SymInsn>, BpfBuildError> {
     let normalized = normalize(fragments.to_vec())?;
-    let mut ctx = infer_ctx(&normalized);
+    let mut ctx = CompileCtx {
+        pass_ip_fragments,
+        ..infer_ctx(&normalized)
+    };
     let mut sym = Vec::with_capacity(normalized.len() * 6);
     for frag in &normalized {
         compile_fragment(frag, &mut ctx, &mut sym)?;
@@ -567,6 +579,7 @@ fn infer_ctx(fragments: &[MatchFrag]) -> CompileCtx {
         vlan: VlanCtx::None,
         vlan_offset: 0,
         l3,
+        pass_ip_fragments: false,
     }
 }
 
@@ -903,12 +916,23 @@ fn emit_ipv4_port(
     let ihl_off = 14u32 + u32::from(ctx.vlan_offset); // start of IPv4 header
     let l4_base = 14u32 + u32::from(ctx.vlan_offset); // bytes preceding L4 (before adding X = IHL)
 
-    // Common preamble: reject IPv4 fragments (ports valid only
-    // in the first fragment), then load IHL into X.
+    // Common preamble: a non-first IPv4 fragment (ports valid only in the
+    // first fragment) fails the term — or, with `pass_ip_fragments`, skips
+    // it: the IHL load plus the port check below (2 instructions for one
+    // direction, 4 for either). Then load IHL into X.
+    let non_first_fragment = if ctx.pass_ip_fragments {
+        let port_insns = match sd {
+            SrcDst::Src | SrcDst::Dst => 2,
+            SrcDst::Any => 4,
+        };
+        Label::SkipNextN(1 + port_insns)
+    } else {
+        Label::Drop
+    };
     out.push(SymInsn::straight(BPF_LD_H_ABS, frag_off));
     out.push(SymInsn::jump(
         BPF_JMP_JSET_K,
-        Label::Drop,
+        non_first_fragment,
         Label::Fallthrough,
         0x1FFF,
     ));
@@ -1647,5 +1671,138 @@ mod tests {
             err,
             BpfBuildError::ConflictingProtocols { a: "vlan", .. }
         ));
+    }
+
+    // ── pass_ip_fragments (#217) ──────────────────────────────────────
+
+    /// `ipv4_frame` (UDP 1 → 2) as a fragment: `offset8` in 8-byte units,
+    /// More Fragments set when `more`. A non-first fragment carries payload
+    /// where the ports would be.
+    fn fragment(offset8: u16, more: bool, proto: u8) -> Vec<u8> {
+        let mut f = ipv4_frame([10, 0, 0, 1], [10, 0, 0, 2]);
+        let flags = if more { 0x2000 } else { 0 };
+        f[20..22].copy_from_slice(&(flags | offset8).to_be_bytes());
+        f[23] = proto;
+        if offset8 != 0 {
+            f[34..42].copy_from_slice(&[0xab; 8]); // payload, not a UDP header
+        }
+        f
+    }
+
+    #[test]
+    fn pass_ip_fragments_lets_non_first_fragments_skip_the_port_term() {
+        let strict = BpfFilterBuilder::new().udp().dst_port(53).build().unwrap();
+        let lenient = BpfFilterBuilder::new()
+            .udp()
+            .dst_port(53)
+            .pass_ip_fragments()
+            .build()
+            .unwrap();
+        let trailing = fragment(185, false, 17);
+        assert!(!strict.matches(&trailing), "libpcap `port` sheds it");
+        assert!(lenient.matches(&trailing), "the reassembler needs it");
+        assert!(
+            lenient.matches(&fragment(185, true, 17)),
+            "a middle fragment"
+        );
+        // The protocol term still applies to a non-first fragment.
+        assert!(!lenient.matches(&fragment(185, false, 6)));
+        // A first fragment (offset 0, MF) is still checked against the port.
+        let mut first = fragment(0, true, 17);
+        assert!(!lenient.matches(&first), "dst port 2, not 53");
+        first[36..38].copy_from_slice(&53u16.to_be_bytes());
+        assert!(lenient.matches(&first));
+        // Unfragmented traffic is unchanged.
+        let plain = ipv4_frame([10, 0, 0, 1], [10, 0, 0, 2]);
+        assert_eq!(lenient.matches(&plain), strict.matches(&plain));
+    }
+
+    #[test]
+    fn pass_ip_fragments_keeps_host_terms_and_covers_every_port_form() {
+        let trailing = fragment(185, false, 17);
+        let src_host = |a: [u8; 4]| IpAddr::from(a);
+        let host_ok = BpfFilterBuilder::new()
+            .udp()
+            .src_host(src_host([10, 0, 0, 1]))
+            .port(53)
+            .pass_ip_fragments()
+            .build()
+            .unwrap();
+        assert!(host_ok.matches(&trailing));
+        let host_other = BpfFilterBuilder::new()
+            .udp()
+            .src_host(src_host([10, 0, 0, 9]))
+            .port(53)
+            .pass_ip_fragments()
+            .build()
+            .unwrap();
+        assert!(
+            !host_other.matches(&trailing),
+            "the host term still applies"
+        );
+
+        for b in [
+            BpfFilterBuilder::new().udp().src_port(53),
+            BpfFilterBuilder::new().udp().dst_port(53),
+            BpfFilterBuilder::new().udp().port(53),
+            BpfFilterBuilder::new().udp().ports([53, 5353]),
+            BpfFilterBuilder::new()
+                .tcp()
+                .dst_port(80)
+                .or(|b| b.udp().dst_port(53)),
+        ] {
+            let f = b.clone().pass_ip_fragments().build().unwrap();
+            assert!(f.matches(&trailing), "{}", f.to_human());
+            assert!(!b.build().unwrap().matches(&trailing));
+        }
+        // Set inside an `or` branch, it applies to the whole filter.
+        let f = BpfFilterBuilder::new()
+            .tcp()
+            .dst_port(80)
+            .or(|b| b.udp().dst_port(53).pass_ip_fragments())
+            .build()
+            .unwrap();
+        assert!(f.matches(&trailing));
+    }
+
+    #[test]
+    fn pass_ip_fragments_jumps_over_exactly_the_port_template() {
+        let jset_jt = |b: BpfFilterBuilder| {
+            let f = b.pass_ip_fragments().build().unwrap();
+            f.instructions()
+                .iter()
+                .find(|i| i.code == BPF_JMP_JSET_K && i.k == 0x1fff)
+                .expect("the fragment check")
+                .jt
+        };
+        // ldxb + (ldh + jeq) for one direction, ldxb + 2 × (ldh + jeq) for
+        // either.
+        assert_eq!(jset_jt(BpfFilterBuilder::new().udp().src_port(1)), 3);
+        assert_eq!(jset_jt(BpfFilterBuilder::new().udp().dst_port(1)), 3);
+        assert_eq!(jset_jt(BpfFilterBuilder::new().udp().port(1)), 5);
+    }
+
+    #[test]
+    fn pass_ip_fragments_renders_in_to_human() {
+        let f = BpfFilterBuilder::new()
+            .udp()
+            .dst_port(53)
+            .pass_ip_fragments()
+            .build()
+            .unwrap();
+        assert_eq!(
+            f.to_human(),
+            "udp and (dst port 53 or ip[6:2] & 0x1fff != 0)"
+        );
+        let f = BpfFilterBuilder::new()
+            .tcp()
+            .ports([80, 443])
+            .pass_ip_fragments()
+            .build()
+            .unwrap();
+        assert_eq!(
+            f.to_human(),
+            "tcp and ((port 80 or ip[6:2] & 0x1fff != 0) or (port 443 or ip[6:2] & 0x1fff != 0))"
+        );
     }
 }

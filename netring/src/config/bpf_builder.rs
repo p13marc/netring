@@ -70,6 +70,7 @@ pub struct BpfFilterBuilder {
     pub(crate) fragments: Vec<MatchFrag>,
     pub(crate) or_branches: Vec<BpfFilterBuilder>,
     pub(crate) negated: bool,
+    pub(crate) pass_ip_fragments: bool,
 }
 
 impl BpfFilterBuilder {
@@ -308,6 +309,26 @@ impl BpfFilterBuilder {
     /// ```
     pub fn negate(mut self) -> Self {
         self.negated = !self.negated;
+        self
+    }
+
+    /// Let IPv4 fragments other than the first pass the **port** terms.
+    ///
+    /// Only an IPv4 datagram's first fragment carries the TCP / UDP header,
+    /// so a port check cannot judge the others; by default (libpcap's
+    /// `port` semantics) they fail it. With this flag a non-first fragment
+    /// (`frag_off & 0x1fff != 0`) skips the port check instead, while the
+    /// address-family, protocol and host / net terms still apply — what an
+    /// IP-fragment reassembler behind the filter needs: every fragment of
+    /// the datagrams it may want (#217). A first fragment is still checked
+    /// against the ports.
+    ///
+    /// Applies to the whole filter, every [`or`](Self::or) branch included.
+    /// IPv6 fragments carry a Fragment extension header the IPv6 templates
+    /// do not walk; the flag does not change them. `to_human` renders each
+    /// port term as `(port … or ip[6:2] & 0x1fff != 0)`.
+    pub fn pass_ip_fragments(mut self) -> Self {
+        self.pass_ip_fragments = true;
         self
     }
 

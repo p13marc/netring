@@ -417,14 +417,34 @@ fn ip_fragment_reassembly_keeps_trailing_fragments() {
         "precondition: the port template sheds a trailing fragment"
     );
 
-    let pf = Monitor::builder()
+    // #217: with reassembly armed the prefilter stays (it used to collapse
+    // to capture-all) and lets the trailing fragments through.
+    let bpf = Monitor::builder()
         .interface("lo")
         .protocol::<Dns>()
         .reassemble_ip_fragments()
-        .kernel_prefilter();
+        .kernel_prefilter()
+        .expect("still a real prefilter with reassembly armed");
     assert!(
-        pf.is_none_or(|bpf| bpf.matches(&ipv4_udp_trailing_fragment())),
+        bpf.matches(&ipv4_udp_trailing_fragment()),
         "an armed reassembler must see every fragment"
+    );
+    // A first fragment carries the ports: one to another port is shed.
+    let mut first = frame(UDP, 80);
+    first[20..22].copy_from_slice(&0x2000u16.to_be_bytes()); // MF, offset 0
+    assert!(!bpf.matches(&first), "first fragment, wrong port");
+    first[36..38].copy_from_slice(&53u16.to_be_bytes());
+    assert!(bpf.matches(&first), "first fragment of a DNS datagram");
+    // A trailing fragment of a protocol nobody wants is still shed.
+    let mut tcp_trailing = ipv4_udp_trailing_fragment();
+    tcp_trailing[23] = TCP;
+    assert!(
+        !bpf.matches(&tcp_trailing),
+        "the protocol term still applies"
+    );
+    assert!(
+        !bpf.matches(&frame(TCP, 80)),
+        "unfragmented traffic still narrowed"
     );
 }
 

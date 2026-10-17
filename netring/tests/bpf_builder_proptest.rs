@@ -20,6 +20,9 @@
 //!     the tag in-band offline equals the kernel's verdict on the stripped
 //!     frame — the metadata block and the in-frame block agree.
 //!
+//! 11. (#217) `pass_ip_fragments()` only widens: anything the plain filter
+//!     accepts it accepts, and adding a fragment still narrows with it.
+//!
 //! Each property runs at proptest's default 256 cases. Run with
 //! `PROPTEST_CASES=10000 cargo test ...` to stress.
 
@@ -431,6 +434,48 @@ proptest! {
             f.matches(&reinsert(&pkt, &tag)),
             f.matches_with(&pkt, &BpfAncillary::stripped(tag))
         );
+    }
+
+    /// 17. (#217) `pass_ip_fragments` only widens, and stays monotonic in
+    /// the fragments (a finer chain never accepts more), on fragmented and
+    /// unfragmented IPv4 alike.
+    #[test]
+    fn pass_ip_fragments_widens_and_stays_monotonic(
+        port in arb_port(),
+        host in arb_ipv4_addr(),
+        pkt in arb_tcp_packet(),
+        frag_off in 0u16..0x2000,
+        more in any::<bool>(),
+    ) {
+        let mut pkt = pkt;
+        let flags = if more { 0x2000 } else { 0 };
+        pkt[20..22].copy_from_slice(&(flags | frag_off).to_be_bytes());
+
+        let plain = BpfFilter::builder().tcp().dst_port(port).build().unwrap();
+        let wide = BpfFilter::builder().tcp().dst_port(port).pass_ip_fragments().build().unwrap();
+        if plain.matches(&pkt) {
+            prop_assert!(wide.matches(&pkt));
+        }
+        // Non-first fragments pass the port; first ones and unfragmented
+        // packets see the same port check as before.
+        if frag_off != 0 {
+            prop_assert!(wide.matches(&pkt));
+        } else {
+            prop_assert_eq!(wide.matches(&pkt), plain.matches(&pkt));
+        }
+
+        let coarse = BpfFilter::builder().tcp().pass_ip_fragments().build().unwrap();
+        let fine = BpfFilter::builder()
+            .tcp()
+            .dst_port(port)
+            .host(host)
+            .pass_ip_fragments()
+            .build()
+            .unwrap();
+        if fine.matches(&pkt) {
+            prop_assert!(wide.matches(&pkt));
+            prop_assert!(coarse.matches(&pkt));
+        }
     }
 }
 

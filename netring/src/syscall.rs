@@ -39,18 +39,26 @@ pub(crate) fn poll_eintr_safe(
 ///
 /// `flags`: `0` for AF_PACKET, `MSG_DONTWAIT` for AF_XDP.
 pub(crate) fn sendto_kick_eintr_safe(fd: RawFd, flags: i32) -> Result<(), std::io::Error> {
+    sendto_kick_status(fd, flags).map(|_| ())
+}
+
+/// [`sendto_kick_eintr_safe`], telling `EAGAIN` apart: `Ok(true)` when the
+/// kernel answered `EAGAIN` (it stopped with work left — an AF_XDP copy-mode
+/// kick transmits at most one batch), `Ok(false)` on success or `ENOBUFS`.
+pub(crate) fn sendto_kick_status(fd: RawFd, flags: i32) -> Result<bool, std::io::Error> {
     loop {
         // SAFETY: standard sendto() syscall with NULL buffer and NULL addr —
         // the conventional TPACKET TX kick. `fd` validity is the caller's
         // contract.
         let ret = unsafe { libc::sendto(fd, std::ptr::null(), 0, flags, std::ptr::null(), 0) };
         if ret >= 0 {
-            return Ok(());
+            return Ok(false);
         }
         let err = std::io::Error::last_os_error();
         match err.raw_os_error() {
             Some(libc::EINTR) => continue,
-            Some(libc::EAGAIN) | Some(libc::ENOBUFS) => return Ok(()),
+            Some(libc::EAGAIN) => return Ok(true),
+            Some(libc::ENOBUFS) => return Ok(false),
             _ => return Err(err),
         }
     }

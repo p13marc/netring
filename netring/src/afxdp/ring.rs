@@ -123,6 +123,12 @@ impl<T: Copy> XdpRing<T> {
         })
     }
 
+    /// Ring capacity in descriptors.
+    #[inline]
+    pub(crate) fn size(&self) -> u32 {
+        self.size
+    }
+
     // ── Producer protocol (Fill ring, TX ring) ───────────────────────────
 
     /// Number of free slots available for the producer.

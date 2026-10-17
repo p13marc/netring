@@ -829,3 +829,33 @@ fn afxdp_send_rejects_empty_packet() {
     drop(sock);
     std::thread::sleep(Duration::from_millis(300));
 }
+
+/// One `flush()` must transmit everything queued. In copy mode each
+/// `sendto()` kick sends at most `TX_BATCH_SIZE` (32) descriptors and
+/// returns `EAGAIN`; the rest stayed in the TX ring (and were discarded when
+/// the socket closed).
+#[test]
+fn afxdp_flush_transmits_more_than_one_kernel_batch() {
+    wait_lo_free();
+    let mut sock = tx_socket(128);
+
+    for i in 0..100 {
+        assert!(sock.send(&tx_frame(i)).expect("send"), "frame {i}");
+    }
+    sock.flush().expect("flush");
+    std::thread::sleep(Duration::from_millis(100));
+
+    // Every transmitted frame completes (synchronously on lo) and is free
+    // again, and the kernel has released every TX slot: the socket can queue
+    // its full 128 frames once more.
+    let mut free = 0;
+    while free < 256 && sock.send(&tx_frame(free)).expect("send") {
+        free += 1;
+    }
+    assert_eq!(
+        free, 128,
+        "one flush() left part of the 100 queued frames untransmitted"
+    );
+    drop(sock);
+    std::thread::sleep(Duration::from_millis(300));
+}

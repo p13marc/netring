@@ -1169,13 +1169,30 @@ impl XdpSocket {
     /// Uses `sendto(fd, NULL, 0, MSG_DONTWAIT, NULL, 0)`.
     /// `MSG_DONTWAIT` is **mandatory** — kernel returns `EOPNOTSUPP` without it.
     /// EINTR is retried; transient `EAGAIN`/`ENOBUFS` are reported as success.
+    ///
+    /// In copy mode one kick transmits at most one kernel batch (32
+    /// descriptors) and answers `EAGAIN` while more are queued, so `flush`
+    /// kicks again until the kernel stops asking — at most once per batch the
+    /// TX ring can hold, so a driver that keeps answering `EAGAIN` (busy) can't
+    /// spin it; whatever is left goes out on the next `flush`.
     #[cfg(feature = "af-xdp")]
     pub fn flush(&self) -> Result<(), Error> {
         if self.need_wakeup_enabled && !self.tx.needs_wakeup() {
             return Ok(());
         }
-        crate::syscall::sendto_kick_eintr_safe(self.fd.as_raw_fd(), libc::MSG_DONTWAIT)
-            .map_err(Error::Io)
+        // __xsk_generic_xmit() (net/xdp/xsk.c) sends up to TX_BATCH_SIZE (32)
+        // descriptors per call — newer kernels: `max_tx_budget`, never below
+        // that — then returns -EAGAIN with the rest still in the TX ring.
+        const KERNEL_TX_BATCH: u32 = 32;
+        let max_kicks = self.tx.size() / KERNEL_TX_BATCH + 1;
+        for _ in 0..max_kicks {
+            let again = crate::syscall::sendto_kick_status(self.fd.as_raw_fd(), libc::MSG_DONTWAIT)
+                .map_err(Error::Io)?;
+            if !again {
+                break;
+            }
+        }
+        Ok(())
     }
 
     /// Poll for readability (incoming packets) with a timeout.

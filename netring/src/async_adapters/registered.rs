@@ -30,13 +30,18 @@
 //! the wait with that error, `Ok` (e.g. the interface is merely down) keeps
 //! waiting. Under load the read readiness is set whenever the reader looks,
 //! so neither check runs on the hot path.
+//!
+//! The probe's clock is a `timerfd` registered with the IO reactor
+//! ([`ProbeTimer`]), not a tokio timer: a runtime built with only
+//! `enable_io()` works. It is created on the first idle wait, so a reader
+//! that never goes idle never opens it.
 
 use std::future::Future;
 use std::io;
-use std::os::fd::{AsFd, BorrowedFd, OwnedFd};
+use std::os::fd::{AsFd, AsRawFd, BorrowedFd, FromRawFd, OwnedFd};
 use std::pin::Pin;
 use std::sync::Arc;
-use std::task::{Context, Poll};
+use std::task::{Context, Poll, ready};
 use std::time::Duration;
 
 use tokio::io::unix::{AsyncFd, AsyncFdReadyGuard};
@@ -89,13 +94,96 @@ fn watch_errors(fd: &Arc<AsyncFd<OwnedFd>>) -> ErrorWatch {
     })
 }
 
+/// A periodic clock on the IO reactor: a `CLOCK_MONOTONIC` `timerfd`
+/// registered for read readiness. Unlike a tokio timer it needs no time
+/// driver — only the IO driver every `AsyncFd` already needs.
+pub(crate) struct ProbeTimer {
+    fd: AsyncFd<OwnedFd>,
+}
+
+impl ProbeTimer {
+    /// Fire every `every` (at least 1 ns), the first time one period from
+    /// now. Must be called in the context of a tokio runtime.
+    pub(crate) fn new(every: Duration) -> io::Result<Self> {
+        // SAFETY: plain syscall; no pointers.
+        let raw = unsafe {
+            libc::timerfd_create(
+                libc::CLOCK_MONOTONIC,
+                libc::TFD_NONBLOCK | libc::TFD_CLOEXEC,
+            )
+        };
+        if raw < 0 {
+            return Err(io::Error::last_os_error());
+        }
+        // SAFETY: `raw` is a fresh fd we own exclusively.
+        let fd = unsafe { OwnedFd::from_raw_fd(raw) };
+        let every = every.max(Duration::from_nanos(1));
+        let period = libc::timespec {
+            tv_sec: every.as_secs().min(libc::time_t::MAX as u64) as libc::time_t,
+            tv_nsec: every.subsec_nanos() as libc::c_long,
+        };
+        let spec = libc::itimerspec {
+            it_interval: period,
+            it_value: period,
+        };
+        // SAFETY: `spec` is a valid itimerspec; a null old-value pointer is
+        // allowed.
+        if unsafe { libc::timerfd_settime(fd.as_raw_fd(), 0, &spec, std::ptr::null_mut()) } < 0 {
+            return Err(io::Error::last_os_error());
+        }
+        // SAFETY: `fd` is an `OwnedFd` moved into the `AsyncFd`: it stays
+        // open, and refers to the same timer, until the `AsyncFd` drops.
+        let fd = unsafe { AsyncFd::register_with_interest(fd, Interest::READABLE) }
+            .map_err(io::Error::from)?;
+        Ok(Self { fd })
+    }
+
+    /// `Ready` once the timer expired (any number of times) since the last
+    /// tick; consumes the expirations.
+    pub(crate) fn poll_tick(&self, cx: &mut Context<'_>) -> Poll<io::Result<()>> {
+        loop {
+            let mut guard = ready!(self.fd.poll_read_ready(cx))?;
+            let mut expirations = [0u8; 8];
+            // SAFETY: an 8-byte buffer for timerfd's 8-byte expiration count.
+            let n = unsafe {
+                libc::read(
+                    self.fd.get_ref().as_raw_fd(),
+                    expirations.as_mut_ptr().cast(),
+                    expirations.len(),
+                )
+            };
+            let err = (n < 0).then(io::Error::last_os_error);
+            // Drained (or stale): the next expiry raises a fresh edge.
+            guard.clear_ready();
+            match err {
+                None if n == 8 => return Poll::Ready(Ok(())),
+                None => return Poll::Ready(Err(io::Error::other("short timerfd read"))),
+                Some(e) if e.kind() == io::ErrorKind::WouldBlock => continue,
+                Some(e) => return Poll::Ready(Err(e)),
+            }
+        }
+    }
+
+    /// Wait for the next tick.
+    pub(crate) async fn tick(&self) -> io::Result<()> {
+        std::future::poll_fn(|cx| self.poll_tick(cx)).await
+    }
+}
+
+/// The idle probe's state: created on the first idle wait.
+enum Probe {
+    Unarmed,
+    Armed(ProbeTimer),
+    /// The timer couldn't be created (logged once): error events only.
+    Unavailable,
+}
+
 /// The read side's death detection (see the module docs).
 struct Liveness<T> {
     health: HealthFn<T>,
     /// Holds a clone of the registration's `Arc`.
     errors: ErrorWatch,
-    /// Armed on the first idle wait (a sleep needs the runtime's timer).
-    probe: Option<Pin<Box<tokio::time::Sleep>>>,
+    probe: Probe,
     probe_every: Duration,
 }
 
@@ -122,18 +210,25 @@ impl<T> Liveness<T> {
                 return Poll::Pending;
             }
         }
-        let every = self.probe_every;
-        let probe = self
-            .probe
-            .get_or_insert_with(|| Box::pin(tokio::time::sleep(every)));
-        while probe.as_mut().poll(cx).is_ready() {
-            if let Err(e) = (self.health)(inner) {
-                return Poll::Ready(e);
+        if matches!(self.probe, Probe::Unarmed) {
+            self.probe = match ProbeTimer::new(self.probe_every) {
+                Ok(timer) => Probe::Armed(timer),
+                Err(e) => {
+                    tracing::warn!(
+                        error = %e,
+                        "no liveness probe (timerfd): a source that dies without an error \
+                         event won't end the wait"
+                    );
+                    Probe::Unavailable
+                }
+            };
+        }
+        if let Probe::Armed(timer) = &self.probe {
+            while let Poll::Ready(tick) = timer.poll_tick(cx) {
+                if let Err(e) = tick.and_then(|()| (self.health)(inner)) {
+                    return Poll::Ready(e);
+                }
             }
-            let now = tokio::time::Instant::now();
-            probe
-                .as_mut()
-                .reset(now.checked_add(every).unwrap_or(now + LIVENESS_PROBE));
         }
         Poll::Pending
     }
@@ -153,13 +248,13 @@ impl<T: AsFd> Registered<T> {
     /// Register a dup of `inner`'s fd for `interest` plus error events.
     /// Waits end with an error once `health` reports the source dead —
     /// checked on an error event and every [`LIVENESS_PROBE`] of idle
-    /// waiting. Needs a runtime with the time driver enabled.
+    /// waiting.
     pub(crate) fn new_rx(inner: T, interest: Interest, health: HealthFn<T>) -> io::Result<Self> {
         let ready = Arc::new(register_dup(inner.as_fd(), interest | Interest::ERROR)?);
         let liveness = Some(Liveness {
             health,
             errors: watch_errors(&ready),
-            probe: None,
+            probe: Probe::Unarmed,
             probe_every: LIVENESS_PROBE,
         });
         Ok(Self {
@@ -418,6 +513,52 @@ mod tests {
         }
         assert!(start.elapsed() >= Duration::from_millis(100));
         assert_eq!(reg.get_ref().calls.load(Ordering::SeqCst), 3);
+    }
+
+    /// The idle liveness probe needs no tokio time driver: an idle read
+    /// wait on a runtime built with `enable_io()` only still probes the
+    /// source (phase-1 0.32 code armed a `tokio::time::Sleep` and panicked:
+    /// "timers are disabled"). A second fd, released by a watchdog thread
+    /// after 2 s, bounds the wait without a timer.
+    #[test]
+    fn idle_probe_needs_no_time_driver() {
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .enable_io()
+            .build()
+            .unwrap();
+        rt.block_on(async {
+            let (a, _b) = UnixDatagram::pair().unwrap();
+            a.set_nonblocking(true).unwrap();
+            let src = Counted {
+                sock: a,
+                calls: AtomicUsize::new(0),
+            };
+            let dies_on_second = |c: &Counted<UnixDatagram>| {
+                if c.calls.fetch_add(1, Ordering::SeqCst) + 1 >= 2 {
+                    Err(io::Error::from_raw_os_error(libc::ENETDOWN))
+                } else {
+                    Ok(())
+                }
+            };
+            let mut reg = Registered::new_rx(src, Interest::READABLE, dies_on_second)
+                .unwrap()
+                .with_probe_every(Duration::from_millis(50));
+            let (watchdog, release) = UnixDatagram::pair().unwrap();
+            release.set_nonblocking(true).unwrap();
+            let release = register_dup(release.as_fd(), Interest::READABLE).unwrap();
+            let guard = std::thread::spawn(move || {
+                std::thread::sleep(Duration::from_secs(2));
+                let _ = watchdog.send(b"x");
+            });
+            tokio::select! {
+                res = reg.readable_mut() => match res {
+                    Err(e) => assert_eq!(e.raw_os_error(), Some(libc::ENETDOWN)),
+                    Ok(_) => panic!("readable without data"),
+                },
+                _ = release.readable() => panic!("the idle probe never ran"),
+            }
+            drop(guard);
+        });
     }
 
     /// A healthy verdict after an error event (an interface merely down)

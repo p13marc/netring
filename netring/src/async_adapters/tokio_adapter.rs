@@ -84,9 +84,9 @@ impl<S: PacketSource + AsRawFd> AsyncCapture<S> {
     /// stream) end with an error once the source is gone: when the kernel
     /// reports an error on its fd, and every second of idle waiting, they
     /// ask [`PacketSource::check_health`] — for a [`Capture`](crate::Capture),
-    /// a removed interface is `ENETDOWN`, a down one is waited out. That
-    /// idle check runs on tokio's timer: the runtime needs its time driver
-    /// (`enable_all()` / `enable_time()`, as `#[tokio::main]` sets up).
+    /// a removed interface is `ENETDOWN`, a down one is waited out. The
+    /// idle check is clocked by a timerfd opened on the first idle wait (one
+    /// more fd); it needs no tokio time driver.
     ///
     /// # Errors
     ///

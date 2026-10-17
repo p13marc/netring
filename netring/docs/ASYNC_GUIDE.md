@@ -53,10 +53,11 @@ A read wait ends with `Error::Io(ENETDOWN)` once the capture's interface
 is removed — noticed on the kernel's error report, or within a second
 when the interface was already down. An interface that is merely down is
 waited out: frames flow again when it comes back up. The same holds for
-`AsyncXdpSocket` and `Bridge::run_async`. (The idle check runs on tokio's
-timer, so the runtime needs its time driver: `#[tokio::main]` /
-`enable_all()`.) A Monitor turns the error into its
-`BackendErrorPolicy`: stop, retire the source, or re-open it.
+`AsyncXdpSocket` and `Bridge::run_async`. (The idle check is clocked by a
+timerfd on tokio's IO reactor — one more fd, opened on the first idle
+wait — so it works on any runtime with IO enabled.) A Monitor turns the
+error into its `BackendErrorPolicy`: stop, retire the source, or re-open
+it.
 
 ### Three reception modes
 

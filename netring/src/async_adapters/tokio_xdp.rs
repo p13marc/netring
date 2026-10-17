@@ -76,9 +76,9 @@ impl AsyncXdpSocket {
     /// Waits end with an error once the socket's device is unregistered
     /// (`ENETDOWN`): AF_XDP raises no readiness event for that, so on an
     /// error event and every second of idle waiting they ask
-    /// [`XdpSocket::check_health`]. That idle check runs on tokio's timer:
-    /// the runtime needs its time driver (`enable_all()` /
-    /// `enable_time()`, as `#[tokio::main]` sets up).
+    /// [`XdpSocket::check_health`]. The idle check is clocked by a timerfd
+    /// opened on the first idle wait (one more fd); it needs no tokio time
+    /// driver.
     ///
     /// # Errors
     ///

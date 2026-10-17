@@ -50,14 +50,11 @@ pub enum BridgeDirection {
 
 /// The async loops' idle health check: every
 /// [`LIVENESS_PROBE`](crate::async_adapters::registered::LIVENESS_PROBE),
-/// first one period from now, missed ticks skipped.
+/// on a timerfd (no tokio time driver needed).
 #[cfg(feature = "tokio")]
-fn liveness_probe() -> tokio::time::Interval {
-    use crate::async_adapters::registered::LIVENESS_PROBE;
-    let mut probe =
-        tokio::time::interval_at(tokio::time::Instant::now() + LIVENESS_PROBE, LIVENESS_PROBE);
-    probe.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
-    probe
+fn liveness_probe() -> Result<crate::async_adapters::registered::ProbeTimer, Error> {
+    use crate::async_adapters::registered::{LIVENESS_PROBE, ProbeTimer};
+    ProbeTimer::new(LIVENESS_PROBE).map_err(Error::Io)
 }
 
 /// Forwarding statistics for both directions, plus per-cause drop counters.
@@ -266,8 +263,7 @@ impl Bridge {
     /// or with `ENETDOWN` when either interface is removed (noticed on the
     /// kernel's error event, or within a second when the interface was
     /// already down). A side that is merely down is waited out, as with
-    /// [`run`](Self::run). The idle check runs on tokio's timer: the
-    /// runtime needs its time driver.
+    /// [`run`](Self::run).
     #[cfg(feature = "tokio")]
     pub async fn run_async<F>(&mut self, mut filter: F) -> Result<(), Error>
     where
@@ -283,7 +279,7 @@ impl Bridge {
         let interest = Interest::READABLE | Interest::ERROR;
         let async_a = register_dup(self.rx_a.as_fd(), interest).map_err(Error::Io)?;
         let async_b = register_dup(self.rx_b.as_fd(), interest).map_err(Error::Io)?;
-        let mut probe = liveness_probe();
+        let probe = liveness_probe()?;
 
         loop {
             tokio::select! {
@@ -295,7 +291,10 @@ impl Bridge {
                     let mut guard = result.map_err(Error::Io)?;
                     self.serve_ready(&mut guard, &mut filter, BridgeDirection::BtoA)?;
                 }
-                _ = probe.tick() => self.check_health()?,
+                tick = probe.tick() => {
+                    tick.map_err(Error::Io)?;
+                    self.check_health()?;
+                }
             }
         }
     }
@@ -320,7 +319,7 @@ impl Bridge {
         let interest = Interest::READABLE | Interest::ERROR;
         let async_a = register_dup(self.rx_a.as_fd(), interest).map_err(Error::Io)?;
         let async_b = register_dup(self.rx_b.as_fd(), interest).map_err(Error::Io)?;
-        let mut probe = liveness_probe();
+        let probe = liveness_probe()?;
 
         for _ in 0..iterations {
             // Bound each iteration with poll_timeout so a quiet bridge still
@@ -334,7 +333,10 @@ impl Bridge {
                     let mut guard = result.map_err(Error::Io)?;
                     self.serve_ready(&mut guard, &mut filter, BridgeDirection::BtoA)?;
                 }
-                _ = probe.tick() => self.check_health()?,
+                tick = probe.tick() => {
+                    tick.map_err(Error::Io)?;
+                    self.check_health()?;
+                }
                 _ = tokio::time::sleep(self.poll_timeout) => {
                     // Idle iteration — fall through to next loop pass.
                 }

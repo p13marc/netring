@@ -3432,7 +3432,12 @@ impl MonitorBuilder {
                 std::mem::take(&mut st.scratch)
             };
             if !learned.is_empty() {
-                let hs = handlers.lock().expect("name handler list poisoned");
+                // Poison-tolerant: the list is read-only while the monitor
+                // runs, and a handler panic caught by `catch_handler_panics`
+                // (which poisons it) must not fail every later response.
+                let hs = handlers
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner);
                 if !hs.is_empty() {
                     for (ip, claim) in &learned {
                         for h in hs.iter() {
@@ -3803,9 +3808,11 @@ impl MonitorBuilder {
                 .state_mut::<analysis::AnalyzerCell>()
                 .analyzer
                 .finalize(&evt.key, evt.stats.clone());
+            // Poison-tolerant (read-only at run time): a caught handler
+            // panic must not fail every later flow.
             let hs = handlers_tcp
                 .lock()
-                .expect("analyzed-flow handler list poisoned");
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
             analysis::emit_analyzed_flow(af, emit_risk, min, ctx, &hs);
             Ok(())
         });
@@ -3818,7 +3825,7 @@ impl MonitorBuilder {
                 .finalize(&evt.key, evt.stats.clone());
             let hs = handlers_udp
                 .lock()
-                .expect("analyzed-flow handler list poisoned");
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
             analysis::emit_analyzed_flow(af, emit_risk, min, ctx, &hs);
             Ok(())
         });

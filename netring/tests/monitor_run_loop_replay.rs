@@ -10,6 +10,7 @@
     feature = "pcap"
 ))]
 
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
@@ -351,4 +352,135 @@ async fn on_dns_then_protocol_dns_delivers_each_message_once() {
         .await
         .unwrap();
     assert_eq!(*seen.lock().unwrap(), 1);
+}
+
+/// Two UDP flows: 10.0.0.1:5000 at t = 1 s (idle-ended by the sweep
+/// the second drives) and 10.0.0.1:6000 at t = 200 s (ended at EOF).
+fn two_udp_flows() -> Vec<(Duration, Vec<u8>)> {
+    [(5000, 1), (6000, 200)]
+        .into_iter()
+        .map(|(sport, t)| {
+            (
+                Duration::from_secs(t),
+                ipv4_udp([10, 0, 0, 1], [10, 0, 0, 2], sport, 53, b"query"),
+            )
+        })
+        .collect()
+}
+
+/// A callback that panics on its first call and counts every call.
+fn panics_once(calls: &AtomicUsize) {
+    if calls.fetch_add(1, Ordering::SeqCst) == 0 {
+        panic!("first call panics");
+    }
+}
+
+/// A caught panic in an `on_analyzed_flow` handler must not poison the
+/// handler list: the next flow's handlers still run (every later event
+/// used to fail on the poisoned lock).
+#[tokio::test(flavor = "current_thread")]
+async fn panicking_analyzed_flow_handler_does_not_poison_later_flows() {
+    use netring::monitor::HandlerErrorPolicy;
+    let file = pcap(&two_udp_flows());
+    let calls = Arc::new(AtomicUsize::new(0));
+    let c = Arc::clone(&calls);
+    let monitor = Monitor::builder()
+        .pcap_source(file.path())
+        .handler_error_policy(HandlerErrorPolicy::Isolate)
+        .catch_handler_panics(true)
+        .flow_analysis()
+        .on_analyzed_flow(move |_af, _ctx| panics_once(&c))
+        .build()
+        .unwrap();
+    let health = monitor.health();
+    monitor.replay().await.unwrap();
+    assert_eq!(calls.load(Ordering::SeqCst), 2);
+    assert_eq!(health.handler_errors(), 1);
+}
+
+struct NoScore;
+
+impl netring::anomaly::DetectorScore for NoScore {
+    fn kind(&self) -> flowscope::DetectorKind {
+        flowscope::DetectorKind::Other("none")
+    }
+    fn into_anomaly(self, ts: flowscope::Timestamp) -> flowscope::OwnedAnomaly {
+        flowscope::OwnedAnomaly::new(
+            flowscope::DetectorKind::Other("none"),
+            flowscope::event::Severity::Info,
+            ts,
+        )
+    }
+}
+
+/// Same for a `pattern_detector!` whose body panics: its detector
+/// mutex must not turn every later event into a panic.
+#[tokio::test(flavor = "current_thread")]
+async fn panicking_pattern_detector_does_not_poison_later_events() {
+    use netring::monitor::HandlerErrorPolicy;
+    use netring::protocol::builtin::Udp;
+    use netring::protocol::event_typed::FlowStarted;
+    let file = pcap(&two_udp_flows());
+    let calls = Arc::new(AtomicUsize::new(0));
+    let c = Arc::clone(&calls);
+    let det = netring::pattern_detector! {
+        name: "PanicsOnce",
+        event: FlowStarted<Udp>,
+        detector: 0u32,
+        feed: |_evt, det| {
+            *det += 1;
+            panics_once(&c);
+        },
+        verdict: |_evt, _det| None::<NoScore>,
+    };
+    let monitor = Monitor::builder()
+        .pcap_source(file.path())
+        .protocol::<Udp>()
+        .handler_error_policy(HandlerErrorPolicy::Isolate)
+        .catch_handler_panics(true)
+        .detect(det)
+        .build()
+        .unwrap();
+    let health = monitor.health();
+    monitor.replay().await.unwrap();
+    assert_eq!(calls.load(Ordering::SeqCst), 2);
+    assert_eq!(health.handler_errors(), 1);
+}
+
+/// A DNS response 10.0.0.2:53 → 10.0.0.1:5353 answering
+/// `example.test` A with `ip`.
+#[cfg(feature = "dns")]
+fn dns_response(id: u16, ip: [u8; 4]) -> Vec<u8> {
+    let mut r = id.to_be_bytes().to_vec();
+    r.extend_from_slice(&[0x81, 0x80, 0, 1, 0, 1, 0, 0, 0, 0]);
+    r.extend_from_slice(b"\x07example\x04test\x00");
+    r.extend_from_slice(&[0, 1, 0, 1]);
+    r.extend_from_slice(&[0xc0, 0x0c, 0, 1, 0, 1, 0, 0, 0, 60, 0, 4]);
+    r.extend_from_slice(&ip);
+    ipv4_udp([10, 0, 0, 2], [10, 0, 0, 1], 53, 5353, &r)
+}
+
+/// Same for an `on_name` handler.
+#[cfg(feature = "dns")]
+#[tokio::test(flavor = "current_thread")]
+async fn panicking_on_name_handler_does_not_poison_later_names() {
+    use netring::monitor::HandlerErrorPolicy;
+    let file = pcap(&timed(vec![
+        dns_response(1, [192, 0, 2, 10]),
+        dns_response(2, [192, 0, 2, 11]),
+    ]));
+    let calls = Arc::new(AtomicUsize::new(0));
+    let c = Arc::clone(&calls);
+    let monitor = Monitor::builder()
+        .pcap_source(file.path())
+        .handler_error_policy(HandlerErrorPolicy::Isolate)
+        .catch_handler_panics(true)
+        .name_map()
+        .on_name(move |_ip, _claim, _ctx| panics_once(&c))
+        .build()
+        .unwrap();
+    let health = monitor.health();
+    monitor.replay().await.unwrap();
+    assert_eq!(calls.load(Ordering::SeqCst), 2);
+    assert_eq!(health.handler_errors(), 1);
 }

@@ -1293,9 +1293,8 @@ For the `0.31.2` release (a non-breaking patch; flowscope stays 0.25.1).
    `$CARGO_HOME/credentials.toml`, `CARGO_HOME=/srv/dev/cargo` — not
    `~/.cargo`). A flowscope release goes first when netring needs it.
    `publish-crates.yml` (`workflow_dispatch`, `allow_breaking: no`) also
-   works once its `CARGO_REGISTRY_TOKEN` secret is valid — it was rejected
-   with a 403 for 0.31.1 and 0.31.2 — and skips versions already on
-   crates.io.
+   works if its `CARGO_REGISTRY_TOKEN` secret is valid (it was rejected
+   with a 403 for 0.31.1) and skips versions already on crates.io.
 5. Close the milestone's issues explicitly (`Closes #N` doesn't reliably
    close them on merge here). Planning lives in Forgejo issues at
    <https://git.marcpardo.eu/marcpardo/netring>; GitHub is a synced mirror.

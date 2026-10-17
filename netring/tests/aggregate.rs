@@ -165,3 +165,112 @@ async fn on_aggregate_reports() {
         .build();
     assert!(m.is_ok(), "on_aggregate build failed: {:?}", m.err());
 }
+
+/// A pcap of one UDP datagram from each of `n` distinct senders
+/// (10.1.x.y:40000 → 10.0.0.1:53) inside one 100 ms burst, plus a repeat
+/// of the first 2 s later so a 1 s report ticks after the burst.
+#[cfg(all(feature = "pcap", feature = "parse"))]
+fn many_senders_pcap(dir: &std::path::Path, n: u32) -> std::path::PathBuf {
+    use pcap_file::pcap::{PcapHeader, PcapPacket, PcapWriter};
+
+    let path = dir.join("senders.pcap");
+    let header = PcapHeader {
+        datalink: pcap_file::DataLink::ETHERNET,
+        ..Default::default()
+    };
+    let mut w = PcapWriter::with_header(std::fs::File::create(&path).unwrap(), header).unwrap();
+    let frame = |i: u32| {
+        let [_, _, x, y] = (0x0a01_0000 + i).to_be_bytes();
+        flowscope::extract::parse::test_frames::ipv4_udp(
+            [10, 1, x, y],
+            [10, 0, 0, 1],
+            40000,
+            53,
+            b"q",
+        )
+    };
+    for i in 0..n {
+        let f = frame(i);
+        let ts = Duration::from_millis(100_000) + Duration::from_micros(u64::from(i) * 10);
+        w.write_packet(&PcapPacket::new(ts, f.len() as u32, &f))
+            .unwrap();
+    }
+    let f = frame(0);
+    w.write_packet(&PcapPacket::new(
+        Duration::from_millis(102_000),
+        f.len() as u32,
+        &f,
+    ))
+    .unwrap();
+    path
+}
+
+/// #214: the default aggregation is bounded — 5000 distinct senders in one
+/// bucket keep at most 4096 talkers / pairs (0.31 kept all 5000, and kept
+/// growing with the key space).
+#[cfg(all(feature = "pcap", feature = "parse"))]
+#[tokio::test(flavor = "current_thread")]
+async fn default_aggregation_is_bounded() {
+    use std::sync::{Arc, Mutex};
+
+    let dir = tempfile::tempdir().unwrap();
+    let path = many_senders_pcap(dir.path(), 5000);
+    let sizes: Arc<Mutex<Vec<(usize, usize)>>> = Arc::default();
+    let s = Arc::clone(&sizes);
+    Monitor::builder()
+        .pcap_source(&path)
+        .on_aggregate(Duration::from_secs(1), move |r| {
+            s.lock()
+                .unwrap()
+                .push((r.top_talkers(100_000).len(), r.top_pairs(100_000).len()));
+            Ok(())
+        })
+        .build()
+        .unwrap()
+        .replay()
+        .await
+        .unwrap();
+    let sizes = sizes.lock().unwrap();
+    let (talkers, pairs) = sizes.iter().copied().max().expect("the report ticked");
+    assert!(talkers > 0 && pairs > 0, "{sizes:?}");
+    assert!(talkers <= 4096 && pairs <= 4096, "{sizes:?}");
+}
+
+/// #214: `max_keys` caps every dimension, and the report counts what the
+/// cap refused.
+#[cfg(all(feature = "pcap", feature = "parse"))]
+#[tokio::test(flavor = "current_thread")]
+async fn max_keys_caps_the_tables_and_counts_the_overflow() {
+    use std::sync::{Arc, Mutex};
+
+    use netring::monitor::aggregate::AggregateOverflow;
+
+    let dir = tempfile::tempdir().unwrap();
+    let path = many_senders_pcap(dir.path(), 100);
+    let mut cfg = AggregateConfig::default();
+    cfg.max_keys = 8;
+    let seen: Arc<Mutex<Vec<(usize, AggregateOverflow)>>> = Arc::default();
+    let s = Arc::clone(&seen);
+    Monitor::builder()
+        .pcap_source(&path)
+        .aggregate_with(cfg)
+        .on_aggregate(Duration::from_secs(1), move |r| {
+            let snap = r.to_snapshot(1000);
+            assert_eq!(snap.overflow, r.overflow());
+            s.lock()
+                .unwrap()
+                .push((r.top_talkers(1000).len(), r.overflow()));
+            Ok(())
+        })
+        .build()
+        .unwrap()
+        .replay()
+        .await
+        .unwrap();
+    let seen = seen.lock().unwrap();
+    let (talkers, overflow) = *seen.last().expect("the report ticked");
+    assert_eq!(talkers, 8, "{seen:?}");
+    // 100 senders, 8 keyed: the other 92 folded into the overflow total.
+    assert_eq!(overflow.talkers, 92, "{seen:?}");
+    assert_eq!(overflow.pairs, 92, "{seen:?}");
+}

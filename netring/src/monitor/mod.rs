@@ -2553,6 +2553,10 @@ impl MonitorBuilder {
         self.aggregate().tick(
             period,
             move |tick: &crate::protocol::event_typed::Tick, ctx: &mut Ctx<'_>| {
+                // Give back the buckets that left the window (#214): the
+                // tables otherwise only shrink when traffic arrives.
+                ctx.state_mut::<aggregate::AggregateState>()
+                    .evict_expired(tick.now);
                 if let Some(state) = ctx.state::<aggregate::AggregateState>() {
                     let report = aggregate::AggregateReport {
                         state,
@@ -5075,6 +5079,35 @@ mod tests {
     /// #216: a merge take re-seeds a `state_init` slot from its factory —
     /// it used to come back as `T::default()`, losing the configuration —
     /// and a `state::<T>()` slot with `T::default()`.
+    /// #214: the aggregation tables keep their configured key cap when a
+    /// merge re-seeds them (the factory captures the config).
+    #[test]
+    fn aggregate_state_keeps_its_cap_across_a_reseed() {
+        let cfg = aggregate::AggregateConfig {
+            max_keys: 8,
+            ..aggregate::AggregateConfig::default()
+        };
+        let mut m = Monitor::builder()
+            .interface("lo")
+            .aggregate_with(cfg)
+            .build()
+            .unwrap();
+        let cap = |m: &Monitor| {
+            let st = m.state_map.get::<aggregate::AggregateState>().unwrap();
+            (
+                st.talkers.as_ref().unwrap().max_keys(),
+                st.domains.as_ref().map(|d| d.max_keys()),
+            )
+        };
+        assert_eq!(cap(&m).0, 8);
+        let _ = m
+            .state_map
+            .take_reset(std::any::TypeId::of::<aggregate::AggregateState>())
+            .unwrap();
+        assert_eq!(cap(&m).0, 8);
+        assert!(cap(&m).1.is_none_or(|k| k == 8));
+    }
+
     #[test]
     fn take_reset_reseeds_from_state_init() {
         #[derive(Default)]

@@ -567,10 +567,10 @@ impl Monitor {
     /// 0.21 E.2: run until `window` of inactivity.
     ///
     /// The run loop resets a deadline each time a packet batch
-    /// arrives (or a tick fires); if the deadline expires before
-    /// the next event, the loop exits. The periodic flow sweep
-    /// (idle `FlowEnded`, parser ticks) is housekeeping and does not
-    /// reset it. Useful for:
+    /// arrives; if the deadline expires before the next batch, the
+    /// loop exits. Ticks (`.tick`, `.report`, `on_bandwidth`, …),
+    /// the periodic flow sweep (idle `FlowEnded`, parser ticks) and
+    /// telemetry are housekeeping and do not reset it. Useful for:
     ///
     /// - **live captures that go quiet** — stop once the source is
     ///   silent; flows still open are ended by the drain phase.

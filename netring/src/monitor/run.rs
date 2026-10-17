@@ -344,7 +344,7 @@ pub(crate) async fn run_loop(monitor: Monitor, stop: StopCondition) -> Result<()
     // 0.24 Phase B: consecutive backend-error count for the SkipSource circuit
     // breaker. Reset on every successful readable wake.
     let mut backend_errors: u64 = 0;
-    // 0.21 E.2: bumped on every packet batch + every tick. Idle
+    // 0.21 E.2: bumped on every readable wake (traffic only). Idle
     // mode computes its deadline as `last_event_at + window`,
     // so refreshing this resets the idle timer. Initialized to
     // "now" so the loop has the full window of grace before the
@@ -450,11 +450,11 @@ pub(crate) async fn run_loop(monitor: Monitor, stop: StopCondition) -> Result<()
                     continue;
                 }
                 tick_idx = next_tick(&mut tick_intervals), if !tick_intervals.is_empty() => {
-                    // Reset idle timer on every tick — periodic
-                    // tick fires are intended user activity, not
-                    // dead air. Without this, a 1s idle timeout +
-                    // 500ms tick handler would never resolve.
-                    last_event_at = Instant::now();
+                    // A tick is not traffic: it doesn't reset the idle
+                    // timer, or any tick period shorter than the idle
+                    // window (a `.report` / `on_bandwidth` cadence
+                    // included) would keep `run_until_idle` from ever
+                    // stopping.
                     // Packet time (the clock of every event's `ctx.ts`,
                     // so time-bound state lines up), wall time before
                     // the first packet.

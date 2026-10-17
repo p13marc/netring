@@ -417,7 +417,6 @@ pub(crate) async fn run_loop(monitor: Monitor, stop: StopCondition) -> Result<()
                     if let Some(now) = packet_clock.now() {
                         events.clear();
                         driver.sweep_into(now, &mut events);
-                        flow_states.sweep(now);
                         #[cfg(feature = "arp")]
                         let arp_table_ref: ArpTableRef<'_> = arp_watch.as_ref().map(|w| &w.table);
                         #[cfg(not(feature = "arp"))]
@@ -443,6 +442,10 @@ pub(crate) async fn run_loop(monitor: Monitor, stop: StopCondition) -> Result<()
                             None,
                         )
                         .await?;
+                        // After the dispatch: the flows this sweep ended
+                        // were released by their `FlowEnded`, whose
+                        // handlers could still read the state.
+                        flow_states.sweep(now);
                     }
                     continue;
                 }
@@ -996,7 +999,6 @@ pub(crate) async fn replay_loop(
                 last_sweep = Some(now);
                 events.clear();
                 driver.sweep_into(now, &mut events);
-                flow_states.sweep(now);
                 dispatch_batch(
                     &mut dispatcher,
                     &mut protocol_slots,
@@ -1018,6 +1020,8 @@ pub(crate) async fn replay_loop(
                     None,
                 )
                 .await?;
+                // After the `FlowEnded` handlers (see `run_loop`).
+                flow_states.sweep(now);
             }
 
             // Ticks that fell due before this packet, at their

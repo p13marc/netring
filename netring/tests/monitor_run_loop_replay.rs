@@ -104,3 +104,47 @@ async fn broadcast_template_is_not_a_subscriber_during_the_run() {
         "the user stream got both"
     );
 }
+
+#[derive(Default)]
+struct Seen(u32);
+
+/// An idle-ended flow's `FlowEnded` handlers still see its per-flow
+/// state: the sweep frees state only after the events it produced
+/// were dispatched (it used to free first, so a `flow_state` whose
+/// TTL is no longer than the idle gap read back `T::default()`).
+#[tokio::test(flavor = "current_thread")]
+async fn idle_ended_flow_keeps_its_state_for_flow_ended() {
+    use netring::protocol::builtin::Udp;
+    use netring::protocol::event_typed::{FlowEnded, FlowStarted};
+    let udp = |sport: u16, t: u64| {
+        (
+            Duration::from_secs(t),
+            ipv4_udp([10, 0, 0, 1], [10, 0, 0, 2], sport, 53, b"query"),
+        )
+    };
+    // Flow 5000 goes quiet after t = 3 s; the packet at t = 200 s
+    // drives the sweep that idle-ends it (UDP idle timeout 60 s).
+    let file = pcap(&[udp(5000, 1), udp(5000, 2), udp(5000, 3), udp(6000, 200)]);
+    let ended: Arc<Mutex<Vec<(u16, u32)>>> = Arc::default();
+    let e = Arc::clone(&ended);
+    Monitor::builder()
+        .pcap_source(file.path())
+        .protocol::<Udp>()
+        .flow_state::<Seen>(Duration::from_secs(60))
+        .on_ctx::<FlowStarted<Udp>>(|_e: &FlowStarted<Udp>, ctx: &mut Ctx<'_>| {
+            ctx.flow_state_mut::<Seen>().expect("registered").0 = 42;
+            Ok(())
+        })
+        .on_ctx::<FlowEnded<Udp>>(move |ev: &FlowEnded<Udp>, ctx: &mut Ctx<'_>| {
+            let port = ev.key.a.port().max(ev.key.b.port());
+            let v = ctx.flow_state_mut::<Seen>().expect("registered").0;
+            e.lock().unwrap().push((port, v));
+            Ok(())
+        })
+        .build()
+        .unwrap()
+        .replay()
+        .await
+        .unwrap();
+    assert_eq!(*ended.lock().unwrap(), vec![(5000, 42), (6000, 42)]);
+}

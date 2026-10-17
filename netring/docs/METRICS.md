@@ -18,8 +18,8 @@ so a scrape always sees the latest sample rather than an increment.
 
 | Metric | Type | Labels | Meaning |
 |--------|------|--------|---------|
-| `netring_capture_packets`   | gauge | `source` | Cumulative packets delivered to userspace (passed the kernel filter). |
-| `netring_capture_drops`     | gauge | `source` | Cumulative packets the kernel dropped (ring full). |
+| `netring_capture_packets`   | gauge | `source` | Cumulative packets delivered to userspace (passed the kernel filter and fit in the ring; excludes drops). |
+| `netring_capture_drops`     | gauge | `source` | Cumulative packets the kernel dropped for lack of ring space (AF_PACKET `tp_drops`; AF_XDP `rx_dropped + rx_ring_full`). |
 | `netring_capture_freezes`   | gauge | `source` | Cumulative TPACKET_V3 ring-freeze events. |
 | `netring_capture_drop_rate` | gauge | `source` | Windowed drop rate `[0.0, 1.0]` over the last sample period. |
 | `netring_capture_dedup_dropped` | gauge | `source` | **(0.31.1)** Cumulative frames the source's `Dedup` dropped as duplicates (`MonitorBuilder::dedup`); 0 without one. |
@@ -29,8 +29,16 @@ registration order), rendered as a string. **Cardinality:** one series
 per source per metric — bounded by your interface count. Safe.
 
 > The windowed `netring_capture_drop_rate` is the alerting signal: it
-> reflects *current* loss, where a `…_drops / …_packets` ratio computed
-> from the cumulative gauges would be smeared across the whole run.
+> reflects *current* loss, where a ratio computed from the cumulative
+> gauges would be smeared across the whole run. (Should you compute one:
+> the gauges' packets exclude drops, so it is `drops / (packets + drops)`;
+> the `record_capture_delta` counters follow the kernel and include them,
+> so there it is `…_drops_total / …_packets_total`.)
+>
+> Before 0.31.2 the gauges and `drop_rate` were wrong on both backends
+> (#182, #183): AF_PACKET's `packets` included the drops, capping
+> `drop_rate` at 0.5; AF_XDP reported `packets = 0` (a 0-or-1 rate) and
+> counted every fill-ring-starvation drop twice.
 
 ## Capture counters (low-level)
 

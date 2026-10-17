@@ -61,6 +61,9 @@ pub(crate) struct XdpRing<T: Copy> {
     descs: *mut T,
     cached_prod: u32,
     cached_cons: u32,
+    /// Entries released by the consumer over the ring's lifetime (`u64`,
+    /// so it never wraps like the `u32` ring indices).
+    released: u64,
 }
 
 impl<T: Copy> XdpRing<T> {
@@ -116,6 +119,7 @@ impl<T: Copy> XdpRing<T> {
             descs,
             cached_prod: 0,
             cached_cons: 0,
+            released: 0,
         })
     }
 
@@ -251,7 +255,20 @@ impl<T: Copy> XdpRing<T> {
     #[inline]
     pub(crate) fn consumer_release(&mut self, tok: PeekToken) {
         self.cached_cons = self.cached_cons.wrapping_add(tok.n);
+        self.released += u64::from(tok.n);
         unsafe { &*self.consumer }.store(self.cached_cons, Ordering::Release);
+    }
+
+    /// Entries the producer has ever placed in this ring: those the consumer
+    /// released plus those still waiting (peeked or not). For the RX ring
+    /// this is the socket's received-packet count (#183). Counting at
+    /// release — not at peek — keeps it exact when a peek is abandoned
+    /// (e.g. a `mem::forget`-ed batch) and the same entries are peeked again.
+    #[inline]
+    pub(crate) fn received_total(&self) -> u64 {
+        // SAFETY: `producer` points into this ring's live mmap region.
+        let prod = unsafe { &*self.producer }.load(Ordering::Acquire);
+        self.released + u64::from(prod.wrapping_sub(self.cached_cons))
     }
 
     // ── Wakeup ───────────────────────────────────────────────────────────
@@ -352,6 +369,7 @@ mod tests {
                 descs,
                 cached_prod: 0,
                 cached_cons: 0,
+                released: 0,
             };
 
             Self { ring, ptr, layout }
@@ -510,6 +528,43 @@ mod tests {
 
         mock.set_flags(0);
         assert!(!mock.ring.needs_wakeup());
+    }
+
+    /// #183: received = released + still in the ring, counted once even
+    /// when a peek is abandoned and repeated.
+    #[test]
+    fn received_total_counts_released_plus_pending() {
+        let mut mock = MockRing::<u64>::new(8);
+        mock.kernel_set_producer(5);
+        assert_eq!(mock.ring.received_total(), 5);
+        let tok = mock.ring.consumer_peek(4).unwrap();
+        assert_eq!(mock.ring.received_total(), 5, "peeking changes nothing");
+        // Abandoned peek (forgotten batch): the next peek sees the same
+        // entries; still 5.
+        let tok2 = mock.ring.consumer_peek(4).unwrap();
+        assert_eq!((tok2.start, tok2.n), (tok.start, tok.n));
+        assert_eq!(mock.ring.received_total(), 5);
+        mock.ring.consumer_release(tok2);
+        assert_eq!(mock.ring.received_total(), 5);
+        mock.kernel_set_producer(7);
+        let tok = mock.ring.consumer_peek(8).unwrap();
+        mock.ring.consumer_release(tok);
+        assert_eq!(mock.ring.received_total(), 7);
+    }
+
+    /// The `u32` ring indices wrap; the count must not.
+    #[test]
+    fn received_total_survives_index_wrap() {
+        let mut mock = MockRing::<u64>::new(8);
+        mock.ring.cached_cons = u32::MAX - 1;
+        mock.ring.cached_prod = u32::MAX - 1;
+        mock.ring.released = u64::from(u32::MAX);
+        mock.kernel_set_producer(2); // 4 entries past cached_cons, wrapped
+        assert_eq!(mock.ring.received_total(), u64::from(u32::MAX) + 4);
+        let tok = mock.ring.consumer_peek(8).unwrap();
+        assert_eq!(tok.n, 4);
+        mock.ring.consumer_release(tok);
+        assert_eq!(mock.ring.received_total(), u64::from(u32::MAX) + 4);
     }
 
     #[test]

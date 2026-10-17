@@ -403,9 +403,10 @@ macro_rules! multi_source_api {
         /// `Some(Ok(..))` for a live source, `Some(Err(..))` when its
         /// `getsockopt` failed, `None` for a source without a kernel
         /// ring (a replay source — see
-        /// [`MultiSource::packets_read`]). Reading resets the kernel
-        /// counters. (Before 0.31.1 `None` meant "ended"; finished
-        /// sources are now kept and report normally.)
+        /// [`MultiSource::packets_read`]). Reading resets an AF_PACKET
+        /// source's kernel counters (a delta); an AF_XDP source reports
+        /// its monotonic totals. (Before 0.31.1 `None` meant "ended";
+        /// finished sources are now kept and report normally.)
         pub fn per_source_capture_stats(
             &self,
         ) -> Vec<(String, Option<Result<CaptureStats, Error>>)> {

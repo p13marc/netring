@@ -45,3 +45,43 @@ fn capture_stats_basic() {
         "no drops expected on loopback with default ring"
     );
 }
+
+/// The kernel contract the Monitor's drop rate relies on (#183):
+/// `PACKET_STATISTICS` reports `tp_packets` with the drops already added,
+/// so on an overflowed ring that is never read, `packets - drops` is only
+/// what fit in the ring.
+#[test]
+fn overflowed_ring_reports_drops_inside_packets() {
+    use netring::BpfFilter;
+
+    let port = helpers::unique_port();
+    let cap = Capture::builder()
+        .interface(helpers::LOOPBACK)
+        .block_size(4096)
+        .block_count(2)
+        .frame_size(2048)
+        .block_timeout_ms(10)
+        .bpf_filter(
+            BpfFilter::builder()
+                .udp()
+                .dst_port(port)
+                .build()
+                .expect("filter"),
+        )
+        .build()
+        .expect("build capture");
+
+    // Never read: two 4 KiB blocks hold a few dozen of these frames.
+    helpers::send_udp_to_loopback(port, &[0x42; 200], 2000);
+    std::thread::sleep(Duration::from_millis(100));
+
+    let s = cap.cumulative_stats().expect("stats");
+    eprintln!("overflowed ring: {s}");
+    assert!(s.drops > 0, "the ring should have overflowed: {s}");
+    assert!(s.packets >= s.drops, "packets must include drops: {s}");
+    assert!(
+        s.packets - s.drops <= 128,
+        "only what fits in two 4 KiB blocks was delivered: {s}"
+    );
+    assert!(s.packets >= 2000, "every datagram reached the socket: {s}");
+}

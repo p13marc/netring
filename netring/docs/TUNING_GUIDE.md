@@ -127,8 +127,8 @@ let total = cap.cumulative_stats()?;  // monotonic since open
 
 | Field | Meaning |
 |-------|---------|
-| `packets` | Total packets received (passed BPF filter) |
-| `drops` | Packets dropped because ring was full |
+| `packets` | Packets received (passed BPF filter), **including** the dropped ones (kernel convention) |
+| `drops` | Packets dropped because the ring was full — the loss fraction is `drops / packets` |
 | `freeze_count` | Times the ring was frozen (queue depth exceeded) |
 
 **`stats()` resets kernel counters.** **Don't mix `stats()` and

@@ -13,7 +13,7 @@ use crate::config::{
 };
 use crate::error::Error;
 use crate::packet::{BatchIter, Packet, PacketBatch};
-use crate::stats::CaptureStats;
+use crate::stats::{CaptureStats, SourceCounters};
 use crate::traits::PacketSource;
 
 /// AF_PACKET TPACKET_V3 packet capture.
@@ -57,7 +57,7 @@ pub struct Capture {
     poll_timeout: Duration,
     /// Running totals across calls to [`cumulative_stats`](Self::cumulative_stats).
     /// `stats()` (the destructive variant) does not touch this.
-    cumulative: Cell<CaptureStats>,
+    cumulative: Cell<SourceCounters>,
     /// Busy-poll trio applied at build time. Inspected via
     /// [`busy_poll_config`](Self::busy_poll_config). Empty (all
     /// `None`) when no busy-poll knobs were set.
@@ -195,19 +195,23 @@ impl Capture {
     ///
     /// Internally calls `stats()` (which resets kernel counters) and adds
     /// the delta to a running total stored on `self`. Returned counters
-    /// are monotonically non-decreasing across calls. **Do not mix with
-    /// `stats()` on the same capture** — each `stats()` call also resets
-    /// the kernel counter and bypasses the running total.
+    /// are monotonically non-decreasing across calls (and saturate at
+    /// `u32::MAX`). **Do not mix with `stats()` on the same capture** — each
+    /// `stats()` call also resets the kernel counter and bypasses the
+    /// running total.
     pub fn cumulative_stats(&self) -> Result<CaptureStats, Error> {
+        self.cumulative_counters()
+            .map(SourceCounters::to_capture_stats)
+    }
+
+    /// The running totals behind [`cumulative_stats`](Self::cumulative_stats)
+    /// in `u64`, with delivered packets split from drops — what the Monitor
+    /// telemetry reads (#183, #184).
+    pub(crate) fn cumulative_counters(&self) -> Result<SourceCounters, Error> {
         let delta = socket::get_packet_stats(self.fd.as_fd())?;
-        let total = self.cumulative.get();
-        let new_total = CaptureStats {
-            packets: total.packets.saturating_add(delta.tp_packets),
-            drops: total.drops.saturating_add(delta.tp_drops),
-            freeze_count: total.freeze_count.saturating_add(delta.tp_freeze_q_cnt),
-        };
-        self.cumulative.set(new_total);
-        Ok(new_total)
+        let total = self.cumulative.get().add_tpacket_v3(delta);
+        self.cumulative.set(total);
+        Ok(total)
     }
 
     // ── Flat packet iterators ────────────────────────────────────────────
@@ -1139,7 +1143,7 @@ fn build_inner(b: &CaptureBuilder, block_count: usize) -> Result<Capture, Error>
         current_block: 0,
         expected_seq: 0,
         poll_timeout: b.poll_timeout,
-        cumulative: Cell::new(CaptureStats::default()),
+        cumulative: Cell::new(SourceCounters::default()),
         busy_poll,
         stop: None,
     })

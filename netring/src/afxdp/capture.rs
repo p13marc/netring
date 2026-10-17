@@ -149,7 +149,7 @@ mod mq {
 
     use super::{Error, Queues};
     use crate::afxdp::loader::{XdpAttachment, XdpFlags, XdpProgram, default_program};
-    use crate::afxdp::{XdpBatch, XdpMode, XdpSocket, XdpSocketBuilder};
+    use crate::afxdp::{XdpBatch, XdpMode, XdpSocket, XdpSocketBuilder, XdpStats};
 
     /// Builder for [`XdpCapture`].
     #[must_use]
@@ -426,6 +426,19 @@ mod mq {
         /// Mutable access to the per-queue sockets (for advanced drain loops).
         pub fn sockets_mut(&mut self) -> &mut [XdpSocket] {
             &mut self.sockets
+        }
+
+        /// `XDP_STATISTICS` summed across the per-queue sockets (each
+        /// counter saturating). See [`XdpStats`] for what each one means.
+        pub fn statistics(&self) -> Result<XdpStats, Error> {
+            crate::afxdp::sum_socket_stats(&self.sockets).map(|(s, _)| s)
+        }
+
+        /// Unified [`CaptureStats`](crate::CaptureStats) summed across the
+        /// per-queue sockets — see [`XdpSocket::capture_stats`].
+        pub fn capture_stats(&self) -> Result<crate::CaptureStats, Error> {
+            let (stats, received) = crate::afxdp::sum_socket_stats(&self.sockets)?;
+            Ok(stats.to_capture_stats(received))
         }
 
         /// Non-blocking unified RX: round-robins the queues and returns the next

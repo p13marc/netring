@@ -31,7 +31,7 @@ use flowscope::{PacketView, Timestamp};
 use crate::AsyncCapture;
 use crate::error::{Error, Result};
 use crate::packet::PacketDirection;
-use crate::stats::CaptureStats;
+use crate::stats::SourceCounters;
 
 /// A live capture backend behind the Monitor run loop. AF_PACKET today;
 /// AF_XDP behind the `af-xdp` feature.
@@ -150,27 +150,25 @@ impl AnyBackend {
         Ok(last_ts)
     }
 
-    /// Cumulative capture statistics **plus** the per-source
-    /// [`DropBreakdown`](crate::stats::DropBreakdown) — the un-collapsed
-    /// "where did packets drop" detail (issue #39). Returns both from a
-    /// single counter read so AF_PACKET's destructive `tp_drops` read
-    /// isn't double-consumed.
-    pub(crate) fn detailed_stats(&self) -> Result<(CaptureStats, crate::stats::DropBreakdown)> {
+    /// Cumulative `u64` counters (delivered packets split from drops)
+    /// **plus** the per-source [`DropBreakdown`](crate::stats::DropBreakdown)
+    /// — the un-collapsed "where did packets drop" detail (issue #39).
+    /// Returns both from a single counter read so AF_PACKET's destructive
+    /// `PACKET_STATISTICS` read isn't double-consumed.
+    pub(crate) fn counters(&self) -> Result<(SourceCounters, crate::stats::DropBreakdown)> {
         match self {
             AnyBackend::AfPacket(cap) => {
-                let stats = cap.cumulative_stats()?;
-                let detail = crate::stats::DropBreakdown::AfPacket {
-                    freezes: stats.freeze_count as u64,
-                };
-                Ok((stats, detail))
+                let c = cap.get_ref().cumulative_counters()?;
+                let detail = crate::stats::DropBreakdown::AfPacket { freezes: c.freezes };
+                Ok((c, detail))
             }
             #[cfg(feature = "af-xdp")]
             AnyBackend::Xdp(xdp) => {
                 let s = xdp.statistics()?;
-                Ok((s.to_capture_stats(), s.into()))
+                Ok((s.counters(xdp.get_ref().rx_received()), s.into()))
             }
             #[cfg(all(feature = "af-xdp", feature = "xdp-loader"))]
-            AnyBackend::XdpMq(cap) => cap.detailed_stats(),
+            AnyBackend::XdpMq(cap) => cap.counters(),
         }
     }
 }

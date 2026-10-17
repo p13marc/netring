@@ -135,6 +135,28 @@ impl AsyncXdpCapture {
     pub fn into_parts(self) -> (Vec<AsyncXdpSocket>, XdpCaptureGuard) {
         (self.sockets, self._guard)
     }
+
+    /// `XDP_STATISTICS` summed across the per-queue sockets (each counter
+    /// saturating) — the per-cause counters behind
+    /// [`capture_stats`](Self::capture_stats). See
+    /// [`XdpStats`](crate::XdpStats) for what each one means.
+    pub fn statistics(&self) -> Result<crate::XdpStats> {
+        self.summed().map(|(s, _)| s)
+    }
+
+    /// Unified [`CaptureStats`](crate::stats::CaptureStats) summed across all
+    /// per-queue sockets (issue #104): `packets` = received + dropped,
+    /// `drops` = `rx_dropped + rx_ring_full` — see
+    /// [`XdpSocket::capture_stats`](crate::XdpSocket::capture_stats).
+    /// Monotonic (AF_XDP counters are not reset by a read).
+    pub fn capture_stats(&self) -> Result<crate::stats::CaptureStats> {
+        let (stats, received) = self.summed()?;
+        Ok(stats.to_capture_stats(received))
+    }
+
+    fn summed(&self) -> Result<(crate::XdpStats, u64)> {
+        crate::afxdp::sum_socket_stats(self.sockets.iter().map(|s| s.get_ref()))
+    }
 }
 
 /// Helpers used only by the Monitor's `AnyBackend::XdpMq` drain (gated on the
@@ -226,26 +248,14 @@ impl AsyncXdpCapture {
         Poll::Pending
     }
 
-    /// Aggregate per-queue `XDP_STATISTICS` into both the unified
-    /// [`CaptureStats`](crate::stats::CaptureStats) **and** the
-    /// un-collapsed [`DropBreakdown`](crate::stats::DropBreakdown) in one
-    /// pass over the sockets (issue #39). `XDP_STATISTICS` is
-    /// non-destructive, so summing is monotonic and repeatable.
-    pub(crate) fn detailed_stats(
+    /// The Monitor's `u64` counters **and** the un-collapsed
+    /// [`DropBreakdown`](crate::stats::DropBreakdown), summed across the
+    /// per-queue sockets in one pass (issues #39, #183). `XDP_STATISTICS`
+    /// is non-destructive, so summing is monotonic and repeatable.
+    pub(crate) fn counters(
         &self,
-    ) -> Result<(crate::stats::CaptureStats, crate::stats::DropBreakdown)> {
-        let mut agg = crate::afxdp::XdpStats::default();
-        for s in &self.sockets {
-            agg = agg.saturating_add(s.statistics()?);
-        }
-        Ok((agg.to_capture_stats(), agg.into()))
-    }
-
-    /// Unified [`CaptureStats`](crate::stats::CaptureStats) summed across all
-    /// per-queue sockets (issue #104). The AF_XDP analogue of the AF_PACKET
-    /// capture-stats accessors, so the fan-in can report per-source ring
-    /// stats.
-    pub fn capture_stats(&self) -> Result<crate::stats::CaptureStats> {
-        self.detailed_stats().map(|(s, _)| s)
+    ) -> Result<(crate::stats::SourceCounters, crate::stats::DropBreakdown)> {
+        let (stats, received) = self.summed()?;
+        Ok((stats.counters(received), stats.into()))
     }
 }

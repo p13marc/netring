@@ -212,6 +212,12 @@ impl AsyncXdpSocket {
         self.inner.get_ref().statistics()
     }
 
+    /// Unified [`CaptureStats`](crate::CaptureStats) — see
+    /// [`XdpSocket::capture_stats`].
+    pub fn capture_stats(&self) -> Result<crate::CaptureStats, Error> {
+        self.inner.get_ref().capture_stats()
+    }
+
     /// Borrow the inner socket.
     pub fn get_ref(&self) -> &XdpSocket {
         self.inner.get_ref()

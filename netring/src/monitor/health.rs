@@ -166,15 +166,17 @@ impl MonitorHealth {
         self.inner.active_flows.load(Ordering::Relaxed)
     }
 
-    /// Cumulative packets across all sources as of the last telemetry
-    /// sample (requires an `on_capture_stats` / `capture_*` registration;
+    /// Cumulative packets delivered to userspace across all sources as of
+    /// the last telemetry sample — excluding [`drops`](Self::drops), as
+    /// [`CaptureTelemetry::packets`](crate::monitor::CaptureTelemetry::packets)
+    /// (requires an `on_capture_stats` / `capture_*` registration;
     /// otherwise stays 0).
     pub fn packets(&self) -> u64 {
         self.inner.packets.load(Ordering::Relaxed)
     }
 
-    /// Cumulative kernel drops across all sources as of the last
-    /// telemetry sample.
+    /// Cumulative kernel drops (no room in the ring) across all sources as
+    /// of the last telemetry sample.
     pub fn drops(&self) -> u64 {
         self.inner.drops.load(Ordering::Relaxed)
     }

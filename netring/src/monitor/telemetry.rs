@@ -5,7 +5,7 @@
 //! result to a user callback registered with
 //! [`MonitorBuilder::on_capture_stats`](crate::monitor::MonitorBuilder::on_capture_stats).
 //! This is the "is my capture keeping up?" signal: packets delivered,
-//! packets the kernel dropped (ring full), and ring freezes — plus a
+//! packets the kernel dropped (no room in the ring), and ring freezes — plus a
 //! windowed [`drop_rate`](CaptureTelemetry::drop_rate) so a transient
 //! burst of loss is visible even when lifetime totals dwarf it.
 //!
@@ -17,43 +17,46 @@ use std::time::Duration;
 
 use crate::ctx::{Ctx, SourceIdx};
 use crate::error::Result;
-use crate::stats::{CaptureStats, DropBreakdown};
+use crate::stats::{DropBreakdown, SourceCounters};
 
 /// A per-source snapshot of capture health, delivered to an
 /// [`on_capture_stats`](crate::monitor::MonitorBuilder::on_capture_stats)
 /// handler once per sample period.
 ///
 /// `packets` / `drops` / `freezes` are **cumulative** since the monitor
-/// started. (AF_PACKET kernel counters are destructive-read and
-/// accumulated internally by [`Capture::cumulative_stats`](crate::Capture);
-/// AF_XDP counters are monotonic.) [`drop_rate`](Self::drop_rate) is
-/// computed over the most recent sample window, so it reflects *current*
-/// loss rather than a lifetime average.
+/// started — including across a [`BackendErrorPolicy::Reopen`](crate::monitor::BackendErrorPolicy::Reopen)
+/// of the source, whose fresh kernel counters are added onto the old
+/// totals. [`drop_rate`](Self::drop_rate) is computed over the most recent
+/// sample window, so it reflects *current* loss rather than a lifetime
+/// average.
 ///
-/// Counters are widened to `u64` here even though the kernel reports
-/// `u32`: a busy 10 GbE link can retire more than `u32::MAX` packets in
-/// a long-running capture, and `cumulative_stats` already accumulates
-/// across the destructive `u32` reads.
+/// The counters are `u64` end to end (the monitor accumulates the kernel's
+/// `u32` reads itself), so they keep counting past `u32::MAX` — a busy
+/// 10 GbE link gets there in minutes.
 #[derive(Debug, Clone, Copy, PartialEq)]
 #[non_exhaustive]
 pub struct CaptureTelemetry {
     /// Which capture source produced this sample — the interface's
     /// index in builder `.interfaces([...])` registration order.
     pub source: SourceIdx,
-    /// Cumulative packets delivered to userspace (i.e. passed the
-    /// kernel BPF filter and were read out of the ring).
+    /// Cumulative packets delivered to userspace: passed the kernel BPF
+    /// filter and were placed in the ring. Excludes [`drops`](Self::drops)
+    /// (unlike [`CaptureStats::packets`](crate::CaptureStats::packets),
+    /// which follows the kernel's AF_PACKET convention of including them).
     pub packets: u64,
-    /// Cumulative packets the kernel dropped because the ring was full
-    /// when they arrived. Non-zero here means the consumer isn't
-    /// draining fast enough (or the ring is undersized).
+    /// Cumulative packets the kernel dropped because the ring had no room
+    /// for them (AF_PACKET: `tp_drops`; AF_XDP: `rx_dropped +
+    /// rx_ring_full`). Non-zero here means the consumer isn't draining
+    /// fast enough (or the ring is undersized).
     pub drops: u64,
     /// Cumulative ring-buffer freeze events. For TPACKET_V3 a freeze is
     /// the kernel running out of usable blocks; frequent freezes track
     /// with drops and point at the same backpressure.
     pub freezes: u64,
     /// Drop rate over the **most recent sample window**, in `[0.0, 1.0]`:
-    /// `window_drops / (window_packets + window_drops)`. `0.0` when the
-    /// window saw no traffic at all. Distinct from
+    /// the fraction of the packets that reached the socket in the window
+    /// which were dropped, `window_drops / (window_packets + window_drops)`.
+    /// `0.0` when the window saw no traffic at all. Distinct from
     /// [`lifetime_drop_rate`](Self::lifetime_drop_rate), which averages
     /// over the whole run.
     pub drop_rate: f64,
@@ -70,7 +73,8 @@ pub struct CaptureTelemetry {
 }
 
 impl CaptureTelemetry {
-    /// Cumulative drop rate over the entire run so far:
+    /// Cumulative drop rate over the entire run so far: the fraction of all
+    /// packets that reached the socket which were dropped,
     /// `drops / (packets + drops)`, in `[0.0, 1.0]`. `0.0` before any
     /// traffic. Use [`drop_rate`](Self::drop_rate) instead to react to a
     /// *current* loss spike — the lifetime figure is slow to move once a
@@ -152,9 +156,9 @@ impl CaptureTelemetry {
 pub struct CaptureHealth {
     /// Capture source index (interface registration order).
     pub source: u8,
-    /// Cumulative packets delivered to userspace.
+    /// Cumulative packets delivered to userspace (excludes `drops`).
     pub packets: u64,
-    /// Cumulative packets the kernel dropped (ring full).
+    /// Cumulative packets the kernel dropped for lack of ring space.
     pub drops: u64,
     /// Cumulative ring freeze events.
     pub freezes: u64,
@@ -190,64 +194,121 @@ impl From<CaptureTelemetry> for CaptureHealth {
     }
 }
 
-/// Internal per-source accumulator that turns the monitor's cumulative
-/// [`CaptureStats`] into a [`CaptureTelemetry`] with a *windowed*
-/// `drop_rate`. One entry per capture source; remembers the last
-/// sampled cumulative `(packets, drops)` so the next sample can compute
-/// the delta over the window.
+/// Internal per-source accumulator that turns the backends' cumulative
+/// [`SourceCounters`] into a [`CaptureTelemetry`] with a *windowed*
+/// `drop_rate`. One slot per capture source.
+///
+/// A backend's counters restart from zero when the source is reopened
+/// (`BackendErrorPolicy::Reopen`), so each slot keeps a `base` — the totals
+/// of the backends that came before — and reports `base + current`. The
+/// run loop announces a reopen with [`retire`](Self::retire); a counter
+/// that goes backwards without one is treated the same way. Either way the
+/// reported totals stay monotonic and no window sees a negative delta
+/// (#184).
 pub(crate) struct TelemetrySampler {
-    /// Last sampled cumulative `(packets, drops)` per source index.
-    last: Vec<(u64, u64)>,
+    slots: Vec<SamplerSlot>,
+}
+
+#[derive(Default, Clone, Copy)]
+struct SamplerSlot {
+    /// Totals carried over from retired backends.
+    base: SourceCounters,
+    base_detail: Option<DropBreakdown>,
+    /// The current backend's last reading.
+    last_raw: SourceCounters,
+    last_raw_detail: Option<DropBreakdown>,
+    /// The last cumulative value reported (`base + last_raw`).
+    last_cum: SourceCounters,
+}
+
+impl SamplerSlot {
+    /// Fold the current backend's counters into `base` and start over.
+    fn rebase(&mut self, fin: SourceCounters, fin_detail: Option<DropBreakdown>) {
+        self.base = self.base.saturating_add(fin);
+        self.base_detail = match (self.base_detail, fin_detail) {
+            (Some(b), Some(f)) => Some(b.saturating_add(f)),
+            (b, f) => f.or(b),
+        };
+        self.last_raw = SourceCounters::default();
+        self.last_raw_detail = None;
+    }
 }
 
 impl TelemetrySampler {
     /// One slot per capture source, all starting at zero.
     pub(crate) fn new(num_sources: usize) -> Self {
         Self {
-            last: vec![(0, 0); num_sources],
+            slots: vec![SamplerSlot::default(); num_sources],
         }
     }
 
-    /// Fold a fresh cumulative reading for `source` into a
-    /// [`CaptureTelemetry`], computing the windowed drop rate against
-    /// the previous reading. `cum` must be the source's *cumulative*
-    /// stats (e.g. from [`Capture::cumulative_stats`](crate::Capture)),
-    /// not a destructive single read. `detail` is the matching
-    /// per-source [`DropBreakdown`] read in the same pass.
+    /// Fold a fresh cumulative reading of `source`'s current backend into a
+    /// [`CaptureTelemetry`], computing the windowed drop rate against the
+    /// previous sample. `raw` must be the backend's *cumulative* counters,
+    /// not a destructive single read. `detail` is the matching per-source
+    /// [`DropBreakdown`] read in the same pass.
     pub(crate) fn sample(
         &mut self,
         source: usize,
-        cum: CaptureStats,
+        raw: SourceCounters,
         detail: DropBreakdown,
     ) -> CaptureTelemetry {
-        let packets = cum.packets as u64;
-        let drops = cum.drops as u64;
+        let slot = &mut self.slots[source];
+        let last = slot.last_raw;
+        if raw.delivered < last.delivered || raw.drops < last.drops || raw.freezes < last.freezes {
+            // The backend's counters restarted without a `retire` — keep
+            // what it had counted.
+            let last_detail = slot.last_raw_detail;
+            slot.rebase(last, last_detail);
+        }
+        let cum = slot.base.saturating_add(raw);
+        let window = cum.saturating_sub(slot.last_cum);
+        slot.last_raw = raw;
+        slot.last_raw_detail = Some(detail);
+        slot.last_cum = cum;
 
-        let (last_packets, last_drops) = self.last[source];
-        // `saturating_sub` guards the (pathological) case where a
-        // counter appears to go backwards — e.g. an AF_XDP reset or a
-        // wrap we failed to accumulate. Better a 0-delta window than a
-        // garbage rate from underflow.
-        let window_packets = packets.saturating_sub(last_packets);
-        let window_drops = drops.saturating_sub(last_drops);
-        self.last[source] = (packets, drops);
-
-        let window_total = window_packets + window_drops;
+        let window_total = window.delivered.saturating_add(window.drops);
         let drop_rate = if window_total == 0 {
             0.0
         } else {
-            window_drops as f64 / window_total as f64
+            window.drops as f64 / window_total as f64
         };
 
         CaptureTelemetry {
             source: SourceIdx(source as u8),
-            packets,
-            drops,
-            freezes: cum.freeze_count as u64,
+            packets: cum.delivered,
+            drops: cum.drops,
+            freezes: cum.freezes,
             drop_rate,
-            detail,
+            detail: match slot.base_detail {
+                Some(b) => b.saturating_add(detail),
+                None => detail,
+            },
             dedup_dropped: 0,
         }
+    }
+
+    /// `source`'s backend is being replaced (`BackendErrorPolicy::Reopen`):
+    /// fold its final reading — or, if that couldn't be read, its last
+    /// sampled one — into the source's base. A no-op when telemetry isn't
+    /// armed (no slots).
+    pub(crate) fn retire(&mut self, source: usize, fin: Option<(SourceCounters, DropBreakdown)>) {
+        let Some(slot) = self.slots.get_mut(source) else {
+            return;
+        };
+        match fin {
+            Some((counters, detail)) => slot.rebase(counters, Some(detail)),
+            None => {
+                let (last, last_detail) = (slot.last_raw, slot.last_raw_detail);
+                slot.rebase(last, last_detail);
+            }
+        }
+    }
+
+    /// The last cumulative totals reported for `source` (for a sample whose
+    /// read failed, so the health totals don't dip).
+    pub(crate) fn last_cumulative(&self, source: usize) -> Option<SourceCounters> {
+        self.slots.get(source).map(|s| s.last_cum)
     }
 }
 
@@ -280,20 +341,30 @@ impl std::fmt::Debug for CaptureStatsRegistration {
 mod tests {
     use super::*;
 
-    fn stats(packets: u32, drops: u32, freezes: u32) -> CaptureStats {
-        CaptureStats {
-            packets,
+    /// A backend's cumulative counters: `delivered` excludes `drops`.
+    fn stats(delivered: u64, drops: u64, freezes: u64) -> SourceCounters {
+        SourceCounters {
+            delivered,
             drops,
-            freeze_count: freezes,
+            freezes,
         }
     }
 
     /// AF_PACKET drop breakdown for a given freeze count — the detail
     /// companion to [`stats`] in these sampler tests.
-    fn afp(freezes: u32) -> DropBreakdown {
-        DropBreakdown::AfPacket {
-            freezes: freezes as u64,
-        }
+    fn afp(freezes: u64) -> DropBreakdown {
+        DropBreakdown::AfPacket { freezes }
+    }
+
+    /// The counters an AF_PACKET backend reports after one kernel read of
+    /// `tp_packets` / `tp_drops` (the kernel includes the drops in
+    /// `tp_packets`).
+    fn afp_read(tp_packets: u32, tp_drops: u32) -> SourceCounters {
+        SourceCounters::default().add_tpacket_v3(crate::afpacket::ffi::tpacket_stats_v3 {
+            tp_packets,
+            tp_drops,
+            tp_freeze_q_cnt: 0,
+        })
     }
 
     #[test]
@@ -337,16 +408,106 @@ mod tests {
         assert!(!t.drop_rate.is_nan());
     }
 
+    /// #183: a fully overloaded AF_PACKET socket reports `tp_packets ==
+    /// tp_drops` (the kernel adds the drops in). That is 100% loss, not the
+    /// 50% the old `drops / (packets + drops)` on raw `tp_packets` gave.
     #[test]
-    fn counter_going_backwards_saturates_to_zero_window() {
+    fn af_packet_total_loss_reads_one_not_one_half() {
+        let mut s = TelemetrySampler::new(1);
+        let t = s.sample(0, afp_read(1000, 1000), afp(0));
+        assert_eq!(t.packets, 0);
+        assert_eq!(t.drops, 1000);
+        assert_eq!(t.drop_rate, 1.0);
+        assert_eq!(t.lifetime_drop_rate(), 1.0);
+        let mut s = TelemetrySampler::new(1);
+        let t = s.sample(0, afp_read(2000, 1000), afp(0));
+        assert!((t.drop_rate - 0.5).abs() < 1e-9, "rate = {}", t.drop_rate);
+    }
+
+    /// #183: an AF_XDP source now reports its received packets, so its
+    /// rate is a fraction, not 0-or-1.
+    #[test]
+    fn xdp_rate_is_a_fraction() {
+        let mut s = TelemetrySampler::new(1);
+        let xdp = |n: u64, d: u64| {
+            crate::afxdp::XdpStats {
+                rx_dropped: d,
+                ..Default::default()
+            }
+            .counters(n)
+        };
+        let _ = s.sample(0, xdp(0, 0), afp(0));
+        let t = s.sample(0, xdp(900, 100), afp(0));
+        assert!((t.drop_rate - 0.1).abs() < 1e-9, "rate = {}", t.drop_rate);
+    }
+
+    /// #184: past `u32::MAX` the windows keep moving.
+    #[test]
+    fn counters_past_u32_keep_the_window_moving() {
+        let mut s = TelemetrySampler::new(1);
+        let _ = s.sample(0, stats(5_000_000_000, 5_000_000_000, 0), afp(0));
+        let t = s.sample(0, stats(5_000_001_000, 5_000_001_000, 0), afp(0));
+        assert_eq!(t.packets, 5_000_001_000);
+        assert!((t.drop_rate - 0.5).abs() < 1e-9, "rate = {}", t.drop_rate);
+    }
+
+    /// #184: a reopened backend restarts from zero; with its final reading
+    /// retired into the base, totals stay monotonic and the window is
+    /// exact.
+    #[test]
+    fn reopen_with_final_reading_rebases() {
+        let mut s = TelemetrySampler::new(1);
+        let _ = s.sample(0, stats(1000, 50, 2), afp(2));
+        s.retire(0, Some((stats(1200, 60, 2), afp(2))));
+        let t = s.sample(0, stats(100, 40, 0), afp(0));
+        assert_eq!((t.packets, t.drops, t.freezes), (1300, 100, 2));
+        // Window: (1300 - 1000) delivered, (100 - 50) dropped.
+        assert!(
+            (t.drop_rate - 50.0 / 350.0).abs() < 1e-9,
+            "rate = {}",
+            t.drop_rate
+        );
+        assert_eq!(t.detail, afp(2));
+    }
+
+    #[test]
+    fn reopen_without_final_reading_keeps_the_last_sample() {
         let mut s = TelemetrySampler::new(1);
         let _ = s.sample(0, stats(1000, 50, 0), afp(0));
-        // Pathological reset: cumulative appears to drop. Saturating
-        // sub yields a 0-delta window instead of an underflow panic /
-        // garbage rate.
-        let t = s.sample(0, stats(10, 1, 0), afp(0));
+        s.retire(0, None);
+        let t = s.sample(0, stats(100, 40, 0), afp(0));
+        assert_eq!((t.packets, t.drops), (1100, 90));
+        assert!(
+            (t.drop_rate - 40.0 / 140.0).abs() < 1e-9,
+            "rate = {}",
+            t.drop_rate
+        );
+    }
+
+    /// A reset nobody announced: the old code saturated each field on its
+    /// own and reported a window of (0 delivered, 5 dropped) = rate 1.0.
+    #[test]
+    fn counter_going_backwards_is_treated_as_a_reset() {
+        let mut s = TelemetrySampler::new(1);
+        let _ = s.sample(0, stats(1000, 0, 0), afp(0));
+        let t = s.sample(0, stats(10, 5, 0), afp(0));
+        assert_eq!((t.packets, t.drops), (1010, 5));
+        assert!(
+            (t.drop_rate - 5.0 / 15.0).abs() < 1e-9,
+            "rate = {}",
+            t.drop_rate
+        );
+        // And it keeps counting from there.
+        let t = s.sample(0, stats(20, 5, 0), afp(0));
+        assert_eq!(t.packets, 1020);
         assert_eq!(t.drop_rate, 0.0);
-        assert_eq!(t.packets, 10);
+    }
+
+    #[test]
+    fn retire_without_slots_is_a_noop() {
+        let mut s = TelemetrySampler::new(0);
+        s.retire(3, None);
+        assert_eq!(s.last_cumulative(3), None);
     }
 
     #[test]
@@ -408,9 +569,9 @@ mod tests {
             tx_invalid_descs: 5,
             tx_ring_empty_descs: 6,
         };
-        // The unified `drops` is whatever the backend computed (the
-        // queue-pressure total); the sampler folds it into the windowed
-        // rate but must carry the per-source breakdown through verbatim.
+        // The unified `drops` is whatever the backend computed; the sampler
+        // folds it into the windowed rate but must carry the per-source
+        // breakdown through verbatim.
         let t = s.sample(0, stats(0, 8, 0), detail);
         assert_eq!(t.detail, detail);
         match t.detail {

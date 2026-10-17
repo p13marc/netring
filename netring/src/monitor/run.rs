@@ -551,6 +551,11 @@ pub(crate) async fn run_loop(monitor: Monitor, stop: StopCondition) -> Result<()
                         health.record_backend_error();
                         match open_backend(&specs[i], fanout, &kernel_prefilter, promiscuous) {
                             Ok(b) => {
+                                // The new backend's counters start at zero:
+                                // hand the old one's totals to the sampler.
+                                if capture_stats.is_some() {
+                                    telemetry_sampler.retire(i, caps[i].counters().ok());
+                                }
                                 caps[i] = b;
                                 tracing::warn!(error = %e, idx = i, count = backend_errors, "capture backend error (Reopen) — source reopened");
                             }
@@ -1479,11 +1484,12 @@ fn emit_active_flow_records(
 /// fold them into a windowed [`CaptureTelemetry`], and fire the registered
 /// `on_capture_stats` handler once per source.
 ///
-/// Reads `cumulative_stats` (non-destructive at the API level — the inner
-/// `Capture` accumulates the destructive `u32` kernel reads internally), so
-/// it never disturbs the user-visible counters. A per-source stats read
-/// that errors is logged and skipped rather than tearing down the monitor:
-/// telemetry is best-effort observability.
+/// Reads each backend's cumulative `u64` counters (non-destructive at the
+/// API level — the inner `Capture` accumulates the destructive kernel reads
+/// internally), so it never disturbs the user-visible counters. A
+/// per-source stats read that errors is logged and skipped rather than
+/// tearing down the monitor (its last totals still count toward the health
+/// handle): telemetry is best-effort observability.
 #[allow(clippy::too_many_arguments)]
 fn sample_and_fire_capture_stats(
     caps: &[AnyBackend],
@@ -1504,7 +1510,7 @@ fn sample_and_fire_capture_stats(
     let mut total_packets: u64 = 0;
     let mut total_drops: u64 = 0;
     for (i, cap) in caps.iter().enumerate() {
-        let (cum, detail) = match cap.detailed_stats() {
+        let (cum, detail) = match cap.counters() {
             Ok(s) => s,
             Err(e) => {
                 tracing::warn!(
@@ -1512,6 +1518,10 @@ fn sample_and_fire_capture_stats(
                     error = %e,
                     "capture stats read failed; skipping telemetry sample for this source"
                 );
+                if let Some(last) = sampler.last_cumulative(i) {
+                    total_packets += last.delivered;
+                    total_drops += last.drops;
+                }
                 continue;
             }
         };

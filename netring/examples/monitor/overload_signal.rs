@@ -37,7 +37,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 match state {
                     OverloadState::Emergency => {
                         eprintln!(
-                            "⚠ OVERLOAD — dropping {:.1}% ({} pkts/s)",
+                            "⚠ OVERLOAD — dropping {:.1}% ({} packets delivered so far)",
                             t.drop_rate * 100.0,
                             t.packets
                         );

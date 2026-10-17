@@ -640,3 +640,63 @@ fn afxdp_send_full_frame_after_rx_recycles_whole_chunks() {
     drop(sock);
     std::thread::sleep(Duration::from_millis(300));
 }
+
+/// #182: an AF_XDP socket that is never read loses every packet beyond its
+/// prefilled buffers. In copy mode the kernel counts each of those losses
+/// in both `rx_dropped` and `rx_fill_ring_empty_descs`; `capture_stats()`
+/// must count it once (it used to report about twice the packets sent).
+#[test]
+fn afxdp_lo_capture_stats_counts_each_drop_once() {
+    wait_lo_free();
+    let mut sock = build_with_retry("rx socket on lo", || {
+        XdpSocket::builder()
+            .interface("lo")
+            .queue_id(0)
+            .frame_size(2048)
+            .frame_count(64)
+            .mode(netring::XdpMode::Rx)
+            .with_default_program()
+            .xdp_attach_flags(XdpFlags::SKB_MODE)
+            .build()
+    });
+
+    const N: usize = 4096;
+    let tx = UdpSocket::bind("127.0.0.1:0").expect("bind udp tx");
+    for chunk in 0..N / 256 {
+        for _ in 0..256 {
+            let _ = tx.send_to(b"netring-afxdp-drops", "127.0.0.1:65113");
+        }
+        if chunk % 4 == 3 {
+            std::thread::sleep(Duration::from_millis(1));
+        }
+    }
+    std::thread::sleep(Duration::from_millis(200));
+
+    let raw = sock.statistics().expect("statistics");
+    let cs = sock.capture_stats().expect("capture_stats");
+    eprintln!("raw: {raw}; capture_stats: {cs}");
+    let (packets, drops) = (cs.packets as usize, cs.drops as usize);
+    assert!(drops >= N / 2, "the socket should have overflowed: {cs}");
+    assert!(drops <= N + 256, "drops counted twice? {cs} for {N} sent");
+    let delivered = packets - drops;
+    assert!(
+        delivered > 0 && delivered <= 64,
+        "only the 64 prefilled frames can hold packets: {cs}"
+    );
+
+    // Draining moves packets from the ring to userspace; it does not change
+    // how many the socket received.
+    let mut drained = 0;
+    loop {
+        let n = sock.recv().expect("recv").len();
+        if n == 0 {
+            break;
+        }
+        drained += n;
+    }
+    assert!(drained <= 64, "drained {drained}");
+    let after = sock.capture_stats().expect("capture_stats");
+    assert!(after.packets >= cs.packets, "{after} < {cs}");
+    drop(sock);
+    std::thread::sleep(Duration::from_millis(300));
+}

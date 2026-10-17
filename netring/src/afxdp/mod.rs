@@ -61,6 +61,21 @@ pub use capture::{Queues, interface_numa_node, queue_count};
 pub use capture::{XdpCapture, XdpCaptureBuilder, XdpCaptureGuard};
 pub use stats::XdpStats;
 
+/// Sum `XDP_STATISTICS` and the RX received counts over a multi-queue
+/// capture's sockets (`XdpCapture` / `AsyncXdpCapture`).
+#[cfg(all(feature = "af-xdp", feature = "xdp-loader"))]
+pub(crate) fn sum_socket_stats<'a>(
+    sockets: impl IntoIterator<Item = &'a XdpSocket>,
+) -> Result<(XdpStats, u64), Error> {
+    let mut stats = XdpStats::default();
+    let mut received = 0u64;
+    for s in sockets {
+        stats = stats.saturating_add(s.statistics()?);
+        received = received.saturating_add(s.rx_received());
+    }
+    Ok((stats, received))
+}
+
 #[cfg(feature = "xdp-loader")]
 pub use loader::{XdpAttachment, XdpFlags, XdpProgram, default_program};
 
@@ -1145,6 +1160,24 @@ impl XdpSocket {
     #[cfg(feature = "af-xdp")]
     pub fn statistics(&self) -> Result<XdpStats, Error> {
         socket::get_statistics(self.fd.as_fd()).map(XdpStats::from)
+    }
+
+    /// Unified [`CaptureStats`](crate::CaptureStats) for this socket, with
+    /// the same meaning as on AF_PACKET: `packets` = packets received
+    /// (placed in the RX ring, counted in userspace since `XDP_STATISTICS`
+    /// has none) **plus** the dropped ones, `drops` = `rx_dropped +
+    /// rx_ring_full`. Monotonic; each field saturates at `u32::MAX`. For
+    /// the per-cause counters use [`statistics`](Self::statistics).
+    #[cfg(feature = "af-xdp")]
+    pub fn capture_stats(&self) -> Result<crate::CaptureStats, Error> {
+        Ok(self.statistics()?.to_capture_stats(self.rx_received()))
+    }
+
+    /// Packets the kernel has placed in this socket's RX ring so far
+    /// (consumed or still pending).
+    #[cfg(feature = "af-xdp")]
+    pub(crate) fn rx_received(&self) -> u64 {
+        self.rx.received_total()
     }
 
     // ── Internal helpers ─────────────────────────────────────────────────

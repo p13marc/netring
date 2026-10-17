@@ -84,6 +84,7 @@ type ObserveFn = Box<dyn Fn(&dyn Any) + Send>;
 /// primary, then observe the primary.
 pub(crate) struct MergeSpec {
     type_id: TypeId,
+    type_name: &'static str,
     period: Duration,
     /// `Box<T>`, accumulates across intervals (the grand total).
     primary: Box<dyn Any + Send>,
@@ -94,11 +95,6 @@ pub(crate) struct MergeSpec {
 }
 
 impl MergeSpec {
-    /// The interval between probes.
-    pub(crate) fn period(&self) -> Duration {
-        self.period
-    }
-
     /// `merge_state` / `state_auto_merge` build this. `merge(&mut primary, shard_value)`.
     pub(crate) fn new<T, F>(period: Duration, mut merge: F) -> Self
     where
@@ -107,6 +103,7 @@ impl MergeSpec {
     {
         Self {
             type_id: TypeId::of::<T>(),
+            type_name: std::any::type_name::<T>(),
             period,
             primary: Box::new(T::default()),
             fold: Box::new(move |primary, taken| {
@@ -140,6 +137,28 @@ impl MergeSpec {
             obs(self.primary.as_ref());
         }
     }
+}
+
+/// Check the merges before a run: each needs a non-zero period (it would
+/// re-probe the shards back to back), and each state type gets one merge
+/// (#227) — a shard's delta is taken once, so it can feed one fold only.
+pub(crate) fn validate(specs: &[MergeSpec]) -> crate::error::Result<()> {
+    use crate::error::BuildError;
+    if specs.iter().any(|m| m.period.is_zero()) {
+        return Err(BuildError::ZeroPeriod {
+            what: "merge_state / state_auto_merge",
+        }
+        .into());
+    }
+    for (i, spec) in specs.iter().enumerate() {
+        if specs[..i].iter().any(|s| s.type_id == spec.type_id) {
+            return Err(BuildError::DuplicateMergeState {
+                type_name: spec.type_name,
+            }
+            .into());
+        }
+    }
+    Ok(())
 }
 
 /// How long a probe waits for the shards' replies. Replies that come
@@ -432,6 +451,35 @@ mod tests {
             Duration::from_millis(50),
         );
         assert_eq!(*observed.lock().unwrap(), vec![9]);
+    }
+
+    /// #227: one merge per state type; a zero period is rejected too.
+    #[test]
+    fn validate_rejects_a_second_merge_for_a_type() {
+        use crate::error::{BuildError, Error};
+        let sum = || {
+            MergeSpec::new::<Counter, _>(Duration::from_secs(1), |p: &mut Counter, t: Counter| {
+                p.0 += t.0
+            })
+        };
+        let max = || {
+            MergeSpec::new::<Counter, _>(Duration::from_secs(5), |p: &mut Counter, t: Counter| {
+                p.0 = p.0.max(t.0)
+            })
+        };
+        let other = MergeSpec::new::<u64, _>(Duration::from_secs(1), |p: &mut u64, t: u64| *p += t);
+        assert!(validate(&[sum(), other]).is_ok());
+        match validate(&[sum(), max()]) {
+            Err(Error::Build(BuildError::DuplicateMergeState { type_name })) => {
+                assert!(type_name.ends_with("Counter"), "{type_name}")
+            }
+            other => panic!("{other:?}"),
+        }
+        let zero = MergeSpec::new::<u64, _>(Duration::ZERO, |p: &mut u64, t: u64| *p += t);
+        assert!(matches!(
+            validate(&[zero]),
+            Err(Error::Build(BuildError::ZeroPeriod { .. }))
+        ));
     }
 
     /// The worker exits promptly once every shard is gone, even without

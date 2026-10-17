@@ -335,6 +335,12 @@ impl ShardedRunner {
     /// 0.22 §5.1: periodically fold each shard's `T` state slot into a
     /// single primary via `merge(&mut primary, shard_value)`.
     ///
+    /// One merge per state type: a second `merge_state` /
+    /// [`Self::state_auto_merge`] for the same `T` makes the run fail with
+    /// [`BuildError::DuplicateMergeState`](crate::error::BuildError::DuplicateMergeState)
+    /// before any shard starts (a shard's delta is taken once, so only one
+    /// fold could ever see it).
+    ///
     /// Every `period`, a merge-worker thread probes each shard for its
     /// `T` — taking it and re-seeding the slot the way it was registered
     /// (`T::default()` for `MonitorBuilder::state::<T>()`, the factory for
@@ -441,13 +447,8 @@ impl ShardedRunner {
     }
 
     fn run_inner(self, mode: RunMode) -> Result<()> {
-        // A zero merge period would re-probe the shards back to back.
-        if self.merges.iter().any(|m| m.period().is_zero()) {
-            return Err(crate::error::BuildError::ZeroPeriod {
-                what: "merge_state / state_auto_merge",
-            }
-            .into());
-        }
+        // A zero period, or a second merge for one state type (#227).
+        crate::monitor::merge::validate(&self.merges)?;
         let build_shard = self.build_shard;
         // 0.22 §5.2: share the layer specs across shard threads; each
         // shard instantiates its own layer instances.
@@ -603,6 +604,34 @@ mod tests {
             "{err:?}"
         );
         assert!(!built.load(std::sync::atomic::Ordering::Relaxed));
+    }
+
+    /// #227: two merges for the same state type are a build error — a
+    /// shard's delta can be taken once, so only one of them could ever
+    /// fold it. Rejected before any shard is built.
+    #[test]
+    fn duplicate_merge_for_a_type_is_a_build_error() {
+        let built = Arc::new(AtomicBool::new(false));
+        let b = Arc::clone(&built);
+        let runner =
+            super::ShardedRunner::new("lo", crate::config::FanoutMode::Hash, 1, 2, move |_| {
+                b.store(true, Ordering::Relaxed);
+                Err(crate::error::Error::Config("not reached".into()))
+            })
+            .state_auto_merge::<u64>(Duration::from_secs(1))
+            .merge_state::<u64, _>(Duration::from_secs(5), |p: &mut u64, t: u64| {
+                *p = (*p).max(t)
+            });
+        let err = runner.run_for(Duration::from_millis(10)).unwrap_err();
+        assert!(
+            matches!(
+                &err,
+                crate::error::Error::Build(crate::error::BuildError::DuplicateMergeState { type_name })
+                    if type_name.contains("u64")
+            ),
+            "{err:?}"
+        );
+        assert!(!built.load(Ordering::Relaxed));
     }
 
     /// The calling thread's affinity mask, as CPU ids.

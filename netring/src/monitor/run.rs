@@ -390,6 +390,10 @@ pub(crate) async fn run_loop(monitor: Monitor, stop: StopCondition) -> Result<()
     // Every exit — stop condition, EOF, or an error — reaches the
     // output flush below.
     let run: Result<()> = async {
+        // One waiter for the whole run: a fresh one per `select!` pass
+        // would lock the `Notify` every shard shares on every loop turn.
+        let sibling_stop = sibling_stopped(&shard_stop);
+        tokio::pin!(sibling_stop);
         loop {
             // tokio::select! waits on shutdown, the next packet, OR
             // the next tick. The `if !tick_intervals.is_empty()`
@@ -403,7 +407,7 @@ pub(crate) async fn run_loop(monitor: Monitor, stop: StopCondition) -> Result<()
                 biased;
                 _ = shutdown.recv(last_event_at) => break,
                 // A `ShardedRunner` sibling's run ended (an error, a signal).
-                _ = sibling_stopped(&shard_stop), if shard_stop.is_some() => break,
+                _ = &mut sibling_stop, if shard_stop.is_some() => break,
                 // Housekeeping, like telemetry: does not reset the idle timer.
                 _ = sweep_timer.tick() => {
                     if let Some(now) = packet_clock.now() {

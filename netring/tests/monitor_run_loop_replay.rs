@@ -850,15 +850,7 @@ async fn effect_handlers_receive_parser_events() {
 struct CountingSink(Arc<AtomicUsize>);
 
 impl netring::anomaly::sink::AnomalySink for CountingSink {
-    fn write(
-        &mut self,
-        _kind: &'static str,
-        _severity: netring::anomaly::Severity,
-        _ts: flowscope::Timestamp,
-        _key: Option<&dyn netring::anomaly::Key>,
-        _observations: &[(&'static str, std::borrow::Cow<'_, str>)],
-        _metrics: &[(&'static str, f64)],
-    ) {
+    fn write(&mut self, _record: &netring::anomaly::sink::AnomalyRecord<'_>) {
         self.0.fetch_add(1, Ordering::SeqCst);
     }
 }

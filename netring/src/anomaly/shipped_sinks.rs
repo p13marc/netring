@@ -11,15 +11,12 @@
 //! | [`TracingSink`]   | 0 (tracing event!)      | `tracing::event!` at the matching Level    |
 //! | [`ChannelSink`]   | 1 ([`OwnedAnomaly`](crate::anomaly::OwnedAnomaly))    | tokio mpsc; lets consumers retain anomalies |
 
-use std::borrow::Cow;
 use std::io::Write;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 
-use flowscope::Timestamp;
-
 use crate::anomaly::Severity;
-use crate::anomaly::sink::AnomalySink;
+use crate::anomaly::sink::{AnomalyRecord, AnomalySink, endpoint_text};
 
 // ─── StdoutSink ─────────────────────────────────────────────────
 
@@ -29,8 +26,12 @@ use crate::anomaly::sink::AnomalySink;
 ///
 /// Format:
 /// ```text
-/// [<severity>] <kind> ts=<ts> [key=<Debug-K>] [obs1=v1 ...] [m1=v1 ...]
+/// [<severity>] <kind> ts=<ts> [src=<ip:port> dst=<ip:port> [proto=<p>] | key=<Debug-K>] [obs1=v1 ...] [m1=v1 ...]
 /// ```
+///
+/// `src` / `dst` are the record's [`Endpoints`](crate::anomaly::sink::Endpoints)
+/// (the flow's initiator first when known); a key without endpoints (a
+/// host, a counter key) prints as `key=` instead.
 pub struct StdoutSink {
     buf: Vec<u8>,
 }
@@ -52,25 +53,43 @@ impl Default for StdoutSink {
     }
 }
 
-impl AnomalySink for StdoutSink {
-    fn write(
-        &mut self,
-        kind: &'static str,
-        severity: Severity,
-        ts: Timestamp,
-        key: Option<&dyn crate::anomaly::Key>,
-        observations: &[(&'static str, Cow<'_, str>)],
-        metrics: &[(&'static str, f64)],
-    ) {
-        self.buf.clear();
-        let _ = write!(&mut self.buf, "[{severity}] {kind} ts={ts}");
-        if let Some(k) = key {
-            let _ = write!(&mut self.buf, " key={k:?}");
+/// ` src=… dst=… [proto=…]` for the record's endpoints, else ` key=<Debug>`.
+fn write_subject(out: &mut impl std::fmt::Write, r: &AnomalyRecord<'_>) {
+    if let Some(e) = r.endpoints {
+        let _ = write!(
+            out,
+            " src={} dst={}",
+            endpoint_text(e.src_ip, e.src_port),
+            endpoint_text(e.dest_ip, e.dest_port)
+        );
+        if let Some(p) = e.proto {
+            let _ = write!(out, " proto={p}");
         }
-        for (l, v) in observations {
+    } else if let Some(k) = r.key {
+        let _ = write!(out, " key={k:?}");
+    }
+}
+
+/// `std::fmt::Write` over the reused byte buffer.
+struct BufFmt<'a>(&'a mut Vec<u8>);
+
+impl std::fmt::Write for BufFmt<'_> {
+    fn write_str(&mut self, s: &str) -> std::fmt::Result {
+        self.0.extend_from_slice(s.as_bytes());
+        Ok(())
+    }
+}
+
+impl AnomalySink for StdoutSink {
+    fn write(&mut self, r: &AnomalyRecord<'_>) {
+        self.buf.clear();
+        let (severity, kind, ts) = (r.severity, r.kind, r.ts);
+        let _ = write!(&mut self.buf, "[{severity}] {kind} ts={ts}");
+        write_subject(&mut BufFmt(&mut self.buf), r);
+        for (l, v) in r.observations {
             let _ = write!(&mut self.buf, " {l}={v}");
         }
-        for (l, v) in metrics {
+        for (l, v) in r.metrics {
             let _ = write!(&mut self.buf, " {l}={v:.2}");
         }
         let _ = writeln!(&mut self.buf);
@@ -112,24 +131,36 @@ impl Default for StdoutJsonSink {
 
 #[cfg(feature = "serde")]
 impl AnomalySink for StdoutJsonSink {
-    fn write(
-        &mut self,
-        kind: &'static str,
-        severity: Severity,
-        ts: Timestamp,
-        key: Option<&dyn crate::anomaly::Key>,
-        observations: &[(&'static str, Cow<'_, str>)],
-        metrics: &[(&'static str, f64)],
-    ) {
+    fn write(&mut self, r: &AnomalyRecord<'_>) {
         use serde_json::{Map, Value};
+        let (observations, metrics) = (r.observations, r.metrics);
         self.buf.clear();
-        let mut obj = Map::with_capacity(6);
-        obj.insert("severity".into(), severity.to_string().into());
-        obj.insert("kind".into(), kind.into());
-        obj.insert("ts_sec".into(), ts.sec.into());
-        obj.insert("ts_nsec".into(), ts.nsec.into());
-        if let Some(k) = key {
+        let mut obj = Map::with_capacity(12);
+        obj.insert("severity".into(), r.severity.to_string().into());
+        obj.insert("kind".into(), r.kind.into());
+        obj.insert("ts_sec".into(), r.ts.sec.into());
+        obj.insert("ts_nsec".into(), r.ts.nsec.into());
+        if let Some(k) = r.key {
             obj.insert("key".into(), format!("{k:?}").into());
+        }
+        // 0.32 (#215): the endpoints, initiator first when `directional`.
+        if let Some(e) = r.endpoints {
+            if let Some(ip) = e.src_ip {
+                obj.insert("src_ip".into(), ip.to_string().into());
+            }
+            if let Some(p) = e.src_port {
+                obj.insert("src_port".into(), p.into());
+            }
+            if let Some(ip) = e.dest_ip {
+                obj.insert("dest_ip".into(), ip.to_string().into());
+            }
+            if let Some(p) = e.dest_port {
+                obj.insert("dest_port".into(), p.into());
+            }
+            if let Some(p) = e.proto {
+                obj.insert("proto".into(), p.into());
+            }
+            obj.insert("directional".into(), e.directional.into());
         }
         if !observations.is_empty() {
             let mut obs_map = Map::with_capacity(observations.len());
@@ -195,27 +226,22 @@ impl Default for TracingSink {
 }
 
 impl AnomalySink for TracingSink {
-    fn write(
-        &mut self,
-        kind: &'static str,
-        severity: Severity,
-        ts: Timestamp,
-        key: Option<&dyn crate::anomaly::Key>,
-        observations: &[(&'static str, Cow<'_, str>)],
-        metrics: &[(&'static str, f64)],
-    ) {
+    fn write(&mut self, r: &AnomalyRecord<'_>) {
         use std::fmt::Write as _;
+        let (kind, severity, ts) = (r.kind, r.severity, r.ts);
         self.msg_buf.clear();
-        if let Some(k) = key {
-            let _ = write!(&mut self.msg_buf, "key={k:?}");
+        write_subject(&mut self.msg_buf, r);
+        // `write_subject` leads with a separator; the message doesn't.
+        if self.msg_buf.starts_with(' ') {
+            self.msg_buf.remove(0);
         }
-        for (l, v) in observations {
+        for (l, v) in r.observations {
             if !self.msg_buf.is_empty() {
                 self.msg_buf.push(' ');
             }
             let _ = write!(&mut self.msg_buf, "{l}={v}");
         }
-        for (l, v) in metrics {
+        for (l, v) in r.metrics {
             if !self.msg_buf.is_empty() {
                 self.msg_buf.push(' ');
             }
@@ -317,48 +343,11 @@ impl ChannelSink {
     }
 }
 
-fn build_owned(
-    kind: &'static str,
-    severity: Severity,
-    ts: Timestamp,
-    key: Option<&dyn crate::anomaly::Key>,
-    observations: &[(&'static str, Cow<'_, str>)],
-    metrics: &[(&'static str, f64)],
-) -> flowscope::OwnedAnomaly {
-    let mut owned = flowscope::OwnedAnomaly::new(
-        crate::anomaly::sink::detector_kind_for(kind),
-        severity.into(),
-        ts,
-    );
-    if let Some(k) = key {
-        // Structured 5-tuple flatten via KeyFields downcast.
-        if let Some(fkey) = k
-            .as_any()
-            .downcast_ref::<flowscope::extract::FiveTupleKey>()
-        {
-            owned = owned.with_key(fkey);
-        }
-    }
-    for (label, value) in observations {
-        owned = owned.with_observation(label, value.to_string());
-    }
-    for (label, value) in metrics {
-        owned = owned.with_metric(label, *value);
-    }
-    owned
-}
-
 impl AnomalySink for ChannelSink {
-    fn write(
-        &mut self,
-        kind: &'static str,
-        severity: Severity,
-        ts: Timestamp,
-        key: Option<&dyn crate::anomaly::Key>,
-        observations: &[(&'static str, Cow<'_, str>)],
-        metrics: &[(&'static str, f64)],
-    ) {
-        let owned = build_owned(kind, severity, ts, key, observations, metrics);
+    fn write(&mut self, r: &AnomalyRecord<'_>) {
+        // The owned copy's 5-tuple is the record's endpoints (initiator
+        // first when known).
+        let owned = r.to_owned_anomaly();
         match &self.tx {
             ChannelTx::Unbounded(tx) => {
                 let _ = tx.send(owned);
@@ -378,6 +367,7 @@ impl AnomalySink for ChannelSink {
 mod tests {
     use super::*;
     use crate::anomaly::sink::{AnomalySink, AnomalySinkExt};
+    use flowscope::Timestamp;
 
     #[test]
     fn bounded_channel_sink_drops_with_count_when_full() {
@@ -385,14 +375,11 @@ mod tests {
         // anomaly + counts it instead of blocking the capture task.
         let (mut sink, _rx, dropped) = ChannelSink::bounded(2);
         for _ in 0..5 {
-            sink.write(
+            sink.write(&AnomalyRecord::new(
                 "Test",
                 Severity::Warning,
                 Timestamp::new(0, 0),
-                None,
-                &[],
-                &[],
-            );
+            ));
         }
         // Receiver never drained: 2 fit in the buffer, the other 3 are dropped.
         assert_eq!(dropped.load(Ordering::Relaxed), 3);
@@ -403,7 +390,11 @@ mod tests {
     fn bounded_channel_sink_with_zero_capacity_holds_one() {
         let (mut sink, mut rx, dropped) = ChannelSink::bounded(0);
         for _ in 0..2 {
-            sink.write("T", Severity::Info, Timestamp::new(0, 0), None, &[], &[]);
+            sink.write(&AnomalyRecord::new(
+                "T",
+                Severity::Info,
+                Timestamp::new(0, 0),
+            ));
         }
         assert_eq!(dropped.load(Ordering::Relaxed), 1);
         assert!(rx.try_recv().is_ok());
@@ -413,7 +404,11 @@ mod tests {
     fn bounded_channel_sink_delivers_until_full() {
         let (mut sink, mut rx, dropped) = ChannelSink::bounded(4);
         for _ in 0..3 {
-            sink.write("T", Severity::Info, Timestamp::new(0, 0), None, &[], &[]);
+            sink.write(&AnomalyRecord::new(
+                "T",
+                Severity::Info,
+                Timestamp::new(0, 0),
+            ));
         }
         assert_eq!(dropped.load(Ordering::Relaxed), 0);
         let mut got = 0;
@@ -503,5 +498,49 @@ mod tests {
         let v: serde_json::Value = serde_json::from_str(payload).expect("valid JSON");
         assert_eq!(v["kind"], "JsonKind");
         assert_eq!(v["severity"], "info");
+        assert!(v.get("src_ip").is_none(), "no key, no endpoints");
+    }
+
+    /// #215: the JSON line carries the endpoints, initiator first.
+    #[cfg(feature = "serde")]
+    #[test]
+    fn stdout_json_sink_carries_the_endpoints() {
+        let key = flowscope::extract::FiveTupleKey::new(
+            flowscope::L4Proto::Udp,
+            "10.0.0.1:53".parse().unwrap(),
+            "10.0.0.9:5353".parse().unwrap(),
+        );
+        let mut s = StdoutJsonSink::with_capacity(512);
+        s.begin("K", Severity::Info, Timestamp::new(1, 2))
+            .with_flow(&key, flowscope::Orientation::Reverse)
+            .emit();
+        let v: serde_json::Value =
+            serde_json::from_str(std::str::from_utf8(&s.buf).unwrap().trim_end()).unwrap();
+        assert_eq!(v["src_ip"], "10.0.0.9");
+        assert_eq!(v["src_port"], 5353);
+        assert_eq!(v["dest_ip"], "10.0.0.1");
+        assert_eq!(v["dest_port"], 53);
+        assert_eq!(v["proto"], "UDP");
+        assert_eq!(v["directional"], true);
+    }
+
+    /// The text line prints `src=` / `dst=` for a flow key.
+    #[test]
+    fn stdout_sink_prints_the_endpoints() {
+        let key = flowscope::extract::FiveTupleKey::new(
+            flowscope::L4Proto::Tcp,
+            "10.0.0.1:80".parse().unwrap(),
+            "10.0.0.9:40000".parse().unwrap(),
+        );
+        let mut s = StdoutSink::with_capacity(256);
+        s.begin("K", Severity::Info, Timestamp::new(0, 0))
+            .with_flow(&key, flowscope::Orientation::Reverse)
+            .emit();
+        let line = std::str::from_utf8(&s.buf).unwrap();
+        assert!(
+            line.contains(" src=10.0.0.9:40000 dst=10.0.0.1:80 proto=TCP"),
+            "{line}"
+        );
+        assert!(!line.contains("key="), "{line}");
     }
 }

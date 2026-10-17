@@ -2,11 +2,11 @@
 //! [`AnomalySink`] chain.
 //!
 //! Thin wrapper over [`flowscope::emit::EveJsonWriter`]: each
-//! [`AnomalySink::write`] call constructs a
-//! [`flowscope::OwnedAnomaly`] from the accumulated writer state
-//! (with structured 5-tuple fields when the attached key
-//! downcasts to [`flowscope::extract::FiveTupleKey`]) and forwards
-//! it via [`flowscope::emit::EveJsonWriter::write_owned_anomaly`].
+//! [`AnomalySink::write`] call turns the record into a
+//! [`flowscope::OwnedAnomaly`]
+//! ([`AnomalyRecord::to_owned_anomaly`] — `src_ip` / `src_port` are the
+//! flow's initiator when the record's endpoints are directional) and
+//! forwards it via [`flowscope::emit::EveJsonWriter::write_owned_anomaly`].
 //!
 //! Schema-compatible with Filebeat's Suricata module, Splunk's
 //! Suricata TA, Tenzir's `read_suricata` pipeline, and any
@@ -33,15 +33,12 @@
 //! land under `anomaly.labels.<label>` and are scoped to the
 //! anomaly object.
 
-use std::borrow::Cow;
 use std::io::Write;
 
 use flowscope::Timestamp;
 use flowscope::emit::{EveJsonWriter, EveOptions};
 
-use crate::anomaly::Severity;
-use crate::anomaly::key::Key;
-use crate::anomaly::sink::AnomalySink;
+use crate::anomaly::sink::{AnomalyRecord, AnomalySink};
 
 /// Suricata EVE JSON anomaly sink. Wraps any `W: Write + Send`
 /// and forwards each anomaly as a single EVE JSON line.
@@ -85,39 +82,11 @@ impl EveSink<std::io::Stdout> {
 }
 
 impl<W: Write + Send> AnomalySink for EveSink<W> {
-    fn write(
-        &mut self,
-        kind: &'static str,
-        severity: Severity,
-        ts: Timestamp,
-        key: Option<&dyn Key>,
-        observations: &[(&'static str, Cow<'_, str>)],
-        metrics: &[(&'static str, f64)],
-    ) {
-        // Build the OwnedAnomaly from the writer state. Same
-        // pattern as AnomalyWriter::emit_owned + ChannelSink
-        // (downcast key to FiveTupleKey for structured 5-tuple
-        // flatten). Keys that don't downcast keep `src_ip` etc.
-        // `None` — EveJsonWriter omits those fields rather than
-        // emitting `null` per its schema convention.
-        let mut owned = flowscope::OwnedAnomaly::new(
-            crate::anomaly::sink::detector_kind_for(kind),
-            severity.into(),
-            ts,
-        );
-        if let Some(k) = key
-            && let Some(fkey) = k
-                .as_any()
-                .downcast_ref::<flowscope::extract::FiveTupleKey>()
-        {
-            owned = owned.with_key(fkey);
-        }
-        for (label, value) in observations {
-            owned = owned.with_observation(label, value.to_string());
-        }
-        for (label, value) in metrics {
-            owned = owned.with_metric(label, *value);
-        }
+    fn write(&mut self, record: &AnomalyRecord<'_>) {
+        // The record's endpoints become the EVE 5-tuple (initiator first
+        // when known); without them `src_ip` etc. stay `None` and
+        // EveJsonWriter omits those fields rather than emitting `null`.
+        let owned = record.to_owned_anomaly();
         // EveJsonWriter::write_owned_anomaly returns io::Result —
         // swallow errors here matching the StdoutSink pattern; the
         // EVE writer never panics on serialize and write errors are
@@ -273,6 +242,7 @@ impl<W: Write + Send> EveTlsSink<W> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::anomaly::Severity;
     use crate::anomaly::sink::AnomalySinkExt;
     use std::net::{IpAddr, Ipv4Addr, SocketAddr};
 

@@ -174,7 +174,11 @@ mod tests {
 
         let (s, k) = ctx.split_state_sink::<State1>();
         s.n = 9;
-        k.write("k", Severity::Info, Timestamp::new(0, 0), None, &[], &[]);
+        k.write(&crate::anomaly::sink::AnomalyRecord::new(
+            "k",
+            Severity::Info,
+            Timestamp::new(0, 0),
+        ));
         // Both borrows are still live here — the test compiles
         // iff the projection actually emits disjoint refs.
         assert_eq!(s.n, 9);
@@ -212,7 +216,11 @@ mod tests {
 
         let (k, c) = ctx.split_sink_counter::<u16>();
         c.bump(42u16, Timestamp::new(0, 0));
-        k.write("k", Severity::Info, Timestamp::new(0, 0), None, &[], &[]);
+        k.write(&crate::anomaly::sink::AnomalyRecord::new(
+            "k",
+            Severity::Info,
+            Timestamp::new(0, 0),
+        ));
     }
 
     #[test]
@@ -230,7 +238,11 @@ mod tests {
         let (s, k, c) = ctx.split_state_sink_counter::<State2, u64>();
         s.m = 11;
         c.bump(99u64, Timestamp::new(0, 0));
-        k.write("k", Severity::Info, Timestamp::new(0, 0), None, &[], &[]);
+        k.write(&crate::anomaly::sink::AnomalyRecord::new(
+            "k",
+            Severity::Info,
+            Timestamp::new(0, 0),
+        ));
         assert_eq!(s.m, 11);
     }
 

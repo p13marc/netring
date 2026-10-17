@@ -5,7 +5,6 @@
 
 #![cfg(all(feature = "tokio", feature = "flow"))]
 
-use std::borrow::Cow;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
@@ -28,15 +27,8 @@ impl CaptureSink {
 }
 
 impl AnomalySink for CaptureSink {
-    fn write(
-        &mut self,
-        kind: &'static str,
-        severity: Severity,
-        _ts: Timestamp,
-        _key: Option<&dyn netring::anomaly::Key>,
-        _observations: &[(&'static str, Cow<'_, str>)],
-        _metrics: &[(&'static str, f64)],
-    ) {
+    fn write(&mut self, record: &netring::anomaly::sink::AnomalyRecord<'_>) {
+        let (kind, severity) = (record.kind, record.severity);
         self.seen.lock().unwrap().push((kind, severity));
     }
 }

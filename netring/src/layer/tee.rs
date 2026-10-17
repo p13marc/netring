@@ -1,11 +1,6 @@
 //! Fan-out: write each anomaly to two sinks.
 
-use std::borrow::Cow;
-
-use flowscope::Timestamp;
-
-use crate::anomaly::Severity;
-use crate::anomaly::sink::AnomalySink;
+use crate::anomaly::sink::{AnomalyRecord, AnomalySink};
 use crate::layer::Layer;
 
 /// Layer that fans out each anomaly to both the inner sink chain
@@ -88,19 +83,9 @@ pub struct TeeLayered {
 }
 
 impl AnomalySink for TeeLayered {
-    fn write(
-        &mut self,
-        kind: &'static str,
-        severity: Severity,
-        ts: Timestamp,
-        key: Option<&dyn crate::anomaly::Key>,
-        observations: &[(&'static str, Cow<'_, str>)],
-        metrics: &[(&'static str, f64)],
-    ) {
-        self.inner
-            .write(kind, severity, ts, key, observations, metrics);
-        self.secondary
-            .write(kind, severity, ts, key, observations, metrics);
+    fn write(&mut self, record: &AnomalyRecord<'_>) {
+        self.inner.write(record);
+        self.secondary.write(record);
     }
 
     fn flush(&mut self) -> Result<(), std::io::Error> {
@@ -117,7 +102,10 @@ impl AnomalySink for TeeLayered {
 mod tests {
     use std::sync::{Arc, Mutex};
 
+    use flowscope::Timestamp;
+
     use super::*;
+    use crate::anomaly::Severity;
 
     #[derive(Default)]
     struct Capture(Arc<Mutex<u32>>);
@@ -127,15 +115,7 @@ mod tests {
         }
     }
     impl AnomalySink for Capture {
-        fn write(
-            &mut self,
-            _: &'static str,
-            _: Severity,
-            _: Timestamp,
-            _: Option<&dyn crate::anomaly::Key>,
-            _: &[(&'static str, Cow<'_, str>)],
-            _: &[(&'static str, f64)],
-        ) {
+        fn write(&mut self, _record: &AnomalyRecord<'_>) {
             *self.0.lock().unwrap() += 1;
         }
     }

@@ -270,7 +270,6 @@ async fn replay_on_effect_emits_anomaly_through_the_sink() {
     // the effect to the monitor's sink AFTER the sync/async passes. This
     // exercises the full wiring: on_effect → register_effect → dispatcher
     // effect_slots → run-loop dispatch_lifecycle_effects → Effects::apply.
-    use std::borrow::Cow;
     use std::sync::Mutex;
 
     use netring::anomaly::sink::AnomalySink;
@@ -282,15 +281,8 @@ async fn replay_on_effect_emits_anomaly_through_the_sink() {
     #[derive(Clone, Default)]
     struct Recording(Arc<Mutex<Vec<&'static str>>>);
     impl AnomalySink for Recording {
-        fn write(
-            &mut self,
-            kind: &'static str,
-            _severity: Severity,
-            _ts: flowscope::Timestamp,
-            _key: Option<&dyn netring::anomaly::key::Key>,
-            _observations: &[(&'static str, Cow<'_, str>)],
-            _metrics: &[(&'static str, f64)],
-        ) {
+        fn write(&mut self, record: &netring::anomaly::sink::AnomalyRecord<'_>) {
+            let kind = record.kind;
             self.0.lock().unwrap().push(kind);
         }
     }

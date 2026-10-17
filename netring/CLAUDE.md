@@ -572,7 +572,8 @@ the existing 0.19 `ProtocolMonitor` / `AnomalyMonitor` surface
 
 **Phase C — Perf hardening + AnomalyWriter + dhat bench:**
 - `src/anomaly/sink.rs` — real `AnomalySink` trait body:
-  `write(kind, severity, ts, key, observations, metrics)` +
+  `write(kind, severity, ts, key, observations, metrics)` (0.32:
+  `write(&AnomalyRecord)`, with initiator-first `Endpoints`) +
   default `flush()`. Object-safe. `begin(...)` lives on both
   `impl dyn AnomalySink + '_` and a blanket `AnomalySinkExt`
   trait — works through trait objects (layered chains) AND
@@ -1238,8 +1239,11 @@ Cargo features unique to 0.21:
     `dispatch_lifecycle_async`. `ShutdownSignal` for SIGINT/SIGTERM.
   - `tick.rs` — `TickRegistration` boxed callback (Phase F
     consumer).
-- `src/anomaly/sink.rs` — `AnomalySink` trait + `AnomalyWriter`
-  + `NoopSink` + `AnomalySinkExt`. `ANOMALY_INLINE_CAPACITY = 8`.
+- `src/anomaly/sink.rs` — `AnomalySink` trait (`write(&AnomalyRecord)`)
+  + `AnomalyRecord` / `Endpoints` + `AnomalyWriter` + `NoopSink` +
+  `AnomalySinkExt`. `ANOMALY_INLINE_CAPACITY = 8`. `Ctx::emit` hands the
+  writer the current flow + initiator, so a key that is that flow reaches
+  sinks initiator-first (#215).
 - `src/anomaly/shipped_sinks.rs` — `StdoutSink`, `StdoutJsonSink`
   (`feature = "serde"`), `TracingSink`, `ChannelSink` +
   `OwnedAnomaly`.

@@ -26,9 +26,21 @@
 //!   to a custom sink if you need more).
 //! - `&'static str` values pass through `with(...)` with zero
 //!   allocations. `String` values cost one allocation per emit.
-//! - The sink callback ([`AnomalySink::write`]) receives borrowed
-//!   slices; sinks that need to retain the anomaly (e.g.
-//!   `ChannelSink`) are responsible for the copy.
+//! - The sink callback ([`AnomalySink::write`]) receives one borrowed
+//!   [`AnomalyRecord`]; sinks that need to retain the anomaly (e.g.
+//!   `ChannelSink`) are responsible for the copy
+//!   ([`AnomalyRecord::to_owned_anomaly`]).
+//!
+//! ## Endpoints (0.32)
+//!
+//! A flow key is address-sorted (`key.a < key.b`), so its `a` is not
+//! the endpoint that opened the connection. [`AnomalyWriter::emit`]
+//! resolves the anomaly's [`Endpoints`] — `src` / `dest` as sinks render
+//! them — from the flow's **initiator** whenever it knows it: the key is
+//! the flow [`Ctx::emit`](crate::ctx::Ctx::emit) was called for, or the
+//! handler said which side opened it ([`AnomalyWriter::with_flow`] /
+//! [`AnomalyWriter::with_initiator`]). Otherwise the key is read as
+//! stored, `a` → `b`, and [`Endpoints::directional`] is `false`.
 //!
 //! ## Phase B → Phase C
 //!
@@ -38,9 +50,11 @@
 //! body.
 
 use std::borrow::Cow;
+use std::net::{IpAddr, SocketAddr};
 
 use arrayvec::ArrayVec;
-use flowscope::Timestamp;
+use flowscope::extract::FiveTupleKey;
+use flowscope::{KeyFields, Orientation, Timestamp};
 
 use crate::anomaly::Severity;
 use crate::anomaly::key::Key;
@@ -49,6 +63,201 @@ use crate::anomaly::key::Key;
 /// Values beyond this are silently dropped; the [`AnomalyWriter`]
 /// docs surface the limit.
 pub const ANOMALY_INLINE_CAPACITY: usize = 8;
+
+/// The endpoints an anomaly is about, as sinks render them: `src_*` /
+/// `dest_*` plus the L4 protocol label.
+///
+/// When [`Self::directional`] is `true`, `src` is the flow's
+/// **initiator** — or, for an anomaly about one endpoint, its subject —
+/// and `dest` the other side. When it is `false` the endpoints are a flow
+/// key read as stored (`key.a` → `key.b`, the address-sorted order), which
+/// says nothing about who opened the connection.
+///
+/// [`AnomalyWriter::emit`] fills it from the attached key; a sink reads it
+/// off [`AnomalyRecord::endpoints`]. New in 0.32.0 (#215).
+#[non_exhaustive]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Endpoints {
+    /// Source address — the initiator when [`Self::directional`].
+    pub src_ip: Option<IpAddr>,
+    /// Source port, when the protocol has ports.
+    pub src_port: Option<u16>,
+    /// Destination address — the responder when [`Self::directional`].
+    pub dest_ip: Option<IpAddr>,
+    /// Destination port, when the protocol has ports.
+    pub dest_port: Option<u16>,
+    /// L4 protocol label (`"TCP"`, `"UDP"`, `"ICMP"`, `"ICMPv6"`,
+    /// `"SCTP"`), as [`flowscope::KeyFields::proto_str`] spells it.
+    pub proto: Option<&'static str>,
+    /// `true`: `src` is the flow's initiator (or the anomaly's subject);
+    /// `false`: the canonical `a` → `b` order of an address-sorted key.
+    pub directional: bool,
+}
+
+impl Endpoints {
+    /// `src` → `dest` over `proto`; `directional` says whether `src` is
+    /// the initiator / the subject (see [`Self::directional`]).
+    pub fn new(
+        src: SocketAddr,
+        dest: SocketAddr,
+        proto: Option<&'static str>,
+        directional: bool,
+    ) -> Self {
+        Self {
+            src_ip: Some(src.ip()),
+            src_port: Some(src.port()),
+            dest_ip: Some(dest.ip()),
+            dest_port: Some(dest.port()),
+            proto,
+            directional,
+        }
+    }
+
+    /// A flow read from its initiator: `initiator` is the orientation of
+    /// the endpoint that opened it (`Forward`: `key.a`; see
+    /// [`flowscope::FlowStats::initiator_orientation`] and
+    /// [`Ctx::initiator`](crate::ctx::Ctx::initiator)). Directional.
+    pub fn from_flow(key: &FiveTupleKey, initiator: Orientation) -> Self {
+        let (src, dest) = key.oriented(initiator);
+        Self::new(src, dest, key.proto_str(), true)
+    }
+
+    /// A flow key read as stored, `a` → `b`. Not directional.
+    pub fn canonical(key: &FiveTupleKey) -> Self {
+        Self::new(key.a, key.b, key.proto_str(), false)
+    }
+
+    /// The 5-tuple fields of an owned anomaly, which flowscope's
+    /// detectors and [`flowscope::OwnedAnomaly::with_flow`] fill from the
+    /// initiator (directional). `None` when it carries no address.
+    pub fn from_owned(anomaly: &flowscope::OwnedAnomaly) -> Option<Self> {
+        if anomaly.src_ip.is_none() && anomaly.dest_ip.is_none() {
+            return None;
+        }
+        Some(Self {
+            src_ip: anomaly.src_ip,
+            src_port: anomaly.src_port,
+            dest_ip: anomaly.dest_ip,
+            dest_port: anomaly.dest_port,
+            proto: anomaly.proto,
+            directional: true,
+        })
+    }
+
+    /// `src` as a socket address (both the address and the port known).
+    pub fn src(&self) -> Option<SocketAddr> {
+        Some(SocketAddr::new(self.src_ip?, self.src_port?))
+    }
+
+    /// `dest` as a socket address (both the address and the port known).
+    pub fn dest(&self) -> Option<SocketAddr> {
+        Some(SocketAddr::new(self.dest_ip?, self.dest_port?))
+    }
+}
+
+/// One anomaly, as an [`AnomalySink`] receives it: borrowed, built by
+/// [`AnomalyWriter::emit`] on the stack (no allocation).
+///
+/// Sinks render `src` / `dest` from [`Self::endpoints`] — resolved from
+/// the flow's initiator when the emitter knew it — and may still read the
+/// raw [`Self::key`] (its `Debug` text, or [`Self::flow_key`]) for the
+/// flow's identity. New in 0.32.0 (#215); it replaces `write`'s six
+/// positional arguments.
+#[non_exhaustive]
+#[derive(Debug, Clone, Copy)]
+pub struct AnomalyRecord<'a> {
+    /// The detector / rule slug.
+    pub kind: &'static str,
+    /// Severity tier.
+    pub severity: Severity,
+    /// Event timestamp (packet time).
+    pub ts: Timestamp,
+    /// The key the emitter attached — typically a flow key
+    /// ([`FiveTupleKey`], address-sorted) or a host (`IpAddr`).
+    pub key: Option<&'a dyn Key>,
+    /// Who the anomaly is about, `src` → `dest` (see [`Endpoints`]).
+    /// `None` when the emitter attached no flow key and no endpoints.
+    pub endpoints: Option<Endpoints>,
+    /// Free-form `(label, value)` observations.
+    pub observations: &'a [(&'static str, Cow<'a, str>)],
+    /// `(label, value)` numeric metrics.
+    pub metrics: &'a [(&'static str, f64)],
+}
+
+impl<'a> AnomalyRecord<'a> {
+    /// A record with no key, endpoints, observations or metrics — for
+    /// sinks' tests and hand-built records; handlers emit through
+    /// [`AnomalyWriter`].
+    pub fn new(kind: &'static str, severity: Severity, ts: Timestamp) -> Self {
+        Self {
+            kind,
+            severity,
+            ts,
+            key: None,
+            endpoints: None,
+            observations: &[],
+            metrics: &[],
+        }
+    }
+
+    /// Attach a key. A [`FiveTupleKey`] also sets the endpoints, read as
+    /// stored ([`Endpoints::canonical`]), unless they are already set.
+    pub fn with_key(mut self, key: &'a dyn Key) -> Self {
+        self.key = Some(key);
+        if self.endpoints.is_none() {
+            self.endpoints = self.flow_key().map(Endpoints::canonical);
+        }
+        self
+    }
+
+    /// Set the endpoints.
+    pub fn with_endpoints(mut self, endpoints: Endpoints) -> Self {
+        self.endpoints = Some(endpoints);
+        self
+    }
+
+    /// Set the observations.
+    pub fn with_observations(mut self, observations: &'a [(&'static str, Cow<'a, str>)]) -> Self {
+        self.observations = observations;
+        self
+    }
+
+    /// Set the metrics.
+    pub fn with_metrics(mut self, metrics: &'a [(&'static str, f64)]) -> Self {
+        self.metrics = metrics;
+        self
+    }
+
+    /// The key as a flow key, when it is one.
+    pub fn flow_key(&self) -> Option<&'a FiveTupleKey> {
+        self.key?.as_any().downcast_ref::<FiveTupleKey>()
+    }
+
+    /// An owned copy, for sinks that retain the anomaly: the 5-tuple
+    /// fields come from [`Self::endpoints`] (so `src_*` is the initiator
+    /// when they are directional), the observations are copied.
+    pub fn to_owned_anomaly(&self) -> flowscope::OwnedAnomaly {
+        let mut owned = flowscope::OwnedAnomaly::new(
+            detector_kind_for(self.kind),
+            self.severity.into(),
+            self.ts,
+        );
+        if let Some(e) = self.endpoints {
+            owned.src_ip = e.src_ip;
+            owned.src_port = e.src_port;
+            owned.dest_ip = e.dest_ip;
+            owned.dest_port = e.dest_port;
+            owned.proto = e.proto;
+        }
+        for (label, value) in self.observations {
+            owned = owned.with_observation(label, value.clone().into_owned());
+        }
+        for (label, value) in self.metrics {
+            owned = owned.with_metric(label, *value);
+        }
+        owned
+    }
+}
 
 /// Destination for anomalies emitted by the 0.20 [`crate::monitor::Monitor`].
 ///
@@ -66,21 +275,13 @@ pub trait AnomalySink: Send {
     /// Render the anomaly. Called by [`AnomalyWriter::emit`]; sinks
     /// own this — that's the one method every impl provides.
     ///
-    /// `key` is `&dyn Key` (0.21 A.13 — `Key: KeyFields + Debug +
-    /// Send + Sync`). Sinks needing the typed 5-tuple call
-    /// `key.src_ip()` / `key.dest_port()` etc.; sinks needing a
-    /// human-readable slug use `format!("{key:?}")` via the `Debug`
-    /// super-bound. `FiveTupleKey` and `IpAddr`-style keys both
-    /// satisfy the bounds out of the box.
-    fn write(
-        &mut self,
-        kind: &'static str,
-        severity: Severity,
-        ts: Timestamp,
-        key: Option<&dyn Key>,
-        observations: &[(&'static str, Cow<'_, str>)],
-        metrics: &[(&'static str, f64)],
-    );
+    /// The record is borrowed for the call. Render `src` / `dest` from
+    /// [`AnomalyRecord::endpoints`] (initiator first when
+    /// [`Endpoints::directional`]); the raw key stays available as
+    /// [`AnomalyRecord::key`] (`Debug` text) and
+    /// [`AnomalyRecord::flow_key`]. 0.32 (#215): one record replaces the
+    /// six positional arguments.
+    fn write(&mut self, record: &AnomalyRecord<'_>);
 
     /// Optional shutdown hook. Default is a no-op.
     fn flush(&mut self) -> Result<(), std::io::Error> {
@@ -130,10 +331,9 @@ impl<T: AnomalySink + Sized> AnomalySinkExt for T {}
 ///   wants for every variant, so no `Box::leak` is ever needed.
 /// - Observations and metrics are forwarded as borrowed slices —
 ///   no copy beyond the `Cow::Borrowed` re-wrap.
-/// - The `key` parameter is `None`: OwnedAnomaly's 5-tuple fields
-///   land via the `observations` path on this best-effort
-///   translation. Users wanting structured key emission should
-///   `sink.begin(...).with_key(...)` directly.
+/// - The record carries no `key`; the anomaly's 5-tuple fields become
+///   its [`Endpoints`] ([`Endpoints::from_owned`], directional — flowscope
+///   fills them from the flow's initiator, or the anomaly's subject).
 pub fn publish_owned(sink: &mut dyn AnomalySink, owned: &flowscope::OwnedAnomaly) {
     // Translate the SmallVec<Cow<'static, str>> observations into the
     // borrowed slice shape AnomalySink::write expects. The internal
@@ -153,14 +353,27 @@ pub fn publish_owned(sink: &mut dyn AnomalySink, owned: &flowscope::OwnedAnomaly
     // `as_str()` yields a `&'static str` slug for every variant (including
     // `Other`) — no more `Cow`/`Box::leak` dance.
     let kind: &'static str = owned.kind.as_str();
-    sink.write(
-        kind,
-        owned.severity.into(),
-        owned.ts,
-        None,
-        &observations,
-        &metrics,
-    );
+    let mut record = AnomalyRecord::new(kind, owned.severity.into(), owned.ts)
+        .with_observations(&observations)
+        .with_metrics(&metrics);
+    record.endpoints = Endpoints::from_owned(owned);
+    sink.write(&record);
+}
+
+/// `ip:port` (`[ip]:port` for IPv6), the bare address without a port,
+/// `-` without an address — how the text sinks print an endpoint.
+pub(crate) fn endpoint_text(ip: Option<IpAddr>, port: Option<u16>) -> impl std::fmt::Display {
+    struct Text(Option<IpAddr>, Option<u16>);
+    impl std::fmt::Display for Text {
+        fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+            match (self.0, self.1) {
+                (Some(ip), Some(port)) => SocketAddr::new(ip, port).fmt(f),
+                (Some(ip), None) => ip.fmt(f),
+                (None, _) => f.write_str("-"),
+            }
+        }
+    }
+    Text(ip, port)
 }
 
 /// Map a netring anomaly `kind` slug back to a flowscope [`DetectorKind`]
@@ -180,25 +393,35 @@ pub(crate) fn detector_kind_for(kind: &'static str) -> flowscope::DetectorKind {
     }
 }
 
-/// Erased key borrow — lets [`AnomalyWriter`] stay non-generic in
-/// the key type so it can be returned from a `&mut dyn AnomalySink`.
-/// Stored as `&dyn Key` so sinks get both `KeyFields` (typed 5-tuple)
-/// and `Debug` (human render) on the read side.
-struct KeyRepr<'a> {
-    key: &'a dyn Key,
-}
-
 /// Stack-only builder for a single anomaly. Each `with_*` method
 /// returns the writer by value; finalize with [`Self::emit`].
 ///
 /// Storage is `ArrayVec` so the writer fits inside a single
 /// stack frame. Overflow drops the offending entry silently.
+///
+/// The [`Endpoints`] the sink receives are resolved at [`Self::emit`]
+/// (first match wins):
+///
+/// 1. set with [`Self::with_endpoints`];
+/// 2. the attached flow key read from the initiator given by
+///    [`Self::with_flow`] / [`Self::with_initiator`];
+/// 3. the attached flow key read from its initiator when it is the flow
+///    [`Ctx::emit`](crate::ctx::Ctx::emit) was called for (either way
+///    round) and the dispatch knows who opened it;
+/// 4. the attached flow key read as stored, `a` → `b` (not directional).
+///
+/// A key that is not a [`FiveTupleKey`] (a host, a counter key) yields no
+/// endpoints unless they are set explicitly.
 pub struct AnomalyWriter<'sink> {
     sink: &'sink mut dyn AnomalySink,
     kind: &'static str,
     severity: Severity,
     ts: Timestamp,
-    key_repr: Option<KeyRepr<'sink>>,
+    key: Option<&'sink dyn Key>,
+    endpoints: Option<Endpoints>,
+    initiator: Option<Orientation>,
+    /// The flow `Ctx::emit` was called for, with its initiator.
+    current_flow: Option<(FiveTupleKey, Orientation)>,
     obs: ArrayVec<(&'static str, Cow<'sink, str>), ANOMALY_INLINE_CAPACITY>,
     metrics: ArrayVec<(&'static str, f64), ANOMALY_INLINE_CAPACITY>,
 }
@@ -217,20 +440,75 @@ impl<'sink> AnomalyWriter<'sink> {
             kind,
             severity,
             ts,
-            key_repr: None,
+            key: None,
+            endpoints: None,
+            initiator: None,
+            current_flow: None,
             obs: ArrayVec::new(),
             metrics: ArrayVec::new(),
         }
     }
 
+    /// Record the flow the emitting handler runs for and its initiator
+    /// ([`Ctx::emit`](crate::ctx::Ctx::emit)), so a key that is this flow
+    /// resolves to directional endpoints.
+    pub(crate) fn in_flow(mut self, key: FiveTupleKey, initiator: Orientation) -> Self {
+        self.current_flow = Some((key, initiator));
+        self
+    }
+
     /// Attach a key — typically a flow key (`FiveTupleKey`) or a
     /// host (`IpAddr`). Held as `&dyn Key` so the writer stays
-    /// key-erased while sinks see both typed-field accessors
-    /// ([`flowscope::KeyFields`]) and `Debug` rendering.
+    /// key-erased; sinks get its `Debug` rendering and, for a flow key,
+    /// the [`Endpoints`] (see the type docs for how they are oriented).
     pub fn with_key<K: Key>(mut self, key: &'sink K) -> Self {
         let erased: &dyn Key = key;
-        self.key_repr = Some(KeyRepr { key: erased });
+        self.key = Some(erased);
         self
+    }
+
+    /// Attach a flow key and the orientation of its initiator (the
+    /// endpoint that opened it: `Forward` = `key.a`; e.g.
+    /// [`flowscope::FlowStats::initiator_orientation`] or
+    /// [`Ctx::initiator`](crate::ctx::Ctx::initiator)). The sink sees
+    /// `src` = the initiator. New in 0.32.0.
+    pub fn with_flow(self, key: &'sink FiveTupleKey, initiator: Orientation) -> Self {
+        self.with_key(key).with_initiator(initiator)
+    }
+
+    /// Say which endpoint of the attached flow key is the initiator (or
+    /// the anomaly's subject) — `Forward`: `key.a`. Ignored for a key that
+    /// is not a [`FiveTupleKey`]. New in 0.32.0.
+    pub fn with_initiator(mut self, initiator: Orientation) -> Self {
+        self.initiator = Some(initiator);
+        self
+    }
+
+    /// Set the endpoints outright (e.g. a host-pair anomaly with no flow
+    /// key). Overrides whatever the key would give. New in 0.32.0.
+    pub fn with_endpoints(mut self, endpoints: Endpoints) -> Self {
+        self.endpoints = Some(endpoints);
+        self
+    }
+
+    /// The endpoints the sink receives — see the type docs.
+    fn resolve_endpoints(&self) -> Option<Endpoints> {
+        if self.endpoints.is_some() {
+            return self.endpoints;
+        }
+        let key = self.key?.as_any().downcast_ref::<FiveTupleKey>()?;
+        if let Some(initiator) = self.initiator {
+            return Some(Endpoints::from_flow(key, initiator));
+        }
+        if let Some((flow, initiator)) = &self.current_flow
+            && flow.proto == key.proto
+        {
+            let (i, r) = flow.oriented(*initiator);
+            if (key.a, key.b) == (i, r) || (key.a, key.b) == (r, i) {
+                return Some(Endpoints::new(i, r, key.proto_str(), true));
+            }
+        }
+        Some(Endpoints::canonical(key))
     }
 
     /// Attach a textual observation. `&'static str` literals pass
@@ -268,49 +546,41 @@ impl<'sink> AnomalyWriter<'sink> {
 
     /// Finalize and ship to the underlying sink.
     pub fn emit(self) {
-        let key: Option<&dyn Key> = self.key_repr.as_ref().map(|k| k.key);
-        self.sink.write(
-            self.kind,
-            self.severity,
-            self.ts,
-            key,
-            &self.obs,
-            &self.metrics,
-        );
+        let endpoints = self.resolve_endpoints();
+        let record = AnomalyRecord {
+            kind: self.kind,
+            severity: self.severity,
+            ts: self.ts,
+            key: self.key,
+            endpoints,
+            observations: &self.obs,
+            metrics: &self.metrics,
+        };
+        self.sink.write(&record);
     }
 
     /// Materialize as a [`flowscope::OwnedAnomaly`] instead of
     /// firing the sink. The writer's accumulated state — kind,
     /// severity, ts, observations, metrics — is folded into the
-    /// returned owned value. Structured 5-tuple fields (`src_ip`,
-    /// `dest_port`, …) are populated when the attached key
-    /// downcasts to [`flowscope::extract::FiveTupleKey`].
+    /// returned owned value; its 5-tuple fields are the
+    /// [`Endpoints`] [`Self::emit`] would hand the sink (initiator
+    /// first when known).
     ///
     /// Use when retaining the anomaly past the dispatch frame
     /// (batch upload, cross-task channel, custom sink) without
     /// involving an intermediate [`AnomalySink`]. The caller owns
     /// what happens next; no sink callback is invoked.
     pub fn emit_owned(self) -> flowscope::OwnedAnomaly {
-        let mut owned = flowscope::OwnedAnomaly::new(
-            detector_kind_for(self.kind),
-            self.severity.into(),
-            self.ts,
-        );
-        if let Some(repr) = self.key_repr
-            && let Some(fkey) = repr
-                .key
-                .as_any()
-                .downcast_ref::<flowscope::extract::FiveTupleKey>()
-        {
-            owned = owned.with_key(fkey);
+        AnomalyRecord {
+            kind: self.kind,
+            severity: self.severity,
+            ts: self.ts,
+            key: self.key,
+            endpoints: self.resolve_endpoints(),
+            observations: &self.obs,
+            metrics: &self.metrics,
         }
-        for (label, value) in self.obs {
-            owned = owned.with_observation(label, value.into_owned());
-        }
-        for (label, value) in self.metrics {
-            owned = owned.with_metric(label, value);
-        }
-        owned
+        .to_owned_anomaly()
     }
 
     /// Number of observations queued. Useful for the saturation
@@ -330,16 +600,7 @@ impl<'sink> AnomalyWriter<'sink> {
 pub struct NoopSink;
 
 impl AnomalySink for NoopSink {
-    fn write(
-        &mut self,
-        _kind: &'static str,
-        _severity: Severity,
-        _ts: Timestamp,
-        _key: Option<&dyn Key>,
-        _observations: &[(&'static str, Cow<'_, str>)],
-        _metrics: &[(&'static str, f64)],
-    ) {
-    }
+    fn write(&mut self, _record: &AnomalyRecord<'_>) {}
 }
 
 #[cfg(test)]
@@ -364,6 +625,7 @@ mod tests {
         obs_count: usize,
         metric_count: usize,
         has_key: bool,
+        endpoints: Option<Endpoints>,
     }
 
     // SAFETY: CaptureSink uses Rc<RefCell<_>> internally — it's
@@ -372,21 +634,14 @@ mod tests {
     unsafe impl Send for CaptureSink {}
 
     impl AnomalySink for CaptureSink {
-        fn write(
-            &mut self,
-            kind: &'static str,
-            severity: Severity,
-            _ts: Timestamp,
-            key: Option<&dyn Key>,
-            observations: &[(&'static str, Cow<'_, str>)],
-            metrics: &[(&'static str, f64)],
-        ) {
+        fn write(&mut self, r: &AnomalyRecord<'_>) {
             self.calls.borrow_mut().push(CapturedCall {
-                kind,
-                severity,
-                obs_count: observations.len(),
-                metric_count: metrics.len(),
-                has_key: key.is_some(),
+                kind: r.kind,
+                severity: r.severity,
+                obs_count: r.observations.len(),
+                metric_count: r.metrics.len(),
+                has_key: r.key.is_some(),
+                endpoints: r.endpoints,
             });
         }
     }
@@ -396,7 +651,172 @@ mod tests {
         let mut sink = NoopSink;
         let s: &mut dyn AnomalySink = &mut sink;
         // Object-safe: this only compiles if AnomalySink is dyn-safe.
-        s.write("k", Severity::Info, Timestamp::new(0, 0), None, &[], &[]);
+        s.write(&AnomalyRecord::new(
+            "k",
+            Severity::Info,
+            Timestamp::new(0, 0),
+        ));
+    }
+
+    fn sock(s: &str) -> SocketAddr {
+        s.parse().unwrap()
+    }
+
+    /// 10.0.0.9:40000 opened a connection to 10.0.0.1:80; the key sorts
+    /// the server first, so the initiator is `Reverse`.
+    fn server_first_key() -> FiveTupleKey {
+        FiveTupleKey::new(
+            flowscope::L4Proto::Tcp,
+            sock("10.0.0.1:80"),
+            sock("10.0.0.9:40000"),
+        )
+    }
+
+    fn endpoints_of(build: impl FnOnce(&mut CaptureSink)) -> Option<Endpoints> {
+        let mut sink = CaptureSink::default();
+        let calls = Rc::clone(&sink.calls);
+        build(&mut sink);
+        let calls = calls.borrow();
+        assert_eq!(calls.len(), 1);
+        calls[0].endpoints
+    }
+
+    /// #215: `with_flow` reads the key from its initiator.
+    #[test]
+    fn with_flow_puts_the_initiator_first() {
+        let key = server_first_key();
+        let e = endpoints_of(|s| {
+            s.begin("K", Severity::Info, Timestamp::new(0, 0))
+                .with_flow(&key, Orientation::Reverse)
+                .emit()
+        })
+        .unwrap();
+        assert_eq!(e.src(), Some(sock("10.0.0.9:40000")));
+        assert_eq!(e.dest(), Some(sock("10.0.0.1:80")));
+        assert_eq!(e.proto, Some("TCP"));
+        assert!(e.directional);
+    }
+
+    /// A key alone is read as stored and marked non-directional.
+    #[test]
+    fn a_bare_flow_key_is_canonical() {
+        let key = server_first_key();
+        let e = endpoints_of(|s| {
+            s.begin("K", Severity::Info, Timestamp::new(0, 0))
+                .with_key(&key)
+                .emit()
+        })
+        .unwrap();
+        assert_eq!(e.src(), Some(key.a));
+        assert!(!e.directional);
+    }
+
+    /// The flow `Ctx::emit` ran for orients its own key — stored either
+    /// way round — and leaves any other key alone.
+    #[test]
+    fn the_current_flow_orients_its_own_key_only() {
+        let key = server_first_key();
+        let swapped = FiveTupleKey::new(key.proto, key.b, key.a);
+        let other = FiveTupleKey::new(key.proto, key.a, sock("10.0.0.9:40001"));
+        for k in [key, swapped] {
+            let e = endpoints_of(|s| {
+                s.begin("K", Severity::Info, Timestamp::new(0, 0))
+                    .in_flow(key, Orientation::Reverse)
+                    .with_key(&k)
+                    .emit()
+            })
+            .unwrap();
+            assert_eq!(e.src(), Some(sock("10.0.0.9:40000")), "{k:?}");
+            assert!(e.directional);
+        }
+        let e = endpoints_of(|s| {
+            s.begin("K", Severity::Info, Timestamp::new(0, 0))
+                .in_flow(key, Orientation::Reverse)
+                .with_key(&other)
+                .emit()
+        })
+        .unwrap();
+        assert_eq!(e, Endpoints::canonical(&other));
+        // No key → no endpoints, current flow or not.
+        let none = endpoints_of(|s| {
+            s.begin("K", Severity::Info, Timestamp::new(0, 0))
+                .in_flow(key, Orientation::Reverse)
+                .emit()
+        });
+        assert_eq!(none, None);
+    }
+
+    /// Explicit endpoints win; a non-flow key yields none.
+    #[test]
+    fn explicit_endpoints_win_and_host_keys_have_none() {
+        let key = server_first_key();
+        let set = Endpoints::new(sock("192.0.2.1:1"), sock("192.0.2.2:2"), Some("UDP"), true);
+        let e = endpoints_of(|s| {
+            s.begin("K", Severity::Info, Timestamp::new(0, 0))
+                .with_flow(&key, Orientation::Forward)
+                .with_endpoints(set)
+                .emit()
+        });
+        assert_eq!(e, Some(set));
+        let host: std::net::IpAddr = "10.0.0.9".parse().unwrap();
+        let e = endpoints_of(|s| {
+            s.begin("K", Severity::Info, Timestamp::new(0, 0))
+                .with_key(&host)
+                .with_initiator(Orientation::Forward)
+                .emit()
+        });
+        assert_eq!(e, None);
+    }
+
+    /// `emit_owned` and `publish_owned` carry the same orientation.
+    #[test]
+    fn owned_round_trip_keeps_the_initiator_first() {
+        let key = server_first_key();
+        let mut sink = NoopSink;
+        let owned = sink
+            .begin("K", Severity::Info, Timestamp::new(0, 0))
+            .with_flow(&key, Orientation::Reverse)
+            .emit_owned();
+        assert_eq!(
+            (owned.src_ip, owned.src_port),
+            (Some(key.b.ip()), Some(key.b.port()))
+        );
+        let mut cap = CaptureSink::default();
+        let calls = Rc::clone(&cap.calls);
+        publish_owned(&mut cap, &owned);
+        let e = calls.borrow()[0].endpoints.unwrap();
+        assert_eq!(e.src(), Some(key.b));
+        assert_eq!(e.dest(), Some(key.a));
+        assert!(e.directional);
+        // Nothing to say → no endpoints.
+        let bare = flowscope::OwnedAnomaly::new(
+            flowscope::DetectorKind::Other("x"),
+            flowscope::event::Severity::Info,
+            Timestamp::new(0, 0),
+        );
+        assert_eq!(Endpoints::from_owned(&bare), None);
+    }
+
+    /// A hand-built record: `with_key` fills canonical endpoints unless
+    /// set; `to_owned_anomaly` copies them.
+    #[test]
+    fn record_builder_and_owned_copy() {
+        let key = server_first_key();
+        let obs = [("note", Cow::Borrowed("x"))];
+        let r = AnomalyRecord::new("K", Severity::Warning, Timestamp::new(3, 0))
+            .with_key(&key)
+            .with_observations(&obs)
+            .with_metrics(&[("m", 1.0)]);
+        assert_eq!(r.endpoints, Some(Endpoints::canonical(&key)));
+        assert_eq!(r.flow_key(), Some(&key));
+        let owned = r.to_owned_anomaly();
+        assert_eq!(owned.src_ip, Some(key.a.ip()));
+        assert_eq!(owned.observations[0].1.as_ref(), "x");
+        assert_eq!(owned.metrics[0], ("m", 1.0));
+        let flipped = AnomalyRecord::new("K", Severity::Info, Timestamp::new(0, 0))
+            .with_endpoints(Endpoints::from_flow(&key, Orientation::Reverse))
+            .with_key(&key);
+        assert_eq!(flipped.to_owned_anomaly().src_port, Some(40_000));
     }
 
     /// Sink that records the observation key/value pairs it receives.
@@ -406,17 +826,9 @@ mod tests {
     }
     unsafe impl Send for ObsSink {}
     impl AnomalySink for ObsSink {
-        fn write(
-            &mut self,
-            _kind: &'static str,
-            _severity: Severity,
-            _ts: Timestamp,
-            _key: Option<&dyn Key>,
-            observations: &[(&'static str, Cow<'_, str>)],
-            _metrics: &[(&'static str, f64)],
-        ) {
+        fn write(&mut self, r: &AnomalyRecord<'_>) {
             self.obs
-                .extend(observations.iter().map(|(k, v)| (*k, v.to_string())));
+                .extend(r.observations.iter().map(|(k, v)| (*k, v.to_string())));
         }
     }
 

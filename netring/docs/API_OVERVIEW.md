@@ -406,7 +406,16 @@ runner.run_until_signal().await?;
 | `TracingSink` | core | `tracing::event!` at matching `Level` |
 | `ChannelSink` | core | tokio mpsc of `OwnedAnomaly` |
 | `EveSink` | `eve-sink` | Suricata-compatible EVE JSON |
+| `OcsfSink` | `ocsf-sink` | OCSF 2004 Detection Finding NDJSON |
+| `SyslogSink` | `syslog` | RFC 5424 syslog lines |
 | `MetricsSink` | `metrics` | Prometheus-style counter facade |
+
+A custom sink implements `AnomalySink::write(&mut self, &AnomalyRecord)`
+(0.32). The record's `endpoints` (`Endpoints`: `src_*` / `dest_*` /
+`proto` / `directional`) put the flow's **initiator** first whenever the
+emitter knew it — `ctx.emit(..).with_key(&flow)` for the current flow,
+`AnomalyWriter::with_flow(&key, initiator)` elsewhere; `directional:
+false` means a key read in its address-sorted order.
 
 ### Middleware layers
 

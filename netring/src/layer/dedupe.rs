@@ -1,6 +1,5 @@
 //! Suppress repeated `(kind, key)` anomalies within a sliding window.
 
-use std::borrow::Cow;
 use std::fmt::Write as _;
 use std::hash::Hasher;
 use std::time::Duration;
@@ -8,8 +7,7 @@ use std::time::Duration;
 use flowscope::Timestamp;
 use rustc_hash::{FxHashMap, FxHasher};
 
-use crate::anomaly::Severity;
-use crate::anomaly::sink::AnomalySink;
+use crate::anomaly::sink::{AnomalyRecord, AnomalySink};
 use crate::layer::Layer;
 
 /// Suppress duplicate anomalies (same `kind` + same `Debug`-formatted
@@ -124,16 +122,9 @@ fn dedupe_hash(kind: &'static str, key: Option<&dyn crate::anomaly::Key>) -> u64
 }
 
 impl AnomalySink for DedupeAnomaliesLayered {
-    fn write(
-        &mut self,
-        kind: &'static str,
-        severity: Severity,
-        ts: Timestamp,
-        key: Option<&dyn crate::anomaly::Key>,
-        observations: &[(&'static str, Cow<'_, str>)],
-        metrics: &[(&'static str, f64)],
-    ) {
-        let id = dedupe_hash(kind, key);
+    fn write(&mut self, record: &AnomalyRecord<'_>) {
+        let (kind, ts) = (record.kind, record.ts);
+        let id = dedupe_hash(kind, record.key);
         if let Some(prev) = self.seen.get(&id)
             && ts.saturating_sub(*prev) < self.window
         {
@@ -149,8 +140,7 @@ impl AnomalySink for DedupeAnomaliesLayered {
             self.seen
                 .retain(|_, last| ts.saturating_sub(*last) < window);
         }
-        self.inner
-            .write(kind, severity, ts, key, observations, metrics);
+        self.inner.write(record);
     }
 
     fn flush(&mut self) -> Result<(), std::io::Error> {
@@ -162,7 +152,10 @@ impl AnomalySink for DedupeAnomaliesLayered {
 mod tests {
     use std::sync::{Arc, Mutex};
 
+    use flowscope::Timestamp;
+
     use super::*;
+    use crate::anomaly::Severity;
 
     #[derive(Default)]
     struct Capture(Arc<Mutex<Vec<&'static str>>>);
@@ -172,15 +165,8 @@ mod tests {
         }
     }
     impl AnomalySink for Capture {
-        fn write(
-            &mut self,
-            kind: &'static str,
-            _: Severity,
-            _: Timestamp,
-            _: Option<&dyn crate::anomaly::Key>,
-            _: &[(&'static str, Cow<'_, str>)],
-            _: &[(&'static str, f64)],
-        ) {
+        fn write(&mut self, record: &AnomalyRecord<'_>) {
+            let kind = record.kind;
             self.0.lock().unwrap().push(kind);
         }
     }
@@ -286,7 +272,7 @@ mod tests {
         for i in 0..5_000u32 {
             // One distinct key per millisecond: at most ~1000 within a window.
             let ts = Timestamp::new(i / 1000, (i % 1000) * 1_000_000);
-            sink.write("X", Severity::Info, ts, Some(&i), &[], &[]);
+            sink.write(&AnomalyRecord::new("X", Severity::Info, ts).with_key(&i));
         }
         assert!(
             sink.seen.len() <= 2 * PURGE_EVERY as usize,

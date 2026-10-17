@@ -242,16 +242,7 @@ async fn fin_flushed_message_precedes_flow_ended() {
 struct FlushCounter(Arc<AtomicUsize>);
 
 impl AnomalySink for FlushCounter {
-    fn write(
-        &mut self,
-        _: &'static str,
-        _: netring::Severity,
-        _: flowscope::Timestamp,
-        _: Option<&dyn netring::anomaly::Key>,
-        _: &[(&'static str, std::borrow::Cow<'_, str>)],
-        _: &[(&'static str, f64)],
-    ) {
-    }
+    fn write(&mut self, _record: &netring::anomaly::sink::AnomalyRecord<'_>) {}
     fn flush(&mut self) -> Result<(), std::io::Error> {
         self.0.fetch_add(1, Ordering::SeqCst);
         Ok(())

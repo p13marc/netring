@@ -7,13 +7,10 @@
 //!
 //! [LogRecord]: https://opentelemetry.io/docs/specs/otlp/#otlphttp
 
-use std::borrow::Cow;
 use std::io;
 
-use netring::Timestamp;
 use netring::anomaly::Severity;
-use netring::anomaly::key::Key;
-use netring::anomaly::sink::AnomalySink;
+use netring::anomaly::sink::{AnomalyRecord, AnomalySink};
 use serde_json::{Value, json};
 
 /// OTLP severity number for a netring [`Severity`] (per the OTLP spec's
@@ -33,23 +30,39 @@ fn severity_number(s: Severity) -> u8 {
 
 /// Build the OTLP `LogRecord` JSON for one anomaly. Pure — unit-tested without
 /// a collector.
-pub(crate) fn build_log_record(
-    kind: &'static str,
-    severity: Severity,
-    ts: Timestamp,
-    key: Option<&dyn Key>,
-    observations: &[(&'static str, Cow<'_, str>)],
-    metrics: &[(&'static str, f64)],
-) -> Value {
+///
+/// netring 0.32 (#215): the record's endpoints become the OpenTelemetry
+/// semantic-convention attributes `source.address` / `source.port` /
+/// `destination.address` / `destination.port` / `network.transport` (the
+/// flow's initiator as the source when the endpoints are directional).
+pub(crate) fn build_log_record(record: &AnomalyRecord<'_>) -> Value {
+    let (kind, severity, ts) = (record.kind, record.severity, record.ts);
     let mut attributes = vec![kv("anomaly.kind", json!(kind))];
-    if let Some(k) = key {
+    if let Some(k) = record.key {
         // `&dyn Key` only exposes `Debug`; the 5-tuple is in its repr.
         attributes.push(kv("anomaly.key", json!(format!("{k:?}"))));
     }
-    for (name, value) in observations {
+    if let Some(e) = record.endpoints {
+        if let Some(ip) = e.src_ip {
+            attributes.push(kv("source.address", json!(ip.to_string())));
+        }
+        if let Some(p) = e.src_port {
+            attributes.push(kv("source.port", json!(p)));
+        }
+        if let Some(ip) = e.dest_ip {
+            attributes.push(kv("destination.address", json!(ip.to_string())));
+        }
+        if let Some(p) = e.dest_port {
+            attributes.push(kv("destination.port", json!(p)));
+        }
+        if let Some(t) = e.proto.and_then(network_transport) {
+            attributes.push(kv("network.transport", json!(t)));
+        }
+    }
+    for (name, value) in record.observations {
         attributes.push(kv(&format!("anomaly.{name}"), json!(value.as_ref())));
     }
-    for (name, value) in metrics {
+    for (name, value) in record.metrics {
         attributes.push(kv(&format!("anomaly.{name}"), json!(value)));
     }
 
@@ -62,6 +75,16 @@ pub(crate) fn build_log_record(
         "body": { "stringValue": kind },
         "attributes": attributes,
     })
+}
+
+/// OpenTelemetry `network.transport` value for an endpoints protocol label
+/// (`tcp`, `udp`; ICMP / SCTP have no well-known value — omitted).
+fn network_transport(proto: &str) -> Option<&'static str> {
+    match proto {
+        "TCP" => Some("tcp"),
+        "UDP" => Some("udp"),
+        _ => None,
+    }
 }
 
 /// Wrap a batch of `LogRecord`s in the OTLP `logs` request envelope
@@ -148,23 +171,8 @@ impl OtlpAnomalySink {
 }
 
 impl AnomalySink for OtlpAnomalySink {
-    fn write(
-        &mut self,
-        kind: &'static str,
-        severity: Severity,
-        ts: Timestamp,
-        key: Option<&dyn Key>,
-        observations: &[(&'static str, Cow<'_, str>)],
-        metrics: &[(&'static str, f64)],
-    ) {
-        self.batch.push(build_log_record(
-            kind,
-            severity,
-            ts,
-            key,
-            observations,
-            metrics,
-        ));
+    fn write(&mut self, record: &AnomalyRecord<'_>) {
+        self.batch.push(build_log_record(record));
         if self.batch.len() >= self.batch_size
             && let Err(e) = self.post_batch()
         {
@@ -183,17 +191,23 @@ impl AnomalySink for OtlpAnomalySink {
 
 #[cfg(test)]
 mod tests {
+    use std::borrow::Cow;
+
+    use netring::Timestamp;
+    use netring::anomaly::sink::Endpoints;
+
     use super::*;
 
     #[test]
     fn log_record_carries_otlp_shape() {
         let rec = build_log_record(
-            "PortScan",
-            Severity::Warning,
-            Timestamp::new(1_700_000_000, 0),
-            None,
-            &[("detail", Cow::Borrowed("fast connect rate"))],
-            &[("rate", 42.0)],
+            &AnomalyRecord::new(
+                "PortScan",
+                Severity::Warning,
+                Timestamp::new(1_700_000_000, 0),
+            )
+            .with_observations(&[("detail", Cow::Borrowed("fast connect rate"))])
+            .with_metrics(&[("rate", 42.0)]),
         );
         assert_eq!(rec["severityNumber"], 13);
         assert_eq!(rec["severityText"], "Warning");
@@ -216,7 +230,11 @@ mod tests {
 
     #[test]
     fn envelope_nests_records_under_resource_and_scope() {
-        let rec = build_log_record("X", Severity::Info, Timestamp::new(1, 0), None, &[], &[]);
+        let rec = build_log_record(&AnomalyRecord::new(
+            "X",
+            Severity::Info,
+            Timestamp::new(1, 0),
+        ));
         let env = build_envelope("my-svc", std::slice::from_ref(&rec));
         // service.name on the resource.
         let res_attrs = env["resourceLogs"][0]["resource"]["attributes"]
@@ -233,6 +251,38 @@ mod tests {
             .unwrap();
         assert_eq!(logs.len(), 1);
         assert_eq!(logs[0]["body"]["stringValue"], "X");
+    }
+
+    /// netring 0.32 (#215): the endpoints as OTel semantic-convention
+    /// attributes, initiator as the source.
+    #[test]
+    fn log_record_carries_the_endpoints() {
+        let key = netring::flow::extract::FiveTupleKey::new(
+            netring::flow::L4Proto::Tcp,
+            "10.0.0.1:80".parse().unwrap(),
+            "10.0.0.2:40000".parse().unwrap(),
+        );
+        let rec = build_log_record(
+            &AnomalyRecord::new("X", Severity::Info, Timestamp::new(1, 0))
+                .with_endpoints(Endpoints::from_flow(
+                    &key,
+                    netring::flow::Orientation::Reverse,
+                ))
+                .with_key(&key),
+        );
+        let attrs = rec["attributes"].as_array().unwrap();
+        let attr = |k: &str| {
+            attrs
+                .iter()
+                .find(|a| a["key"] == k)
+                .unwrap_or_else(|| panic!("no {k}: {attrs:?}"))["value"]
+                .clone()
+        };
+        assert_eq!(attr("source.address")["stringValue"], "10.0.0.2");
+        assert_eq!(attr("source.port")["intValue"], "40000");
+        assert_eq!(attr("destination.address")["stringValue"], "10.0.0.1");
+        assert_eq!(attr("destination.port")["intValue"], "80");
+        assert_eq!(attr("network.transport")["stringValue"], "tcp");
     }
 
     #[test]

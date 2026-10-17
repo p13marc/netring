@@ -252,16 +252,8 @@ use netring::prelude::*;
 struct Kinds(Arc<Mutex<Vec<&'static str>>>);
 
 impl AnomalySink for Kinds {
-    fn write(
-        &mut self,
-        kind: &'static str,
-        _: Severity,
-        _: flowscope::Timestamp,
-        _: Option<&dyn netring::anomaly::Key>,
-        _: &[(&'static str, std::borrow::Cow<'_, str>)],
-        _: &[(&'static str, f64)],
-    ) {
-        self.0.lock().unwrap().push(kind);
+    fn write(&mut self, record: &netring::anomaly::sink::AnomalyRecord<'_>) {
+        self.0.lock().unwrap().push(record.kind);
     }
 }
 

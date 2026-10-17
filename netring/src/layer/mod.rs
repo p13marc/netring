@@ -108,7 +108,6 @@ mod tests {
     //! they can use the test-only `CaptureSink` defined in each
     //! layer's submodule via re-export.
 
-    use std::borrow::Cow;
     use std::sync::{Arc, Mutex};
     use std::time::Duration;
 
@@ -116,7 +115,7 @@ mod tests {
 
     use super::*;
     use crate::anomaly::Severity;
-    use crate::anomaly::sink::AnomalySink;
+    use crate::anomaly::sink::{AnomalyRecord, AnomalySink};
 
     #[derive(Default)]
     struct CaptureSink {
@@ -130,15 +129,8 @@ mod tests {
     }
 
     impl AnomalySink for CaptureSink {
-        fn write(
-            &mut self,
-            kind: &'static str,
-            severity: Severity,
-            _ts: Timestamp,
-            _key: Option<&dyn crate::anomaly::Key>,
-            _observations: &[(&'static str, Cow<'_, str>)],
-            _metrics: &[(&'static str, f64)],
-        ) {
+        fn write(&mut self, record: &AnomalyRecord<'_>) {
+            let (kind, severity) = (record.kind, record.severity);
             self.calls.lock().unwrap().push((kind, severity));
         }
     }

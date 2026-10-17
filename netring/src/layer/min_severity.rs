@@ -1,11 +1,7 @@
 //! Drop anomalies below a configured severity tier.
 
-use std::borrow::Cow;
-
-use flowscope::Timestamp;
-
 use crate::anomaly::Severity;
-use crate::anomaly::sink::AnomalySink;
+use crate::anomaly::sink::{AnomalyRecord, AnomalySink};
 use crate::layer::Layer;
 
 /// Drops anomalies whose [`Severity`] is below `floor`.
@@ -57,20 +53,11 @@ pub struct MinSeverityLayered {
 }
 
 impl AnomalySink for MinSeverityLayered {
-    fn write(
-        &mut self,
-        kind: &'static str,
-        severity: Severity,
-        ts: Timestamp,
-        key: Option<&dyn crate::anomaly::Key>,
-        observations: &[(&'static str, Cow<'_, str>)],
-        metrics: &[(&'static str, f64)],
-    ) {
-        if severity < self.floor {
+    fn write(&mut self, record: &AnomalyRecord<'_>) {
+        if record.severity < self.floor {
             return;
         }
-        self.inner
-            .write(kind, severity, ts, key, observations, metrics);
+        self.inner.write(record);
     }
 
     fn flush(&mut self) -> Result<(), std::io::Error> {
@@ -82,7 +69,10 @@ impl AnomalySink for MinSeverityLayered {
 mod tests {
     use std::sync::{Arc, Mutex};
 
+    use flowscope::Timestamp;
+
     use super::*;
+    use crate::anomaly::Severity;
 
     #[derive(Default)]
     struct Capture {
@@ -94,15 +84,8 @@ mod tests {
         }
     }
     impl AnomalySink for Capture {
-        fn write(
-            &mut self,
-            kind: &'static str,
-            severity: Severity,
-            _ts: Timestamp,
-            _key: Option<&dyn crate::anomaly::Key>,
-            _observations: &[(&'static str, Cow<'_, str>)],
-            _metrics: &[(&'static str, f64)],
-        ) {
+        fn write(&mut self, record: &AnomalyRecord<'_>) {
+            let (kind, severity) = (record.kind, record.severity);
             self.seen.lock().unwrap().push((kind, severity));
         }
     }

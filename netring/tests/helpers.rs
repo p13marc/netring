@@ -141,7 +141,19 @@ pub mod pcap {
     /// [`flow`] with explicit client and server ports (`sp = 80` puts the
     /// flow on the HTTP parser).
     pub fn flow_to(cp: u16, sp: u16, segments: &[(u32, Vec<u8>)]) -> Vec<(Duration, Vec<u8>)> {
-        let (c, s) = ([10, 0, 0, 1], [10, 0, 0, 2]);
+        flow_between([10, 0, 0, 1], [10, 0, 0, 2], cp, sp, segments)
+    }
+
+    /// [`flow_to`] between explicit addresses: client `c`:`cp` opens the
+    /// connection to server `s`:`sp`. With `c > s` the initiator is the
+    /// flow key's `b` endpoint (the key is address-sorted).
+    pub fn flow_between(
+        c: [u8; 4],
+        s: [u8; 4],
+        cp: u16,
+        sp: u16,
+        segments: &[(u32, Vec<u8>)],
+    ) -> Vec<(Duration, Vec<u8>)> {
         let (cisn, sisn) = (1000u32, 5000u32);
         let m = [0u8; 6];
         let mut v = vec![

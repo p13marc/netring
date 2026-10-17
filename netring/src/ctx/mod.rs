@@ -487,6 +487,14 @@ impl<'a> Ctx<'a> {
     ///
     /// The returned [`AnomalyWriter`](crate::anomaly::sink::AnomalyWriter)
     /// borrows the sink for its lifetime; no temporaries needed.
+    ///
+    /// 0.32 (#215): the writer knows the current flow and its
+    /// [initiator](Self::initiator), so a key that is this flow reaches
+    /// the sink read from the endpoint that opened it (`src` = the
+    /// initiator), not in the key's address-sorted order. Emitting
+    /// through [`Self::sink_mut`] skips this; use
+    /// [`AnomalyWriter::with_flow`](crate::anomaly::sink::AnomalyWriter::with_flow)
+    /// there.
     #[inline]
     pub fn emit(
         &mut self,
@@ -494,7 +502,12 @@ impl<'a> Ctx<'a> {
         severity: crate::anomaly::Severity,
     ) -> crate::anomaly::sink::AnomalyWriter<'_> {
         let ts = self.ts;
-        self.sink.begin(kind, severity, ts)
+        let current = self.flow.zip(self.initiator());
+        let writer = self.sink.begin(kind, severity, ts);
+        match current {
+            Some((key, initiator)) => writer.in_flow(key, initiator),
+            None => writer,
+        }
     }
 }
 

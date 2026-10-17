@@ -255,7 +255,29 @@ impl BpfFilterBuilder {
 
     // ── Composition ─────────────────────────────────────────
 
-    /// Negate the entire builder so far. Calling twice is a no-op.
+    /// Negate the **whole filter**. The flag applies at
+    /// [`build`](Self::build) to the final filter — every fragment and
+    /// every [`or`](Self::or) branch, including those chained *after*
+    /// this call — so `a.negate().or(b)` is `not (a or b)`, not
+    /// `(not a) or b`. Calling it twice is a no-op. (A branch inside
+    /// `or()` can't be negated on its own: that fails `build()` with
+    /// [`BpfBuildError::NestedOr`].)
+    ///
+    /// ```
+    /// use netring::BpfFilter;
+    /// // Ethernet + a bare IPv4 header carrying IP protocol `proto`.
+    /// let frame = |proto: u8| {
+    ///     let mut f = vec![0u8; 12];
+    ///     f.extend_from_slice(&[0x08, 0x00, 0x45, 0, 0, 20, 0, 0, 0, 0, 64, proto, 0, 0]);
+    ///     f.extend_from_slice(&[10, 0, 0, 1, 10, 0, 0, 2]);
+    ///     f
+    /// };
+    /// let f = BpfFilter::builder().tcp().negate().or(|b| b.udp()).build().unwrap();
+    /// assert!(!f.matches(&frame(6))); // tcp
+    /// assert!(!f.matches(&frame(17))); // udp: the later branch is negated too
+    /// assert!(f.matches(&frame(1))); // icmp: neither
+    /// assert_eq!(f.to_human(), "not (tcp or udp)");
+    /// ```
     pub fn negate(mut self) -> Self {
         self.negated = !self.negated;
         self

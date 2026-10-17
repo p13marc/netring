@@ -30,6 +30,7 @@ use futures_core::Stream;
 
 use crate::async_adapters::async_reassembler::AsyncReassemblerFactory;
 use crate::async_adapters::flow_source::{AsyncFlowSource, DrainOutcome, SourcePacket};
+use crate::async_adapters::multi_config::SharedIdleTimeoutFn;
 use crate::async_adapters::tokio_adapter::AsyncCapture;
 use crate::dedup::Dedup;
 use crate::error::Error;
@@ -62,6 +63,10 @@ where
     /// conversions (same plumbing as `dedup`).
     #[cfg(feature = "pcap")]
     tap: Option<crate::pcap_tap::PcapTap>,
+    /// The [`with_idle_timeout_fn`](Self::with_idle_timeout_fn)
+    /// predicate, kept so [`with_state`](FlowStream::with_state) can
+    /// install it in the tracker it rebuilds.
+    idle_timeout_fn: Option<SharedIdleTimeoutFn<E::Key>>,
 }
 
 impl<C, E> FlowStream<C, E, ()>
@@ -80,10 +85,17 @@ where
             monotonic_ts: None,
             #[cfg(feature = "pcap")]
             tap: None,
+            idle_timeout_fn: None,
         }
     }
 
     /// Attach per-flow user state.
+    ///
+    /// The flow table is rebuilt for the new state type: the config, the
+    /// [`with_idle_timeout_fn`](Self::with_idle_timeout_fn) predicate,
+    /// dedup, timestamp clamp, pcap tap and already-queued events carry
+    /// over, but flows already tracked do not (their `Ended` never
+    /// comes) — call it before the first poll.
     pub fn with_state<U, F>(self, init: F) -> FlowStream<C, E, U>
     where
         U: Send + 'static,
@@ -91,15 +103,20 @@ where
     {
         let config = self.tracker.config().clone();
         let extractor = self.tracker.into_extractor();
+        let mut tracker = FlowTracker::with_config_and_state(extractor, config, init);
+        if let Some(f) = self.idle_timeout_fn.clone() {
+            tracker.set_idle_timeout_fn(move |k, l4| f(k, l4));
+        }
         FlowStream {
             cap: self.cap,
-            tracker: FlowTracker::with_config_and_state(extractor, config, init),
-            pending: VecDeque::new(),
+            tracker,
+            pending: self.pending,
             sweep: self.sweep,
             dedup: self.dedup,
             monotonic_ts: self.monotonic_ts,
             #[cfg(feature = "pcap")]
             tap: self.tap,
+            idle_timeout_fn: self.idle_timeout_fn,
         }
     }
 }
@@ -295,7 +312,10 @@ where
     where
         F: Fn(&E::Key, Option<flowscope::L4Proto>) -> Option<Duration> + Send + Sync + 'static,
     {
-        self.tracker.set_idle_timeout_fn(f);
+        let f: SharedIdleTimeoutFn<E::Key> = std::sync::Arc::new(f);
+        let shared = f.clone();
+        self.tracker.set_idle_timeout_fn(move |k, l4| shared(k, l4));
+        self.idle_timeout_fn = Some(f);
         self
     }
 
@@ -806,7 +826,7 @@ pub(crate) mod monotonic_tests {
         loop {
             let ev = tokio::select! {
                 biased;
-                () = &mut deadline => panic!("the sweep timer must keep firing on a quiet source"),
+                () = &mut deadline => panic!("no matching event within 3 s (sweep timer disarmed?)"),
                 ev = s.next() => ev.expect("a live stream never ends").unwrap(),
             };
             if done(&ev) {
@@ -823,6 +843,48 @@ pub(crate) mod monotonic_tests {
         let mut flows = FlowStream::new(one_udp_datagram(), FiveTuple::bidirectional())
             .with_config(quick_idle_config());
         next_until(&mut flows, |ev| matches!(ev, FlowEvent::Ended { .. })).await;
+    }
+
+    /// `with_state` keeps an idle-timeout predicate set before it.
+    #[tokio::test(flavor = "current_thread")]
+    async fn with_state_keeps_the_idle_timeout_fn() {
+        let mut cfg = FlowTrackerConfig::default();
+        cfg.sweep_interval = Duration::from_millis(50);
+        let mut flows = FlowStream::new(
+            one_udp_datagram(),
+            flowscope::extract::FiveTuple::bidirectional(),
+        )
+        .with_config(cfg)
+        .with_idle_timeout_fn(|_, _| Some(Duration::from_millis(300)))
+        .with_state(|_| 0u32);
+        next_until(&mut flows, |ev| matches!(ev, FlowEvent::Ended { .. })).await;
+    }
+
+    /// `with_state` keeps the events the stream had already queued.
+    #[tokio::test(flavor = "current_thread")]
+    async fn with_state_keeps_queued_events() {
+        use flowscope::extract::parse::test_frames::ipv4_udp;
+        use futures::StreamExt;
+        let ts = current_timestamp();
+        let frames =
+            [5000, 6000].map(|sp| (ipv4_udp([10, 0, 0, 1], [10, 0, 0, 2], sp, 53, b"q"), ts));
+        let mut flows = FlowStream::new(
+            crate::async_adapters::flow_source::VecSource(frames.into()),
+            flowscope::extract::FiveTuple::bidirectional(),
+        );
+        let first = flows.next().await.unwrap().unwrap();
+        assert!(matches!(first, FlowEvent::Started { .. }));
+        let mut flows = flows.with_state(|_| 0u32);
+        let mut started = 0;
+        while let Ok(Some(ev)) =
+            tokio::time::timeout(Duration::from_millis(300), flows.next()).await
+        {
+            if let FlowEvent::Started { key, .. } = ev.unwrap() {
+                assert_eq!(key.a.port().max(key.b.port()), 6000);
+                started += 1;
+            }
+        }
+        assert_eq!(started, 1, "the second flow's queued Started");
     }
 
     #[derive(Clone, Default)]

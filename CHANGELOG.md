@@ -1,6 +1,6 @@
 # Changelog
 
-## 0.31.2 — unreleased — capture statistics, a working TX ring, and a pre-release audit
+## 0.31.2 — 2026-10-17 — capture statistics, a working TX ring, and a pre-release audit
 
 Patch release: bug fixes, plus a few additive accessors and `BuildError`
 variants; cargo-semver-checks passes against 0.31.1. It started from an

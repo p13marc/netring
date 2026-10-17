@@ -20,7 +20,7 @@ built on AF_PACKET with TPACKET_V3 (block-based mmap ring buffers) and AF_XDP.
 
 ## Implementation Status
 
-**0.31.2 — unreleased** (bug-fix patch, CHANGELOG `## 0.31.2`; milestone
+**0.31.2 — RELEASED 2026-10-17** (tag `0.31.2`; bug-fix patch, CHANGELOG `## 0.31.2`; PR #218; milestone
 "0.31.2 — capture statistics & pre-release bug hunt", issues #182–#207;
 follow-ups in milestone "0.31.3 — audit follow-ups" #208–#217, breaking
 ones in "0.32" #186 / #209 / #215). Still flowscope 0.25.1 (flowscope 0.25.2

@@ -12,7 +12,6 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use flowscope::correlate::{Attribution, BandwidthByKey, ByteSemantics};
-use rustc_hash::FxHashMap;
 
 use crate::protocol::FlowKey;
 
@@ -23,12 +22,21 @@ pub(crate) const OWNER_BW_BUCKET: Duration = Duration::from_secs(1);
 /// The flow→owner attribution hook. `None` = "couldn't attribute this flow".
 pub type AttributionHook = Arc<dyn Fn(&FlowKey) -> Option<Attribution> + Send + Sync + 'static>;
 
-/// StateMap cell: the attribution hook, a per-flow owner cache (populated at
-/// first packet, evicted at flow end), the per-owner rate table, and an
-/// unattributed-bytes counter.
+/// Per-flow `flow_state` slot caching the flow's owner (`Some(owner)` once
+/// attributed). The run loop releases it when the flow ends, whatever its
+/// protocol, or after [`OWNER_CACHE_IDLE`].
+#[derive(Default)]
+pub(crate) struct CachedOwner(pub(crate) Option<Option<Attribution>>);
+
+/// Idle timeout of the [`CachedOwner`] slot — a backstop: the slot goes
+/// with its flow's end.
+pub(crate) const OWNER_CACHE_IDLE: Duration = Duration::from_secs(300);
+
+/// StateMap cell: the attribution hook, the per-owner rate table, and an
+/// unattributed-bytes counter. (The per-flow owner cache is a
+/// [`CachedOwner`] flow-state slot.)
 pub(crate) struct OwnerBandwidthState {
     hook: AttributionHook,
-    owners: FxHashMap<FlowKey, Option<Attribution>>,
     pub(crate) bw: BandwidthByKey<Attribution>,
     pub(crate) unknown: BandwidthByKey<()>,
 }
@@ -37,24 +45,27 @@ impl OwnerBandwidthState {
     pub(crate) fn new(hook: AttributionHook, window: Duration, bucket: Duration) -> Self {
         Self {
             hook,
-            owners: FxHashMap::default(),
             bw: BandwidthByKey::new_unbounded(window, bucket),
             unknown: BandwidthByKey::new_unbounded(window, bucket),
         }
     }
 
-    /// Attribute a flow's bytes. Caches the owner on first sight of the flow.
-    pub(crate) fn record(&mut self, key: &FlowKey, bytes: u64, now: flowscope::Timestamp) {
-        let owner = *self.owners.entry(*key).or_insert_with(|| (self.hook)(key));
+    /// Ask the attribution hook for a flow's owner.
+    pub(crate) fn attribute(&self, key: &FlowKey) -> Option<Attribution> {
+        (self.hook)(key)
+    }
+
+    /// Count a flow's bytes for its owner (`None`: unattributed).
+    pub(crate) fn record(
+        &mut self,
+        owner: Option<Attribution>,
+        bytes: u64,
+        now: flowscope::Timestamp,
+    ) {
         match owner {
             Some(attr) => self.bw.record_tx(attr, bytes, now),
             None => self.unknown.record_tx((), bytes, now),
         }
-    }
-
-    /// Drop a finished flow's cached owner.
-    pub(crate) fn forget(&mut self, key: &FlowKey) {
-        self.owners.remove(key);
     }
 }
 

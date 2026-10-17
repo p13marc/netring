@@ -2281,7 +2281,7 @@ impl MonitorBuilder {
     /// `window` / `bucket`. See [`owner_bandwidth`](Self::owner_bandwidth).
     pub fn owner_bandwidth_windowed(mut self, window: Duration, bucket: Duration) -> Self {
         use crate::protocol::builtin::{Tcp, Udp};
-        use crate::protocol::event_typed::{FlowEnded, FlowPacket};
+        use crate::protocol::event_typed::FlowPacket;
 
         if self.owner_bandwidth_registered {
             return self;
@@ -2296,30 +2296,32 @@ impl MonitorBuilder {
         self = self
             .protocol::<Tcp>()
             .protocol::<Udp>()
+            // The per-flow owner cache: released by the run loop when the
+            // flow ends — whatever its protocol, not only TCP / UDP — or
+            // idles out.
+            .flow_state::<owner_bandwidth::CachedOwner>(owner_bandwidth::OWNER_CACHE_IDLE)
             .state_init::<owner_bandwidth::OwnerBandwidthState, _>(move || {
                 owner_bandwidth::OwnerBandwidthState::new(hook.clone(), window, bucket)
             });
-        self = self.on_ctx::<FlowPacket>(
+        self.on_ctx::<FlowPacket>(
             |evt: &crate::protocol::event_typed::FlowPacket, ctx: &mut Ctx<'_>| {
                 let key = evt.key;
                 let len = evt.len as u64;
                 let ts = ctx.ts;
-                ctx.state_mut::<owner_bandwidth::OwnerBandwidthState>()
-                    .record(&key, len, ts);
+                let cached = ctx
+                    .flow_state_mut::<owner_bandwidth::CachedOwner>()
+                    .and_then(|c| c.0);
+                let state = ctx.state_mut::<owner_bandwidth::OwnerBandwidthState>();
+                let owner = cached.unwrap_or_else(|| state.attribute(&key));
+                state.record(owner, len, ts);
+                if cached.is_none()
+                    && let Some(slot) = ctx.flow_state_mut::<owner_bandwidth::CachedOwner>()
+                {
+                    slot.0 = Some(owner);
+                }
                 Ok(())
             },
-        );
-        // Evict a flow's cached owner when it ends (Tcp + Udp).
-        self = self.on_ctx::<FlowEnded<Tcp>>(|evt: &FlowEnded<Tcp>, ctx: &mut Ctx<'_>| {
-            ctx.state_mut::<owner_bandwidth::OwnerBandwidthState>()
-                .forget(&evt.key);
-            Ok(())
-        });
-        self.on_ctx::<FlowEnded<Udp>>(|evt: &FlowEnded<Udp>, ctx: &mut Ctx<'_>| {
-            ctx.state_mut::<owner_bandwidth::OwnerBandwidthState>()
-                .forget(&evt.key);
-            Ok(())
-        })
+        )
     }
 
     /// Issue #130: arm [`owner_bandwidth`](Self::owner_bandwidth) and a periodic

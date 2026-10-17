@@ -293,6 +293,51 @@ fn pure_l4_protocol_keeps_all_of_that_l4() {
     );
 }
 
+/// `f` with 802.1Q-style tags (`tpids`, VID 100 each) left in the frame data
+/// after the MACs. The kernel strips only the outer 802.1Q / 802.1ad tag
+/// before packet taps, so a QinQ inner tag (or a 0x9100 one) reaches the
+/// socket filter and userspace in-frame.
+fn tagged(f: &[u8], tpids: &[u16]) -> Vec<u8> {
+    let mut out = f[..12].to_vec();
+    for tpid in tpids {
+        out.extend_from_slice(&tpid.to_be_bytes());
+        out.extend_from_slice(&100u16.to_be_bytes());
+    }
+    out.extend_from_slice(&f[12..]);
+    out
+}
+
+// Audit A7 (in-frame VLAN tags): userspace (etherparse, the ARP parser)
+// reads through VLAN tags left in the frame; the prefilter's templates read
+// at untagged offsets, so such frames must pass rather than be shed.
+#[test]
+fn in_frame_vlan_tags_pass_the_prefilter() {
+    let bpf = Monitor::builder()
+        .interface("lo")
+        .protocol::<Dns>()
+        .kernel_prefilter()
+        .expect("dns narrows to udp/53");
+    assert!(bpf.matches(&tagged(&frame(UDP, 53), &[0x8100])), "802.1Q");
+    assert!(
+        bpf.matches(&tagged(&frame(UDP, 53), &[0x88a8, 0x8100])),
+        "QinQ"
+    );
+    assert!(bpf.matches(&tagged(&frame(UDP, 53), &[0x9100])), "0x9100");
+    assert!(!bpf.matches(&frame(TCP, 80)), "untagged tcp/80 still shed");
+}
+
+#[cfg(feature = "arp")]
+#[test]
+fn in_frame_vlan_tagged_arp_passes_an_arp_prefilter() {
+    let bpf = Monitor::builder()
+        .interface("lo")
+        .on_arp(|_m, _ctx| Ok(()))
+        .kernel_prefilter()
+        .expect("arp-only filter");
+    assert!(bpf.matches(&tagged(&arp_frame(), &[0x8100])));
+    assert!(!bpf.matches(&frame(UDP, 53)), "untagged udp still shed");
+}
+
 /// A non-first IPv4 fragment of a UDP datagram: fragment offset 1480 bytes,
 /// no UDP header (it lives in fragment 0), just payload.
 fn ipv4_udp_trailing_fragment() -> Vec<u8> {

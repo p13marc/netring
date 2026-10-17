@@ -89,6 +89,14 @@ const IPV6_EXT_HEADERS: [u8; 5] = [0, 43, 44, 51, 60];
 const ETH_IPV4: u16 = 0x0800;
 const ETH_IPV6: u16 = 0x86dd;
 
+/// VLAN TPIDs userspace parses through (etherparse: 802.1Q, 802.1ad, the
+/// legacy QinQ 0x9100; flowscope's ARP parser: 802.1Q). Linux strips only the
+/// *outer* 802.1Q / 802.1ad tag before packet taps, so a QinQ inner tag — or
+/// a 0x9100 one, or a tag a non-offloading NIC got in-band on transmit — is
+/// still in the frame when the socket filter runs, where every template reads
+/// at untagged offsets. Frames with one of these at the EtherType slot pass.
+const IN_FRAME_VLAN_TPIDS: [u16; 3] = [0x8100, 0x88a8, 0x9100];
+
 /// How [`split_families`] lowers the IPv6 copy of a conjunction.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum V6Lowering {
@@ -136,9 +144,19 @@ pub(crate) fn predicate_to_bpf(pred: &Predicate) -> Option<BpfFilter> {
     // Name every IP-dependent conjunction's address family explicitly — the
     // builder would default it to IPv4 and shed all IPv6. The precise IPv6
     // lowering first; the coarse one if that's over budget; else no filter.
+    // Then let frames with an in-frame VLAN tag through (see
+    // `IN_FRAME_VLAN_TPIDS`).
     let dnf = [V6Lowering::Precise, V6Lowering::Coarse]
         .into_iter()
-        .map(|v6| split_families(&dnf, v6))
+        .map(|v6| {
+            let mut lowered = split_families(&dnf, v6);
+            if !lowered.is_empty() {
+                for tpid in IN_FRAME_VLAN_TPIDS {
+                    push_unique(&mut lowered, vec![Atom::EtherType(tpid)]);
+                }
+            }
+            lowered
+        })
         .find(|lowered| lowered.len() <= MAX_KERNEL_CLAUSES)?;
     let mut clauses = dnf.into_iter();
     // First conjunction is the base builder; the rest become OR branches.
@@ -646,11 +664,34 @@ mod tests {
         f
     }
 
+    /// `frame` with VLAN tags (`tpid`, VID 100 each) inserted after the MACs,
+    /// outermost first — what a packet tap sees of a frame whose tags the
+    /// kernel left in the data (a QinQ inner tag, a 0x9100 tag, …).
+    fn tagged(frame: &[u8], tpids: &[u16]) -> Vec<u8> {
+        let mut f = frame[..12].to_vec();
+        for tpid in tpids {
+            f.extend_from_slice(&tpid.to_be_bytes());
+            f.extend_from_slice(&100u16.to_be_bytes());
+        }
+        f.extend_from_slice(&frame[12..]);
+        f
+    }
+
     /// Every frame of a small cartesian product — both families, IPv6 with
     /// and without a Hop-by-Hop header, TCP / UDP / ICMP / ICMPv6 (including
     /// the cross-family proto numbers userspace also accepts), a handful of
-    /// well-known and ephemeral ports in both directions.
+    /// well-known and ephemeral ports in both directions; each untagged and
+    /// with in-frame VLAN tags (single 802.1Q, QinQ, 0x9100).
     fn frame_corpus() -> Vec<Vec<u8>> {
+        let untagged = untagged_corpus();
+        let mut out = untagged.clone();
+        for tpids in [&[0x8100][..], &[0x88a8, 0x8100], &[0x9100]] {
+            out.extend(untagged.iter().map(|f| tagged(f, tpids)));
+        }
+        out
+    }
+
+    fn untagged_corpus() -> Vec<Vec<u8>> {
         let ports = [
             (54321, 443),
             (8443, 40000),

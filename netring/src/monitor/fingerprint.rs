@@ -18,9 +18,13 @@ use crate::protocol::FlowKey;
 /// [`ja4plus`](index.html#features) feature — commercial use requires a FoxIO
 /// OEM license (see `docs/FINGERPRINTS.md`). All are `None` if fingerprinting
 /// wasn't enabled/configured.
+///
+/// 0.32 (#215): `#[non_exhaustive]`, with the handshake's
+/// [`client`](Self::client) / [`server`](Self::server) endpoints.
 #[cfg(feature = "tls")]
 #[derive(Debug, Clone, Default, PartialEq)]
 #[cfg_attr(feature = "serde", derive(serde::Serialize))]
+#[non_exhaustive]
 pub struct TlsFingerprint {
     /// Server Name Indication from the ClientHello, if present.
     pub sni: Option<String>,
@@ -51,8 +55,18 @@ pub struct TlsFingerprint {
     /// offered.
     pub app_protocol: flowscope::app_proto::AppProtocol,
     /// The flow's 5-tuple key (from the dispatch context), if available.
+    /// Address-sorted — it identifies the flow; [`Self::client`] /
+    /// [`Self::server`] say which end is which.
     #[cfg_attr(feature = "serde", serde(skip_serializing_if = "Option::is_none"))]
     pub key: Option<FlowKey>,
+    /// The TLS client — the flow's initiator — when the dispatch knew it.
+    /// New in 0.32.0 (#215).
+    #[cfg_attr(feature = "serde", serde(skip_serializing_if = "Option::is_none"))]
+    pub client: Option<std::net::SocketAddr>,
+    /// The TLS server — the flow's responder — when the dispatch knew it.
+    /// New in 0.32.0 (#215).
+    #[cfg_attr(feature = "serde", serde(skip_serializing_if = "Option::is_none"))]
+    pub server: Option<std::net::SocketAddr>,
 }
 
 /// The server's port of a flow, which drives app-protocol classification
@@ -86,11 +100,13 @@ pub(crate) fn server_port(
 #[cfg(feature = "tls")]
 impl TlsFingerprint {
     /// Build from a flowscope handshake event + the flow key; `port` is
-    /// the server's (see [`server_port`]).
+    /// the server's (see [`server_port`]); `endpoints` the flow's
+    /// `(initiator, responder)` ([`Ctx::endpoints`](crate::ctx::Ctx::endpoints)).
     pub(crate) fn from_handshake(
         hs: &flowscope::tls::TlsHandshake,
         key: Option<FlowKey>,
         port: u16,
+        endpoints: Option<(std::net::SocketAddr, std::net::SocketAddr)>,
     ) -> Self {
         Self {
             sni: hs.sni.clone(),
@@ -107,6 +123,8 @@ impl TlsFingerprint {
             pq_key_share: hs.pq_key_share,
             app_protocol: flowscope::app_proto::AppProtocol::from_tls_handshake(hs, port),
             key,
+            client: endpoints.map(|(c, _)| c),
+            server: endpoints.map(|(_, s)| s),
         }
     }
 
@@ -425,7 +443,7 @@ mod tests {
             Some(FlowSide::Initiator),
             Some(Orientation::Reverse),
         );
-        let fp = TlsFingerprint::from_handshake(&hs, Some(dot_key()), port);
+        let fp = TlsFingerprint::from_handshake(&hs, Some(dot_key()), port, None);
         assert_eq!(
             fp.app_protocol,
             flowscope::app_proto::AppProtocol::DnsOverTls
@@ -448,7 +466,7 @@ mod tests {
             hs.ja4x = Some("a564fbbd9b48_5e2c5a8f4f17_8c0e391b6d8b".to_string());
         }
 
-        let fp = TlsFingerprint::from_handshake(&hs, None, 443);
+        let fp = TlsFingerprint::from_handshake(&hs, None, 443, None);
         assert_eq!(fp.sni.as_deref(), Some("example.com"));
         assert_eq!(fp.alpn.as_deref(), Some("h2")); // server's pick
         assert!(fp.pq_key_share, "pq_key_share should carry through (#128)");
@@ -475,7 +493,7 @@ mod tests {
         hs.client_alpn = vec!["h2".to_string()];
         hs.server_alpn = None;
 
-        let fp = TlsFingerprint::from_handshake(&hs, None, 443);
+        let fp = TlsFingerprint::from_handshake(&hs, None, 443, None);
         assert_eq!(fp.alpn.as_deref(), Some("h2"));
         assert!(!fp.has_fingerprint());
     }
@@ -494,7 +512,7 @@ mod tests {
         let mut hs = TlsHandshake::default();
         hs.server_alpn = Some("h2".to_string());
         hs.sni = Some("cloudflare-dns.com".to_string());
-        let fp = TlsFingerprint::from_handshake(&hs, None, 443);
+        let fp = TlsFingerprint::from_handshake(&hs, None, 443, None);
         assert_eq!(
             fp.app_protocol,
             flowscope::app_proto::AppProtocol::DnsOverHttps

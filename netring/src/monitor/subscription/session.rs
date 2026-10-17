@@ -10,7 +10,7 @@
 //! [`Ctx::flow`](crate::ctx::Ctx) at dispatch time (the message itself doesn't
 //! carry the key).
 
-use std::net::IpAddr;
+use std::net::{IpAddr, SocketAddr};
 use std::sync::Arc;
 
 use flowscope::L4Proto;
@@ -119,18 +119,23 @@ impl<P: MessageProtocol> std::fmt::Debug for SessionSubscription<P> {
 }
 
 /// [`FieldSource`] over a parsed session message: L7 fields from the message
-/// (via [`L7Fields`]), 5-tuple from the flow key carried on the [`Ctx`].
-///
-/// **Orientation caveat (same as the flow tier):** the flow key is
-/// bidirectionally canonicalised (`a`/`b` sorted), not wire-directional, so
-/// `src_port`/`src_host` and `dst_port`/`dst_host` map to `a`/`b` as a best
-/// effort and may be swapped relative to the wire. For session/flow filters,
-/// prefer the **either-endpoint** combinators (`port`/`host`) — they're
-/// orientation-independent. (Only the packet tier, which extracts directionally
-/// per frame, has reliable `src_*`/`dst_*`.)
+/// (via [`L7Fields`]), 5-tuple from the flow carried on the [`Ctx`] — read
+/// from the flow's **initiator** ([`Ctx::endpoints`]: `src_*` is the endpoint
+/// that opened the connection, whichever side sent this message; 0.32, #215).
+/// Only when the initiator is unknown does it fall back to the address-sorted
+/// key's `a` / `b`.
 pub(crate) struct SessionFields<'a, M: L7Fields> {
     pub(crate) key: Option<FlowKey>,
+    /// `(initiator, responder)`, when known.
+    pub(crate) endpoints: Option<(SocketAddr, SocketAddr)>,
     pub(crate) msg: &'a M,
+}
+
+impl<M: L7Fields> SessionFields<'_, M> {
+    /// `(src, dst)`: the endpoints, else the key as stored.
+    fn src_dst(&self) -> Option<(SocketAddr, SocketAddr)> {
+        self.endpoints.or_else(|| self.key.map(|k| (k.a, k.b)))
+    }
 }
 
 impl<M: L7Fields> FieldSource for SessionFields<'_, M> {
@@ -138,16 +143,16 @@ impl<M: L7Fields> FieldSource for SessionFields<'_, M> {
         self.key.map(|k| k.proto)
     }
     fn src_port(&self) -> Option<u16> {
-        self.key.map(|k| k.a.port())
+        self.src_dst().map(|(s, _)| s.port())
     }
     fn dst_port(&self) -> Option<u16> {
-        self.key.map(|k| k.b.port())
+        self.src_dst().map(|(_, d)| d.port())
     }
     fn src_ip(&self) -> Option<IpAddr> {
-        self.key.map(|k| k.a.ip())
+        self.src_dst().map(|(s, _)| s.ip())
     }
     fn dst_ip(&self) -> Option<IpAddr> {
-        self.key.map(|k| k.b.ip())
+        self.src_dst().map(|(_, d)| d.ip())
     }
     fn sni(&self) -> Option<&str> {
         self.msg.sni()
@@ -190,6 +195,7 @@ mod tests {
         };
         let fields = SessionFields {
             key: Some(tls_key()),
+            endpoints: None,
             msg: &msg,
         };
         // 5-tuple comes from the flow key…
@@ -208,11 +214,30 @@ mod tests {
         assert!(!Predicate::Atom(Atom::SniGlob(Glob::new("*.gov"))).eval(&fields));
     }
 
+    /// #215: with the initiator known, `src_*` is the client even when the
+    /// key sorts the server first.
+    #[test]
+    fn session_fields_read_from_the_initiator() {
+        let msg = MockMsg { sni: None };
+        let server: SocketAddr = "10.0.0.1:443".parse().unwrap();
+        let client: SocketAddr = "10.0.0.9:54321".parse().unwrap();
+        let fields = SessionFields {
+            key: Some(FlowKey::new(L4Proto::Tcp, server, client)),
+            endpoints: Some((client, server)),
+            msg: &msg,
+        };
+        assert_eq!(fields.src_ip(), Some(client.ip()));
+        assert_eq!(fields.src_port(), Some(54321));
+        assert_eq!(fields.dst_port(), Some(443));
+        assert!(Predicate::Atom(Atom::DstPort(443)).eval(&fields));
+    }
+
     #[test]
     fn missing_l7_field_does_not_match() {
         let msg = MockMsg { sni: None };
         let fields = SessionFields {
             key: Some(tls_key()),
+            endpoints: None,
             msg: &msg,
         };
         // No SNI on the message → an sni filter evaluates false (not a panic).

@@ -131,11 +131,9 @@ async fn replay_export_flows_emits_a_flow_record() {
     // 3 packets all from the initiator.
     assert_eq!(rec.total_packets(), 3, "rec = {rec:?}");
     assert!(rec.total_bytes() >= 3 * 12, "rec = {rec:?}");
-    // Canonical endpoints: 10.0.0.1:54321 (a) ↔ 10.0.0.2:80 (b).
-    assert!(
-        rec.a.port() == 80 || rec.b.port() == 80,
-        "expected port 80 endpoint, rec = {rec:?}"
-    );
+    // 10.0.0.1:54321 opened the flow to 10.0.0.2:80.
+    assert_eq!(rec.initiator.port(), 54321, "rec = {rec:?}");
+    assert_eq!(rec.responder.port(), 80, "rec = {rec:?}");
 }
 
 #[tokio::test(flavor = "current_thread")]

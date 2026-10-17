@@ -126,13 +126,22 @@ fn emit_match(ctx: &mut Ctx<'_>, m: &IocMatch, observed: Option<&str>) {
 }
 
 /// Match a flow's destination + source IP, emitting one `ioc_match` per side
-/// that hits a host indicator.
-pub(crate) fn check_flow_ip(set: &IocSet, key: FlowKey, ctx: &mut Ctx<'_>) {
-    for (ip, side) in [(key.b.ip(), "dst"), (key.a.ip(), "src")] {
+/// that hits a host indicator. `initiator` is the orientation of the endpoint
+/// that opened the flow (`FlowStarted::orientation`): it is the `src` side,
+/// the responder the `dst` side (#215 — the address-sorted key's `a` / `b`
+/// were labelled `src` / `dst` before).
+pub(crate) fn check_flow_ip(
+    set: &IocSet,
+    key: FlowKey,
+    initiator: flowscope::Orientation,
+    ctx: &mut Ctx<'_>,
+) {
+    let (src, dst) = key.oriented(initiator);
+    for (ip, side) in [(dst.ip(), "dst"), (src.ip(), "src")] {
         if let Some(m) = set.contains_ip(ip) {
             let mut w = ctx
                 .emit("ioc_match", Severity::Critical)
-                .with_key(&key)
+                .with_flow(&key, initiator)
                 .with("ioc_kind", m.kind.as_str())
                 .with("side", side)
                 .with("indicator", m.value.clone());

@@ -110,9 +110,12 @@ pub struct FlowStarted<P: Protocol> {
     pub key: FlowKey,
     /// L4 protocol — `Some(L4Proto::Tcp)` for `P = Tcp`, etc.
     pub l4: Option<L4Proto>,
-    /// Canonical, address-sorted direction of the opening packet
-    /// (flowscope 0.20 #118). Unlike a logical role, this is stable
-    /// across a tap-merge / multi-queue arrival race. Defaults to
+    /// The orientation of the flow's **initiator**: `Forward` when
+    /// `key.a` opened the flow, `Reverse` when `key.b` did (the key is
+    /// address-sorted). Since flowscope 0.26 this is the initiator's even
+    /// when the tracker first saw a responder packet (it was the opening
+    /// packet's direction before). Read the endpoints through
+    /// [`Self::initiator`] / [`Self::responder`]. Defaults to
     /// [`Orientation::Forward`] for synthetically-constructed events.
     pub orientation: Orientation,
     /// Timestamp of the first packet.
@@ -121,6 +124,16 @@ pub struct FlowStarted<P: Protocol> {
 }
 
 impl<P: Protocol> FlowStarted<P> {
+    /// The endpoint that opened the flow. New in 0.32.0 (#215).
+    pub fn initiator(&self) -> std::net::SocketAddr {
+        self.key.oriented(self.orientation).0
+    }
+
+    /// The other endpoint. New in 0.32.0 (#215).
+    pub fn responder(&self) -> std::net::SocketAddr {
+        self.key.oriented(self.orientation).1
+    }
+
     /// The [Community ID](https://github.com/corelight/community-id-spec) v1
     /// flow hash for this flow (`"1:<base64>"`), matching
     /// [`export::FlowRecord::community_id`](crate::export::FlowRecord::community_id).
@@ -152,9 +165,9 @@ impl<P: Protocol> FlowStarted<P> {
         }
     }
 
-    /// Set the canonical [`Orientation`] of the opening packet. Used
-    /// by the live dispatch path (flowscope 0.20 #118); synthetic
-    /// constructions default to [`Orientation::Forward`].
+    /// Set the initiator's [`Orientation`]. Used by the live dispatch
+    /// path (flowscope 0.20 #118); synthetic constructions default to
+    /// [`Orientation::Forward`].
     #[must_use]
     pub fn with_orientation(mut self, orientation: Orientation) -> Self {
         self.orientation = orientation;
@@ -202,6 +215,18 @@ pub struct FlowEnded<P: Protocol> {
 }
 
 impl<P: Protocol> FlowEnded<P> {
+    /// The endpoint that opened the flow (from
+    /// [`FlowStats::initiator_orientation`]; the key is address-sorted).
+    /// New in 0.32.0 (#215).
+    pub fn initiator(&self) -> std::net::SocketAddr {
+        self.key.oriented(self.stats.initiator_orientation).0
+    }
+
+    /// The other endpoint. New in 0.32.0 (#215).
+    pub fn responder(&self) -> std::net::SocketAddr {
+        self.key.oriented(self.stats.initiator_orientation).1
+    }
+
     /// The [Community ID](https://github.com/corelight/community-id-spec) v1
     /// flow hash for this flow (`"1:<base64>"`), matching
     /// [`export::FlowRecord::community_id`](crate::export::FlowRecord::community_id).
@@ -829,6 +854,28 @@ mod tests {
         // Distinct types — compile-time check only.
         fn _accept_tcp(_: &FlowStarted<Tcp>) {}
         fn _accept_udp(_: &FlowStarted<Udp>) {}
+    }
+
+    /// #215: the lifecycle events name the initiator / responder from the
+    /// initiator's orientation, not the key's address order.
+    #[test]
+    fn lifecycle_events_name_the_initiator() {
+        let server: std::net::SocketAddr = "10.0.0.1:80".parse().unwrap();
+        let client: std::net::SocketAddr = "10.0.0.9:40000".parse().unwrap();
+        let key = FlowKey::new(L4Proto::Tcp, server, client);
+        let started = FlowStarted::<Tcp>::new(key, Some(L4Proto::Tcp), Timestamp::new(0, 0))
+            .with_orientation(Orientation::Reverse);
+        assert_eq!((started.initiator(), started.responder()), (client, server));
+        let mut stats = FlowStats::default();
+        stats.initiator_orientation = Orientation::Reverse;
+        let ended = FlowEnded::<Tcp>::new(
+            key,
+            EndReason::Fin,
+            stats,
+            Some(L4Proto::Tcp),
+            Timestamp::new(1, 0),
+        );
+        assert_eq!((ended.initiator(), ended.responder()), (client, server));
     }
 
     // 0.22 §2.4/2.5: classify a real (parsed) ICMPv4 Port-Unreachable

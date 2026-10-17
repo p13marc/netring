@@ -17,10 +17,11 @@
 //! ## Fields (canonical `FLOWSCOPE_TEMPLATE_FLOW_IPV4`/`_IPV6` templates)
 //!
 //! `protocolIdentifier` (4), `source`/`destinationTransportPort` (7/11),
-//! `source`/`destinationIPv4Address` (8/12) or `…IPv6Address` (27/28),
-//! `octetDeltaCount` (1) + `packetDeltaCount` (2) on the **initiator**
-//! direction, `octetTotalCount` (85) + `packetTotalCount` (86) for both
-//! directions summed, `flowStartMilliseconds` (152),
+//! `source`/`destinationIPv4Address` (8/12) or `…IPv6Address` (27/28) —
+//! the source is the flow's **initiator** —, `octetDeltaCount` (1) and
+//! `packetDeltaCount` (2) on the initiator direction, `octetTotalCount` (85)
+//! and `packetTotalCount` (86) for both directions summed (octets are **IP**
+//! octets, as IANA defines them), `flowStartMilliseconds` (152),
 //! `flowEndMilliseconds` (153), `tcpControlBits` (6), `flowEndReason` (136).
 //!
 //! ## Semantics & limits
@@ -44,10 +45,11 @@
 //!   [`EndReason`]; the canonical record also keeps
 //!   the un-collapsed reason in flowscope's `original_end_reason` shadow field
 //!   (issue #33). Reach the canonical record via [`FlowRecord::to_ipfix_record`].
-//! - Source/destination map to the record's `a`/`b` endpoints. With the
-//!   default bidirectional extractor those are canonically ordered, not
-//!   connection direction — use a directional extractor if "source =
-//!   initiator" matters to your collector.
+//! - Source/destination are the record's
+//!   [`initiator`](FlowRecord::initiator) / [`responder`](FlowRecord::responder)
+//!   (0.32, #215 — they were the address-sorted key's `a` / `b`), and the
+//!   octet counts (IE 1 / IE 85) are IP octets — header included, link layer
+//!   excluded (0.32, #217 — they were the captured frame lengths).
 //! - One Data Record per Message; the IPFIX `sequenceNumber` is the
 //!   cumulative count of Data Records sent (RFC 7011 §3.1), advanced by the
 //!   data-record count after each write.
@@ -101,21 +103,22 @@ fn ts_millis(ts: flowscope::Timestamp) -> u64 {
 fn to_ie_record(record: &FlowRecord) -> IeFlowRecord {
     let mut rec = IeFlowRecord::default();
     rec.protocol_identifier = protocol_number(record.proto);
-    match record.a.ip() {
+    // Source = the initiator (#215); octets = IP octets (#217).
+    match record.initiator.ip() {
         IpAddr::V4(v4) => rec.source_ipv4_address = Some(v4),
         IpAddr::V6(v6) => rec.source_ipv6_address = Some(v6),
     }
-    match record.b.ip() {
+    match record.responder.ip() {
         IpAddr::V4(v4) => rec.destination_ipv4_address = Some(v4),
         IpAddr::V6(v6) => rec.destination_ipv6_address = Some(v6),
     }
-    rec.source_transport_port = record.a.port();
-    rec.destination_transport_port = record.b.port();
-    rec.octet_delta_count_initiator = record.bytes_initiator;
-    rec.octet_delta_count_responder = record.bytes_responder;
+    rec.source_transport_port = record.initiator.port();
+    rec.destination_transport_port = record.responder.port();
+    rec.octet_delta_count_initiator = record.ip_bytes_initiator;
+    rec.octet_delta_count_responder = record.ip_bytes_responder;
     rec.packet_delta_count_initiator = record.packets_initiator;
     rec.packet_delta_count_responder = record.packets_responder;
-    rec.octet_total_count = record.total_bytes();
+    rec.octet_total_count = record.total_ip_bytes();
     rec.packet_total_count = record.total_packets();
     rec.flow_start_milliseconds = ts_millis(record.start);
     rec.flow_end_milliseconds = ts_millis(record.end);
@@ -148,8 +151,9 @@ impl FlowRecord {
     /// (so the core API isn't bound to flowscope's IE registry), and this is the
     /// opt-in bridge for code that wants the canonical record — e.g. to drive a
     /// flowscope IE-writer other than netring's [`IpfixExporter`]. The mapping is
-    /// the same one `IpfixExporter` uses on the wire: per-direction delta counts
-    /// (IE 1/2) + both-direction totals (IE 85/86), `flowEndReason` (IE 136)
+    /// the same one `IpfixExporter` uses on the wire: the initiator as the
+    /// source, per-direction delta counts (IE 1/2) + both-direction totals
+    /// (IE 85/86) in IP octets, `flowEndReason` (IE 136)
     /// **plus** the un-collapsed `original_end_reason` shadow, and the Community
     /// ID. `tcpControlBits` is left unset — flowscope's `FlowStats` does not
     /// accumulate per-flow TCP flags, so there is no source for it (a flowscope
@@ -161,12 +165,13 @@ impl FlowRecord {
 
 /// The flow a record belongs to.
 fn flow_id(record: &FlowRecord) -> FlowId {
-    (record.proto, record.a, record.b, record.start)
+    (record.proto, record.key.a, record.key.b, record.start)
 }
 
-/// The flowscope template ID for a record, chosen by IP family.
+/// The flowscope template ID for a record, chosen by the IP family of the
+/// addresses it carries (the initiator's).
 fn template_id(record: &FlowRecord) -> u16 {
-    match record.a.ip() {
+    match record.initiator.ip() {
         IpAddr::V4(_) => TEMPLATE_ID_FLOW_IPV4,
         IpAddr::V6(_) => TEMPLATE_ID_FLOW_IPV6,
     }
@@ -185,8 +190,8 @@ type FlowId = (
 /// carried — the baseline of its next delta counts.
 #[derive(Debug, Clone, Copy)]
 struct Exported {
-    bytes_initiator: u64,
-    bytes_responder: u64,
+    ip_bytes_initiator: u64,
+    ip_bytes_responder: u64,
     packets_initiator: u64,
     packets_responder: u64,
     /// The record's `end`, to forget flows that never get a final record.
@@ -275,10 +280,12 @@ impl<W: Write + Send> IpfixExporter<W> {
     fn delta_record(&self, record: &FlowRecord) -> IeFlowRecord {
         let mut rec = to_ie_record(record);
         if let Some(prev) = self.exported.get(&flow_id(record)) {
-            rec.octet_delta_count_initiator =
-                record.bytes_initiator.saturating_sub(prev.bytes_initiator);
-            rec.octet_delta_count_responder =
-                record.bytes_responder.saturating_sub(prev.bytes_responder);
+            rec.octet_delta_count_initiator = record
+                .ip_bytes_initiator
+                .saturating_sub(prev.ip_bytes_initiator);
+            rec.octet_delta_count_responder = record
+                .ip_bytes_responder
+                .saturating_sub(prev.ip_bytes_responder);
             rec.packet_delta_count_initiator = record
                 .packets_initiator
                 .saturating_sub(prev.packets_initiator);
@@ -311,8 +318,8 @@ impl<W: Write + Send> IpfixExporter<W> {
         self.exported.insert(
             id,
             Exported {
-                bytes_initiator: record.bytes_initiator,
-                bytes_responder: record.bytes_responder,
+                ip_bytes_initiator: record.ip_bytes_initiator,
+                ip_bytes_responder: record.ip_bytes_responder,
                 packets_initiator: record.packets_initiator,
                 packets_responder: record.packets_responder,
                 at: record.end,
@@ -397,9 +404,12 @@ mod tests {
         s.packets_responder = 5;
         s.bytes_initiator = 400;
         s.bytes_responder = 600;
+        // IP octets: the wire bytes minus 14 bytes of Ethernet per packet.
+        s.ip_bytes_initiator = 330;
+        s.ip_bytes_responder = 530;
         s.started = Timestamp::from_unix_f64(1000.0);
         s.last_seen = Timestamp::from_unix_f64(1002.0);
-        FlowRecord::from_ended(&key, &s, EndReason::Fin)
+        FlowRecord::from_stats(&key, &s, Some(EndReason::Fin))
     }
 
     /// Read the big-endian `u16` at `off` in an IPFIX message.
@@ -443,13 +453,14 @@ mod tests {
         );
         assert_eq!(rec.source_transport_port, 1234);
         assert_eq!(rec.destination_transport_port, 80);
-        // Per-direction deltas (IE 1/2) populated from netring's counters …
-        assert_eq!(rec.octet_delta_count_initiator, 400);
-        assert_eq!(rec.octet_delta_count_responder, 600);
+        // Per-direction deltas (IE 1/2) populated from netring's counters —
+        // IP octets, not wire bytes (#217) …
+        assert_eq!(rec.octet_delta_count_initiator, 330);
+        assert_eq!(rec.octet_delta_count_responder, 530);
         assert_eq!(rec.packet_delta_count_initiator, 5);
         assert_eq!(rec.packet_delta_count_responder, 5);
         // … and the totals (IE 85/86) are both directions summed.
-        assert_eq!(rec.octet_total_count, 1000);
+        assert_eq!(rec.octet_total_count, 860);
         assert_eq!(rec.packet_total_count, 10);
         assert_eq!(rec.flow_end_reason, Some(FlowEndReason::EndOfFlowDetected));
         // Issue #33: the Community ID carries onto the canonical IE record
@@ -461,6 +472,28 @@ mod tests {
         );
         // Issue #33: the full 8-variant EndReason survives in the shadow field.
         assert_eq!(rec.original_end_reason, Some(EndReason::Fin));
+    }
+
+    /// #215: the source is the flow's initiator, also when it is the key's
+    /// `b` (the higher address); the counters stay with their sides.
+    #[test]
+    fn ie_record_source_is_the_initiator() {
+        let key = v4_record().key;
+        let mut s = FlowStats::default();
+        s.initiator_orientation = flowscope::Orientation::Reverse;
+        s.ip_bytes_initiator = 77;
+        let r = FlowRecord::from_stats(&key, &s, Some(EndReason::Fin));
+        let rec = to_ie_record(&r);
+        assert_eq!(rec.source_ipv4_address, Some(Ipv4Addr::new(10, 0, 0, 2)));
+        assert_eq!(rec.source_transport_port, 80);
+        assert_eq!(
+            rec.destination_ipv4_address,
+            Some(Ipv4Addr::new(10, 0, 0, 1))
+        );
+        assert_eq!(rec.destination_transport_port, 1234);
+        assert_eq!(rec.octet_delta_count_initiator, 77);
+        // The delta baseline is keyed by the flow, not its orientation.
+        assert_eq!(flow_id(&r), (L4Proto::Tcp, key.a, key.b, r.start));
     }
 
     #[test]
@@ -475,8 +508,9 @@ mod tests {
         );
         let stats = FlowStats::default();
         let parse_err =
-            FlowRecord::from_ended(&key, &stats, EndReason::ParseError).to_ipfix_record();
-        let evicted = FlowRecord::from_ended(&key, &stats, EndReason::Evicted).to_ipfix_record();
+            FlowRecord::from_stats(&key, &stats, Some(EndReason::ParseError)).to_ipfix_record();
+        let evicted =
+            FlowRecord::from_stats(&key, &stats, Some(EndReason::Evicted)).to_ipfix_record();
         assert_eq!(parse_err.original_end_reason, Some(EndReason::ParseError));
         assert_eq!(evicted.original_end_reason, Some(EndReason::Evicted));
         assert_ne!(
@@ -485,7 +519,7 @@ mod tests {
         );
         // An ongoing active-timeout snapshot (reason = None) stays None.
         assert_eq!(
-            FlowRecord::from_active(&key, &stats)
+            FlowRecord::from_stats(&key, &stats, None)
                 .to_ipfix_record()
                 .original_end_reason,
             None
@@ -593,20 +627,20 @@ mod tests {
         let mut s = FlowStats::default();
         s.started = Timestamp::from_unix_f64(1000.0);
         s.last_seen = Timestamp::from_unix_f64(1060.0);
-        s.bytes_initiator = 100;
+        s.ip_bytes_initiator = 100;
         s.packets_initiator = 2;
         let mut exporter = IpfixExporter::new(Vec::<u8>::new(), 1);
-        exporter.export(&FlowRecord::from_active(&key, &s));
-        s.bytes_initiator = 150;
+        exporter.export(&FlowRecord::from_stats(&key, &s, None));
+        s.ip_bytes_initiator = 150;
         s.packets_initiator = 3;
         s.last_seen = Timestamp::from_unix_f64(1090.0);
-        exporter.export(&FlowRecord::from_ended(&key, &s, EndReason::Fin));
+        exporter.export(&FlowRecord::from_stats(&key, &s, Some(EndReason::Fin)));
         let mut next = FlowStats::default();
         next.started = Timestamp::from_unix_f64(2000.0);
         next.last_seen = next.started;
-        next.bytes_initiator = 40;
+        next.ip_bytes_initiator = 40;
         next.packets_initiator = 1;
-        exporter.export(&FlowRecord::from_ended(&key, &next, EndReason::Fin));
+        exporter.export(&FlowRecord::from_stats(&key, &next, Some(EndReason::Fin)));
 
         let bytes = exporter.into_inner();
         let msgs = messages(&bytes);
@@ -634,8 +668,8 @@ mod tests {
             let mut s = FlowStats::default();
             s.started = Timestamp::from_unix_f64(1000.0);
             s.last_seen = Timestamp::from_unix_f64(1000.0 + 7200.0 * f64::from(round));
-            s.bytes_initiator = 100 * records[usize::from(port)];
-            let rec = FlowRecord::from_active(&key(port), &s);
+            s.ip_bytes_initiator = 100 * records[usize::from(port)];
+            let rec = FlowRecord::from_stats(&key(port), &s, None);
             let delta = exporter.delta_record(&rec).octet_delta_count_initiator;
             exporter.export(&rec);
             delta
@@ -670,19 +704,23 @@ mod tests {
         s.started = Timestamp::from_unix_f64(1000.0);
         s.last_seen = s.started;
         let mut exporter = IpfixExporter::new(std::io::sink(), 1);
-        exporter.export(&FlowRecord::from_active(&key(1), &s));
-        exporter.export(&FlowRecord::from_ended(&key(1), &s, EndReason::IdleTimeout));
+        exporter.export(&FlowRecord::from_stats(&key(1), &s, None));
+        exporter.export(&FlowRecord::from_stats(
+            &key(1),
+            &s,
+            Some(EndReason::IdleTimeout),
+        ));
         assert!(exporter.exported.is_empty());
 
         for port in 0..2000 {
-            exporter.export(&FlowRecord::from_active(&key(port), &s));
+            exporter.export(&FlowRecord::from_stats(&key(port), &s, None));
         }
         assert!(exporter.exported.len() <= 2000);
         // Two days later the old interim baselines are pruned.
         s.started = Timestamp::from_unix_f64(1000.0 + 2.0 * 86_400.0);
         s.last_seen = s.started;
         for port in 0..2000 {
-            exporter.export(&FlowRecord::from_active(&key(port), &s));
+            exporter.export(&FlowRecord::from_stats(&key(port), &s, None));
         }
         assert!(
             exporter.exported.len() <= 2000,
@@ -699,7 +737,7 @@ mod tests {
             SocketAddr::new(IpAddr::V6(Ipv6Addr::LOCALHOST), 53),
         );
         let s = FlowStats::default();
-        let rec = FlowRecord::from_ended(&key, &s, EndReason::IdleTimeout);
+        let rec = FlowRecord::from_stats(&key, &s, Some(EndReason::IdleTimeout));
         assert_eq!(template_id(&rec), TEMPLATE_ID_FLOW_IPV6);
         let mut exporter = IpfixExporter::new(Vec::<u8>::new(), 9);
         exporter.export(&rec);

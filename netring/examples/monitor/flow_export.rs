@@ -39,10 +39,10 @@ async fn main() -> Result<(), netring::Error> {
         .export_flows(|rec: &netring::export::FlowRecord| {
             if rec.is_ongoing() {
                 eprintln!(
-                    "# ongoing  {:?} {} ↔ {} : {} bytes so far",
+                    "# ongoing  {:?} {} → {} : {} bytes so far",
                     rec.proto,
-                    rec.a,
-                    rec.b,
+                    rec.initiator,
+                    rec.responder,
                     rec.total_bytes()
                 );
             }

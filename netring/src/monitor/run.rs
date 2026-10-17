@@ -1788,7 +1788,7 @@ fn emit_active_flow_records(
         live.insert(*key);
         let last = last_export.get(key).copied().unwrap_or(stats.started);
         if now.saturating_sub(last) >= period {
-            let rec = FlowRecord::from_active(key, stats);
+            let rec = FlowRecord::from_stats(key, stats, None);
             for ex in exporters.iter_mut() {
                 ex.export(&rec);
             }
@@ -2124,7 +2124,7 @@ async fn dispatch_tracked_event(
             key, stats, reason, ..
         } = &evt
     {
-        let record = crate::export::FlowRecord::from_ended(key, stats, *reason);
+        let record = crate::export::FlowRecord::from_stats(key, stats, Some(*reason));
         for exporter in flow_exporters.iter_mut() {
             exporter.export(&record);
         }

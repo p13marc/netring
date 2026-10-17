@@ -109,8 +109,11 @@ impl<W: Write + Send> AnomalySink for EveSink<W> {
 /// into any Suricata-aware pipeline alongside the `event_type: "anomaly"`
 /// records [`EveSink`] produces.
 ///
-/// `src`/`dest` follow the key's `a`/`b` endpoints — canonically ordered under
-/// the default bidirectional extractor, not connection direction.
+/// `src` is the TLS client and `dest` the server
+/// ([`TlsFingerprint::client`](crate::monitor::TlsFingerprint::client) /
+/// [`server`](crate::monitor::TlsFingerprint::server), 0.32 #215); when those
+/// are unknown, the key's `a` / `b` as stored (address-sorted under the
+/// default bidirectional extractor, not connection direction).
 #[cfg(feature = "tls")]
 pub fn eve_tls_record(
     fp: &crate::monitor::TlsFingerprint,
@@ -150,10 +153,14 @@ pub fn eve_tls_record(
         obj.insert("in_iface".into(), json!(in_iface));
     }
     if let Some(key) = &fp.key {
-        obj.insert("src_ip".into(), json!(key.a.ip().to_string()));
-        obj.insert("src_port".into(), json!(key.a.port()));
-        obj.insert("dest_ip".into(), json!(key.b.ip().to_string()));
-        obj.insert("dest_port".into(), json!(key.b.port()));
+        let (src, dest) = match (fp.client, fp.server) {
+            (Some(c), Some(s)) => (c, s),
+            _ => (key.a, key.b),
+        };
+        obj.insert("src_ip".into(), json!(src.ip().to_string()));
+        obj.insert("src_port".into(), json!(src.port()));
+        obj.insert("dest_ip".into(), json!(dest.ip().to_string()));
+        obj.insert("dest_port".into(), json!(dest.port()));
         obj.insert("proto".into(), json!(l4_proto_str(key.proto)));
         // Issue #123: the standard Community ID, so this record correlates with
         // Zeek / Suricata / netring flow records for the same flow.
@@ -267,7 +274,7 @@ mod tests {
             SocketAddr::new(IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1)), 1234),
             SocketAddr::new(IpAddr::V4(Ipv4Addr::new(10, 0, 0, 2)), 443),
         );
-        let fp = TlsFingerprint::from_handshake(&hs, Some(key), 443);
+        let fp = TlsFingerprint::from_handshake(&hs, Some(key), 443, None);
 
         let v = eve_tls_record(&fp, Timestamp::from_unix_f64(1000.0), "eth0");
         assert_eq!(v["event_type"], "tls");
@@ -289,6 +296,25 @@ mod tests {
         assert_eq!(out.lines().count(), 1);
         assert!(out.ends_with('\n'));
         assert!(out.contains("\"event_type\":\"tls\""), "out = {out}");
+    }
+
+    /// #215: `src` is the TLS client even when the key sorts it second.
+    #[cfg(feature = "tls")]
+    #[test]
+    fn eve_tls_record_src_is_the_client() {
+        use crate::monitor::TlsFingerprint;
+
+        let hs = flowscope::tls::TlsHandshake::default();
+        let server = SocketAddr::new(IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1)), 443);
+        let client = SocketAddr::new(IpAddr::V4(Ipv4Addr::new(10, 0, 0, 9)), 50_000);
+        let key = flowscope::extract::FiveTupleKey::new(flowscope::L4Proto::Tcp, server, client);
+        let fp = TlsFingerprint::from_handshake(&hs, Some(key), 443, Some((client, server)));
+        assert_eq!((fp.client, fp.server), (Some(client), Some(server)));
+        let v = eve_tls_record(&fp, Timestamp::from_unix_f64(1.0), "");
+        assert_eq!(v["src_ip"], "10.0.0.9");
+        assert_eq!(v["src_port"], 50_000);
+        assert_eq!(v["dest_ip"], "10.0.0.1");
+        assert_eq!(v["dest_port"], 443);
     }
 
     #[test]

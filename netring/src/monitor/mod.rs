@@ -1901,7 +1901,10 @@ impl MonitorBuilder {
     ///     .interface("eth0")
     ///     .protocol::<Tcp>()
     ///     .export_flows(|rec: &netring::export::FlowRecord| {
-    ///         println!("{:?} {} ↔ {} : {} bytes", rec.proto, rec.a, rec.b, rec.total_bytes());
+    ///         println!(
+    ///             "{:?} {} → {} : {} bytes",
+    ///             rec.proto, rec.initiator, rec.responder, rec.total_bytes()
+    ///         );
     ///     })
     ///     .build()?;
     /// # let _ = monitor;
@@ -2474,8 +2477,17 @@ impl MonitorBuilder {
                         t.record_tx(src, len, ts);
                     }
                     if let Some(m) = st.matrix.as_mut() {
-                        // `key` is address-canonical, so the pair is stable.
-                        m.record_tx((key.a.ip(), key.b.ip()), len, ts);
+                        // The pair reads (initiator, responder) — both
+                        // directions of a flow count towards it (#215; it
+                        // was the address-sorted (a, b)). The initiator's
+                        // orientation is this packet's, or the opposite
+                        // when the responder sent it.
+                        let initiator = match evt.side {
+                            flowscope::FlowSide::Initiator => evt.orientation,
+                            flowscope::FlowSide::Responder => evt.orientation.flipped(),
+                        };
+                        let (i, r) = key.oriented(initiator);
+                        m.record_tx((i.ip(), r.ip()), len, ts);
                     }
                     Ok(())
                 });
@@ -3190,6 +3202,7 @@ impl MonitorBuilder {
                         ctx.side(),
                         ctx.orientation(),
                     ),
+                    ctx.endpoints(),
                 );
                 handler(&fp, ctx)
             },
@@ -3398,6 +3411,7 @@ impl MonitorBuilder {
                         ctx.side(),
                         ctx.orientation(),
                     ),
+                    ctx.endpoints(),
                 );
                 if !fp.app_protocol.is_encrypted_dns() {
                     return Ok(());
@@ -3621,7 +3635,7 @@ impl MonitorBuilder {
         }
         let s = Arc::clone(&set);
         self = self.on_ctx::<FlowStarted<Tcp>>(move |evt: &FlowStarted<Tcp>, ctx: &mut Ctx<'_>| {
-            ioc::check_flow_ip(&s.load(), evt.key, ctx);
+            ioc::check_flow_ip(&s.load(), evt.key, evt.orientation, ctx);
             Ok(())
         });
         if !self
@@ -3632,7 +3646,7 @@ impl MonitorBuilder {
         }
         let s = Arc::clone(&set);
         self = self.on_ctx::<FlowStarted<Udp>>(move |evt: &FlowStarted<Udp>, ctx: &mut Ctx<'_>| {
-            ioc::check_flow_ip(&s.load(), evt.key, ctx);
+            ioc::check_flow_ip(&s.load(), evt.key, evt.orientation, ctx);
             Ok(())
         });
 

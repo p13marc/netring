@@ -32,31 +32,48 @@ pub use ipfix::IpfixExporter;
 
 /// A completed-flow record, built from a `FlowEnded` event's key + stats.
 ///
-/// `a` / `b` are the flow's two endpoints. In the default
-/// (bidirectional) extractor they're canonically ordered (`a < b`), so
-/// "source/destination" lives in the **directional** byte/packet counts
-/// — `*_initiator` is the side that opened the flow, `*_responder` the
-/// other — not in `a`/`b`. In a directional extractor `a` is the source.
+/// The record reads the flow **from its initiator**: [`initiator`](Self::initiator)
+/// is the endpoint that opened it, [`responder`](Self::responder) the other
+/// one, and every `*_initiator` / `*_responder` counter belongs to that side.
+/// [`key`](Self::key) keeps the flow's identity as the tracker stores it —
+/// address-sorted under the default bidirectional extractor, so `key.a` is
+/// *not* the source.
+///
+/// Byte counts: `bytes_*` are wire (L2) lengths, `ip_bytes_*` IP octets
+/// (what NetFlow / IPFIX and Zeek's `*_ip_bytes` count), both as flowscope
+/// 0.26 tracks them — a snap length does not shrink either.
+///
+/// 0.32 (#215 / #217): `a` / `b` became `key` + `initiator` / `responder`,
+/// `ip_bytes_*` are new, and the type is `#[non_exhaustive]`; build one
+/// with [`Self::from_stats`].
 // No longer `Copy` (0.20 / issue #33): the `community_id` String owns a heap
 // allocation. Records are passed to exporters by `&` on the hot path, so this
 // costs nothing there — only explicit `.clone()` sites pay.
 #[derive(Debug, Clone, PartialEq)]
 #[cfg_attr(feature = "serde", derive(serde::Serialize))]
+#[non_exhaustive]
 pub struct FlowRecord {
+    /// The flow key (its identity; address-sorted under the bidirectional
+    /// extractor).
+    pub key: FlowKey,
     /// L4 protocol (TCP / UDP / ICMP / …).
     pub proto: L4Proto,
-    /// First endpoint (`a`).
-    pub a: SocketAddr,
-    /// Second endpoint (`b`).
-    pub b: SocketAddr,
-    /// Packets sent by the flow initiator (the side that opened it).
+    /// The endpoint that opened the flow (its first packet's source).
+    pub initiator: SocketAddr,
+    /// The other endpoint.
+    pub responder: SocketAddr,
+    /// Packets sent by the initiator.
     pub packets_initiator: u64,
     /// Packets sent by the responder.
     pub packets_responder: u64,
-    /// Bytes sent by the initiator.
+    /// Wire (L2) bytes sent by the initiator.
     pub bytes_initiator: u64,
-    /// Bytes sent by the responder.
+    /// Wire (L2) bytes sent by the responder.
     pub bytes_responder: u64,
+    /// IP octets sent by the initiator (IP header included, L2 excluded).
+    pub ip_bytes_initiator: u64,
+    /// IP octets sent by the responder.
+    pub ip_bytes_responder: u64,
     /// First-seen timestamp.
     pub start: Timestamp,
     /// Last-seen timestamp (flow end, or the snapshot time for an ongoing
@@ -78,42 +95,29 @@ pub struct FlowRecord {
 }
 
 impl FlowRecord {
-    /// Build a record from a `FlowEnded` event's key + stats + reason.
-    pub(crate) fn from_ended(key: &FlowKey, stats: &FlowStats, reason: EndReason) -> Self {
+    /// Build a record from a flow's key + stats: `reason` is the
+    /// `FlowEnded` reason, or `None` for an **ongoing** interim record (the
+    /// active timeout; counters cumulative-to-date). The initiator comes from
+    /// [`FlowStats::initiator_orientation`].
+    pub fn from_stats(key: &FlowKey, stats: &FlowStats, reason: Option<EndReason>) -> Self {
+        let (initiator, responder) = key.oriented(stats.initiator_orientation);
         Self {
+            key: *key,
             proto: key.proto,
-            a: key.a,
-            b: key.b,
+            initiator,
+            responder,
             packets_initiator: stats.packets_initiator,
             packets_responder: stats.packets_responder,
             bytes_initiator: stats.bytes_initiator,
             bytes_responder: stats.bytes_responder,
+            ip_bytes_initiator: stats.ip_bytes_initiator,
+            ip_bytes_responder: stats.ip_bytes_responder,
             start: stats.started,
             end: stats.last_seen,
-            reason: Some(reason),
+            reason,
             // Call the `KeyFields` trait method explicitly (the inherent
             // `FiveTupleKey::community_id` is feature-gated and returns a bare
             // `String`); the trait method is the always-present `Option`.
-            community_id: KeyFields::community_id(key),
-        }
-    }
-
-    /// Build an **ongoing** interim record for a still-alive flow at the active
-    /// timeout (0.25 W1c). `reason` is `None`; `end` is the snapshot time
-    /// (`stats.last_seen`). Counters are cumulative-to-date; the IPFIX
-    /// exporter derives the per-record delta counts (IE 1/2) from them.
-    pub(crate) fn from_active(key: &FlowKey, stats: &FlowStats) -> Self {
-        Self {
-            proto: key.proto,
-            a: key.a,
-            b: key.b,
-            packets_initiator: stats.packets_initiator,
-            packets_responder: stats.packets_responder,
-            bytes_initiator: stats.bytes_initiator,
-            bytes_responder: stats.bytes_responder,
-            start: stats.started,
-            end: stats.last_seen,
-            reason: None,
             community_id: KeyFields::community_id(key),
         }
     }
@@ -131,10 +135,16 @@ impl FlowRecord {
         self.packets_initiator + self.packets_responder
     }
 
-    /// Total bytes in both directions.
+    /// Total wire (L2) bytes in both directions.
     #[inline]
     pub fn total_bytes(&self) -> u64 {
         self.bytes_initiator + self.bytes_responder
+    }
+
+    /// Total IP octets in both directions (IPFIX `octetTotalCount`).
+    #[inline]
+    pub fn total_ip_bytes(&self) -> u64 {
+        self.ip_bytes_initiator + self.ip_bytes_responder
     }
 
     /// Flow duration (`end - start`), floored at zero.
@@ -230,6 +240,8 @@ mod tests {
         s.packets_responder = 8;
         s.bytes_initiator = 1500;
         s.bytes_responder = 12000;
+        s.ip_bytes_initiator = 1360;
+        s.ip_bytes_responder = 11888;
         s.started = Timestamp::from_unix_f64(1000.0);
         s.last_seen = Timestamp::from_unix_f64(1002.5);
         s
@@ -237,10 +249,14 @@ mod tests {
 
     #[test]
     fn from_ended_maps_key_stats_and_reason() {
-        let r = FlowRecord::from_ended(&key(), &stats(), EndReason::Fin);
+        let r = FlowRecord::from_stats(&key(), &stats(), Some(EndReason::Fin));
         assert_eq!(r.proto, L4Proto::Tcp);
-        assert_eq!(r.a.port(), 1234);
-        assert_eq!(r.b.port(), 80);
+        assert_eq!(r.key, key());
+        // `initiator_orientation` defaults to Forward: key.a opened it.
+        assert_eq!(r.initiator.port(), 1234);
+        assert_eq!(r.responder.port(), 80);
+        assert_eq!(r.ip_bytes_initiator, 1360);
+        assert_eq!(r.total_ip_bytes(), 1360 + 11888);
         assert_eq!(r.packets_initiator, 10);
         assert_eq!(r.bytes_responder, 12000);
         assert_eq!(r.reason, Some(EndReason::Fin));
@@ -264,7 +280,7 @@ mod tests {
     fn from_active_is_ongoing_with_no_reason() {
         // 0.25 W1c: an interim active-timeout record carries the same counters
         // but `reason == None` / `is_ongoing()`.
-        let r = FlowRecord::from_active(&key(), &stats());
+        let r = FlowRecord::from_stats(&key(), &stats(), None);
         assert!(r.is_ongoing());
         assert_eq!(r.reason, None);
         assert_eq!(r.packets_initiator, 10);
@@ -272,11 +288,24 @@ mod tests {
         assert_eq!(r.total_packets(), 18);
     }
 
+    /// #215: a flow opened by `key.b` (the higher address) reads from `b`.
+    #[test]
+    fn from_stats_reads_the_flow_from_its_initiator() {
+        let mut s = stats();
+        s.initiator_orientation = flowscope::Orientation::Reverse;
+        let r = FlowRecord::from_stats(&key(), &s, Some(EndReason::Fin));
+        assert_eq!(r.initiator, key().b);
+        assert_eq!(r.responder, key().a);
+        // The counters are per side already; the key stays sorted.
+        assert_eq!(r.bytes_initiator, 1500);
+        assert_eq!(r.key, key());
+    }
+
     #[test]
     fn fnmut_is_a_flow_exporter() {
         let mut count = 0u32;
         let mut exporter = |_r: &FlowRecord| count += 1;
-        let r = FlowRecord::from_ended(&key(), &stats(), EndReason::Fin);
+        let r = FlowRecord::from_stats(&key(), &stats(), Some(EndReason::Fin));
         FlowExporter::export(&mut exporter, &r);
         FlowExporter::export(&mut exporter, &r);
         assert_eq!(count, 2);
@@ -286,12 +315,18 @@ mod tests {
     #[test]
     fn json_flow_exporter_writes_one_line_with_core_fields() {
         let mut exporter = JsonFlowExporter::new(Vec::<u8>::new());
-        let r = FlowRecord::from_ended(&key(), &stats(), EndReason::Fin);
+        let r = FlowRecord::from_stats(&key(), &stats(), Some(EndReason::Fin));
         exporter.export(&r);
         let out = String::from_utf8(exporter.into_inner()).unwrap();
         assert_eq!(out.lines().count(), 1);
         assert!(out.contains("\"packets_initiator\":10"), "out = {out}");
         assert!(out.contains("\"bytes_responder\":12000"), "out = {out}");
+        assert!(
+            out.contains("\"initiator\":\"10.0.0.1:1234\""),
+            "out = {out}"
+        );
+        assert!(out.contains("\"responder\":\"10.0.0.2:80\""), "out = {out}");
+        assert!(out.contains("\"ip_bytes_initiator\":1360"), "out = {out}");
         // Issue #33: the portable Community ID rides the NDJSON line.
         assert!(out.contains("\"community_id\":\"1:"), "out = {out}");
     }

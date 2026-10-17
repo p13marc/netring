@@ -105,7 +105,11 @@ where
         // come from the message via `L7Fields`. `on_ctx::<P>` records the
         // protocol's traffic interest (a superset of the filter — safe).
         builder.on_ctx::<P>(move |msg: &P::Message, ctx: &mut crate::ctx::Ctx<'_>| {
-            let fields = session::SessionFields { key: ctx.flow, msg };
+            let fields = session::SessionFields {
+                key: ctx.flow,
+                endpoints: ctx.endpoints(),
+                msg,
+            };
             if pred.eval(&fields) {
                 user(msg, ctx)
             } else {

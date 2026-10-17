@@ -29,7 +29,8 @@ pub struct AggregateConfig {
     pub bucket: Duration,
     /// Track per-source-IP bytes/sec (top talkers).
     pub top_talkers: bool,
-    /// Track per-host-pair bytes/sec (traffic matrix).
+    /// Track per-host-pair bytes/sec (traffic matrix), keyed
+    /// `(initiator, responder)`.
     pub traffic_matrix: bool,
     /// Track DNS query-name rate (needs the `dns` feature).
     pub top_domains: bool,
@@ -111,7 +112,10 @@ impl AggregateReport<'_> {
             .unwrap_or_default()
     }
 
-    /// Top-`n` host pairs by bytes/sec, descending. Empty if `traffic_matrix` off.
+    /// Top-`n` host pairs by bytes/sec, descending, each `(initiator,
+    /// responder)` — the host that opened the flows first; both directions'
+    /// bytes count towards the pair (0.32, #215: it was the address-sorted
+    /// pair). Empty if `traffic_matrix` off.
     pub fn top_pairs(&self, n: usize) -> Vec<((IpAddr, IpAddr), f64)> {
         self.state
             .matrix
@@ -165,7 +169,7 @@ impl AggregateReport<'_> {
 pub struct AggregateSnapshot {
     /// `(src_ip, bytes_per_sec)` top talkers.
     pub talkers: Vec<(String, f64)>,
-    /// `(src_ip, dst_ip, bytes_per_sec)` top host pairs.
+    /// `(initiator_ip, responder_ip, bytes_per_sec)` top host pairs.
     pub pairs: Vec<(String, String, f64)>,
     /// `(name, queries_per_sec)` top DNS names.
     pub domains: Vec<(String, f64)>,

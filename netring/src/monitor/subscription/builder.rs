@@ -202,6 +202,11 @@ impl SubscriptionBuilder<PacketTier> {
     /// Finish a packet subscription with its handler. The handler sees every
     /// frame matching the filter as a borrowed `PacketView`, with `&mut Ctx`
     /// for emitting / state — synchronous (it runs in the zero-copy drain).
+    /// The filter's `src` / `dst` are the packet's own; `ctx.flow` is its
+    /// flow's canonical key (the one `FlowEnded` carries), with
+    /// `ctx.orientation()` / `ctx.side()` / `ctx.initiator()` saying which way
+    /// the packet went — so `ctx.flow_state_mut` is one slot per flow, freed
+    /// at its end (0.32).
     /// Register the result with
     /// [`MonitorBuilder::subscribe`](crate::monitor::MonitorBuilder::subscribe).
     pub fn to<H>(self, handler: H) -> super::packet::PacketSubscription

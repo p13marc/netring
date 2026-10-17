@@ -646,6 +646,7 @@ pub(crate) async fn run_loop(monitor: Monitor, stop: StopCondition) -> Result<()
                             &mut counters,
                             &mut flow_states,
                             &label_table,
+                            driver.tracker(),
                             source,
                             monitor_name_borrow,
                             handler_error_policy,
@@ -1143,6 +1144,7 @@ pub(crate) async fn replay_loop(
                     &mut counters,
                     &mut flow_states,
                     &label_table,
+                    driver.tracker(),
                     SourceIdx(0),
                     monitor_name_borrow,
                     handler_error_policy,
@@ -2703,7 +2705,12 @@ async fn dispatch_lifecycle_async(
 ///
 /// Extracts the 5-tuple once (directional — `a`=src, `b`=dst), builds one
 /// `Ctx`, and invokes every sub whose [`Predicate`](crate::monitor::subscription::Predicate)
-/// matches the frame's fields. Synchronous — called from inside the zero-copy
+/// matches the frame's fields. The predicates see the directional fields;
+/// `ctx.flow` is the flow's canonical (address-sorted) key — the one
+/// `FlowEnded` carries — with `ctx.orientation` / `ctx.side` saying which
+/// way this packet went, so per-flow state (`flow_state_mut`) is one slot
+/// for both directions and is freed at flow end (#216). The initiator comes
+/// from the tracker, or is this packet's sender for a flow it will start. Synchronous — called from inside the zero-copy
 /// drain (or the replay packet loop) before flow tracking, so the borrowed
 /// `PacketView` reaches the handler with no copy. Returns `Err` only under
 /// [`HandlerErrorPolicy::Propagate`]; `Isolate` records the error on the
@@ -2721,6 +2728,7 @@ fn dispatch_packet_subs(
     counters: &mut CounterRegistry,
     flow_states: &mut crate::ctx::FlowStateRegistry,
     label_table: &flowscope::well_known::LabelTable,
+    tracker: &flowscope::FlowTracker<FiveTuple, ()>,
     source: SourceIdx,
     monitor_name: Option<&str>,
     policy: HandlerErrorPolicy,
@@ -2729,11 +2737,28 @@ fn dispatch_packet_subs(
     let Some((key, fields)) = PacketFields::extract(view, extractor) else {
         return Ok(());
     };
+    // The canonical key, as FiveTuple::bidirectional() sorts it (`src > dst`
+    // swaps).
+    let (flow, orientation) = if key.a > key.b {
+        (
+            flowscope::extract::FiveTupleKey::new(key.proto, key.b, key.a),
+            flowscope::Orientation::Reverse,
+        )
+    } else {
+        (key, flowscope::Orientation::Forward)
+    };
+    let initiator = tracker
+        .get(&flow)
+        .map_or(orientation, |entry| entry.initiator_orientation());
+    let side = if orientation == initiator {
+        flowscope::FlowSide::Initiator
+    } else {
+        flowscope::FlowSide::Responder
+    };
     // Build the Ctx once and reuse it across subs (sequential dispatch). The
-    // packet tier is pre-flow, so `tracker` is `None` (no flow correlation
-    // before this frame is tracked).
+    // packet tier runs before this frame is tracked, so `tracker` is `None`.
     let mut ctx = Ctx {
-        flow: Some(key),
+        flow: Some(flow),
         ts: view.timestamp,
         source: Some(source),
         monitor_name,
@@ -2744,9 +2769,9 @@ fn dispatch_packet_subs(
         label_table,
         tracker: None,
         arp_table: None,
-        side: None,
-        orientation: None,
-        initiator: None,
+        side: Some(side),
+        orientation: Some(orientation),
+        initiator: Some(initiator),
     };
     for sub in subs {
         if sub.predicate.load().eval(&fields)

@@ -22,6 +22,8 @@
 //!     writer.write_packet(&pkt)?;
 //!     n += 1;
 //! }
+//! // Packets past the 1000th stay in the ring: a later `cap.packets()`
+//! // loop starts with them.
 //! # Ok(()) }
 //! ```
 //!

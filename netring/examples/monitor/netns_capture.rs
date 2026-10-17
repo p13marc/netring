@@ -29,6 +29,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     let mut cap = Capture::builder().interface(&iface).netns(&ns)?;
 
+    // Stopping after N keeps the unread rest of the current ring block: a
+    // later `packets()` loop (or `next_batch`) starts with it.
     let mut pkts = cap.packets();
     let mut seen = 0;
     while seen < 20 {

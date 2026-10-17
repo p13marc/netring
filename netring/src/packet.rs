@@ -393,18 +393,22 @@ impl OwnedPacket {
 
 /// A batch of packets from a single retired kernel block.
 ///
-/// **RAII**: dropping the batch returns the block to the kernel by writing
-/// `TP_STATUS_KERNEL` with `Release` ordering.
+/// **RAII**: dropping the batch returns the **whole** block to the kernel
+/// by writing `TP_STATUS_KERNEL` with `Release` ordering — including any
+/// packets of it that were not iterated. A batch taken after a partly
+/// consumed [`Packets`](crate::Packets) loop holds only the packets that
+/// loop left unread ([`len`](Self::len) counts those).
 ///
 /// Only one batch can be live at a time per [`Capture`](crate::Capture)
 /// (enforced by `&mut self` on [`next_batch()`](crate::traits::PacketSource::next_batch)).
 pub struct PacketBatch<'a> {
     block: NonNull<ffi::tpacket_block_desc>,
-    // Cached from block header
-    num_pkts: u32,
+    /// Packets left to iterate (the block's `num_pkts` for a fresh block).
+    remaining: u32,
     block_status: u32,
     seq_num: u64,
-    offset_to_first_pkt: u32,
+    /// Offset of the next `tpacket3_hdr` from the block base.
+    first_offset: u32,
     blk_len: u32,
     ts_first: Timestamp,
     ts_last: Timestamp,
@@ -412,48 +416,81 @@ pub struct PacketBatch<'a> {
 }
 
 impl<'a> PacketBatch<'a> {
-    /// Create a batch from a block pointer. The block must be in `TP_STATUS_USER` state.
+    /// Create a batch over a whole block. The block must be in
+    /// `TP_STATUS_USER` state.
     ///
     /// # Safety
     ///
     /// - `block` must point to a valid `tpacket_block_desc` in an mmap'd region.
     /// - The block must have been read with `Acquire` ordering before calling this.
     /// - The caller must ensure the block is not released while this batch exists.
+    #[cfg_attr(not(test), allow(dead_code))]
     pub(crate) unsafe fn new(block: NonNull<ffi::tpacket_block_desc>) -> Self {
-        // SAFETY: caller guarantees block is valid and user-owned.
-        let bd = unsafe { &*block.as_ptr() };
-        let bh1 = unsafe { &bd.hdr.bh1 };
+        // SAFETY: caller guarantees block is valid and user-owned; the
+        // fields are read by value through the raw pointer.
+        let (first_offset, num_pkts) = unsafe {
+            let bh1 = &raw const (*block.as_ptr()).hdr.bh1;
+            ((*bh1).offset_to_first_pkt, (*bh1).num_pkts)
+        };
+        // SAFETY: forwarded from the caller.
+        unsafe { Self::resume(block, first_offset, num_pkts) }
+    }
 
-        let ts_first = Timestamp::new(
-            bh1.ts_first_pkt.ts_sec,
-            // libc uses ts_usec but TPACKET_V3 provides nanoseconds
-            bh1.ts_first_pkt.ts_usec,
-        );
-        let ts_last = Timestamp::new(bh1.ts_last_pkt.ts_sec, bh1.ts_last_pkt.ts_usec);
+    /// Create a batch over the packets of `block` from the `tpacket3_hdr`
+    /// at `first_offset` (from the block base), `remaining` of them — the
+    /// rest of a block a [`Packets`](crate::Packets) loop left partly read.
+    ///
+    /// # Safety
+    ///
+    /// As [`new`](Self::new); additionally `first_offset` must be the
+    /// offset of a packet header of this block (as left by
+    /// [`BatchIter::position`]).
+    pub(crate) unsafe fn resume(
+        block: NonNull<ffi::tpacket_block_desc>,
+        first_offset: u32,
+        remaining: u32,
+    ) -> Self {
+        // SAFETY: caller guarantees block is valid and user-owned. Every
+        // field is read by value through the raw pointer: no reference
+        // to the block outlives this function.
+        let (block_status, seq_num, blk_len, ts_first, ts_last) = unsafe {
+            let bh1 = &raw const (*block.as_ptr()).hdr.bh1;
+            (
+                (*bh1).block_status,
+                (*bh1).seq_num,
+                (*bh1).blk_len,
+                // libc names the field ts_usec, but TPACKET_V3 stores
+                // nanoseconds there.
+                Timestamp::new((*bh1).ts_first_pkt.ts_sec, (*bh1).ts_first_pkt.ts_usec),
+                Timestamp::new((*bh1).ts_last_pkt.ts_sec, (*bh1).ts_last_pkt.ts_usec),
+            )
+        };
 
         Self {
             block,
-            num_pkts: bh1.num_pkts,
-            block_status: bh1.block_status,
-            seq_num: bh1.seq_num,
-            offset_to_first_pkt: bh1.offset_to_first_pkt,
-            blk_len: bh1.blk_len,
+            remaining,
+            block_status,
+            seq_num,
+            first_offset,
+            blk_len,
             ts_first,
             ts_last,
             _marker: PhantomData,
         }
     }
 
-    /// Number of packets in this block.
+    /// Number of packets in this batch: the packets left to read in the
+    /// block (all of them, unless a [`Packets`](crate::Packets) loop
+    /// already lent some).
     #[inline]
     pub fn len(&self) -> usize {
-        self.num_pkts as usize
+        self.remaining as usize
     }
 
     /// Whether the batch is empty.
     #[inline]
     pub fn is_empty(&self) -> bool {
-        self.num_pkts == 0
+        self.remaining == 0
     }
 
     /// Whether the block was retired via timeout (partially filled).
@@ -494,25 +531,10 @@ impl<'a> PacketBatch<'a> {
     ///
     /// Copy a packet out with [`Packet::to_owned`] to keep it longer.
     pub fn iter(&self) -> BatchIter<'_> {
-        if self.num_pkts == 0 {
-            return BatchIter {
-                current: std::ptr::null(),
-                remaining: 0,
-                block_end: std::ptr::null(),
-                _marker: PhantomData,
-            };
-        }
-
-        let base = self.block.as_ptr().cast::<u8>();
-        let first = base.map_addr(|a| a + self.offset_to_first_pkt as usize);
-        let end = base.map_addr(|a| a + self.blk_len as usize);
-
-        BatchIter {
-            current: first,
-            remaining: self.num_pkts,
-            block_end: end,
-            _marker: PhantomData,
-        }
+        // SAFETY: the batch holds the user-owned block for `'_`; its
+        // `first_offset` / `remaining` / `blk_len` came from the block
+        // header or from a `BatchIter::position` over the same block.
+        unsafe { BatchIter::at(self.block, self.first_offset, self.remaining, self.blk_len) }
     }
 }
 
@@ -528,7 +550,7 @@ impl<'b> IntoIterator for &'b PacketBatch<'_> {
 impl std::fmt::Debug for PacketBatch<'_> {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("PacketBatch")
-            .field("num_pkts", &self.num_pkts)
+            .field("len", &self.remaining)
             .field("seq_num", &self.seq_num)
             .field("timed_out", &self.timed_out())
             .finish()
@@ -537,7 +559,8 @@ impl std::fmt::Debug for PacketBatch<'_> {
 
 impl Drop for PacketBatch<'_> {
     fn drop(&mut self) {
-        // SAFETY: self.block is valid (from construction) and we're done reading.
+        // SAFETY: self.block is valid (from construction) and we're done
+        // reading. The whole block goes back, unread packets included.
         unsafe { ring::release_block(self.block) };
     }
 }
@@ -553,6 +576,45 @@ pub struct BatchIter<'a> {
     remaining: u32,
     block_end: *const u8,
     _marker: PhantomData<&'a ()>,
+}
+
+impl<'a> BatchIter<'a> {
+    /// An iterator over `remaining` packets of `block`, starting at the
+    /// `tpacket3_hdr` `offset` bytes from the block base; `blk_len` is the
+    /// block's used length (`bh1.blk_len`), the bound every header and
+    /// packet is checked against.
+    ///
+    /// # Safety
+    ///
+    /// `block` must point to a user-owned block of the mmap ring (or a
+    /// test buffer) at least `blk_len` bytes long that stays valid and
+    /// user-owned for `'a`.
+    #[inline]
+    pub(crate) unsafe fn at(
+        block: NonNull<ffi::tpacket_block_desc>,
+        offset: u32,
+        remaining: u32,
+        blk_len: u32,
+    ) -> Self {
+        let base = block.as_ptr().cast::<u8>().cast_const();
+        BatchIter {
+            current: base.map_addr(|a| a + offset as usize),
+            remaining,
+            block_end: base.map_addr(|a| a + blk_len as usize),
+            _marker: PhantomData,
+        }
+    }
+
+    /// Where the iteration stands, relative to `block` (the block it was
+    /// created over): the offset of the next packet header from the block
+    /// base and the packets left — what [`at`](Self::at) needs to resume.
+    /// `remaining == 0` once the block is exhausted (including when the
+    /// kernel's last-packet marker ended it early).
+    #[inline]
+    pub(crate) fn position(&self, block: NonNull<ffi::tpacket_block_desc>) -> (u32, u32) {
+        let offset = self.current.addr().wrapping_sub(block.as_ptr().addr());
+        (offset as u32, self.remaining)
+    }
 }
 
 impl std::fmt::Debug for BatchIter<'_> {
@@ -928,6 +990,90 @@ mod tests {
         assert_eq!(owned.data, data);
         assert_eq!(owned.timestamp.sec, 1000);
         assert_eq!(owned.original_len, data.len());
+    }
+
+    /// The (offset, remaining) a fresh iterator over `block` starts from.
+    fn block_start(block: &mut AlignedBlock) -> (NonNull<ffi::tpacket_block_desc>, u32, u32, u32) {
+        let bd = NonNull::new(block.as_mut_ptr().cast::<ffi::tpacket_block_desc>()).unwrap();
+        // SAFETY: the synthetic block header was written by build_synthetic_block.
+        let (off, n, len) = unsafe {
+            let bh1 = &raw const (*bd.as_ptr()).hdr.bh1;
+            ((*bh1).offset_to_first_pkt, (*bh1).num_pkts, (*bh1).blk_len)
+        };
+        (bd, off, n, len)
+    }
+
+    /// #211: an iterator's position resumes the walk exactly where it
+    /// stopped — what `Capture` keeps across `Packets` values.
+    #[test]
+    fn batch_iter_resumes_from_position() {
+        let mut block = build_synthetic_block(&[b"one", b"two!", b"three"], ffi::TP_STATUS_USER);
+        let (bd, off, n, blk_len) = block_start(&mut block);
+        assert_eq!(n, 3);
+
+        // SAFETY: `block` outlives every iterator below and is not moved.
+        let mut first = unsafe { BatchIter::at(bd, off, n, blk_len) };
+        assert_eq!(first.next().unwrap().data(), b"one");
+        let (pos, rem) = first.position(bd);
+        assert_eq!(rem, 2);
+        assert!(pos > off, "the cursor moved past the first header");
+
+        // SAFETY: as above.
+        let mut resumed = unsafe { BatchIter::at(bd, pos, rem, blk_len) };
+        let pkt = resumed.next().unwrap();
+        assert_eq!(pkt.data(), b"two!");
+        assert_eq!(pkt.timestamp().sec, 1001, "the second packet's own header");
+        assert_eq!(resumed.position(bd).1, 1);
+        assert_eq!(resumed.next().unwrap().data(), b"three");
+        // The last packet (tp_next_offset == 0) exhausts the walk.
+        assert_eq!(resumed.position(bd).1, 0);
+        assert!(resumed.next().is_none());
+
+        // Resuming an exhausted position yields nothing.
+        let (pos, rem) = resumed.position(bd);
+        // SAFETY: as above.
+        assert!(
+            unsafe { BatchIter::at(bd, pos, rem, blk_len) }
+                .next()
+                .is_none()
+        );
+    }
+
+    /// #211: a batch resumed mid-block counts and yields only the packets
+    /// left, and dropping it hands the whole block back to the kernel.
+    #[test]
+    fn resumed_batch_len_is_remaining() {
+        let mut block = build_synthetic_block(&[b"a", b"bb", b"ccc", b"dddd"], ffi::TP_STATUS_USER);
+        let (bd, off, n, blk_len) = block_start(&mut block);
+        // SAFETY: as in batch_iter_resumes_from_position.
+        let mut it = unsafe { BatchIter::at(bd, off, n, blk_len) };
+        it.next();
+        let (pos, rem) = it.position(bd);
+        assert_eq!(rem, 3);
+
+        // SAFETY: the synthetic block is "user-owned" and outlives the batch.
+        let batch = unsafe { PacketBatch::resume(bd, pos, rem) };
+        assert_eq!(batch.len(), 3);
+        assert!(!batch.is_empty());
+        let got: Vec<&[u8]> = batch.iter().map(|p| p.data()).collect();
+        assert_eq!(got, [&b"bb"[..], b"ccc", b"dddd"]);
+        // Iterating does not consume the batch.
+        assert_eq!(batch.iter().count(), 3);
+        drop(batch);
+
+        // SAFETY: header still in place; read by value.
+        let status = unsafe { (*bd.as_ptr()).hdr.bh1.block_status };
+        assert_eq!(
+            status,
+            ffi::TP_STATUS_KERNEL,
+            "the whole block was released"
+        );
+
+        // A fresh batch over the block is the whole block.
+        // SAFETY: as above.
+        let whole = unsafe { PacketBatch::new(bd) };
+        assert_eq!(whole.len(), 4);
+        std::mem::forget(whole);
     }
 
     #[test]

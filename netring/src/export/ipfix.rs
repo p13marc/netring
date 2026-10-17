@@ -80,18 +80,10 @@ fn flow_end_reason(reason: Option<EndReason>) -> FlowEndReason {
     }
 }
 
-/// L4 protocol number for the IP `protocolIdentifier` field.
+/// L4 protocol number for the IP `protocolIdentifier` field — flowscope's
+/// own mapping, which covers SCTP (132) and `Other(n)` (`n`) too.
 fn protocol_number(proto: flowscope::L4Proto) -> u8 {
-    use flowscope::L4Proto::*;
-    match proto {
-        Tcp => 6,
-        Udp => 17,
-        Icmp => 1,
-        IcmpV6 => 58,
-        // Unknown / future variants: 0 (HOPOPT / reserved) is the least
-        // wrong choice for "no specific protocol".
-        _ => 0,
-    }
+    proto.as_u8()
 }
 
 /// Milliseconds since the Unix epoch for a flowscope `Timestamp`.
@@ -417,6 +409,15 @@ mod tests {
         );
         assert_eq!(protocol_number(L4Proto::Tcp), 6);
         assert_eq!(protocol_number(L4Proto::Udp), 17);
+    }
+
+    /// `protocolIdentifier` is the IP protocol number for every L4
+    /// protocol, not 0 for the ones without a named arm.
+    #[test]
+    fn protocol_identifier_covers_sctp_and_other() {
+        assert_eq!(protocol_number(L4Proto::Sctp), 132);
+        assert_eq!(protocol_number(L4Proto::Other(47)), 47);
+        assert_eq!(protocol_number(L4Proto::IcmpV6), 58);
     }
 
     #[test]

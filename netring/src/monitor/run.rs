@@ -332,14 +332,15 @@ pub(crate) async fn run_loop(monitor: Monitor, stop: StopCondition) -> Result<()
     // Periodic sweep: idle flows end (FlowEnded), parsers' `on_tick`
     // runs, out-of-order holes expire, per-flow state is released.
     // Driven by wall time, stamped in packet time (see PacketClock).
-    let mut sweep_timer = periodic(
-        driver
-            .tracker()
-            .config()
-            .sweep_interval
-            .max(Duration::from_millis(10)),
-    );
-    let mut packet_clock = PacketClock::default();
+    let sweep_period = driver
+        .tracker()
+        .config()
+        .sweep_interval
+        .max(Duration::from_millis(10));
+    let mut sweep_timer = periodic(sweep_period);
+    // A source's timestamps going back by more than a sweep period is a
+    // clock step, not reordering.
+    let mut packet_clock = PacketClock::new(caps.len(), sweep_period);
     let mut rr_anchor: usize = 0;
     // 0.24 Phase B: consecutive backend-error count for the SkipSource circuit
     // breaker. Reset on every successful readable wake.
@@ -812,7 +813,7 @@ pub(crate) async fn run_loop(monitor: Monitor, stop: StopCondition) -> Result<()
                 None,
             )
             .await?;
-            packet_clock.observe(ts);
+            packet_clock.observe(i, ts);
 
             // 0.24 Phase C4: record progress for the health handle — a packet
             // batch was processed; snapshot the tracker's active-flow count.
@@ -2067,24 +2068,49 @@ fn apply_handler_error_policy(
 /// a live sweep's `now` is. Sweeping on the packets' own clock keeps
 /// idle timeouts right even when packet timestamps come from another
 /// clock (hardware / PHC) than the host's.
-#[derive(Default)]
+///
+/// Kept per capture source, since sources' clocks can disagree (two
+/// NICs, a PHC and the host clock): `now` is the source furthest
+/// behind, so a source whose clock runs ahead can't idle-end the other
+/// sources' flows early. Within a source the clock only moves forward,
+/// except across a step: a timestamp more than `step` behind the
+/// source's latest (the host clock was set back) re-anchors it. Holding
+/// on to the old maximum put `now` that far ahead of every new packet,
+/// and each sweep ended every flow until packet time caught up.
 struct PacketClock {
-    last: Option<(flowscope::Timestamp, Instant)>,
+    sources: Vec<Option<(flowscope::Timestamp, Instant)>>,
+    step: Duration,
 }
 
 impl PacketClock {
-    fn observe(&mut self, ts: flowscope::Timestamp) {
-        let ts = self.last.map_or(ts, |(prev, _)| prev.max(ts));
-        self.last = Some((ts, Instant::now()));
+    fn new(sources: usize, step: Duration) -> Self {
+        Self {
+            sources: vec![None; sources],
+            step,
+        }
+    }
+
+    fn observe(&mut self, source: usize, ts: flowscope::Timestamp) {
+        let Some(slot) = self.sources.get_mut(source) else {
+            return;
+        };
+        let ts = match *slot {
+            // Reordering (across CPUs / batches) keeps the latest.
+            Some((prev, _)) if ts < prev && prev.saturating_sub(ts) <= self.step => prev,
+            _ => ts,
+        };
+        *slot = Some((ts, Instant::now()));
     }
 
     fn now(&self) -> Option<flowscope::Timestamp> {
-        let (ts, at) = self.last?;
-        let d = ts.to_duration() + at.elapsed();
-        Some(flowscope::Timestamp::new(
-            d.as_secs() as u32,
-            d.subsec_nanos(),
-        ))
+        self.sources
+            .iter()
+            .flatten()
+            .map(|(ts, at)| {
+                let d = ts.to_duration() + at.elapsed();
+                flowscope::Timestamp::new(d.as_secs() as u32, d.subsec_nanos())
+            })
+            .min()
     }
 }
 
@@ -3528,5 +3554,56 @@ mod duration_tests {
         let mut short = periodic(Duration::from_millis(10));
         short.tick().await;
         assert!(start.elapsed() >= Duration::from_millis(10));
+    }
+}
+
+#[cfg(test)]
+mod packet_clock_tests {
+    use std::time::Duration;
+
+    use super::PacketClock;
+
+    fn secs(s: u32) -> flowscope::Timestamp {
+        flowscope::Timestamp::new(s, 0)
+    }
+
+    fn clock(sources: usize) -> PacketClock {
+        PacketClock::new(sources, Duration::from_secs(1))
+    }
+
+    #[test]
+    fn no_packet_no_time() {
+        assert_eq!(clock(2).now(), None);
+    }
+
+    #[test]
+    fn a_backward_clock_step_reanchors() {
+        let mut clock = clock(1);
+        clock.observe(0, secs(1_000));
+        // The host clock was set back 500 s.
+        clock.observe(0, secs(500));
+        let now = clock.now().unwrap();
+        assert!(now < secs(501), "now follows the stepped clock: {now:?}");
+    }
+
+    #[test]
+    fn reordering_within_the_step_keeps_the_latest() {
+        let mut clock = clock(1);
+        clock.observe(0, secs(1_000));
+        clock.observe(0, flowscope::Timestamp::new(999, 500_000_000));
+        let now = clock.now().unwrap();
+        assert!(now >= secs(1_000) && now < secs(1_001), "{now:?}");
+    }
+
+    #[test]
+    fn a_source_running_ahead_does_not_lead() {
+        let mut clock = clock(2);
+        clock.observe(0, secs(1_000));
+        clock.observe(1, secs(1_100));
+        let now = clock.now().unwrap();
+        assert!(now < secs(1_001), "the source furthest behind: {now:?}");
+        // Out-of-range sources are ignored.
+        clock.observe(5, secs(10));
+        assert!(clock.now().unwrap() >= secs(1_000));
     }
 }

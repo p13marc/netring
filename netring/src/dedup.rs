@@ -74,6 +74,7 @@ impl Clone for Dedup {
 #[derive(Clone, Copy)]
 struct Entry {
     hash: u64,
+    /// Wire (original) length.
     len: u32,
     /// Total nanoseconds since UNIX epoch — easier to subtract than
     /// (sec, nsec) pairs.
@@ -122,16 +123,34 @@ impl Dedup {
     /// Returns `true` to keep, `false` to drop. Updates internal
     /// state regardless. Cheap (~100 ns).
     pub fn keep(&mut self, pkt: &Packet<'_>) -> bool {
-        self.keep_raw(pkt.data(), pkt.direction(), pkt.timestamp())
+        self.keep_frame(
+            pkt.data(),
+            pkt.original_len(),
+            pkt.direction(),
+            pkt.timestamp(),
+        )
     }
 
     /// Same logic but operating on (data, direction, timestamp)
     /// directly. Useful for pcap-replay or synthetic-frame use
     /// where you don't have a `Packet`.
     pub fn keep_raw(&mut self, data: &[u8], direction: PacketDirection, ts: Timestamp) -> bool {
+        self.keep_frame(data, data.len(), direction, ts)
+    }
+
+    /// The match key is the captured bytes' hash plus the **wire** length:
+    /// two packets truncated to the same captured bytes are different
+    /// packets unless their original lengths agree too.
+    fn keep_frame(
+        &mut self,
+        data: &[u8],
+        original_len: usize,
+        direction: PacketDirection,
+        ts: Timestamp,
+    ) -> bool {
         self.seen += 1;
         let hash = xxhash_rust::xxh3::xxh3_64(data);
-        let len = data.len() as u32;
+        let len = original_len as u32;
         let ts_ns = (ts.sec as u128) * 1_000_000_000 + (ts.nsec as u128);
         let window_ns = self.window.as_nanos();
 
@@ -141,10 +160,10 @@ impl Dedup {
             if e.hash != hash || e.len != len {
                 continue;
             }
-            // ts_ns may go backwards by a few microseconds across
-            // ring frames; saturating subtraction avoids treating
-            // those as "from the future."
-            let elapsed = ts_ns.saturating_sub(e.ts_ns);
+            // ts_ns may go backwards by a few microseconds across ring
+            // frames (still inside the window), or by far more when sources
+            // merge or a clock steps (outside it): compare the distance.
+            let elapsed = ts_ns.abs_diff(e.ts_ns);
             if elapsed > window_ns {
                 continue;
             }
@@ -308,11 +327,34 @@ mod tests {
         assert!(!directions_complementary(Outgoing, Multicast));
     }
 
+    /// Two packets truncated to the same captured bytes are still different
+    /// packets when their wire lengths differ.
+    #[test]
+    fn content_keeps_truncated_packets_of_different_wire_lengths() {
+        let mut d = Dedup::content(Duration::from_millis(5), 64);
+        let head = [0xabu8; 64]; // both captured as these 64 bytes
+        assert!(d.keep_frame(&head, 1500, PacketDirection::Host, ts(0, 0)));
+        assert!(d.keep_frame(&head, 900, PacketDirection::Host, ts(0, 1_000)));
+        assert_eq!(d.dropped(), 0);
+        // Same wire length too: a duplicate.
+        assert!(!d.keep_frame(&head, 900, PacketDirection::Host, ts(0, 2_000)));
+    }
+
+    /// A timestamp far *behind* the remembered one is outside the window,
+    /// just like one far ahead of it.
+    #[test]
+    fn content_keeps_a_repeat_from_far_back_in_time() {
+        let mut d = Dedup::content(Duration::from_millis(5), 64);
+        assert!(d.keep_raw(b"abc", PacketDirection::Host, ts(100, 0)));
+        assert!(d.keep_raw(b"abc", PacketDirection::Host, ts(90, 0)));
+        assert_eq!(d.dropped(), 0);
+    }
+
     #[test]
     fn timestamp_clock_skew_doesnt_break() {
         // ts can go backwards a tiny amount across kernel ring frames.
-        // Saturating subtraction prevents a "future" timestamp from
-        // wrongly extending the window.
+        // The distance between timestamps is compared, so a slightly
+        // earlier one is still inside the window.
         let mut d = Dedup::loopback();
         assert!(d.keep_raw(b"abc", PacketDirection::Outgoing, ts(1, 0)));
         // "Earlier" timestamp — must still be considered within the window

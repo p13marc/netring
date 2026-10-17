@@ -1,6 +1,8 @@
 //! Async and channel adapters for packet capture.
 
 #[cfg(feature = "tokio")]
+pub(crate) mod registered;
+#[cfg(feature = "tokio")]
 pub mod tokio_adapter;
 
 #[cfg(feature = "tokio")]

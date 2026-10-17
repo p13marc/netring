@@ -1,4 +1,4 @@
-//! Async capture using tokio [`AsyncFd`].
+//! Async capture using tokio [`AsyncFd`](tokio::io::unix::AsyncFd).
 //!
 //! Three reception patterns, in order of preference:
 //!
@@ -17,13 +17,14 @@
 
 use std::os::fd::{AsFd, AsRawFd};
 
-use tokio::io::unix::AsyncFd;
+use tokio::io::Interest;
 
+use crate::async_adapters::registered::{ReadyMut, Registered};
 use crate::error::Error;
 use crate::packet::{OwnedPacket, PacketBatch};
 use crate::traits::PacketSource;
 
-/// Async wrapper around any [`PacketSource`] using tokio's [`AsyncFd`].
+/// Async wrapper around any [`PacketSource`] using tokio's [`AsyncFd`](tokio::io::unix::AsyncFd).
 ///
 /// Three reception entry points (in order of recommended use):
 ///
@@ -70,20 +71,23 @@ use crate::traits::PacketSource;
 /// # Ok(()) }
 /// ```
 pub struct AsyncCapture<S: PacketSource + AsRawFd> {
-    inner: AsyncFd<S>,
+    inner: Registered<S>,
 }
 
 impl<S: PacketSource + AsRawFd> AsyncCapture<S> {
     /// Wrap a packet source in an async adapter.
     ///
-    /// Registers the source's fd with tokio's reactor for `POLLIN` readiness.
+    /// Registers a duplicate of the source's fd with tokio's reactor, so the
+    /// adapter holds one extra fd for its lifetime.
     ///
     /// # Errors
     ///
-    /// Returns [`Error::Io`] if `AsyncFd` registration fails.
+    /// Returns [`Error::Io`] if duplicating the fd or the `AsyncFd`
+    /// registration fails.
     pub fn new(source: S) -> Result<Self, Error> {
-        let fd = AsyncFd::new(source).map_err(Error::Io)?;
-        Ok(Self { inner: fd })
+        let inner =
+            Registered::new(source, Interest::READABLE | Interest::WRITABLE).map_err(Error::Io)?;
+        Ok(Self { inner })
     }
 }
 
@@ -180,13 +184,12 @@ where
 impl<S: PacketSource + AsRawFd> AsyncCapture<S> {
     /// Poll-based readability check for use inside custom `Stream`
     /// impls that need to drive their own state from `poll_next`.
-    /// Returns the same `AsyncFdReadyMutGuard` shape as
-    /// `AsyncFd::poll_read_ready_mut`.
+    /// The guard mirrors `AsyncFd::poll_read_ready_mut`'s.
     #[doc(hidden)]
     pub(crate) fn poll_read_ready_mut(
         &mut self,
         cx: &mut std::task::Context<'_>,
-    ) -> std::task::Poll<std::io::Result<tokio::io::unix::AsyncFdReadyMutGuard<'_, S>>> {
+    ) -> std::task::Poll<std::io::Result<ReadyMut<'_, S>>> {
         self.inner.poll_read_ready_mut(cx)
     }
 
@@ -513,7 +516,7 @@ impl<S: PacketSource + AsRawFd + Unpin> futures_core::Stream for PacketStream<S>
 /// returns immediately to attempt another drain — matching the AsyncFd
 /// idiom for level-triggered fds.
 pub struct ReadableGuard<'a, S: PacketSource + AsRawFd> {
-    guard: tokio::io::unix::AsyncFdReadyMutGuard<'a, S>,
+    guard: ReadyMut<'a, S>,
 }
 
 impl<'a, S: PacketSource + AsRawFd> ReadableGuard<'a, S> {
@@ -533,7 +536,7 @@ impl<'a, S: PacketSource + AsRawFd> ReadableGuard<'a, S> {
         // until then, split the borrow through a raw pointer. Sound because:
         //   - guard is owned exclusively by self (no aliases)
         //   - inner_mut and clear_ready never run concurrently
-        let guard_ptr: *mut tokio::io::unix::AsyncFdReadyMutGuard<'a, S> = &raw mut self.guard;
+        let guard_ptr: *mut ReadyMut<'a, S> = &raw mut self.guard;
         // SAFETY: guard_ptr came from &mut self.guard; reborrowing once for
         // get_inner_mut() and once for clear_ready() is sequential, not
         // overlapping. The returned batch borrows transitively from

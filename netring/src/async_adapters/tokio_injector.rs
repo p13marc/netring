@@ -1,4 +1,4 @@
-//! Async packet injection using tokio [`AsyncFd`].
+//! Async packet injection using tokio [`AsyncFd`](tokio::io::unix::AsyncFd).
 //!
 //! Pairs with [`AsyncCapture`](crate::AsyncCapture): the same `AsyncFd`-based
 //! readiness machinery, but for the TX path. `AsyncInjector::send` waits on
@@ -20,12 +20,11 @@
 use std::os::fd::{AsFd, AsRawFd, BorrowedFd};
 use std::time::Duration;
 
-use tokio::io::unix::AsyncFd;
-
 use crate::afpacket::tx::Injector;
+use crate::async_adapters::registered::Registered;
 use crate::error::Error;
 
-/// Async wrapper around [`Injector`] using tokio's [`AsyncFd`].
+/// Async wrapper around [`Injector`] using tokio's [`AsyncFd`](tokio::io::unix::AsyncFd).
 ///
 /// Provides three async-friendly entry points:
 ///
@@ -42,21 +41,23 @@ use crate::error::Error;
 /// already `slot.send()`'d before cancellation remain queued and will be
 /// transmitted by the next `flush()`.
 pub struct AsyncInjector {
-    inner: AsyncFd<Injector>,
+    inner: Registered<Injector>,
 }
 
 impl AsyncInjector {
     /// Wrap an [`Injector`] in an async adapter.
     ///
-    /// Registers the source's fd with tokio's reactor for `POLLOUT` and
-    /// `POLLIN` (the kernel signals slot reclamation via `POLLOUT`).
+    /// Registers a duplicate of the injector's fd with tokio's reactor for
+    /// `POLLOUT` (the kernel signals slot reclamation via `POLLOUT`), so the
+    /// adapter holds one extra fd for its lifetime.
     ///
     /// # Errors
     ///
-    /// Returns [`Error::Io`] if `AsyncFd` registration fails.
+    /// Returns [`Error::Io`] if duplicating the fd or the `AsyncFd`
+    /// registration fails.
     pub fn new(tx: Injector) -> Result<Self, Error> {
-        let fd = AsyncFd::with_interest(tx, tokio::io::Interest::WRITABLE).map_err(Error::Io)?;
-        Ok(Self { inner: fd })
+        let inner = Registered::new(tx, tokio::io::Interest::WRITABLE).map_err(Error::Io)?;
+        Ok(Self { inner })
     }
 
     /// Open an async injector on `interface` with default settings.
@@ -123,7 +124,6 @@ impl AsyncInjector {
             // We do not consult pending_count here (would re-borrow self.inner
             // while guard is alive); the next allocate() attempt will tell us.
             guard.clear_ready();
-            drop(guard);
         }
     }
 

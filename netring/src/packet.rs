@@ -477,7 +477,23 @@ impl<'a> PacketBatch<'a> {
     }
 
     /// Iterate over packets in the batch.
-    pub fn iter(&self) -> BatchIter<'a> {
+    ///
+    /// The packets borrow the batch, not the capture: dropping the batch
+    /// hands its block back to the kernel, so a packet must not outlive it.
+    /// Keeping packets past the batch is a **compile error**:
+    ///
+    /// ```compile_fail
+    /// # fn f(cap: &mut netring::Capture) {
+    /// let pkts: Vec<netring::Packet<'_>> = match cap.next_batch() {
+    ///     Some(batch) => batch.iter().collect(), // error: `batch` dropped while borrowed
+    ///     None => Vec::new(),
+    /// };
+    /// # let _ = pkts;
+    /// # }
+    /// ```
+    ///
+    /// Copy a packet out with [`Packet::to_owned`] to keep it longer.
+    pub fn iter(&self) -> BatchIter<'_> {
         if self.num_pkts == 0 {
             return BatchIter {
                 current: std::ptr::null(),
@@ -500,11 +516,11 @@ impl<'a> PacketBatch<'a> {
     }
 }
 
-impl<'a> IntoIterator for &'a PacketBatch<'a> {
-    type Item = Packet<'a>;
-    type IntoIter = BatchIter<'a>;
+impl<'b> IntoIterator for &'b PacketBatch<'_> {
+    type Item = Packet<'b>;
+    type IntoIter = BatchIter<'b>;
 
-    fn into_iter(self) -> BatchIter<'a> {
+    fn into_iter(self) -> BatchIter<'b> {
         self.iter()
     }
 }

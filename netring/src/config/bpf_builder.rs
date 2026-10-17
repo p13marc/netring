@@ -46,6 +46,11 @@ pub(crate) enum MatchFrag {
     DstPort(u16),
     /// L4 source OR destination port.
     AnyPort(u16),
+    /// Exactly one of these (single-port) fragments — the OR group a
+    /// `ports` / `src_ports` / `dst_ports` set records. It's one term of
+    /// the AND chain like any other fragment; the compiler distributes
+    /// it into OR blocks once the whole chain is known.
+    AnyOf(Vec<MatchFrag>),
 }
 
 /// Typed builder for a [`BpfFilter`].
@@ -204,9 +209,13 @@ impl BpfFilterBuilder {
     /// # let _ = f;
     /// ```
     ///
-    /// Desugars to an OR-of-branches at build time — same bytecode
-    /// shape as a hand-rolled `.src_port(80).or(|b| b.src_port(8080))…`
-    /// chain.
+    /// The set is a single AND term: fragments chained before *or
+    /// after* it apply to every port, so
+    /// `.tcp().src_ports([80, 8080]).dst_host(h)` is
+    /// `tcp && (src port 80 || src port 8080) && dst host h`. It
+    /// desugars into OR blocks at build time (one per port, the rest of
+    /// the chain repeated in each), and two sets in one chain into their
+    /// cross product.
     ///
     /// # Panics
     ///
@@ -228,23 +237,19 @@ impl BpfFilterBuilder {
         self.expand_ports(ports.into_iter().collect(), MatchFrag::AnyPort)
     }
 
-    /// Desugar `kind_ports([p1, p2, p3])` to
-    /// `kind_port(p1).or(kind_port(p2)).or(kind_port(p3))`. Internal
-    /// helper for `src_ports` / `dst_ports` / `ports`.
+    /// Record `kind_ports([p1, p2, p3])` as one
+    /// `AnyOf([kind_port(p1), kind_port(p2), kind_port(p3)])` AND term
+    /// (a lone port as the plain fragment). Internal helper for
+    /// `src_ports` / `dst_ports` / `ports`; the compiler expands it once
+    /// the chain is complete, so later fragments constrain every port.
     fn expand_ports(mut self, ports: Vec<u16>, wrap: impl Fn(u16) -> MatchFrag) -> Self {
         assert!(!ports.is_empty(), "ports() requires at least one port");
-        let mut iter = ports.into_iter();
-        let first = iter.next().unwrap();
-        // Main branch: existing fragments + first port.
-        let base_fragments = self.fragments.clone();
-        self.fragments.push(wrap(first));
-        // Additional branches: same base AND-chain, one per remaining port.
-        for p in iter {
-            let mut branch = BpfFilterBuilder::new();
-            branch.fragments = base_fragments.clone();
-            branch.fragments.push(wrap(p));
-            self.or_branches.push(branch);
-        }
+        let mut alts: Vec<MatchFrag> = ports.into_iter().map(wrap).collect();
+        self.fragments.push(if alts.len() == 1 {
+            alts.remove(0)
+        } else {
+            MatchFrag::AnyOf(alts)
+        });
         self
     }
 
@@ -302,20 +307,18 @@ mod tests {
     }
 
     #[test]
-    fn ports_expands_to_or_branches() {
-        // `.tcp().ports([80, 8080])` should desugar to one branch with
-        // [IpProto(6), AnyPort(80)] and one OR-branch with [IpProto(6),
-        // AnyPort(8080)].
+    fn ports_records_one_and_term() {
+        // `.tcp().ports([80, 8080])` is one AND term, not OR branches built
+        // from the chain so far (audit A5) — the compiler expands it.
         let b = BpfFilterBuilder::new().tcp().ports([80, 8080]);
         assert_eq!(
             b.fragments,
-            vec![MatchFrag::IpProto(6), MatchFrag::AnyPort(80)]
+            vec![
+                MatchFrag::IpProto(6),
+                MatchFrag::AnyOf(vec![MatchFrag::AnyPort(80), MatchFrag::AnyPort(8080)]),
+            ]
         );
-        assert_eq!(b.or_branches.len(), 1);
-        assert_eq!(
-            b.or_branches[0].fragments,
-            vec![MatchFrag::IpProto(6), MatchFrag::AnyPort(8080)]
-        );
+        assert!(b.or_branches.is_empty());
     }
 
     #[test]
@@ -323,24 +326,26 @@ mod tests {
         let b = BpfFilterBuilder::new().tcp().src_ports([80, 443]);
         assert_eq!(
             b.fragments,
-            vec![MatchFrag::IpProto(6), MatchFrag::SrcPort(80)]
-        );
-        assert_eq!(
-            b.or_branches[0].fragments,
-            vec![MatchFrag::IpProto(6), MatchFrag::SrcPort(443)]
+            vec![
+                MatchFrag::IpProto(6),
+                MatchFrag::AnyOf(vec![MatchFrag::SrcPort(80), MatchFrag::SrcPort(443)]),
+            ]
         );
     }
 
     #[test]
     fn dst_ports_uses_dst_port_fragment() {
-        let b = BpfFilterBuilder::new().udp().dst_ports([53, 5353]);
+        let b = BpfFilterBuilder::new()
+            .udp()
+            .dst_ports([53, 5353])
+            .src_host("10.0.0.1".parse().unwrap());
         assert_eq!(
             b.fragments,
-            vec![MatchFrag::IpProto(17), MatchFrag::DstPort(53)]
-        );
-        assert_eq!(
-            b.or_branches[0].fragments,
-            vec![MatchFrag::IpProto(17), MatchFrag::DstPort(5353)]
+            vec![
+                MatchFrag::IpProto(17),
+                MatchFrag::AnyOf(vec![MatchFrag::DstPort(53), MatchFrag::DstPort(5353)]),
+                MatchFrag::SrcHost("10.0.0.1".parse().unwrap()),
+            ]
         );
     }
 

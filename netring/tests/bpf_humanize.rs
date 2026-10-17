@@ -129,6 +129,20 @@ fn ip6_keyword() {
 }
 
 #[test]
+fn port_set_renders_as_one_and_term() {
+    let f = BpfFilter::builder()
+        .tcp()
+        .dst_ports([80, 443])
+        .src_host("10.0.0.1".parse().unwrap())
+        .build()
+        .unwrap();
+    assert_eq!(
+        f.to_human(),
+        "tcp and (dst port 80 or dst port 443) and src host 10.0.0.1"
+    );
+}
+
+#[test]
 fn display_impl_matches_to_human() {
     let f = BpfFilter::builder().tcp().dst_port(22).build().unwrap();
     assert_eq!(format!("{f}"), f.to_human());

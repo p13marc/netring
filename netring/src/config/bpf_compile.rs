@@ -141,12 +141,12 @@ pub(crate) fn compile(builder: BpfFilterBuilder) -> Result<BpfFilter, BpfBuildEr
     }
 
     // Compile each block (top-level AND chain + each OR branch)
-    // independently. Within each block, fragments use
-    // `Label::Drop` to mean "fail this block"; the linker
-    // rewrites this to either the next branch's start or the
-    // global Drop tail (last branch).
-    let mut blocks: Vec<Vec<SymInsn>> = Vec::with_capacity(1 + or_branches.len());
-    blocks.push(compile_block(&fragments)?);
+    // independently — after distributing any port-set (`AnyOf`)
+    // term, which turns one chain into one block per alternative.
+    // Within each block, fragments use `Label::Drop` to mean "fail
+    // this block"; the linker rewrites this to either the next
+    // branch's start or the global Drop tail (last branch).
+    let mut chains = expand_any_of(&fragments)?;
     for branch in &or_branches {
         if branch.fragments.is_empty() {
             return Err(BpfBuildError::EmptyOr);
@@ -157,7 +157,16 @@ pub(crate) fn compile(builder: BpfFilterBuilder) -> Result<BpfFilter, BpfBuildEr
         if !branch.or_branches.is_empty() || branch.negated {
             return Err(BpfBuildError::NestedOr);
         }
-        blocks.push(compile_block(&branch.fragments)?);
+        chains.extend(expand_any_of(&branch.fragments)?);
+        if chains.len() > BpfFilter::MAX_INSNS {
+            return Err(BpfBuildError::TooManyInstructions {
+                count: chains.len(),
+            });
+        }
+    }
+    let mut blocks: Vec<Vec<SymInsn>> = Vec::with_capacity(chains.len());
+    for chain in &chains {
+        blocks.push(compile_block(chain)?);
     }
 
     // Stitch blocks: each block's body, followed by `JA Accept`
@@ -228,6 +237,38 @@ pub(crate) fn compile(builder: BpfFilterBuilder) -> Result<BpfFilter, BpfBuildEr
 /// Compile a single block (an AND chain of fragments) into a
 /// symbolic instruction stream. Drop labels inside the stream
 /// mean "fail this block"; the linker rewrites them.
+/// Distribute the `AnyOf` (port-set) terms of one AND chain:
+/// `a ∧ (p1 ∨ p2) ∧ b` → `[a, p1, b]`, `[a, p2, b]`; several sets
+/// give their cross product. A chain without one is returned as is.
+///
+/// Every block costs at least one instruction, so more blocks than
+/// [`BpfFilter::MAX_INSNS`] can never load — refused before the
+/// product is built, so a chain of large sets can't exhaust memory.
+fn expand_any_of(fragments: &[MatchFrag]) -> Result<Vec<Vec<MatchFrag>>, BpfBuildError> {
+    let mut chains: Vec<Vec<MatchFrag>> = vec![Vec::with_capacity(fragments.len())];
+    for frag in fragments {
+        match frag {
+            MatchFrag::AnyOf(alts) => {
+                let n = chains.len().saturating_mul(alts.len());
+                if n > BpfFilter::MAX_INSNS {
+                    return Err(BpfBuildError::TooManyInstructions { count: n });
+                }
+                let mut next = Vec::with_capacity(n);
+                for chain in &chains {
+                    for alt in alts {
+                        let mut c = chain.clone();
+                        c.push(alt.clone());
+                        next.push(c);
+                    }
+                }
+                chains = next;
+            }
+            other => chains.iter_mut().for_each(|c| c.push(other.clone())),
+        }
+    }
+    Ok(chains)
+}
+
 fn compile_block(fragments: &[MatchFrag]) -> Result<Vec<SymInsn>, BpfBuildError> {
     let normalized = normalize(fragments.to_vec())?;
     let mut ctx = infer_ctx(&normalized);
@@ -509,6 +550,10 @@ fn compile_fragment(
         MatchFrag::SrcPort(p) => emit_l4_port(SrcDst::Src, *p, ctx, out),
         MatchFrag::DstPort(p) => emit_l4_port(SrcDst::Dst, *p, ctx, out),
         MatchFrag::AnyPort(p) => emit_l4_port(SrcDst::Any, *p, ctx, out),
+        // `compile` distributes every port set into OR blocks before a
+        // block reaches here; an OR group inside one block isn't
+        // expressible by the flat AND template.
+        MatchFrag::AnyOf(_) => Err(BpfBuildError::NestedOr),
     }
 }
 
@@ -1265,6 +1310,38 @@ mod tests {
                 "{b:?} → {err:?}"
             );
         }
+    }
+
+    #[test]
+    fn port_set_inside_or_branch_compiles() {
+        // A port set is an AND term now, not an `or()` of its own, so it no
+        // longer trips the nested-OR rule inside a branch.
+        let b = BpfFilterBuilder::new()
+            .tcp()
+            .dst_port(80)
+            .or(|b| b.udp().dst_ports([53, 5353]));
+        let f = compile(b).expect("flat after expansion");
+        let mut udp_5353 = ipv4_frame([10, 0, 0, 1], [10, 0, 0, 2]);
+        udp_5353[36..38].copy_from_slice(&5353u16.to_be_bytes());
+        assert!(f.matches(&udp_5353));
+        assert!(
+            !f.matches(&ipv4_frame([10, 0, 0, 1], [10, 0, 0, 2])),
+            "udp/2"
+        );
+    }
+
+    #[test]
+    fn port_set_cross_product_is_bounded_before_it_is_built() {
+        // 2^20 blocks could never fit BPF_MAXINSNS; refuse without
+        // materialising them.
+        let mut b = BpfFilterBuilder::new().tcp();
+        for _ in 0..20 {
+            b = b.ports([1, 2]);
+        }
+        assert!(matches!(
+            compile(b),
+            Err(BpfBuildError::TooManyInstructions { .. })
+        ));
     }
 
     #[test]

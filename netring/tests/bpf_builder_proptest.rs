@@ -281,6 +281,52 @@ proptest! {
         // Src-only-in-set must NOT match.
         prop_assert_eq!(f.matches(&pkt), set.contains(&actual_dst));
     }
+
+    /// 13. A port set is one AND term: fragments chained *after* it constrain
+    /// every port, not just the first (audit A5).
+    #[test]
+    fn port_set_ands_with_later_fragments(
+        actual_src in arb_ipv4_octet_set(),
+        actual_dst_port in prop::sample::select(vec![80u16, 443, 8080, 22]),
+        pick_host in any::<bool>(),
+    ) {
+        let host = [10, 0, 0, 1];
+        let src = if pick_host { host } else { actual_src };
+        let f = BpfFilter::builder()
+            .tcp()
+            .dst_ports([80, 443])
+            .src_host(IpAddr::V4(host.into()))
+            .build()
+            .unwrap();
+        let pkt = synth_eth_ipv4_tcp(src, [2, 2, 2, 2], 40000, actual_dst_port);
+        let expected = [80, 443].contains(&actual_dst_port) && src == host;
+        prop_assert_eq!(f.matches(&pkt), expected);
+    }
+
+    /// 14. Two port sets AND together (their cross product), and a port set in
+    /// the main chain stays separate from a user `.or()` branch.
+    #[test]
+    fn two_port_sets_are_a_conjunction(
+        sp in prop::sample::select(vec![1u16, 2, 3, 4]),
+        dp in prop::sample::select(vec![1u16, 2, 3, 4]),
+    ) {
+        let f = BpfFilter::builder()
+            .tcp()
+            .src_ports([1, 2])
+            .dst_ports([3, 4])
+            .build()
+            .unwrap();
+        let pkt = synth_eth_ipv4_tcp([1, 1, 1, 1], [2, 2, 2, 2], sp, dp);
+        prop_assert_eq!(f.matches(&pkt), [1, 2].contains(&sp) && [3, 4].contains(&dp));
+
+        let g = BpfFilter::builder()
+            .tcp()
+            .dst_ports([3, 4])
+            .or(|b| b.tcp().src_port(1))
+            .build()
+            .unwrap();
+        prop_assert_eq!(g.matches(&pkt), [3, 4].contains(&dp) || sp == 1);
+    }
 }
 
 // Re-expose builder type so tests can name it.

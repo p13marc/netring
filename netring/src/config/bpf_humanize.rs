@@ -82,5 +82,9 @@ fn frag_to_string(frag: &MatchFrag) -> String {
         MatchFrag::SrcPort(p) => format!("src port {p}"),
         MatchFrag::DstPort(p) => format!("dst port {p}"),
         MatchFrag::AnyPort(p) => format!("port {p}"),
+        MatchFrag::AnyOf(alts) => {
+            let alts: Vec<String> = alts.iter().map(frag_to_string).collect();
+            format!("({})", alts.join(" or "))
+        }
     }
 }

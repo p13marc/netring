@@ -56,6 +56,11 @@ pub(crate) struct HealthState {
     /// observable so operators can alert on it.
     handler_errors: AtomicU64,
     backend_errors: AtomicU64,
+    /// #214: what the per-flow accumulators (nPrint, YARA) hold, as of the
+    /// last sweep (and the end of the run).
+    accumulator_live_flows: AtomicUsize,
+    accumulator_flows_skipped: AtomicU64,
+    yara_bytes_skipped: AtomicU64,
 }
 
 impl HealthState {
@@ -70,7 +75,20 @@ impl HealthState {
             drops: AtomicU64::new(0),
             handler_errors: AtomicU64::new(0),
             backend_errors: AtomicU64::new(0),
+            accumulator_live_flows: AtomicUsize::new(0),
+            accumulator_flows_skipped: AtomicU64::new(0),
+            yara_bytes_skipped: AtomicU64::new(0),
         })
+    }
+
+    /// Publish what the per-flow accumulators hold (#214).
+    pub(crate) fn record_accumulators(&self, stats: crate::monitor::nprint::AccumulatorStats) {
+        self.accumulator_live_flows
+            .store(stats.live_flows, Ordering::Relaxed);
+        self.accumulator_flows_skipped
+            .store(stats.skipped_flows, Ordering::Relaxed);
+        self.yara_bytes_skipped
+            .store(stats.skipped_bytes, Ordering::Relaxed);
     }
 
     /// Count one handler error swallowed under `HandlerErrorPolicy::Isolate`.
@@ -216,6 +234,30 @@ impl MonitorHealth {
         self.inner.backend_errors.load(Ordering::Relaxed)
     }
 
+    /// Flows the per-flow accumulators — nPrint
+    /// ([`nprint`](crate::monitor::MonitorBuilder)), YARA — skipped because
+    /// their live-flow cap (`max_tracked_*_flows`) was full: they got no
+    /// matrix / were not scanned. Updated on each sweep. New in 0.32.0 (#214).
+    pub fn accumulator_flows_skipped(&self) -> u64 {
+        self.inner.accumulator_flows_skipped.load(Ordering::Relaxed)
+    }
+
+    /// Payload bytes YARA did not buffer — so did not scan — because its
+    /// memory budget
+    /// ([`yara_memory_budget`](crate::monitor::MonitorBuilder)) was full.
+    /// Updated on each sweep. New in 0.32.0 (#214).
+    pub fn yara_bytes_skipped(&self) -> u64 {
+        self.inner.yara_bytes_skipped.load(Ordering::Relaxed)
+    }
+
+    /// Flows the per-flow accumulators (nPrint, YARA) currently hold, as of
+    /// the last sweep — and after the run, what is left: every flow they
+    /// were fed ends with a `FlowEnded` that releases it, so a non-zero
+    /// count once the run is over is a leak. New in 0.32.0 (#214).
+    pub fn accumulator_live_flows(&self) -> usize {
+        self.inner.accumulator_live_flows.load(Ordering::Relaxed)
+    }
+
     /// `true` once at least one event (packet or tick) has been
     /// processed. A weaker signal than [`is_ready`](Self::is_ready) — a
     /// quiet link can be ready without having seen traffic.
@@ -275,6 +317,9 @@ impl MonitorHealth {
             drops: self.drops(),
             handler_errors: self.handler_errors(),
             backend_errors: self.backend_errors(),
+            accumulator_live_flows: self.accumulator_live_flows(),
+            accumulator_flows_skipped: self.accumulator_flows_skipped(),
+            yara_bytes_skipped: self.yara_bytes_skipped(),
             ready: self.is_ready(),
             seen_traffic: self.has_seen_traffic(),
         }
@@ -294,7 +339,11 @@ impl std::fmt::Debug for MonitorHealth {
 /// A consistent snapshot of [`MonitorHealth`] fields. `is_live` isn't
 /// included — it's a function of `last_event_age` + `uptime` against a
 /// caller-chosen window, both present here.
+///
+/// `#[non_exhaustive]` since 0.32.0: read the fields; it isn't built
+/// outside netring.
 #[derive(Debug, Clone, Copy, PartialEq)]
+#[non_exhaustive]
 pub struct MonitorHealthSnapshot {
     /// Time since the run loop started.
     pub uptime: Duration,
@@ -308,8 +357,16 @@ pub struct MonitorHealthSnapshot {
     pub drops: u64,
     /// Handler errors swallowed under `HandlerErrorPolicy::Isolate`.
     pub handler_errors: u64,
-    /// Backend errors swallowed under `BackendErrorPolicy::SkipSource`.
+    /// Backend errors absorbed under `BackendErrorPolicy::SkipSource` /
+    /// `Reopen`.
     pub backend_errors: u64,
+    /// Flows the per-flow accumulators hold (see
+    /// [`MonitorHealth::accumulator_live_flows`]). New in 0.32.0.
+    pub accumulator_live_flows: usize,
+    /// See [`MonitorHealth::accumulator_flows_skipped`]. New in 0.32.0.
+    pub accumulator_flows_skipped: u64,
+    /// See [`MonitorHealth::yara_bytes_skipped`]. New in 0.32.0.
+    pub yara_bytes_skipped: u64,
     /// Readiness (sockets open + loop servicing).
     pub ready: bool,
     /// Whether any traffic has been seen.

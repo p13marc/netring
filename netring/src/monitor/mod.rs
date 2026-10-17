@@ -83,10 +83,19 @@ pub mod ml_features;
 pub(crate) mod nprint;
 pub mod overload;
 pub mod owner_bandwidth;
-/// Default cap on concurrently-tracked per-flow-accumulator flows (nPrint #72 /
-/// YARA #45) when the corresponding `max_tracked_*_flows` is not set.
+/// Default cap on concurrently-tracked nPrint flows (#72) when
+/// [`MonitorBuilder::max_tracked_nprint_flows`] is not set. (Until 0.32 it
+/// capped YARA's flows too: see [`DEFAULT_YARA_MAX_FLOWS`].)
 #[cfg(any(feature = "nprint", feature = "yara"))]
 pub const DEFAULT_NPRINT_MAX_FLOWS: usize = 10_000;
+/// Default cap on concurrently-buffered YARA flows (#45) when
+/// [`MonitorBuilder::max_tracked_yara_flows`] is not set.
+#[cfg(feature = "yara")]
+pub const DEFAULT_YARA_MAX_FLOWS: usize = 10_000;
+/// Default cap on the memory all YARA payload buffers hold together (#214)
+/// when [`MonitorBuilder::yara_memory_budget`] is not set — 256 MiB.
+#[cfg(feature = "yara")]
+pub const DEFAULT_YARA_MEMORY_BUDGET: usize = 256 * 1024 * 1024;
 #[cfg(feature = "yara")]
 pub mod yara;
 /// Default per-direction payload scan window (issue #45) when
@@ -1082,9 +1091,13 @@ pub struct MonitorBuilder {
     #[cfg(feature = "yara")]
     yara_handlers: Vec<yara::YaraHandler>,
     /// Issue #45: cap on concurrently-tracked YARA flows; `None` →
-    /// [`DEFAULT_NPRINT_MAX_FLOWS`].
+    /// [`DEFAULT_YARA_MAX_FLOWS`].
     #[cfg(feature = "yara")]
     yara_max_flows: Option<usize>,
+    /// #214: cap on the memory every YARA buffer holds together; `None` →
+    /// [`DEFAULT_YARA_MEMORY_BUDGET`].
+    #[cfg(feature = "yara")]
+    yara_memory_budget: Option<usize>,
     /// Issue #45: per-direction payload scan cap (bytes); `None` →
     /// [`DEFAULT_YARA_SCAN_BYTES`].
     #[cfg(feature = "yara")]
@@ -2031,10 +2044,23 @@ impl MonitorBuilder {
     }
 
     /// Issue #45: cap the number of concurrently-scanned YARA flows (default
-    /// [`DEFAULT_NPRINT_MAX_FLOWS`]). Past the cap, new flows are skipped.
+    /// [`DEFAULT_YARA_MAX_FLOWS`]). Past the cap, new flows are skipped —
+    /// counted in [`MonitorHealth::accumulator_flows_skipped`].
     #[cfg(feature = "yara")]
     pub fn max_tracked_yara_flows(mut self, max: usize) -> Self {
         self.yara_max_flows = Some(max);
+        self
+    }
+
+    /// #214: cap the memory all YARA payload buffers hold together (default
+    /// [`DEFAULT_YARA_MEMORY_BUDGET`], 256 MiB) — the bound that holds
+    /// whatever the flow count and the per-direction
+    /// [`max_scan_bytes`](Self::max_scan_bytes). Payload a full budget
+    /// refuses is not scanned; it is counted in
+    /// [`MonitorHealth::yara_bytes_skipped`].
+    #[cfg(feature = "yara")]
+    pub fn yara_memory_budget(mut self, bytes: usize) -> Self {
+        self.yara_memory_budget = Some(bytes);
         self
     }
 
@@ -4769,8 +4795,10 @@ impl MonitorBuilder {
             byte_accumulators.push(Box::new(yara::YaraAccumulator::new(
                 swap,
                 self.yara_handlers,
-                self.yara_max_flows.unwrap_or(DEFAULT_NPRINT_MAX_FLOWS),
+                self.yara_max_flows.unwrap_or(DEFAULT_YARA_MAX_FLOWS),
                 self.yara_max_bytes.unwrap_or(DEFAULT_YARA_SCAN_BYTES),
+                self.yara_memory_budget
+                    .unwrap_or(DEFAULT_YARA_MEMORY_BUDGET),
             )));
         }
 

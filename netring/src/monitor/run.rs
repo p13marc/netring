@@ -460,6 +460,13 @@ pub(crate) async fn run_loop(monitor: Monitor, stop: StopCondition) -> Result<()
                         // were released by their `FlowEnded`, whose
                         // handlers could still read the state.
                         flow_states.sweep(now);
+                        // #214: and the accumulators' flows the tracker let
+                        // go without one.
+                        crate::monitor::nprint::retain_tracked(
+                            &mut byte_accumulators,
+                            driver.tracker(),
+                            &health,
+                        );
                     }
                     continue;
                 }
@@ -781,25 +788,40 @@ pub(crate) async fn run_loop(monitor: Monitor, stop: StopCondition) -> Result<()
                     {
                         packet_err = Some(e);
                     }
-                    // Issue #72: append this frame's nPrint row to its flow's
-                    // matrix (keyed canonically, matching FlowEnded). Synchronous,
-                    // in-borrow — the borrow drops before the dispatch `.await`.
-                    for acc in byte_accumulators.iter_mut() {
-                        acc.feed(&view);
-                    }
                     // Issue #134: reassemble IPv4 fragments before the tracker sees
-                    // them (taps/accumulators above already saw the raw fragment).
+                    // them (the taps above already saw the raw fragment). Issue
+                    // #72 / #45 (#214): the per-flow accumulators (nPrint, YARA)
+                    // are fed what the tracker tracked — its key and side, a
+                    // reassembled datagram, never a raw fragment. Synchronous,
+                    // in-borrow — the borrow drops before the dispatch `.await`.
                     match ip_reassembly.as_mut() {
-                        None => driver.track_into(view, &mut events),
+                        None => {
+                            driver.track_into(view, &mut events);
+                            crate::monitor::nprint::feed_tracked(
+                                &mut byte_accumulators,
+                                &driver,
+                                &view,
+                            );
+                        }
                         Some(r) => match r.intercept(&view) {
                             crate::monitor::ip_frag::FragAction::PassThrough => {
-                                driver.track_into(view, &mut events)
+                                driver.track_into(view, &mut events);
+                                crate::monitor::nprint::feed_tracked(
+                                    &mut byte_accumulators,
+                                    &driver,
+                                    &view,
+                                );
                             }
                             crate::monitor::ip_frag::FragAction::Buffered => {}
                             crate::monitor::ip_frag::FragAction::Reassembled(frame) => {
                                 let rv = flowscope::PacketView::new(&frame, view.timestamp)
                                     .with_rx_metadata(view.rx_metadata);
                                 driver.track_into(rv, &mut events);
+                                crate::monitor::nprint::feed_tracked(
+                                    &mut byte_accumulators,
+                                    &driver,
+                                    &rv,
+                                );
                             }
                         },
                     }
@@ -920,6 +942,9 @@ pub(crate) async fn run_loop(monitor: Monitor, stop: StopCondition) -> Result<()
     }
 
     // Flush even when the drain failed; the drain's error wins.
+    // #214: what the accumulators still hold once every flow ended — a
+    // leak, if anything.
+    crate::monitor::nprint::publish(&byte_accumulators, &health);
     let flushed = flush_outputs(sink.as_mut(), &mut flow_exporters, &mut report_flushers);
     // #216: a sharded shard hands the merge worker what it accumulated
     // since the last probe — the drain phase's events included.
@@ -1083,6 +1108,11 @@ pub(crate) async fn replay_loop(
                 .await?;
                 // After the `FlowEnded` handlers (see `run_loop`).
                 flow_states.sweep(now);
+                crate::monitor::nprint::retain_tracked(
+                    &mut byte_accumulators,
+                    driver.tracker(),
+                    &health,
+                );
             }
 
             // Ticks that fell due before this packet, at their
@@ -1262,22 +1292,28 @@ pub(crate) async fn replay_loop(
             let arp_table_ref: ArpTableRef<'_> = None;
 
             events.clear();
-            // Issue #72: append this frame's nPrint row before the tracker keys it.
-            for acc in byte_accumulators.iter_mut() {
-                acc.feed(&view);
-            }
-            // Issue #134: reassemble IPv4 fragments for the tracker (offline replay).
+            // Issue #134: reassemble IPv4 fragments for the tracker (offline
+            // replay); the accumulators get what it tracked, as live (#214).
             match ip_reassembly.as_mut() {
-                None => driver.track_into(view, &mut events),
+                None => {
+                    driver.track_into(view, &mut events);
+                    crate::monitor::nprint::feed_tracked(&mut byte_accumulators, &driver, &view);
+                }
                 Some(r) => match r.intercept(&view) {
                     crate::monitor::ip_frag::FragAction::PassThrough => {
-                        driver.track_into(view, &mut events)
+                        driver.track_into(view, &mut events);
+                        crate::monitor::nprint::feed_tracked(
+                            &mut byte_accumulators,
+                            &driver,
+                            &view,
+                        );
                     }
                     crate::monitor::ip_frag::FragAction::Buffered => {}
                     crate::monitor::ip_frag::FragAction::Reassembled(frame) => {
                         let rv = flowscope::PacketView::new(&frame, view.timestamp)
                             .with_rx_metadata(view.rx_metadata);
                         driver.track_into(rv, &mut events);
+                        crate::monitor::nprint::feed_tracked(&mut byte_accumulators, &driver, &rv);
                     }
                 },
             }
@@ -1345,6 +1381,9 @@ pub(crate) async fn replay_loop(
     }
 
     // Flush even when the drain failed; the drain's error wins.
+    // #214: what the accumulators still hold once every flow ended — a
+    // leak, if anything.
+    crate::monitor::nprint::publish(&byte_accumulators, &health);
     let flushed = flush_outputs(sink.as_mut(), &mut flow_exporters, &mut report_flushers);
     drained.and(flushed)
 }

@@ -256,8 +256,11 @@ fn run_reader(
             let orig_len = (orig_len + frame.len())
                 .saturating_sub(raw_len)
                 .max(frame.len());
-            if config.replay_speed > 0.0 {
-                pace(ts, &mut start_wall, &mut first_ts, config.replay_speed);
+            if config.replay_speed > 0.0
+                && !pace(ts, &mut start_wall, &mut first_ts, config.replay_speed, tx)
+            {
+                // Receiver dropped while pacing.
+                return Ok(());
             }
             let owned = owned_packet(frame, orig_len, ts, direction);
             if tx.blocking_send(Ok(owned)).is_err() {
@@ -277,22 +280,36 @@ fn run_reader(
     }
 }
 
+/// Longest single sleep of [`pace`]: how late it notices a dropped
+/// receiver.
+const PACE_SLICE: Duration = Duration::from_millis(100);
+
 /// Wall-clock pacing: sleep so the wall delta matches the pcap
-/// delta scaled by `1/speed`.
+/// delta scaled by `1/speed`. Sleeps in slices of at most
+/// [`PACE_SLICE`] and gives up (`false`) once the receiver is gone, so
+/// a long gap between packets never keeps the blocking thread — which
+/// runtime shutdown waits for — asleep.
 fn pace(
     ts: Timestamp,
     start_wall: &mut Option<Instant>,
     first_ts: &mut Option<Timestamp>,
     speed: f32,
-) {
+    tx: &mpsc::Sender<Result<OwnedPacket, Error>>,
+) -> bool {
     let first = *first_ts.get_or_insert(ts);
     let started = *start_wall.get_or_insert_with(Instant::now);
     let dt_pcap = timestamp_delta(ts, first);
     let dt_wall = dt_pcap.div_f32(speed);
     let target = started + dt_wall;
-    let now = Instant::now();
-    if target > now {
-        std::thread::sleep(target - now);
+    loop {
+        let now = Instant::now();
+        if target <= now {
+            return true;
+        }
+        if tx.is_closed() {
+            return false;
+        }
+        std::thread::sleep((target - now).min(PACE_SLICE));
     }
 }
 
@@ -622,5 +639,41 @@ mod tests {
             .expect("the reader answers");
         assert!(matches!(item, Some(Err(_))), "{item:?}");
         assert!(src.next().await.is_none());
+    }
+
+    /// A paced replay notices a dropped receiver within its sleep, so
+    /// the blocking task (which runtime shutdown waits for) ends soon
+    /// instead of after the hour-long gap to the next packet.
+    #[test]
+    fn paced_reader_stops_soon_after_the_receiver_is_dropped() {
+        let f = write_legacy_pcap(&[
+            (Timestamp::new(1, 0), vec![0xaa; 60]),
+            (Timestamp::new(3601, 0), vec![0xbb; 60]),
+        ]);
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        let ended = rt.block_on(async {
+            let cfg = AsyncPcapConfig {
+                replay_speed: 1.0,
+                ..Default::default()
+            };
+            let AsyncPcapSource {
+                mut receiver,
+                _task,
+                ..
+            } = AsyncPcapSource::open_with_config(f.path(), cfg)
+                .await
+                .unwrap();
+            assert!(receiver.recv().await.unwrap().is_ok());
+            drop(receiver);
+            tokio::time::timeout(Duration::from_secs(2), _task)
+                .await
+                .is_ok()
+        });
+        // Don't wait for a reader that is still asleep.
+        rt.shutdown_background();
+        assert!(ended, "the paced reader ends within 2 s");
     }
 }

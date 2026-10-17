@@ -114,6 +114,11 @@ of `ShardedRunner`. See [scaling.md](scaling.md) and [BACKENDS.md](BACKENDS.md).
 - **Symmetric RSS** (`netring::xdp::rss`) — `RssConfig` / `toeplitz` /
   `SYMMETRIC_RSS_KEY` make both directions of a bidirectional flow hash to the
   same RX queue, so a sharded capture keeps a connection on one worker.
+  `RssConfig::set_symmetric()` prefers the driver's `SYM_XOR` transform and
+  falls back to the Toeplitz hash function + the symmetric key; it verifies
+  either by reading the configuration back, errors on a NIC it cannot make
+  symmetric (e.g. CRC32-only), and returns an `RssGuard` that restores the
+  previous configuration on drop (`persist()` keeps it).
 - **NIC flow steering** (`netring::xdp::steer`, shipped in 0.28) — `FlowRule` /
   `RxSteer` / `SteerGuard` pin chosen flows to chosen queues via ethtool ntuple
   rules (`FlowRule::tcp().dst_port(443).to_queue(3)`; `SteerGuard` removes rules on

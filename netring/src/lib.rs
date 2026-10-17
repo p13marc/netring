@@ -130,7 +130,7 @@ pub mod xdp {
     /// of a bidirectional flow hash to the same RX queue.
     pub mod rss {
         pub use crate::afxdp::rss::{
-            RssConfig, RssMode, SYMMETRIC_RSS_KEY, rss_flow_hash, toeplitz,
+            RssConfig, RssGuard, RssMode, RssState, SYMMETRIC_RSS_KEY, rss_flow_hash, toeplitz,
         };
     }
 

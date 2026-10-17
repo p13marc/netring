@@ -421,3 +421,32 @@ fn yara_forces_capture_all() {
         .kernel_prefilter();
     assert!(pf.is_none(), "yara scans each flow's payload");
 }
+
+/// A broadcast subscriber wants every message, so a broadcast slot forces
+/// capture-all — whichever order `protocol` and `with_broadcast` came in
+/// (the slot is installed at `build()`, #216). A protocol that can't
+/// broadcast installs no broadcast slot and keeps the filter narrow.
+#[test]
+fn broadcast_forces_capture_all_in_either_order() {
+    use netring::protocol::builtin::Http;
+    let after = Monitor::builder()
+        .interface("lo")
+        .protocol::<Dns>()
+        .protocol::<Http>()
+        .with_broadcast::<Http>()
+        .kernel_prefilter();
+    assert!(after.is_none(), "protocol then with_broadcast");
+    let before = Monitor::builder()
+        .interface("lo")
+        .protocol::<Dns>()
+        .with_broadcast::<Http>()
+        .protocol::<Http>()
+        .kernel_prefilter();
+    assert!(before.is_none(), "with_broadcast then protocol");
+    let no_broadcast = Monitor::builder()
+        .interface("lo")
+        .with_broadcast::<Dns>()
+        .protocol::<Dns>()
+        .kernel_prefilter();
+    assert!(no_broadcast.is_some(), "DNS has no broadcast slot");
+}

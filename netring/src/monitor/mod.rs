@@ -934,6 +934,48 @@ impl ReloadHandle {
     }
 }
 
+/// Installs `P`'s broadcast parser slot on the driver builder: the drain
+/// slot plus the subscribe-template handle. `None` if `P` can't broadcast.
+type InstallBroadcast = fn(
+    &mut DriverBuilder<FiveTuple>,
+)
+    -> Option<(Box<dyn ProtocolSlot>, Box<dyn std::any::Any + Send + Sync>)>;
+
+/// A protocol's parser slot, installed at `build()` (#216).
+/// [`MonitorBuilder::protocol`] and [`MonitorBuilder::with_broadcast`]
+/// only record or upgrade it, so each protocol gets exactly one slot
+/// whatever the order of the calls.
+struct SlotIntent {
+    type_id: std::any::TypeId,
+    /// `protocol::<P>()`'s slot. `None` from a lifecycle-only marker.
+    plain: fn(&mut DriverBuilder<FiveTuple>) -> Option<Box<dyn ProtocolSlot>>,
+    /// Set by `with_broadcast::<P>()`: installed instead of `plain`.
+    broadcast: Option<InstallBroadcast>,
+}
+
+/// `P::register`, then the slot type `P` chooses (0.22 §2.5:
+/// `TypedProtocolSlot<P>` by default; `Icmp` installs an `IcmpSlot`).
+/// `None` for a lifecycle-only marker, whose `register` errs.
+fn install_plain<P: Protocol>(
+    builder: &mut DriverBuilder<FiveTuple>,
+) -> Option<Box<dyn ProtocolSlot>> {
+    P::register(builder).ok().map(P::make_slot)
+}
+
+/// `P::register_broadcast`: a [`TypedBroadcastProtocolSlot`] for the run
+/// loop's drain, plus the handle `Monitor::subscribe` clones from.
+fn install_broadcast<P: crate::protocol::MessageProtocol>(
+    builder: &mut DriverBuilder<FiveTuple>,
+) -> Option<(Box<dyn ProtocolSlot>, Box<dyn std::any::Any + Send + Sync>)>
+where
+    P::Message: Send + Sync + Clone + 'static,
+{
+    let handle = P::register_broadcast(builder).ok()?;
+    let slot: Box<dyn ProtocolSlot> =
+        Box::new(TypedBroadcastProtocolSlot::<P>::new(handle.clone()));
+    Some((slot, Box::new(handle)))
+}
+
 /// Builder for [`Monitor`]. Construct via [`Monitor::builder`].
 #[derive(Default)]
 pub struct MonitorBuilder {
@@ -950,8 +992,11 @@ pub struct MonitorBuilder {
     /// [`Self::capture`] — the resolved backend description, surfaced through
     /// [`Self::resolved_capture_plan`] so operators can see what `Auto` picked.
     resolved_backends: Vec<(String, String)>,
-    driver_builder: Option<DriverBuilder<FiveTuple>>,
-    protocol_slots: Vec<Box<dyn ProtocolSlot>>,
+    /// The protocol parser slots to install — one per protocol, in
+    /// first-declaration order. [`Self::protocol`] and
+    /// [`Self::with_broadcast`] only record or upgrade an intent;
+    /// `build()` installs each (#216).
+    slot_intents: Vec<SlotIntent>,
     handlers: HandlerRegistry,
     state_map: StateMap,
     counters: CounterRegistry,
@@ -1095,18 +1140,6 @@ pub struct MonitorBuilder {
     /// [`BuildError::HandlerForUnregisteredProtocol`] when a
     /// handler requires a slot that was never installed.
     declared_protocols: rustc_hash::FxHashMap<std::any::TypeId, &'static str>,
-    /// Protocol markers whose parser slot is installed (by
-    /// [`Self::protocol`] or a successful [`Self::with_broadcast`]):
-    /// `protocol::<P>()` is a no-op for these. Narrower than
-    /// `declared_protocols`, which a `with_broadcast` that installed
-    /// nothing also records.
-    slotted_protocols: rustc_hash::FxHashSet<std::any::TypeId>,
-    /// 0.21 F: per-protocol broadcast handles keyed by
-    /// `TypeId::of::<P>()`. Populated by [`Self::with_broadcast`],
-    /// passed through to [`Monitor::broadcast_handles`] at
-    /// `build()` time.
-    broadcast_handles:
-        rustc_hash::FxHashMap<std::any::TypeId, Box<dyn std::any::Any + Send + Sync>>,
     /// 0.21 E.1: when `Some`, build() relaxes the [`Self::interface`]
     /// requirement (replay mode doesn't open AF_PACKET rings).
     /// The path itself is consumed by [`Monitor::replay`] /
@@ -2099,22 +2132,20 @@ impl MonitorBuilder {
     ///
     /// Idempotent: declaring `P` again — directly, or through sugar
     /// that declares it for you (`all_l4`, `on_icmp_error`, `on_dns`,
-    /// `flow_analysis`, …, or [`Self::with_broadcast`]) — keeps the one
-    /// slot. A second slot would deliver every message twice.
+    /// `flow_analysis`, …, or [`Self::with_broadcast`], before or after)
+    /// — keeps the one slot. A second slot would deliver every message
+    /// twice. The slot is installed at `build()`.
     pub fn protocol<P: Protocol>(mut self) -> Self {
-        if !self.slotted_protocols.insert(std::any::TypeId::of::<P>()) {
-            return self;
+        let type_id = std::any::TypeId::of::<P>();
+        if !self.slot_intents.iter().any(|i| i.type_id == type_id) {
+            self.slot_intents.push(SlotIntent {
+                type_id,
+                plain: install_plain::<P>,
+                broadcast: None,
+            });
         }
-        let builder = self
-            .driver_builder
-            .get_or_insert_with(|| Driver::builder(FiveTuple::bidirectional()));
-        if let Ok(handle) = P::register(builder) {
-            // 0.22 §2.5: the protocol chooses its slot type. Default is
-            // `TypedProtocolSlot<P>`; `Icmp` installs an `IcmpSlot`.
-            self.protocol_slots.push(P::make_slot(handle));
-        }
-        // Err(_) = lifecycle-only; nothing to register on the driver
-        // side. Still record the marker in `declared_protocols` so
+        // A lifecycle-only marker installs nothing on the driver side
+        // (its `register` errs). Still record the marker in `declared_protocols` so
         // 0.21 D.1's handler-protocol validation accepts handlers
         // typed on lifecycle markers when `.protocol::<Tcp>()` was
         // called for symmetry.
@@ -2977,23 +3008,25 @@ impl MonitorBuilder {
 
     /// 0.21 F: register `P` for broadcast delivery.
     ///
-    /// Calls [`Protocol::register_broadcast`] on the underlying
-    /// flowscope driver — only protocols that override the
-    /// default (currently [`crate::protocol::builtin::Http`])
-    /// accept this. The returned [`flowscope::driver::BroadcastSlotHandle`]
-    /// is cloned twice: one clone wraps a
-    /// [`TypedBroadcastProtocolSlot`] for the run loop's dispatch
-    /// drain; the other lives in the monitor's `broadcast_handles`
-    /// map so [`Monitor::subscribe`] can clone fresh subscribers.
+    /// Installs `P`'s parser through [`Protocol::register_broadcast`] —
+    /// only protocols that override the default (currently
+    /// [`crate::protocol::builtin::Http`]) accept this; for the others
+    /// this call registers nothing (a later [`Self::protocol::<P>`] still
+    /// does). The resulting [`flowscope::driver::BroadcastSlotHandle`]
+    /// serves twice: the run loop's slot drain dispatches every message to
+    /// the registered handlers, and [`Monitor::subscribe`] clones fresh
+    /// subscribers from it.
     ///
-    /// Mutually exclusive with [`Self::protocol::<P>`] — call ONE
-    /// or the other, not both. (Calling both would register two
-    /// slots for the same parser.)
+    /// Composes with [`Self::protocol::<P>`] in either order, and repeats
+    /// are idempotent: `P` gets one parser slot — the broadcast one — so
+    /// handlers see each message once (#216: `protocol` then
+    /// `with_broadcast` used to install two slots and deliver every
+    /// message twice).
     ///
     /// ```ignore
     /// let monitor = Monitor::builder()
     ///     .interface("eth0")
-    ///     .with_broadcast::<Http>()    // not `.protocol::<Http>()`
+    ///     .with_broadcast::<Http>()
     ///     .build()?;
     /// let mut stream = monitor.subscribe::<Http>()?;
     /// ```
@@ -3001,28 +3034,21 @@ impl MonitorBuilder {
     where
         P::Message: Send + Sync + Clone + 'static,
     {
-        let builder = self
-            .driver_builder
-            .get_or_insert_with(|| Driver::builder(FiveTuple::bidirectional()));
-        match P::register_broadcast(builder) {
-            Ok(handle) => {
-                // Clone twice: one for the dispatcher slot drain,
-                // one stored for subscribe() to clone from.
-                let dispatcher_clone = handle.clone();
-                self.protocol_slots
-                    .push(Box::new(TypedBroadcastProtocolSlot::<P>::new(
-                        dispatcher_clone,
-                    )));
-                self.broadcast_handles
-                    .insert(std::any::TypeId::of::<P>(), Box::new(handle));
-                self.slotted_protocols.insert(std::any::TypeId::of::<P>());
-            }
-            Err(_) => {
-                // The default `register_broadcast` returns Err for
-                // any Protocol that hasn't overridden it. Treat it
-                // as a quiet no-op here; the user will discover the
-                // mismatch when `monitor.subscribe::<P>()` fails
-                // with `BuildError::ProtocolNotBroadcast`.
+        // Whether `P` can broadcast at all: the default
+        // `register_broadcast` errs without touching the builder. Asked on
+        // a scratch builder — the real registration waits for `build()`.
+        let mut scratch = Driver::builder(FiveTuple::bidirectional());
+        if P::register_broadcast(&mut scratch).is_ok() {
+            let type_id = std::any::TypeId::of::<P>();
+            let broadcast = Some(install_broadcast::<P> as InstallBroadcast);
+            match self.slot_intents.iter_mut().find(|i| i.type_id == type_id) {
+                // Declared before (`protocol::<P>()`): upgrade its slot.
+                Some(intent) => intent.broadcast = broadcast,
+                None => self.slot_intents.push(SlotIntent {
+                    type_id,
+                    plain: install_plain::<P>,
+                    broadcast,
+                }),
             }
         }
         self.declared_protocols
@@ -4287,7 +4313,7 @@ impl MonitorBuilder {
         let yara_armed = false;
         let wants_all = !self.flow_exporters.is_empty()
             || !self.tick_handlers.is_empty()
-            || !self.broadcast_handles.is_empty()
+            || self.slot_intents.iter().any(|i| i.broadcast.is_some())
             || self.bandwidth_registered
             || !self.ml_feature_handlers.is_empty()
             || nprint_armed
@@ -4677,9 +4703,25 @@ impl MonitorBuilder {
         }
         // Issue #34: apply the reassembler-hardening config (overlap policy,
         // memcap, active/idle threshold) to the central tracker before build.
-        let mut driver_builder = self
-            .driver_builder
-            .unwrap_or_else(|| Driver::builder(FiveTuple::bidirectional()));
+        let mut driver_builder = Driver::builder(FiveTuple::bidirectional());
+        // #216: install each declared protocol's parser slot, once — the
+        // broadcast slot when `with_broadcast` asked for one.
+        let mut protocol_slots: Vec<Box<dyn ProtocolSlot>> = Vec::new();
+        let mut broadcast_handles: rustc_hash::FxHashMap<
+            std::any::TypeId,
+            Box<dyn std::any::Any + Send + Sync>,
+        > = rustc_hash::FxHashMap::default();
+        for intent in &self.slot_intents {
+            match intent.broadcast {
+                Some(install) => {
+                    if let Some((slot, handle)) = install(&mut driver_builder) {
+                        protocol_slots.push(slot);
+                        broadcast_handles.insert(intent.type_id, handle);
+                    }
+                }
+                None => protocol_slots.extend((intent.plain)(&mut driver_builder)),
+            }
+        }
         driver_builder.config(self.tracker_config);
         let emit_anomalies = if self.emit_anomalies_set {
             self.emit_anomalies
@@ -4733,7 +4775,7 @@ impl MonitorBuilder {
             xdp_interfaces: self.xdp_interfaces,
             driver,
             dispatcher,
-            protocol_slots: self.protocol_slots,
+            protocol_slots,
             detector_names: self.detector_names,
             state_map: self.state_map,
             counters: self.counters,
@@ -4741,7 +4783,7 @@ impl MonitorBuilder {
             tick_handlers: self.tick_handlers,
             monitor_name: self.monitor_name,
             drain_timeout: self.drain_timeout.unwrap_or(Duration::from_secs(1)),
-            broadcast_handles: self.broadcast_handles,
+            broadcast_handles,
             #[cfg(all(feature = "pcap", feature = "tokio"))]
             pcap_source_path: self.pcap_source_path,
             #[cfg(all(feature = "pcap", feature = "tokio"))]
@@ -4831,7 +4873,7 @@ impl std::fmt::Debug for MonitorBuilder {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("MonitorBuilder")
             .field("interfaces", &self.interfaces)
-            .field("protocol_slots", &self.protocol_slots.len())
+            .field("protocol_slots", &self.slot_intents.len())
             .field("handler_type_count", &self.handlers.type_count())
             .field("handler_count", &self.handlers.handler_count())
             .field("state_slots", &self.state_map.len())

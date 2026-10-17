@@ -917,3 +917,65 @@ async fn anomaly_layers_measure_windows_in_packet_time() {
         "rate limit"
     );
 }
+
+/// Replay `http_flow()` (a request and a response) through a monitor set
+/// up by `declare`, with an `on::<Http>` handler and one subscriber;
+/// returns (handler calls, messages the subscriber got).
+#[cfg(feature = "http")]
+async fn http_deliveries(
+    declare: impl FnOnce(netring::monitor::MonitorBuilder) -> netring::monitor::MonitorBuilder,
+) -> (usize, usize) {
+    use netring::protocol::builtin::{Http, Tcp};
+    let file = pcap(&timed(http_flow()));
+    let calls = Arc::new(AtomicUsize::new(0));
+    let c = Arc::clone(&calls);
+    let builder = Monitor::builder()
+        .pcap_source(file.path())
+        .protocol::<Tcp>();
+    let monitor = declare(builder)
+        .on::<Http>(move |_msg: &flowscope::http::HttpMessage| {
+            c.fetch_add(1, Ordering::SeqCst);
+            Ok(())
+        })
+        .build()
+        .unwrap();
+    let mut stream = monitor.subscribe::<Http>().unwrap();
+    monitor.replay().await.unwrap();
+    let mut out = Vec::new();
+    let received = stream.recv_many(&mut out, 16);
+    (calls.load(Ordering::SeqCst), received)
+}
+
+/// #216: `with_broadcast::<P>()` after `protocol::<P>()` upgrades P's one
+/// parser slot to a broadcast slot. It used to install a second slot, so
+/// handlers saw every message twice.
+#[cfg(feature = "http")]
+#[tokio::test(flavor = "current_thread")]
+async fn protocol_then_broadcast_delivers_once() {
+    use netring::protocol::builtin::Http;
+    let (handled, subscribed) =
+        http_deliveries(|b| b.protocol::<Http>().with_broadcast::<Http>()).await;
+    assert_eq!(handled, 2, "each message once to the handler");
+    assert_eq!(subscribed, 2, "and once to the subscriber");
+}
+
+/// The other order: `protocol::<P>()` after `with_broadcast::<P>()` keeps
+/// the broadcast slot.
+#[cfg(feature = "http")]
+#[tokio::test(flavor = "current_thread")]
+async fn broadcast_then_protocol_delivers_once() {
+    use netring::protocol::builtin::Http;
+    let (handled, subscribed) =
+        http_deliveries(|b| b.with_broadcast::<Http>().protocol::<Http>()).await;
+    assert_eq!((handled, subscribed), (2, 2));
+}
+
+/// Declaring the broadcast twice is one slot too (it used to be two).
+#[cfg(feature = "http")]
+#[tokio::test(flavor = "current_thread")]
+async fn broadcast_twice_delivers_once() {
+    use netring::protocol::builtin::Http;
+    let (handled, subscribed) =
+        http_deliveries(|b| b.with_broadcast::<Http>().with_broadcast::<Http>()).await;
+    assert_eq!((handled, subscribed), (2, 2));
+}

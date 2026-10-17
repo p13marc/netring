@@ -294,6 +294,13 @@ impl ShardedRunner {
     }
 
     fn run_inner(self, mode: RunMode) -> Result<()> {
+        // A zero merge period would re-probe the shards back to back.
+        if self.merges.iter().any(|m| m.period().is_zero()) {
+            return Err(crate::error::BuildError::ZeroPeriod {
+                what: "merge_state / state_auto_merge",
+            }
+            .into());
+        }
         let stop = Arc::new(AtomicBool::new(false));
         let shard_stop = Arc::new(ShardStop::default());
         let build_shard = self.build_shard;
@@ -464,6 +471,31 @@ impl std::fmt::Debug for ShardedRunner {
 
 #[cfg(test)]
 mod tests {
+    use std::time::Duration;
+
+    /// A zero merge period would re-probe the shards back to back: it is
+    /// rejected before any shard is built.
+    #[test]
+    fn zero_merge_period_is_a_build_error() {
+        let built = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let b = built.clone();
+        let runner =
+            super::ShardedRunner::new("lo", crate::config::FanoutMode::Hash, 1, 2, move |_| {
+                b.store(true, std::sync::atomic::Ordering::Relaxed);
+                Err(crate::error::Error::Config("not reached".into()))
+            })
+            .state_auto_merge::<u64>(Duration::ZERO);
+        let err = runner.run_for(Duration::from_millis(10)).unwrap_err();
+        assert!(
+            matches!(
+                err,
+                crate::error::Error::Build(crate::error::BuildError::ZeroPeriod { .. })
+            ),
+            "{err:?}"
+        );
+        assert!(!built.load(std::sync::atomic::Ordering::Relaxed));
+    }
+
     /// 0.25 C1: pinning the current thread restricts its affinity to a single
     /// core. Cap-free — `sched_setaffinity` on the calling thread needs no
     /// privileges. Restores all-core affinity afterwards so it doesn't pin the

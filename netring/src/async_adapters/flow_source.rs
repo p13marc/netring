@@ -33,8 +33,8 @@ pub(crate) struct SourcePacket<'a> {
     pub view: PacketView<'a>,
     pub data: &'a [u8],
     pub direction: PacketDirection,
-    // Read only by the pcap-tap leg; without `pcap` it is genuinely unused.
-    #[cfg_attr(not(feature = "pcap"), allow(dead_code))]
+    /// The packet's length on the wire (dedup keys on it; the pcap tap
+    /// records it).
     pub original_len: usize,
 }
 

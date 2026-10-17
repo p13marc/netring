@@ -474,7 +474,7 @@ where
             let outcome = cap.poll_drain(cx, &mut |sp: SourcePacket<'_>| {
                 // Plan 17: optional pre-tracking dedup (on the unclamped ts).
                 if let Some(d) = dedup.as_mut()
-                    && !d.keep_raw(sp.data, sp.direction, sp.view.timestamp)
+                    && !d.keep_raw(sp.data, sp.original_len, sp.direction, sp.view.timestamp)
                 {
                     return;
                 }

@@ -100,7 +100,7 @@ impl Replay {
             match Pin::new(&mut self.source).poll_next(cx) {
                 Poll::Ready(Some(Ok(pkt))) => {
                     if let Some(d) = self.dedup.as_mut()
-                        && !d.keep_raw(&pkt.data, pkt.direction, pkt.timestamp)
+                        && !d.keep_raw(&pkt.data, pkt.original_len, pkt.direction, pkt.timestamp)
                     {
                         continue;
                     }

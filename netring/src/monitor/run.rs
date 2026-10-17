@@ -634,7 +634,7 @@ pub(crate) async fn run_loop(monitor: Monitor, stop: StopCondition) -> Result<()
             let drained = caps[i]
                 .drain_batch(|view, direction| {
                     if let Some(d) = dedup_i.as_deref_mut()
-                        && !d.keep_raw(view.frame, direction, view.timestamp)
+                        && !d.keep_view(&view, direction)
                     {
                         return;
                     }
@@ -1155,7 +1155,7 @@ pub(crate) async fn replay_loop(
             // no direction, so `Dedup::loopback` is inert here — see
             // `MonitorBuilder::dedup`).
             if let Some(d) = dedup.as_mut()
-                && !d.keep_raw(&pkt.data, pkt.direction, pkt.timestamp)
+                && !d.keep_raw(&pkt.data, pkt.original_len, pkt.direction, pkt.timestamp)
             {
                 continue;
             }

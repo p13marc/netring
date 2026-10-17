@@ -104,13 +104,8 @@ pub fn queue_count(iface: &str) -> Result<u32, Error> {
         cmd: ffi::ETHTOOL_GCHANNELS,
         ..Default::default()
     };
-    let mut ifr = ffi::ethtool_ifreq {
-        ifr_name: [0; libc::IFNAMSIZ],
-        ifr_data: (&mut channels as *mut ffi::ethtool_channels).cast(),
-    };
-    for (dst, &b) in ifr.ifr_name.iter_mut().zip(iface.as_bytes()) {
-        *dst = b as libc::c_char;
-    }
+    let mut ifr =
+        ffi::ethtool_ifreq::new(iface, (&mut channels as *mut ffi::ethtool_channels).cast())?;
 
     // SAFETY: `ifr` is a well-formed ifreq whose ifr_data points at `channels`;
     // the kernel writes channel counts into `channels` for ETHTOOL_GCHANNELS.

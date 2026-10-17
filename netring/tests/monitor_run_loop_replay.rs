@@ -354,6 +354,34 @@ async fn on_dns_then_protocol_dns_delivers_each_message_once() {
     assert_eq!(*seen.lock().unwrap(), 1);
 }
 
+/// `with_broadcast::<Dns>()` installs nothing (DNS has no broadcast
+/// slot) — a later `.protocol::<Dns>()` must still register the parser,
+/// not be skipped as already declared.
+#[cfg(feature = "dns")]
+#[tokio::test(flavor = "current_thread")]
+async fn protocol_after_a_failed_with_broadcast_still_registers() {
+    use netring::protocol::builtin::Dns;
+    let file = pcap(&timed(vec![dns_query()]));
+    let seen = Arc::new(Mutex::new(0));
+    let s = Arc::clone(&seen);
+    Monitor::builder()
+        .pcap_source(file.path())
+        .with_broadcast::<Dns>()
+        .protocol::<Dns>()
+        .on::<Dns>(move |m: &flowscope::dns::DnsMessage| {
+            if matches!(m, flowscope::dns::DnsMessage::Query(_)) {
+                *s.lock().unwrap() += 1;
+            }
+            Ok(())
+        })
+        .build()
+        .unwrap()
+        .replay()
+        .await
+        .unwrap();
+    assert_eq!(*seen.lock().unwrap(), 1);
+}
+
 /// Two UDP flows: 10.0.0.1:5000 at t = 1 s (idle-ended by the sweep
 /// the second drives) and 10.0.0.1:6000 at t = 200 s (ended at EOF).
 fn two_udp_flows() -> Vec<(Duration, Vec<u8>)> {

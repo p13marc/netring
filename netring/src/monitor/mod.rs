@@ -1084,6 +1084,12 @@ pub struct MonitorBuilder {
     /// [`BuildError::HandlerForUnregisteredProtocol`] when a
     /// handler requires a slot that was never installed.
     declared_protocols: rustc_hash::FxHashMap<std::any::TypeId, &'static str>,
+    /// Protocol markers whose parser slot is installed (by
+    /// [`Self::protocol`] or a successful [`Self::with_broadcast`]):
+    /// `protocol::<P>()` is a no-op for these. Narrower than
+    /// `declared_protocols`, which a `with_broadcast` that installed
+    /// nothing also records.
+    slotted_protocols: rustc_hash::FxHashSet<std::any::TypeId>,
     /// 0.21 F: per-protocol broadcast handles keyed by
     /// `TypeId::of::<P>()`. Populated by [`Self::with_broadcast`],
     /// passed through to [`Monitor::broadcast_handles`] at
@@ -2084,10 +2090,7 @@ impl MonitorBuilder {
     /// `flow_analysis`, …, or [`Self::with_broadcast`]) — keeps the one
     /// slot. A second slot would deliver every message twice.
     pub fn protocol<P: Protocol>(mut self) -> Self {
-        if self
-            .declared_protocols
-            .contains_key(&std::any::TypeId::of::<P>())
-        {
+        if !self.slotted_protocols.insert(std::any::TypeId::of::<P>()) {
             return self;
         }
         let builder = self
@@ -3000,6 +3003,7 @@ impl MonitorBuilder {
                     )));
                 self.broadcast_handles
                     .insert(std::any::TypeId::of::<P>(), Box::new(handle));
+                self.slotted_protocols.insert(std::any::TypeId::of::<P>());
             }
             Err(_) => {
                 // The default `register_broadcast` returns Err for

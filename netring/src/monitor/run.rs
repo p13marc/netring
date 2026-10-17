@@ -2858,11 +2858,16 @@ fn absorb_frame_assets(
     }
     #[cfg(feature = "ndp")]
     if let Ok(layers) = view.layers()
-        && let Some(icmp) = layers.icmpv6()
-        && let Ok(m) = flowscope::ndp::parse_icmpv6(icmp.bytes())
-        && let Some(a) = flowscope::Asset::from_ndp(&m)
+        && let (Some(ip6), Some(icmp)) = (layers.ipv6(), layers.icmpv6())
+        && let Ok(mut m) = flowscope::ndp::parse_icmpv6(icmp.bytes())
+        && let Some((ip, mac)) = crate::monitor::ndp::sender_binding(&m, ip6.source())
     {
-        feed!(a);
+        // An NS's target is the address being resolved, not the sender's:
+        // bind what the message proves about its sender.
+        (m.target, m.lladdr) = (ip, Some(mac));
+        if let Some(a) = flowscope::Asset::from_ndp(&m) {
+            feed!(a);
+        }
     }
     #[cfg(feature = "lldp")]
     if let Ok(m) = flowscope::lldp::parse_frame(view.frame)

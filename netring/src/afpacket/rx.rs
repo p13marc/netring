@@ -1018,6 +1018,17 @@ fn is_enomem(e: &std::io::Error) -> bool {
     e.raw_os_error() == Some(libc::ENOMEM)
 }
 
+/// A classic BPF program that drops every packet (`ret #0`).
+fn reject_all_filter() -> BpfFilter {
+    let ret_0 = BpfInsn {
+        code: 0x06, // BPF_RET | BPF_K
+        jt: 0,
+        jf: 0,
+        k: 0,
+    };
+    BpfFilter::new(vec![ret_0]).expect("one instruction")
+}
+
 /// Single attempt at building a Capture with `block_count` blocks.
 fn build_inner(b: &CaptureBuilder, block_count: usize) -> Result<Capture, Error> {
     let interface = b
@@ -1055,8 +1066,13 @@ fn build_inner(b: &CaptureBuilder, block_count: usize) -> Result<Capture, Error>
 
     let geometry = RingGeometry::new(b.block_size, block_count, b.frame_size)?;
 
-    // Create socket
-    let fd = socket::create_packet_socket()?;
+    // Create the socket with protocol 0: `socket(ETH_P_ALL)` hooks it into
+    // every interface at once (packet_create() registers the prot_hook,
+    // packet_set_ring() re-registers it), so whatever arrived while the ring
+    // was mapped landed in its first blocks — from any interface, before
+    // the BPF filter. Everything that shapes what the ring receives is set
+    // up first; bind() below is what starts reception.
+    let fd = socket::create_packet_socket_proto(0)?;
 
     // Set TPACKET_V3
     socket::set_packet_version(fd.as_fd(), ffi::TPACKET_V3_INT)?;
@@ -1080,13 +1096,6 @@ fn build_inner(b: &CaptureBuilder, block_count: usize) -> Result<Capture, Error>
     // mmap
     let ring = MmapRing::new(fd.as_fd(), geometry.size, b.block_size, block_count)?;
 
-    // Bind to interface
-    let ifindex = socket::resolve_interface(interface)?;
-    socket::bind_to_interface(fd.as_fd(), ifindex)?;
-
-    if b.promiscuous {
-        socket::set_promiscuous(fd.as_fd(), ifindex)?;
-    }
     if b.ignore_outgoing {
         socket::set_ignore_outgoing(fd.as_fd())?;
     }
@@ -1112,12 +1121,33 @@ fn build_inner(b: &CaptureBuilder, block_count: usize) -> Result<Capture, Error>
     if b.timestamp_source != TimestampSource::Software {
         socket::set_timestamp_source(fd.as_fd(), b.timestamp_source)?;
     }
+    let bpf_filter = b
+        .bpf_filter
+        .as_ref()
+        .map(|insns| BpfFilter::new(insns.clone()))
+        .transpose()?;
+    if b.fanout.is_some() {
+        // PACKET_FANOUT needs a bound socket, and until it joins the group
+        // the socket gets every packet on the interface: drop them all
+        // until the group decides what this member sees.
+        filter::attach_bpf_filter(fd.as_fd(), &reject_all_filter())?;
+    } else if let Some(filt) = &bpf_filter {
+        filter::attach_bpf_filter(fd.as_fd(), filt)?;
+    }
+
+    // Bind to interface: the socket starts receiving here.
+    let ifindex = socket::resolve_interface(interface)?;
+    socket::bind_to_interface(fd.as_fd(), ifindex)?;
+
+    if b.promiscuous {
+        socket::set_promiscuous(fd.as_fd(), ifindex)?;
+    }
     if let Some((mode, group_id)) = b.fanout {
         fanout::join_fanout(fd.as_fd(), group_id, mode, b.fanout_flags)?;
-    }
-    if let Some(insns) = &b.bpf_filter {
-        let filt = BpfFilter::new(insns.clone())?;
-        filter::attach_bpf_filter(fd.as_fd(), &filt)?;
+        match &bpf_filter {
+            Some(filt) => filter::attach_bpf_filter(fd.as_fd(), filt)?,
+            None => filter::detach_bpf_filter(fd.as_fd())?,
+        }
     }
 
     let busy_poll = BusyPollConfig {

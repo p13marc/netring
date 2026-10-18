@@ -153,7 +153,7 @@ has an old → new snippet there.
   room instead of kicking again. When the device drops the frame being
   sent (`ENOBUFS`: no carrier, a qdisc or veth backlog at its limit), the
   kernel keeps it queued and its freed skb raises a writability edge of
-  its own: `send` and `wait_drained` then kick again on a timer (1 ms,
+  its own: `send` and `wait_drained` then kick again on a timer (20 µs,
   doubling to 100 ms) rather than on writability.
 - **`Injector::allocate` skipped to any free slot further on** — past a
   slot handed out but not sent, or a frame still in flight — and the

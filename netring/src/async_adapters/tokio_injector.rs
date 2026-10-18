@@ -31,8 +31,10 @@ const TX_POLL: Duration = Duration::from_millis(1);
 /// How many [`TX_POLL`] ticks between liveness checks in that mode.
 const TX_POLL_HEALTH_EVERY: u32 = 1000;
 /// The first wait before kicking again a frame the device dropped (see
-/// [`Backoff`]); it doubles up to [`BACKOFF_MAX`].
-const BACKOFF_MIN: Duration = Duration::from_millis(1);
+/// [`Backoff`]); it doubles up to [`BACKOFF_MAX`]. Short: with qdisc
+/// bypass, `ENOBUFS` also means a busy NIC's TX queue is full for a
+/// moment, and a millisecond's pause there costs line rate.
+const BACKOFF_MIN: Duration = Duration::from_micros(20);
 /// The longest wait between two kicks of a frame the device keeps
 /// dropping.
 const BACKOFF_MAX: Duration = Duration::from_millis(100);
@@ -50,8 +52,9 @@ struct Kicked {
 /// event reports the end of: the device dropping the frame at the kernel's
 /// TX position (`ENOBUFS` — its freed skb even raises a writability edge of
 /// its own, so a writability wait returned at once and the kick spun at
-/// 100% CPU). 1 ms, doubling to 100 ms; back to 1 ms on progress. A
-/// timerfd: no tokio time driver needed.
+/// 100% CPU). 20 µs, doubling to 100 ms (about a dozen wake-ups to get
+/// there, then ten a second); back to 20 µs on progress. A timerfd: no
+/// tokio time driver needed.
 struct Backoff {
     timer: Option<ProbeTimer>,
     next: Duration,
@@ -69,15 +72,22 @@ impl Backoff {
         self.next = BACKOFF_MIN;
     }
 
+    /// The next wait, doubling the one after it.
+    fn step(&mut self) -> Duration {
+        let wait = self.next;
+        self.next = (self.next * 2).min(BACKOFF_MAX);
+        wait
+    }
+
     async fn wait(&mut self) -> Result<(), Error> {
         if self.timer.is_none() {
             self.timer = Some(ProbeTimer::disarmed().map_err(Error::Io)?);
         }
+        let wait = self.step();
         let Some(timer) = &self.timer else {
             return Ok(());
         };
-        timer.arm_once(self.next).map_err(Error::Io)?;
-        self.next = (self.next * 2).min(BACKOFF_MAX);
+        timer.arm_once(wait).map_err(Error::Io)?;
         timer.tick().await.map_err(Error::Io)
     }
 }
@@ -597,5 +607,32 @@ mod pacer_tests {
             (wait.as_secs_f64() - 1.0).abs() < 1e-2,
             "expected ~1s, got {wait:?}"
         );
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Review r5: the backoff after a dropped frame started at 1 ms — with
+    /// qdisc bypass on a busy NIC, `ENOBUFS` is also a momentarily full TX
+    /// queue, and a millisecond's pause per such kick cuts line rate. It
+    /// starts at 20 µs and still doubles to 100 ms (no spin).
+    #[test]
+    fn backoff_starts_short_and_caps() {
+        let mut b = Backoff::new();
+        assert_eq!(b.step(), Duration::from_micros(20));
+        assert_eq!(b.step(), Duration::from_micros(40));
+        let mut last = Duration::ZERO;
+        let mut steps = 2;
+        while last < BACKOFF_MAX {
+            last = b.step();
+            steps += 1;
+        }
+        assert_eq!(last, BACKOFF_MAX);
+        assert!(steps <= 16, "{steps} waits to reach the cap");
+        assert_eq!(b.step(), BACKOFF_MAX);
+        b.reset();
+        assert_eq!(b.step(), Duration::from_micros(20));
     }
 }

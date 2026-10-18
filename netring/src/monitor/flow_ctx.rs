@@ -33,6 +33,29 @@ impl Origin {
     }
 }
 
+/// The flows a batch ends, by key (#216): looked up once per event and
+/// message of theirs dispatched after the tracker let them go — hashed, as
+/// a sweep or a drain can end tens of thousands at once. Cleared and
+/// refilled per batch; it keeps its allocation.
+pub(crate) type EndedFlows = rustc_hash::FxHashMap<FlowKey, FlowCtx>;
+
+/// What [`lookup`] found for a flow key.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum Found {
+    /// The tracker still has the flow.
+    Live(FlowCtx),
+    /// The batch being dispatched ended it.
+    Ended(FlowCtx),
+}
+
+impl Found {
+    fn ctx(self) -> FlowCtx {
+        match self {
+            Found::Live(c) | Found::Ended(c) => c,
+        }
+    }
+}
+
 /// What a flow event's `Ctx` is stamped with.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub(crate) struct FlowCtx {
@@ -86,12 +109,11 @@ pub(crate) fn initiator_of(side: FlowSide, orientation: Orientation) -> Orientat
 ///   side and orientation.
 /// - A tracker-wide anomaly: no flow, no source.
 /// - Anything else (`Established`, parser closes / side stops, flow
-///   anomalies, …): the batch's packet when there is one, else the flow's
-///   bound leg; the initiator from the flow.
+///   anomalies, …): see [`resolve_key`].
 pub(crate) fn resolve(
     evt: &FsEvent<FlowKey>,
     origin: Origin,
-    lookup: &dyn Fn(&FlowKey) -> Option<FlowCtx>,
+    lookup: &dyn Fn(&FlowKey) -> Option<Found>,
 ) -> FlowCtx {
     match evt {
         FsEvent::Ended { stats, .. } | FsEvent::Tick { stats, .. } => {
@@ -120,48 +142,58 @@ pub(crate) fn resolve(
 }
 
 /// Resolve the context of a flow-keyed event or message without stats of
-/// its own (see [`resolve`]).
+/// its own (see [`resolve`]):
+///
+/// - a flow the batch ended: its bound leg, like its `Ended` (else the
+///   batch's packet) — a packet of another flow, maybe on another source,
+///   can end it (LRU eviction), so the batch's packet is not its source;
+/// - a live flow: the batch's packet when there is one, else the flow's
+///   bound leg;
+/// - the initiator from the flow either way.
 pub(crate) fn resolve_key(
     key: Option<&FlowKey>,
     origin: Origin,
-    lookup: &dyn Fn(&FlowKey) -> Option<FlowCtx>,
+    lookup: &dyn Fn(&FlowKey) -> Option<Found>,
 ) -> FlowCtx {
-    let found = key.and_then(lookup);
-    match origin {
-        Origin::Packet(source) => FlowCtx {
-            source: Some(source),
-            initiator: found.and_then(|f| f.initiator),
+    match (key.and_then(lookup), origin) {
+        (Some(Found::Ended(ctx)), _) => FlowCtx {
+            source: ctx.source.or(origin.source()),
+            ..ctx
         },
-        Origin::Housekeeping => found.unwrap_or_default(),
+        (found, Origin::Packet(source)) => FlowCtx {
+            source: Some(source),
+            initiator: found.and_then(|f| f.ctx().initiator),
+        },
+        (found, Origin::Housekeeping) => found.map(Found::ctx).unwrap_or_default(),
     }
 }
 
 /// Look `key` up in the tracker, then in the batch's ended flows.
 pub(crate) fn lookup(
     tracker: &flowscope::FlowTracker<flowscope::extract::FiveTuple, ()>,
-    ended: &[(FlowKey, FlowCtx)],
+    ended: &EndedFlows,
     key: &FlowKey,
-) -> Option<FlowCtx> {
+) -> Option<Found> {
     match tracker.get(key) {
         Some(entry) => {
             let ctx = FlowCtx::of_stats(&entry.stats);
-            Some(FlowCtx {
+            Some(Found::Live(FlowCtx {
                 initiator: Some(entry.initiator_orientation()),
                 ..ctx
-            })
+            }))
         }
-        None => ended.iter().find(|(k, _)| k == key).map(|(_, c)| *c),
+        None => ended.get(key).copied().map(Found::Ended),
     }
 }
 
 /// Pre-scan a batch: the context of every flow it ends, for the events
 /// and messages of those flows dispatched before or after their `Ended`
 /// (the tracker no longer has them). Reuses `out`'s allocation.
-pub(crate) fn scan_ended(events: &[FsEvent<FlowKey>], out: &mut Vec<(FlowKey, FlowCtx)>) {
+pub(crate) fn scan_ended(events: &[FsEvent<FlowKey>], out: &mut EndedFlows) {
     out.clear();
     for evt in events {
         if let FsEvent::Ended { key, stats, .. } = evt {
-            out.push((*key, FlowCtx::of_stats(stats)));
+            out.insert(*key, FlowCtx::of_stats(stats));
         }
     }
 }
@@ -243,7 +275,7 @@ mod tests {
             source: Some(SourceIdx(7)),
             initiator: Some(Orientation::Reverse),
         };
-        let lookup = |_: &FlowKey| Some(found);
+        let lookup = |_: &FlowKey| Some(Found::Live(found));
         let ctx = resolve_key(Some(&key()), Origin::Packet(SourceIdx(1)), &lookup);
         assert_eq!(ctx.source, Some(SourceIdx(1)));
         assert_eq!(ctx.initiator, Some(Orientation::Reverse));
@@ -261,6 +293,28 @@ mod tests {
         );
     }
 
+    /// Review r2: a message of a flow the batch ended — evicted by another
+    /// flow's packet, maybe on another source — takes the flow's own leg,
+    /// as its `Ended` does, not the batch's packet.
+    #[test]
+    fn messages_of_ended_flows_take_the_flows_leg() {
+        let ended_ctx = FlowCtx {
+            source: Some(SourceIdx(0)),
+            initiator: Some(Orientation::Forward),
+        };
+        let lookup = |_: &FlowKey| Some(Found::Ended(ended_ctx));
+        let ctx = resolve_key(Some(&key()), Origin::Packet(SourceIdx(1)), &lookup);
+        assert_eq!(ctx, ended_ctx);
+        // An ended flow without a bound leg: the batch's packet.
+        let unbound = FlowCtx {
+            source: None,
+            ..ended_ctx
+        };
+        let lookup = |_: &FlowKey| Some(Found::Ended(unbound));
+        let ctx = resolve_key(Some(&key()), Origin::Packet(SourceIdx(1)), &lookup);
+        assert_eq!(ctx.source, Some(SourceIdx(1)));
+    }
+
     #[test]
     fn initiator_follows_side_and_orientation() {
         use FlowSide::*;
@@ -272,10 +326,11 @@ mod tests {
 
     #[test]
     fn scan_ended_collects_each_ended_flow() {
-        let mut out = vec![(key(), FlowCtx::default())];
+        let mut out = EndedFlows::default();
+        out.insert(key(), FlowCtx::default());
         let s = stats(Some(2), None, Orientation::Forward);
         scan_ended(&[ended(s)], &mut out);
         assert_eq!(out.len(), 1);
-        assert_eq!(out[0].1.source, Some(SourceIdx(1)));
+        assert_eq!(out[&key()].source, Some(SourceIdx(1)));
     }
 }

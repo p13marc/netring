@@ -166,7 +166,8 @@ has an old → new snippet there.
   (`BuildError::DuplicateMergeState`, #227).
 - **Events no packet drove claimed capture source 0** (#216): idle-ended
   flows, parser ticks, ticks. Packets carry their capture leg into
-  flowscope; housekeeping events resolve the flow's leg; ticks have none.
+  flowscope; housekeeping events — and the messages of a flow another
+  packet ended (LRU eviction) — resolve the flow's leg; ticks have none.
 - **Packet-tier per-flow state leaked** (#216): `ctx.flow` was the
   packet's directional key, so one slot per direction was never freed.
 - **YARA / nPrint saw raw IP fragments and reported the wrong side**

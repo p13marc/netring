@@ -344,7 +344,7 @@ pub(crate) async fn run_loop(monitor: Monitor, stop: StopCondition) -> Result<()
 
     let mut events: Vec<FsEvent<FlowKey>> = Vec::with_capacity(64);
     // #216: the flows a dispatched batch ends (reused across batches).
-    let mut flow_ctx_scratch: Vec<(FlowKey, FlowCtx)> = Vec::new();
+    let mut flow_ctx_scratch = crate::monitor::flow_ctx::EndedFlows::default();
     let mut shutdown = ShutdownSignal::new(stop);
     // Periodic sweep: idle flows end (FlowEnded), parsers' `on_tick`
     // runs, out-of-order holes expire, per-flow state is released.
@@ -1047,7 +1047,7 @@ pub(crate) async fn replay_loop(
     let mut source = crate::pcap_source::AsyncPcapSource::open_with_config(&path, config).await?;
     let mut events: Vec<FsEvent<FlowKey>> = Vec::with_capacity(64);
     // #216: the flows a dispatched batch ends (reused across batches).
-    let mut flow_ctx_scratch: Vec<(FlowKey, FlowCtx)> = Vec::new();
+    let mut flow_ctx_scratch = crate::monitor::flow_ctx::EndedFlows::default();
     // Replay sweeps on packet time, every `sweep_interval` of it.
     let sweep_interval = driver.tracker().config().sweep_interval;
     let mut last_sweep: Option<flowscope::Timestamp> = None;
@@ -1431,7 +1431,7 @@ async fn drain_phase(
         counters,
         &mut leftover,
         Origin::Housekeeping,
-        &mut Vec::new(),
+        &mut crate::monitor::flow_ctx::EndedFlows::default(),
         monitor_name,
         flow_states,
         label_table,
@@ -1912,7 +1912,7 @@ async fn dispatch_batch(
     counters: &mut CounterRegistry,
     events: &mut Vec<FsEvent<FlowKey>>,
     origin: Origin,
-    ended: &mut Vec<(FlowKey, FlowCtx)>,
+    ended: &mut crate::monitor::flow_ctx::EndedFlows,
     monitor_name: Option<&str>,
     flow_states: &mut crate::ctx::FlowStateRegistry,
     label_table: &flowscope::well_known::LabelTable,
@@ -1931,7 +1931,7 @@ async fn dispatch_batch(
     // #216: the flows this batch ends, for the events and messages of
     // theirs dispatched once the tracker has let them go.
     crate::monitor::flow_ctx::scan_ended(events, ended);
-    let ended: &[(FlowKey, FlowCtx)] = ended;
+    let ended: &crate::monitor::flow_ctx::EndedFlows = ended;
     let mut batch = std::mem::take(events);
     for (i, evt) in batch.drain(..).enumerate() {
         if deadline.is_some_and(|d| Instant::now() >= d) {
@@ -2013,7 +2013,7 @@ async fn dispatch_slot_messages(
     counters: &mut CounterRegistry,
     flow_states: &mut crate::ctx::FlowStateRegistry,
     origin: Origin,
-    ended: &[(FlowKey, FlowCtx)],
+    ended: &crate::monitor::flow_ctx::EndedFlows,
     monitor_name: Option<&str>,
     label_table: &flowscope::well_known::LabelTable,
     policy: HandlerErrorPolicy,

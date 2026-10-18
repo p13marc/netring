@@ -74,12 +74,16 @@ pub struct BridgeStats {
     /// A→B packets dropped because they didn't fit the TX frame, or were
     /// longer than interface B accepts (its MTU + the Ethernet header, + 4
     /// only for an outer 802.1Q tag — a re-inserted 802.1ad tag on a
-    /// full-size frame is too long). The second check is made on Ethernet
-    /// devices (not VLAN sub-interfaces, whose header length the kernel
-    /// alone knows), against the MTU as of the last second (re-read before
-    /// a frame is dropped). On other devices, and right after the MTU was
-    /// lowered, a frame the kernel refuses is dropped by the kernel
-    /// (`PACKET_LOSS`) without being counted here.
+    /// full-size frame is too long). The second check is made only where
+    /// the kernel's limit is known exactly — the devices
+    /// [`Injector::max_frame_len`](crate::Injector::max_frame_len) answers
+    /// for: a plain Ethernet NIC, `veth`, `dummy`, `bridge`, … — against
+    /// the MTU as of the last second (re-read before a frame is dropped),
+    /// so the bridge never drops a frame the kernel would send. On other
+    /// devices (a VLAN sub-interface, a `macvlan` / `bond` stacked on one,
+    /// other link types), and right after the MTU was lowered, a frame the
+    /// kernel refuses is dropped by the kernel (`PACKET_LOSS`) without
+    /// being counted here.
     pub a_to_b_dropped_too_large: u64,
     /// A→B packets dropped because the TX ring was full.
     pub a_to_b_dropped_ring_full: u64,

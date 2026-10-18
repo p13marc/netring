@@ -373,3 +373,99 @@ fn a_refused_frame_does_not_block_the_ring() {
     );
     assert_eq!(strict.rejected_slots(), 1);
 }
+
+/// `sh -c cmd`, true on success.
+fn sh(cmd: &str) -> bool {
+    std::process::Command::new("sh")
+        .args(["-c", cmd])
+        .stderr(std::process::Stdio::null())
+        .status()
+        .is_ok_and(|s| s.success())
+}
+
+/// Queue one `len`-byte frame and kick it, blocking: `Ok` when the kernel
+/// took it.
+fn send_one(tx: &mut Injector, len: usize) -> Result<usize, netring::Error> {
+    let mut f = vec![0u8; len];
+    f[..6].copy_from_slice(&[0xff; 6]);
+    f[12..14].copy_from_slice(&0x88b5u16.to_be_bytes());
+    let mut slot = tx.allocate(len).expect("allocate");
+    slot.data_mut()[..len].copy_from_slice(&f);
+    slot.set_len(len);
+    slot.send();
+    tx.flush()
+}
+
+/// Review r5: a device stacked on a VLAN without VLAN TX offload (a
+/// macvlan on a VLAN on a dummy) inherits the VLAN's 18-byte header
+/// length, so the kernel takes `mtu + 18`; `max_frame_len` said
+/// `mtu + 14` (and the bridge dropped what lay between). Such devices are
+/// the kernel's to judge now; a plain device keeps its exact limit.
+#[test]
+fn max_frame_len_is_none_on_a_device_stacked_on_a_vlan() {
+    let _ = sh("ip link del nrr5d0");
+    if !sh("ip link add nrr5d0 type dummy && ip link set nrr5d0 up \
+         && ip link add link nrr5d0 name nrr5d0.7 type vlan id 7 && ip link set nrr5d0.7 up \
+         && ip link add link nrr5d0.7 name nrr5mv0 type macvlan mode bridge && ip link set nrr5mv0 up")
+    {
+        let _ = sh("ip link del nrr5d0");
+        eprintln!("skip: needs CAP_NET_ADMIN and the 8021q / macvlan modules");
+        return;
+    }
+    let build = |iface: &str| {
+        Injector::builder()
+            .interface(iface)
+            .frame_count(4)
+            .drop_rejected(false)
+            .build()
+            .expect("injector")
+    };
+    let mut macvlan = build("nrr5mv0");
+    let mfl = macvlan.max_frame_len().unwrap();
+    let took = send_one(&mut macvlan, 1518);
+    let rejected = macvlan.rejected_slots();
+    let vlan = build("nrr5d0.7").max_frame_len().unwrap();
+    let plain = build("nrr5d0").max_frame_len().unwrap();
+    let _ = sh("ip link del nrr5d0");
+    assert!(
+        took.is_ok() && rejected == 0,
+        "the kernel takes 1518 bytes: {took:?}"
+    );
+    assert_eq!(mfl, None, "a macvlan over a VLAN is the kernel's to judge");
+    assert_eq!(vlan, None, "so is the VLAN");
+    assert_eq!(plain, Some(1514), "a dummy has the plain Ethernet limit");
+}
+
+/// Review r5: the VLAN check read `/proc/net/vlan` through `/proc/self`
+/// — the namespace of the process's main thread, not the socket's — so an
+/// injector built inside `NetNs::run_in` on a VLAN there was taken for
+/// plain Ethernet. The device is looked up where the socket was opened.
+#[test]
+fn max_frame_len_looks_at_the_sockets_namespace() {
+    let _ = sh("ip netns del nrr5in");
+    if !sh(
+        "ip netns add nrr5in && ip -n nrr5in link add nrr5e0 type dummy \
+         && ip -n nrr5in link set nrr5e0 up \
+         && ip -n nrr5in link add link nrr5e0 name nrr5e0.9 type vlan id 9 \
+         && ip -n nrr5in link set nrr5e0.9 up",
+    ) {
+        let _ = sh("ip netns del nrr5in");
+        eprintln!("skip: needs CAP_SYS_ADMIN / CAP_NET_ADMIN and 8021q");
+        return;
+    }
+    let ns = netring::netns::NetNs::from_name("nrr5in").expect("netns");
+    let res = ns.run_in(|| {
+        let mfl = |iface: &str| {
+            Injector::builder()
+                .interface(iface)
+                .frame_count(4)
+                .build()
+                .and_then(|tx| tx.max_frame_len())
+        };
+        (mfl("nrr5e0.9"), mfl("nrr5e0"))
+    });
+    let _ = sh("ip netns del nrr5in");
+    let (vlan, plain) = res.expect("run_in");
+    assert_eq!(vlan.unwrap(), None, "a VLAN in the socket's namespace");
+    assert_eq!(plain.unwrap(), Some(1514));
+}

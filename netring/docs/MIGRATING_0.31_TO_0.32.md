@@ -376,8 +376,9 @@ A frame the kernel refuses (longer than the device accepts, a malformed
 header) is now dropped by the kernel and the kick goes on — 0.31's kick
 stopped there with `EMSGSIZE` / `EINVAL` and left the frames behind it
 queued. Nothing reports such a drop: compare frame lengths with
-`Injector::max_frame_len()` (`mtu + 14` on Ethernet, +4 for an outer
-802.1Q tag) before sending if you need to know.
+`Injector::max_frame_len()` (`mtu + 14` on a plain Ethernet device, +4 for
+an outer 802.1Q tag; `None` where only the kernel knows, e.g. on a VLAN)
+before sending if you need to know.
 
 `InjectorBuilder::drop_rejected(false)` restores the stop-and-report
 behaviour, with its cost: the frames queued behind the refused one are held

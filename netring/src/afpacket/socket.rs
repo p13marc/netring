@@ -131,6 +131,108 @@ pub(crate) fn interface_link_type(fd: BorrowedFd<'_>, name: &str) -> Result<u16,
     Ok(u16::from_ne_bytes([req.data[0], req.data[1]]))
 }
 
+/// The `rtnl_link_ops` kind of interface `ifindex` (`IFLA_INFO_KIND`:
+/// `"veth"`, `"vlan"`, `"macvlan"`, …), `None` for a device without one (a
+/// NIC's own driver). Asked over rtnetlink in the calling thread's network
+/// namespace — the caller must be where it opened the socket the index
+/// belongs to.
+pub(crate) fn interface_kind(ifindex: i32) -> Result<Option<String>, Error> {
+    use std::os::fd::{FromRawFd, OwnedFd};
+    const RTM_GETLINK: u16 = 18;
+    const RTM_NEWLINK: u16 = 16;
+    const IFLA_LINKINFO: u16 = 18;
+    const IFLA_INFO_KIND: u16 = 1;
+    const NLA_TYPE_MASK: u16 = 0x3fff;
+    let io = |e: std::io::Error| Error::Io(e);
+
+    // struct nlmsghdr (16) + struct ifinfomsg (16).
+    let mut req = [0u8; 32];
+    req[0..4].copy_from_slice(&32u32.to_ne_bytes());
+    req[4..6].copy_from_slice(&RTM_GETLINK.to_ne_bytes());
+    req[6..8].copy_from_slice(&(libc::NLM_F_REQUEST as u16).to_ne_bytes());
+    req[8..12].copy_from_slice(&1u32.to_ne_bytes()); // seq
+    req[16] = libc::AF_UNSPEC as u8;
+    req[20..24].copy_from_slice(&ifindex.to_ne_bytes());
+
+    // SAFETY: plain socket(2); the fd is owned right away.
+    let raw = unsafe {
+        libc::socket(
+            libc::AF_NETLINK,
+            libc::SOCK_RAW | libc::SOCK_CLOEXEC,
+            libc::NETLINK_ROUTE,
+        )
+    };
+    if raw < 0 {
+        return Err(io(std::io::Error::last_os_error()));
+    }
+    // SAFETY: `raw` is a fresh fd we own exclusively.
+    let fd = unsafe { OwnedFd::from_raw_fd(raw) };
+    // SAFETY: send(2) of a buffer we own; the kernel is the default peer
+    // of an unbound NETLINK_ROUTE socket.
+    if unsafe { libc::send(fd.as_raw_fd(), req.as_ptr().cast(), req.len(), 0) } < 0 {
+        return Err(io(std::io::Error::last_os_error()));
+    }
+    let mut buf = vec![0u8; 32 * 1024];
+    let n = loop {
+        // SAFETY: recv(2) into a buffer we own.
+        let n = unsafe { libc::recv(fd.as_raw_fd(), buf.as_mut_ptr().cast(), buf.len(), 0) };
+        if n >= 0 {
+            break n as usize;
+        }
+        let e = std::io::Error::last_os_error();
+        if e.raw_os_error() != Some(libc::EINTR) {
+            return Err(io(e));
+        }
+    };
+    let msg = &buf[..n];
+    let u16_at = |b: &[u8], i: usize| u16::from_ne_bytes([b[i], b[i + 1]]);
+    if msg.len() < 32 {
+        return Err(io(std::io::Error::other("short rtnetlink reply")));
+    }
+    match u16_at(msg, 4) {
+        RTM_NEWLINK => {}
+        t if t == libc::NLMSG_ERROR as u16 => {
+            let errno = i32::from_ne_bytes([msg[16], msg[17], msg[18], msg[19]]);
+            return Err(io(std::io::Error::from_raw_os_error(-errno)));
+        }
+        t => {
+            return Err(io(std::io::Error::other(format!(
+                "rtnetlink reply type {t}"
+            ))));
+        }
+    }
+    let len = (u32::from_ne_bytes([msg[0], msg[1], msg[2], msg[3]]) as usize).min(msg.len());
+    // Walk `rtattr`s: u16 len, u16 type, payload, 4-byte aligned.
+    let attrs = |b: &[u8]| {
+        let mut out = Vec::new();
+        let mut i = 0;
+        while i + 4 <= b.len() {
+            let alen = u16_at(b, i) as usize;
+            if alen < 4 || i + alen > b.len() {
+                break;
+            }
+            out.push((u16_at(b, i + 2) & NLA_TYPE_MASK, i + 4, i + alen));
+            i += alen.next_multiple_of(4);
+        }
+        out
+    };
+    let top = &msg[32..len];
+    for (ty, start, end) in attrs(top) {
+        if ty != IFLA_LINKINFO {
+            continue;
+        }
+        let info = &top[start..end];
+        for (ity, istart, iend) in attrs(info) {
+            if ity == IFLA_INFO_KIND {
+                let kind = &info[istart..iend];
+                let kind = kind.split(|&b| b == 0).next().unwrap_or(kind);
+                return Ok(Some(String::from_utf8_lossy(kind).into_owned()));
+            }
+        }
+    }
+    Ok(None)
+}
+
 // ── setsockopt wrappers ────────────────────────────────────────────────────
 
 /// Set `PACKET_VERSION` (`ffi::TPACKET_V3_INT` for RX, `ffi::TPACKET_V2_INT`

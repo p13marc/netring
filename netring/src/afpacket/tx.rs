@@ -198,6 +198,19 @@ struct LinkLimit {
     read_at: std::time::Instant,
 }
 
+/// Whether a device of link kind `kind` (`IFLA_INFO_KIND`; `None`: a NIC's
+/// own driver) has the plain 14-byte Ethernet header length the kernel's
+/// limit adds to the MTU (`dev->hard_header_len`, set by `ether_setup()`).
+/// Not the kinds that take theirs from the device below — `vlan` (+4
+/// without VLAN TX offload), and `macvlan`, `ipvlan`, `bond`, `team`, …
+/// over such a VLAN — nor kinds not known here.
+fn plain_ethernet_kind(kind: Option<&str>) -> bool {
+    matches!(
+        kind,
+        None | Some("veth" | "dummy" | "bridge" | "vxlan" | "geneve" | "tun")
+    )
+}
+
 impl LinkLimit {
     fn fits(&self, frame: &[u8]) -> bool {
         const ETH_HLEN: usize = 14;
@@ -372,8 +385,13 @@ impl Injector {
     /// tpacket_snd() checks it, with the MTU read now: `mtu + 14` on an
     /// Ethernet device — a frame whose outermost EtherType is 802.1Q
     /// (`0x8100`) may be 4 bytes longer; an 802.1ad (`0x88a8`) tag gets no
-    /// allowance. `None` where the link-header length isn't known here
-    /// (other link types, VLAN sub-interfaces): the kernel decides.
+    /// allowance. `None` where the link-header length isn't known to be
+    /// the plain 14 bytes: the kernel decides. Known: an Ethernet NIC with
+    /// no link kind of its own, `veth`, `dummy`, `bridge`, `vxlan`,
+    /// `geneve` and `tap` devices. Not: other link types, VLAN
+    /// sub-interfaces (4 bytes more without VLAN TX offload), and devices
+    /// stacked on one, which inherit its header length (`macvlan`,
+    /// `ipvlan`, `bond`, `team`, …).
     /// Longer frames are refused: dropped silently by default, see
     /// [`InjectorBuilder::drop_rejected`]. New in 0.32.0.
     ///
@@ -394,9 +412,10 @@ impl Injector {
     /// tpacket_snd()'s limit: `dev->mtu + dev->hard_header_len`, plus
     /// `VLAN_HLEN` for an outer 802.1Q tag on an Ethernet device
     /// (packet_extra_vlan_len_allowed()). Checked only where that length
-    /// is known — an Ethernet device (14-byte header) that isn't a VLAN
-    /// sub-interface (which may take 4 more); elsewhere `true`, and the
-    /// kernel decides. The MTU is re-read when a frame doesn't fit (not
+    /// is known to be the plain 14 bytes (see [`Self::max_frame_len`]);
+    /// elsewhere `true`, and the kernel decides — dropping a frame the
+    /// kernel would send is worse than leaving a refusal uncounted. The
+    /// MTU is re-read when a frame doesn't fit (not
     /// more than every 50 ms) and by [`Self::refresh_link_if_stale`].
     pub(crate) fn fits_device(&mut self, frame: &[u8]) -> bool {
         if !self.link.checked || self.link.fits(frame) {
@@ -928,17 +947,15 @@ impl InjectorBuilder {
         let ifindex = socket::resolve_interface(&interface)?;
         socket::bind_to_interface_proto(fd.as_fd(), ifindex, 0)?;
         let mtu = socket::interface_mtu(fd.as_fd(), &interface)? as usize;
-        // A VLAN sub-interface may count its tag in the header length; its
-        // limit is the kernel's to apply.
-        let vlan_dev = std::path::Path::new("/proc/net/vlan")
-            .join(&interface)
-            .exists();
         let ether = socket::interface_link_type(fd.as_fd(), &interface)
             .is_ok_and(|t| t == libc::ARPHRD_ETHER);
+        // Asked here, in the thread that opened the socket: the same
+        // network namespace.
+        let kind = socket::interface_kind(ifindex).ok();
         let link = LinkLimit {
             ifindex,
             mtu,
-            checked: ether && !vlan_dev,
+            checked: ether && kind.is_some_and(|k| plain_ethernet_kind(k.as_deref())),
             read_at: std::time::Instant::now(),
         };
 

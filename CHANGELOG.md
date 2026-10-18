@@ -176,9 +176,12 @@ has an old → new snippet there.
   now let the kernel drop a refused frame and go on (`PACKET_LOSS`;
   `InjectorBuilder::drop_rejected(false)` for the old stop-and-report),
   and `Bridge` drops (and counts) frames longer than the egress device
-  accepts before queueing them — on an Ethernet egress (not a VLAN
-  sub-interface), against its MTU re-read at least once a second and
-  before a frame is dropped; other link types are left to the kernel.
+  accepts before queueing them — where that limit is known exactly (a
+  plain Ethernet NIC, `veth`, `dummy`, `bridge`, …, by its rtnetlink link
+  kind; not a VLAN or a device stacked on one, whose header length may be
+  longer), against the MTU re-read at least once a second and before a
+  frame is dropped; elsewhere the kernel decides and a refusal goes
+  uncounted.
   With `drop_rejected(false)`, `Injector::allocate` hands out the refused slot it resets — where the
   kernel's TX position waits — instead of skipping it (an `AsyncInjector`
   `send` then waited forever with a free slot).

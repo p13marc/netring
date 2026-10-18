@@ -133,7 +133,12 @@ by a test that fails on 0.31.1. Things worth knowing when touching the code:
   AF_XDP counts received packets in the RX ring
   (`XdpRing::received_total`, counted at release).
 - **TX ring** (`afpacket/tx.rs`): `TPACKET_V2` + `tpacket2_hdr`, frames
-  addressed per block; the version and the header must agree (#187).
+  addressed per block; the version and the header must agree (#187). The
+  kernel sends strictly in ring order from its TX position (`tx_ring.head`)
+  and stops at the first slot it can't take; `TxQueue` mirrors that
+  position, `allocate` hands out slots in the same order (a dropped
+  `TxSlot` rewinds), and a kick reads only the slots it took (O(taken), no
+  ring scans).
 - **AF_PACKET RX** (`afpacket/rx.rs`): socket created with protocol 0,
   bound only after ring + filter (fanout members behind `ret #0` until they
   join); a down interface is waited out, a removed one is `ENETDOWN`

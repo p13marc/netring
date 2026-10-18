@@ -33,14 +33,56 @@ const TX_DATA_OFFSET: usize = ffi::tpacket_align(std::mem::size_of::<TxFrameHdr>
 ///
 /// Calling [`send()`](TxSlot::send) marks the frame for transmission.
 /// Dropping without calling `send()` discards the frame and returns it
-/// to the available pool.
+/// to the available pool (the next [`Injector::allocate`] hands out the
+/// same slot).
 pub struct TxSlot<'a> {
     frame_ptr: NonNull<u8>,
     data_offset: usize,
     max_len: usize,
     len: usize,
     sent: bool,
-    pending: &'a mut u32,
+    /// The slot's index in the ring.
+    index: usize,
+    /// Its status before it was handed out, restored if it isn't sent.
+    prev_status: u32,
+    queue: &'a mut TxQueue,
+}
+
+/// Where the injector and the kernel are in the TX ring.
+///
+/// The kernel sends frames strictly in ring order: each kick starts at its
+/// TX position (`tx_ring.head`, 0 when the ring is set up) and takes every
+/// `TP_STATUS_SEND_REQUEST` frame from there, moving one slot on per frame
+/// it hands to the device (or drops, with `PACKET_LOSS`); it stops on the
+/// first frame it can't take — still `SEND_REQUEST` (send buffer full,
+/// device dropped it) or refused and left `WRONG_FORMAT` — or that isn't
+/// queued. So the injector fills slots in the same order (`cursor`), and
+/// the queued frames are always the `pending` slots from `head` (from
+/// `head + 1` while `head_rejected`): after a kick, walking from `head`
+/// over the slots that are no longer `SEND_REQUEST` finds what the kick
+/// took in O(frames taken), without scanning the ring.
+#[derive(Debug, Clone, Copy)]
+struct TxQueue {
+    /// Frames queued (`SEND_REQUEST`) that no kick has taken.
+    pending: u32,
+    /// The next slot [`Injector::allocate`] hands out.
+    cursor: usize,
+    /// The kernel's TX position.
+    head: usize,
+    /// The frame at `head` was refused and left `WRONG_FORMAT` (no
+    /// `PACKET_LOSS`): the kernel waits on it until it is queued again.
+    head_rejected: bool,
+    frame_count: usize,
+}
+
+impl TxQueue {
+    fn next(&self, index: usize) -> usize {
+        if index + 1 == self.frame_count {
+            0
+        } else {
+            index + 1
+        }
+    }
 }
 
 impl<'a> TxSlot<'a> {
@@ -97,17 +139,25 @@ impl<'a> TxSlot<'a> {
         unsafe { &*status_ptr }.store(ffi::TP_STATUS_SEND_REQUEST, Ordering::Release);
 
         self.sent = true;
-        *self.pending += 1;
+        self.queue.pending += 1;
+        if self.queue.head_rejected && self.index == self.queue.head {
+            // The refused frame's slot is queued again: the kernel's next
+            // kick starts with it.
+            self.queue.head_rejected = false;
+        }
     }
 }
 
 impl Drop for TxSlot<'_> {
     fn drop(&mut self) {
         if !self.sent {
-            // Discard: return frame to available pool.
+            // Discard: the slot goes back as it was — AVAILABLE, or the
+            // refused frame the kernel waits on — and is the next one
+            // handed out, so the queued frames stay in ring order.
             let status_ptr = self.frame_ptr.as_ptr().cast::<AtomicU32>();
             // SAFETY: frame_ptr points to a valid tpacket2_hdr, tp_status at offset 0.
-            unsafe { &*status_ptr }.store(ffi::TP_STATUS_AVAILABLE, Ordering::Release);
+            unsafe { &*status_ptr }.store(self.prev_status, Ordering::Release);
+            self.queue.cursor = self.index;
         }
     }
 }
@@ -144,7 +194,6 @@ pub struct Injector {
     // Drop order: ring (munmap) before fd (close).
     ring: MmapRing,
     fd: OwnedFd,
-    current_frame: usize,
     frame_count: usize,
     frame_size: usize,
     /// Frames per ring block: the kernel never lets a frame cross a block,
@@ -152,9 +201,12 @@ pub struct Injector {
     /// each block is unused.
     frames_per_block: usize,
     data_offset: usize,
-    pending: u32,
+    queue: TxQueue,
     /// The device's MTU when the injector was built (`SIOCGIFMTU`).
     mtu: usize,
+    /// Slot status reads (tests: a kick must not scan the ring).
+    #[cfg(test)]
+    status_reads: std::cell::Cell<u64>,
 }
 
 impl std::fmt::Debug for Injector {
@@ -162,7 +214,7 @@ impl std::fmt::Debug for Injector {
         f.debug_struct("Injector")
             .field("frame_count", &self.frame_count)
             .field("frame_size", &self.frame_size)
-            .field("pending", &self.pending)
+            .field("pending", &self.queue.pending)
             .finish()
     }
 }
@@ -193,6 +245,8 @@ impl Injector {
     }
 
     fn read_frame_status(&self, index: usize) -> u32 {
+        #[cfg(test)]
+        self.status_reads.set(self.status_reads.get() + 1);
         let ptr = self.frame_ptr(index).as_ptr().cast::<AtomicU32>();
         // SAFETY: points to tp_status at the start of a tpacket2_hdr.
         unsafe { &*ptr }.load(Ordering::Acquire)
@@ -252,18 +306,34 @@ impl Injector {
     /// Number of frames queued with [`TxSlot::send`] that no kick has handed
     /// to the kernel yet (`TP_STATUS_SEND_REQUEST`): what the next
     /// [`flush`](Self::flush) / [`flush_nonblocking`](Self::flush_nonblocking)
-    /// will try to hand over. O(frame_count). New in 0.32.0.
+    /// will try to hand over. O(1). New in 0.32.0.
     pub fn queued_count(&self) -> usize {
-        self.queued_frames() as usize
+        self.queue.pending as usize
     }
 
-    /// `TP_STATUS_SEND_REQUEST` slots. The kernel moves a slot out of that
-    /// state only inside our own kick (`tpacket_snd()` runs from
-    /// `sendto()`), so the count is stable between kicks.
-    fn queued_frames(&self) -> u32 {
-        (0..self.frame_count)
-            .filter(|&i| self.read_frame_status(i) == ffi::TP_STATUS_SEND_REQUEST)
-            .count() as u32
+    /// After a kick: move [`TxQueue::head`] over the frames the kernel took
+    /// — handed to the device (`SENDING`, or already `AVAILABLE` again) or
+    /// dropped (`PACKET_LOSS`) — up to the first it left `SEND_REQUEST` or
+    /// refused (`WRONG_FORMAT`). Returns how many it took. O(taken): the
+    /// kernel moves a slot out of `SEND_REQUEST` only inside our own kicks
+    /// (`tpacket_snd()` runs from `sendto()`), in ring order.
+    fn advance_head(&mut self) -> usize {
+        let mut taken = 0;
+        while self.queue.pending > 0 && !self.queue.head_rejected {
+            let status = self.read_frame_status(self.queue.head);
+            if status & ffi::TP_STATUS_SEND_REQUEST != 0 {
+                break;
+            }
+            self.queue.pending -= 1;
+            if status & ffi::TP_STATUS_WRONG_FORMAT != 0 {
+                // Refused, not dropped: the kernel stays on it.
+                self.queue.head_rejected = true;
+                break;
+            }
+            self.queue.head = self.queue.next(self.queue.head);
+            taken += 1;
+        }
+        taken
     }
 
     /// Number of slots currently held by the kernel (`TP_STATUS_SEND_REQUEST`
@@ -394,59 +464,55 @@ impl Injector {
 
     /// Allocate a TX frame for a packet of up to `len` bytes.
     ///
-    /// Returns `None` if the packet is too large for the frame or if every
-    /// slot in the ring is currently in `TP_STATUS_SEND_REQUEST` /
-    /// `TP_STATUS_SENDING` (all frames pending kernel transmission).
+    /// Slots are handed out strictly in ring order — the order the kernel
+    /// sends them in. Returns `None` if the packet is too large for the
+    /// frame, or if the next slot is still queued
+    /// (`TP_STATUS_SEND_REQUEST`) or in flight (`TP_STATUS_SENDING`): the
+    /// ring is full up to it. Kick ([`flush`](Self::flush)) and wait for
+    /// the device to complete frames
+    /// ([`pending_count`](Self::pending_count)). Before 0.32 it skipped to
+    /// any free slot further on, which the kernel then didn't send until
+    /// the skipped one was queued again.
     ///
     /// A slot the kernel refused (`TP_STATUS_WRONG_FORMAT`, with
     /// [`drop_rejected(false)`](InjectorBuilder::drop_rejected)) is reset
     /// and handed out: the kernel's TX position waits on it.
     ///
-    /// Worst-case O(N) scan but typical O(1) on the happy path.
+    /// O(1).
     pub fn allocate(&mut self, len: usize) -> Option<TxSlot<'_>> {
         if len > self.frame_size - self.data_offset {
             return None; // frame can't hold this packet
         }
-
-        // Scan up to frame_count slots from current_frame.
-        for _ in 0..self.frame_count {
-            let status = self.read_frame_status(self.current_frame);
-            match status {
-                ffi::TP_STATUS_AVAILABLE | ffi::TP_STATUS_WRONG_FORMAT => {
-                    if status == ffi::TP_STATUS_WRONG_FORMAT {
-                        // The kernel refused this frame
-                        // (`drop_rejected(false)`) and its TX position
-                        // stays on the slot: the frames queued after it
-                        // leave only once this slot is queued again. So
-                        // it is the one to fill — skipping it left a ring
-                        // whose kicks hand over nothing, and a `send` that
-                        // waited for a slot forever.
-                        tracing::warn!(
-                            "AF_PACKET TX: the kernel rejected a frame (WRONG_FORMAT) — reusing its slot"
-                        );
-                        self.reset_slot(self.current_frame);
-                    }
-                    let slot = TxSlot {
-                        frame_ptr: self.frame_ptr(self.current_frame),
-                        data_offset: self.data_offset,
-                        max_len: self.frame_size - self.data_offset,
-                        len: 0,
-                        sent: false,
-                        pending: &mut self.pending,
-                    };
-                    self.current_frame = (self.current_frame + 1) % self.frame_count;
-                    return Some(slot);
-                }
-                _ => {
-                    // SEND_REQUEST or SENDING — kernel hasn't reclaimed.
-                    // Keep scanning in case a later slot is AVAILABLE
-                    // (happens when a previous allocate() saw a Drop
-                    // without send(), then rolled the cursor past it).
-                    self.current_frame = (self.current_frame + 1) % self.frame_count;
-                }
-            }
+        // Strictly in ring order: the kernel sends from its TX position
+        // onwards and stops at the first slot that isn't queued, so a frame
+        // queued past a slot that is still in flight would wait for that
+        // slot to be queued again (see `TxQueue`).
+        let index = self.queue.cursor;
+        let status = self.read_frame_status(index);
+        if status & (ffi::TP_STATUS_SEND_REQUEST | ffi::TP_STATUS_SENDING) != 0 {
+            return None;
         }
-        None
+        if status & ffi::TP_STATUS_WRONG_FORMAT != 0 {
+            // The kernel refused this frame (`drop_rejected(false)`) and
+            // its TX position stays on the slot: the frames queued after
+            // it leave only once this slot is queued again, so it is the
+            // one to fill.
+            tracing::warn!(
+                "AF_PACKET TX: the kernel rejected a frame (WRONG_FORMAT) — reusing its slot"
+            );
+            self.reset_slot(index);
+        }
+        self.queue.cursor = self.queue.next(index);
+        Some(TxSlot {
+            frame_ptr: self.frame_ptr(index),
+            data_offset: self.data_offset,
+            max_len: self.frame_size - self.data_offset,
+            len: 0,
+            sent: false,
+            index,
+            prev_status: status,
+            queue: &mut self.queue,
+        })
     }
 
     fn reset_slot(&self, idx: usize) {
@@ -480,15 +546,15 @@ impl Injector {
     /// Returns [`Error::Io`] if the underlying `sendto` syscall fails with
     /// a non-transient error.
     pub fn flush(&mut self) -> Result<usize, Error> {
-        if self.pending == 0 {
+        if self.queue.pending == 0 {
             return Ok(0);
         }
-        let count = self.pending as usize;
+        let count = self.queue.pending as usize;
         let res = crate::syscall::sendto_kick_eintr_safe(self.fd.as_raw_fd(), 0);
-        // Whatever the kick did, the ring says what is still queued: a kick
-        // the kernel cut short (an error, a full send buffer) leaves frames
-        // in SEND_REQUEST, and the next flush must kick them.
-        self.pending = self.queued_frames();
+        // Whatever the kick did, the ring says how far it got: a kick the
+        // kernel cut short (an error, a full send buffer) leaves frames in
+        // SEND_REQUEST, and the next flush must kick them.
+        self.advance_head();
         res.map_err(Error::Io)?;
         Ok(count)
     }
@@ -514,16 +580,15 @@ impl Injector {
     /// Returns [`Error::Io`] if the underlying `sendto` syscall fails with
     /// a non-transient error.
     pub fn flush_nonblocking(&mut self) -> Result<usize, Error> {
-        if self.pending == 0 {
+        if self.queue.pending == 0 {
             return Ok(0);
         }
-        let before = self.queued_frames();
         let res = crate::syscall::sendto_kick_status(self.fd.as_raw_fd(), libc::MSG_DONTWAIT);
         // From the ring, not from the return value: tpacket_snd() reports
         // a kick the send buffer cut short as a success (#228 review).
-        self.pending = self.queued_frames();
+        let taken = self.advance_head();
         res.map_err(Error::Io)?;
-        Ok(before.saturating_sub(self.pending) as usize)
+        Ok(taken)
     }
 }
 
@@ -756,13 +821,20 @@ impl InjectorBuilder {
         Ok(Injector {
             ring,
             fd,
-            current_frame: 0,
             frame_count: geometry.frame_nr as usize,
             frame_size: self.frame_size,
             frames_per_block,
             data_offset,
-            pending: 0,
+            queue: TxQueue {
+                pending: 0,
+                cursor: 0,
+                head: 0,
+                head_rejected: false,
+                frame_count: geometry.frame_nr as usize,
+            },
             mtu,
+            #[cfg(test)]
+            status_reads: std::cell::Cell::new(0),
         })
     }
 }
@@ -817,6 +889,96 @@ mod tests {
         assert_eq!(b.frame_count, 256);
         assert!(!b.qdisc_bypass);
         assert!(b.drop_rejected);
+    }
+
+    /// Review r3: every non-blocking kick scanned the whole ring twice
+    /// (what was queued before and after), so `send_stream` on a 16 384-frame
+    /// ring ran at 2 250 frames/s. A kick now reads the slots it took, from
+    /// the kernel's TX position. Needs `CAP_NET_RAW` (skips without).
+    #[test]
+    fn a_kick_reads_only_the_slots_it_took() {
+        let mut tx = match InjectorBuilder::default()
+            .interface("lo")
+            .frame_count(4096)
+            .build()
+        {
+            Ok(tx) => tx,
+            Err(e) => {
+                eprintln!("skip (needs CAP_NET_RAW): {e}");
+                return;
+            }
+        };
+        let mut frame = [0u8; 64];
+        frame[..6].copy_from_slice(&[0xff; 6]);
+        frame[12..14].copy_from_slice(&0x88b5u16.to_be_bytes());
+        let queue = |tx: &mut Injector| {
+            if tx.allocate(frame.len()).is_none() {
+                tx.wait_drained(std::time::Duration::from_secs(2)).unwrap();
+            }
+            let mut slot = tx.allocate(frame.len()).expect("a drained ring has room");
+            slot.data_mut()[..frame.len()].copy_from_slice(&frame);
+            slot.set_len(frame.len());
+            slot.send();
+        };
+        // One frame per kick, around the ring three times.
+        let kicks = 3 * 4096;
+        tx.status_reads.set(0);
+        let mut taken = 0;
+        for _ in 0..kicks {
+            queue(&mut tx);
+            taken += tx.flush_nonblocking().unwrap();
+        }
+        let reads = tx.status_reads.get();
+        assert_eq!(taken, kicks, "lo takes every frame");
+        assert!(
+            reads <= 4 * kicks as u64,
+            "{reads} slot reads for {kicks} one-frame kicks"
+        );
+        // A batch: 100 frames, one kick.
+        tx.status_reads.set(0);
+        for _ in 0..100 {
+            queue(&mut tx);
+        }
+        assert_eq!(tx.queued_count(), 100);
+        assert_eq!(tx.flush_nonblocking().unwrap(), 100);
+        assert!(
+            tx.status_reads.get() <= 4 * 100,
+            "{}",
+            tx.status_reads.get()
+        );
+        assert_eq!(tx.queued_count(), 0);
+    }
+
+    /// A slot handed out but not sent is the next one handed out: the
+    /// frames queued stay in ring order, and the kernel sends them all.
+    #[test]
+    fn a_dropped_slot_is_handed_out_again() {
+        let mut tx = match InjectorBuilder::default()
+            .interface("lo")
+            .frame_count(8)
+            .build()
+        {
+            Ok(tx) => tx,
+            Err(e) => {
+                eprintln!("skip (needs CAP_NET_RAW): {e}");
+                return;
+            }
+        };
+        let frame = [0xffu8; 64];
+        let send = |tx: &mut Injector| {
+            let mut slot = tx.allocate(64).expect("free slot");
+            slot.data_mut()[..64].copy_from_slice(&frame);
+            slot.set_len(64);
+            slot.send();
+        };
+        send(&mut tx);
+        drop(tx.allocate(64).expect("free slot"));
+        send(&mut tx);
+        send(&mut tx);
+        assert_eq!(tx.queued_count(), 3);
+        assert_eq!(tx.flush_nonblocking().unwrap(), 3, "no hole stops the kick");
+        assert_eq!(tx.queued_count(), 0);
+        tx.wait_drained(std::time::Duration::from_secs(2)).unwrap();
     }
 
     /// frame_capacity should equal frame_size minus the tpacket2_hdr alignment.

@@ -380,6 +380,12 @@ stop-and-report behaviour (`Injector::rejected_slots()` counts the
 refused slots until `allocate` hands the slot out again — it now reuses a
 refused slot first, since the kernel's TX position waits on it).
 
+`Injector::allocate` hands out slots in ring order — the order the kernel
+sends them in — and returns `None` while the next slot is still in flight,
+even if `available_slots()` counts free ones further on (0.31 took those,
+and the kernel then held the frames until the gap was filled). Kick and
+wait as for a full ring.
+
 ### Reads, statistics, timing
 
 - A `Packets` loop stopped mid-block no longer discards the rest of the

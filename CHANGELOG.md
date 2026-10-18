@@ -142,9 +142,16 @@ has an old → new snippet there.
   until every frame in flight completes. They use `MSG_DONTWAIT` now;
   `Injector`'s drop no longer blocks either. A kick the socket's send
   buffer cuts short leaves the rest of the queued frames for the next kick
-  (the injector reads what is still queued from the ring), and `send` on a
+  (the injector follows the kernel's TX position, reading only the slots
+  each kick took — O(1) per frame, not a scan of the ring), and `send` on a
   full ring whose kick can hand nothing over waits for the device to free
   room instead of kicking again.
+- **`Injector::allocate` skipped to any free slot further on** — past a
+  slot handed out but not sent, or a frame still in flight — and the
+  kernel, which sends strictly in ring order, then held every frame queued
+  after the gap until the skipped slot was queued again. Slots are handed
+  out in ring order now (`None` while the next one is still in flight),
+  and a dropped `TxSlot` is the next one handed out.
 - **`Injector::wait_drained` spun at 100% CPU** (#226): `poll(POLLOUT)` on a
   TX-ring socket returns at once whatever the ring holds. It checks the
   ring every millisecond and sleeps in between.

@@ -70,7 +70,10 @@ impl AnomalySink for RateLimitAnomaliesLayered {
             window_start: ts,
             count: 0,
         });
-        if ts.saturating_sub(bucket.window_start) >= self.period {
+        // Either way round: a clock that stepped back by a period or more
+        // starts a new window rather than keeping the budget spent until it
+        // catches up.
+        if crate::layer::dedupe::distance(ts, bucket.window_start) >= self.period {
             bucket.window_start = ts;
             bucket.count = 0;
         }
@@ -153,6 +156,25 @@ mod tests {
         sink.begin("X", Severity::Info, Timestamp::new(0, 20_000_000))
             .emit();
         assert_eq!(*n.lock().unwrap(), 0);
+    }
+
+    /// Review r2: a clock that steps back by more than a period starts a
+    /// new window (the budget stayed spent until the clock caught up).
+    #[test]
+    fn a_backward_clock_step_starts_a_new_window() {
+        let inner = Capture::default();
+        let n = inner.n();
+        let mut sink: Box<dyn AnomalySink> =
+            Box::new(RateLimitAnomalies::new(1, Duration::from_millis(10))).wrap(Box::new(inner));
+        for ts in [
+            Timestamp::new(1_000, 0),
+            Timestamp::new(1_000, 1),
+            Timestamp::new(10, 0),
+            Timestamp::new(10, 1),
+        ] {
+            sink.begin("X", Severity::Info, ts).emit();
+        }
+        assert_eq!(*n.lock().unwrap(), 2);
     }
 
     /// The period is packet time: the budget refills a full period after

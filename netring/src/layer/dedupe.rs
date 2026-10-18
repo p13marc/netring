@@ -108,25 +108,48 @@ impl std::fmt::Write for KeyHasher {
     }
 }
 
-/// The dedup identity of an anomaly: `kind`, then the key's `Debug` text.
-fn dedupe_hash(kind: &'static str, key: Option<&dyn crate::anomaly::Key>) -> u64 {
+/// The dedup identity of an anomaly: `kind`, then the key's `Debug` text —
+/// or, for a record without a key (an owned anomaly published with
+/// `publish_owned`, endpoints set by hand), its endpoints: two such
+/// anomalies about different flows are not duplicates.
+fn dedupe_hash(
+    kind: &'static str,
+    key: Option<&dyn crate::anomaly::Key>,
+    endpoints: Option<&crate::anomaly::sink::Endpoints>,
+) -> u64 {
     let mut h = KeyHasher::new();
     h.push(kind.as_bytes());
     // A separator byte no `&str` contains: `kind` "ab" + key "c" must not
     // hash like `kind` "a" + key "bc".
     h.push(&[0xff]);
-    if let Some(k) = key {
-        let _ = write!(h, "{k:?}");
+    match (key, endpoints) {
+        (Some(k), _) => {
+            let _ = write!(h, "{k:?}");
+        }
+        (None, Some(e)) => {
+            h.push(&[0xfe]);
+            let _ = write!(h, "{e:?}");
+        }
+        (None, None) => {}
     }
     h.finish()
+}
+
+/// How far apart two packet timestamps are, either way round. A repeat
+/// stamped *earlier* than the one remembered (several capture queues, a
+/// merged replay) is within the window only if it is that close — a clock
+/// that stepped back by more than the window starts afresh instead of
+/// suppressing the key until the clock catches up.
+pub(crate) fn distance(a: Timestamp, b: Timestamp) -> Duration {
+    a.saturating_sub(b).max(b.saturating_sub(a))
 }
 
 impl AnomalySink for DedupeAnomaliesLayered {
     fn write(&mut self, record: &AnomalyRecord<'_>) {
         let (kind, ts) = (record.kind, record.ts);
-        let id = dedupe_hash(kind, record.key);
+        let id = dedupe_hash(kind, record.key, record.endpoints.as_ref());
         if let Some(prev) = self.seen.get(&id)
-            && ts.saturating_sub(*prev) < self.window
+            && distance(ts, *prev) < self.window
         {
             return;
         }
@@ -137,8 +160,7 @@ impl AnomalySink for DedupeAnomaliesLayered {
         if self.inserts >= PURGE_EVERY {
             self.inserts = 0;
             let window = self.window;
-            self.seen
-                .retain(|_, last| ts.saturating_sub(*last) < window);
+            self.seen.retain(|_, last| distance(ts, *last) < window);
         }
         self.inner.write(record);
     }
@@ -226,6 +248,53 @@ mod tests {
         assert_eq!(calls.lock().unwrap().len(), 2);
     }
 
+    /// Review r2: after the clock steps back by more than the window, the
+    /// key isn't suppressed until the clock catches up — the step starts
+    /// afresh; a repeat right after it is still a duplicate.
+    #[test]
+    fn a_backward_clock_step_does_not_suppress_for_the_whole_step() {
+        let inner = Capture::default();
+        let calls = inner.list();
+        let mut sink: Box<dyn AnomalySink> =
+            Box::new(DedupeAnomalies::within(Duration::from_millis(10))).wrap(Box::new(inner));
+        for ts in [
+            Timestamp::new(1_000, 0),
+            Timestamp::new(10, 0),
+            Timestamp::new(10, 1_000_000),
+            // A small reorder within the window is still a duplicate.
+            Timestamp::new(9, 999_000_000),
+        ] {
+            sink.begin("X", Severity::Info, ts).with_key(&1u32).emit();
+        }
+        assert_eq!(calls.lock().unwrap().len(), 2);
+    }
+
+    /// Review r3: anomalies without a key — an owned anomaly published
+    /// with `publish_owned` — about different flows are not duplicates of
+    /// each other; the same flow's are.
+    #[test]
+    fn keyless_records_dedupe_by_their_endpoints() {
+        use crate::anomaly::sink::{AnomalyRecord, Endpoints};
+        let inner = Capture::default();
+        let calls = inner.list();
+        let mut sink: Box<dyn AnomalySink> =
+            Box::new(DedupeAnomalies::within(Duration::from_secs(10))).wrap(Box::new(inner));
+        let flow = |port: u16| {
+            Endpoints::new(
+                format!("10.0.0.9:{port}").parse().unwrap(),
+                "10.0.0.1:53".parse().unwrap(),
+                Some("UDP"),
+                false,
+            )
+        };
+        for e in [flow(40_000), flow(40_001), flow(40_000)] {
+            sink.write(
+                &AnomalyRecord::new("Dga", Severity::Info, Timestamp::new(1, 0)).with_endpoints(e),
+            );
+        }
+        assert_eq!(*calls.lock().unwrap(), vec!["Dga", "Dga"]);
+    }
+
     /// The same kind and key text dedupe together, whatever splits the
     /// text into `write_str` calls; a different kind doesn't.
     #[test]
@@ -245,17 +314,25 @@ mod tests {
         ]);
         assert_eq!(format!("{one:?}"), long);
         assert_eq!(
-            dedupe_hash("K", Some(&one as &dyn crate::anomaly::Key)),
-            dedupe_hash("K", Some(&many as &dyn crate::anomaly::Key))
+            dedupe_hash("K", Some(&one as &dyn crate::anomaly::Key), None),
+            dedupe_hash("K", Some(&many as &dyn crate::anomaly::Key), None)
         );
         assert_ne!(
-            dedupe_hash("K", Some(&one as &dyn crate::anomaly::Key)),
-            dedupe_hash("L", Some(&one as &dyn crate::anomaly::Key))
+            dedupe_hash("K", Some(&one as &dyn crate::anomaly::Key), None),
+            dedupe_hash("L", Some(&one as &dyn crate::anomaly::Key), None)
         );
         // `kind` "ab" + key "c" is not `kind` "a" + key "bc".
         assert_ne!(
-            dedupe_hash("ab", Some(&Chunked(&["c"]) as &dyn crate::anomaly::Key)),
-            dedupe_hash("a", Some(&Chunked(&["bc"]) as &dyn crate::anomaly::Key))
+            dedupe_hash(
+                "ab",
+                Some(&Chunked(&["c"]) as &dyn crate::anomaly::Key),
+                None
+            ),
+            dedupe_hash(
+                "a",
+                Some(&Chunked(&["bc"]) as &dyn crate::anomaly::Key),
+                None
+            )
         );
     }
 

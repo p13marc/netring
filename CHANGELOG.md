@@ -183,7 +183,10 @@ has an old → new snippet there.
   buckets.
 - **`DedupeAnomalies` / `RateLimitAnomalies` measured wall-clock windows**
   (#216), so a fast replay collapsed an hour into one window; they use
-  packet time.
+  packet time (a clock that steps back by more than a window starts
+  afresh). `DedupeAnomalies` also told keyless anomalies — a
+  `pattern_detector!` score, an owned anomaly — of different flows apart
+  only by their kind; it now uses their endpoints.
 - `with_broadcast::<P>()` after `protocol::<P>()` delivered every message
   twice (#216).
 - The kernel prefilter stays on when IP-fragment reassembly is armed (it

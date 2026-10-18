@@ -24,6 +24,7 @@
 
 use crate::anomaly::sink::AnomalySink;
 
+mod clock;
 mod dedupe;
 mod min_severity;
 mod rate_limit;

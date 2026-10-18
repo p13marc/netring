@@ -9,17 +9,22 @@ use rustc_hash::{FxHashMap, FxHasher};
 
 use crate::anomaly::sink::{AnomalyRecord, AnomalySink};
 use crate::layer::Layer;
+use crate::layer::clock::{Reading, SteadyClock};
 
 /// Suppress duplicate anomalies (same `kind` + same `Debug`-formatted
 /// `key`) within a sliding `window`. Subsequent identical anomalies
 /// within the window are dropped; once the window expires the next
 /// one re-fires.
 ///
-/// The window is measured in **packet time** — each anomaly's own
-/// timestamp — so a fast [`Monitor::replay`](crate::monitor::Monitor)
-/// suppresses exactly what a live run over the same traffic would, and
-/// an anomaly with a timestamp before the one it repeats counts as
-/// within the window.
+/// The window is measured in **packet time** — the anomalies' own
+/// timestamps — so a fast [`Monitor::replay`](crate::monitor::Monitor)
+/// suppresses exactly what a live run over the same traffic would. Time
+/// is the high-water mark of those timestamps: an anomaly stamped earlier
+/// than the latest (another capture queue's or NIC's clock, a reorder)
+/// reads as that, so interleaved clocks don't reopen the window. A clock
+/// that steps back for good — its anomalies still more than a window
+/// behind after a window of their own time — is followed, and the
+/// suppression starts afresh.
 ///
 /// Each `(kind, key)` pair is remembered as a 64-bit hash of `kind` and
 /// the key's `Debug` text (written straight into the hasher — no `String`
@@ -48,6 +53,7 @@ impl Layer for DedupeAnomalies {
             window: self.window,
             seen: FxHashMap::default(),
             inserts: 0,
+            clock: SteadyClock::default(),
         })
     }
 }
@@ -59,9 +65,10 @@ const PURGE_EVERY: u32 = 1024;
 pub struct DedupeAnomaliesLayered {
     inner: Box<dyn AnomalySink>,
     window: Duration,
-    /// `(kind, key)` hash → when it last fired (packet time).
+    /// `(kind, key)` hash → when it last fired (on `clock`).
     seen: FxHashMap<u64, Timestamp>,
     inserts: u32,
+    clock: SteadyClock,
 }
 
 /// Hashes `Debug` output as it is written. Bytes go to the hasher in
@@ -135,32 +142,32 @@ fn dedupe_hash(
     h.finish()
 }
 
-/// How far apart two packet timestamps are, either way round. A repeat
-/// stamped *earlier* than the one remembered (several capture queues, a
-/// merged replay) is within the window only if it is that close — a clock
-/// that stepped back by more than the window starts afresh instead of
-/// suppressing the key until the clock catches up.
-pub(crate) fn distance(a: Timestamp, b: Timestamp) -> Duration {
-    a.saturating_sub(b).max(b.saturating_sub(a))
-}
-
 impl AnomalySink for DedupeAnomaliesLayered {
     fn write(&mut self, record: &AnomalyRecord<'_>) {
-        let (kind, ts) = (record.kind, record.ts);
+        let kind = record.kind;
+        let now = match self.clock.read(record.ts, self.window) {
+            Reading::Now(now) => now,
+            Reading::Restarted(now) => {
+                // Remembered on the old clock: none of it holds now.
+                self.seen.clear();
+                now
+            }
+        };
         let id = dedupe_hash(kind, record.key, record.endpoints.as_ref());
         if let Some(prev) = self.seen.get(&id)
-            && distance(ts, *prev) < self.window
+            && now.saturating_sub(*prev) < self.window
         {
             return;
         }
-        self.seen.insert(id, ts);
+        self.seen.insert(id, now);
         // Purge expired entries now and then, to bound the table in
         // long-running monitors.
         self.inserts += 1;
         if self.inserts >= PURGE_EVERY {
             self.inserts = 0;
             let window = self.window;
-            self.seen.retain(|_, last| distance(ts, *last) < window);
+            self.seen
+                .retain(|_, last| now.saturating_sub(*last) < window);
         }
         self.inner.write(record);
     }
@@ -249,8 +256,9 @@ mod tests {
     }
 
     /// Review r2: after the clock steps back by more than the window, the
-    /// key isn't suppressed until the clock catches up — the step starts
-    /// afresh; a repeat right after it is still a duplicate.
+    /// key isn't suppressed until the clock catches up — once the earlier
+    /// clock has run a window, it starts afresh; a repeat right after that
+    /// is still a duplicate.
     #[test]
     fn a_backward_clock_step_does_not_suppress_for_the_whole_step() {
         let inner = Capture::default();
@@ -259,14 +267,38 @@ mod tests {
             Box::new(DedupeAnomalies::within(Duration::from_millis(10))).wrap(Box::new(inner));
         for ts in [
             Timestamp::new(1_000, 0),
+            // The step: within the window it lands in.
             Timestamp::new(10, 0),
             Timestamp::new(10, 1_000_000),
+            // A window of the earlier clock later: afresh.
+            Timestamp::new(10, 11_000_000),
+            Timestamp::new(10, 12_000_000),
             // A small reorder within the window is still a duplicate.
-            Timestamp::new(9, 999_000_000),
+            Timestamp::new(10, 10_500_000),
         ] {
             sink.begin("X", Severity::Info, ts).with_key(&1u32).emit();
         }
         assert_eq!(calls.lock().unwrap().len(), 2);
+    }
+
+    /// Review r3: two clocks interleaved (one NIC on a PHC in TAI, one on
+    /// system time, 37 s apart): measured on each record's own timestamp,
+    /// the step-back rule saw a clock step at every other record and
+    /// reopened the window each time — 200 of 200 passed. The window
+    /// follows the later clock now: one passes.
+    #[test]
+    fn interleaved_clocks_keep_the_window() {
+        let inner = Capture::default();
+        let calls = inner.list();
+        let mut sink: Box<dyn AnomalySink> =
+            Box::new(DedupeAnomalies::within(Duration::from_secs(10))).wrap(Box::new(inner));
+        for i in 0..200u32 {
+            let ms = i * 10;
+            let base = if i % 2 == 0 { 1_037 } else { 1_000 };
+            let ts = Timestamp::new(base + ms / 1000, (ms % 1000) * 1_000_000);
+            sink.begin("X", Severity::Info, ts).with_key(&1u32).emit();
+        }
+        assert_eq!(calls.lock().unwrap().len(), 1);
     }
 
     /// Review r3: anomalies without a key — an owned anomaly published
@@ -345,6 +377,7 @@ mod tests {
             window: Duration::from_secs(1),
             seen: FxHashMap::default(),
             inserts: 0,
+            clock: SteadyClock::default(),
         };
         for i in 0..5_000u32 {
             // One distinct key per millisecond: at most ~1000 within a window.

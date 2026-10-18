@@ -395,7 +395,9 @@ wait as for a full ring.
   (`while let Some(_) = cap.next_batch() {}`) if "skip what's buffered" was
   the intent.
 - `DedupeAnomalies` / `RateLimitAnomalies` windows are packet time (a fast
-  replay no longer collapses an hour into one window).
+  replay no longer collapses an hour into one window): the latest anomaly
+  timestamp seen, so an earlier-stamped one — another NIC's clock —
+  counts toward the current window.
 - Traffic aggregation keeps at most `AggregateConfig::max_keys` (4096)
   keys per bucket per dimension; `report.overflow()` counts the rest
   (cumulative). Set `max_keys = usize::MAX` for the old unbounded tables.

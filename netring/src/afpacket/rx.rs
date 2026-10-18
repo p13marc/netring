@@ -988,7 +988,7 @@ impl CaptureBuilder {
     /// Byte counts follow the data: with re-insertion off, a tagged
     /// packet's [`view`](crate::Packet::view) — and every flow count built
     /// on it — is 4 bytes shorter than what was on the wire (the same as
-    /// an AF_XDP capture whose NIC strips the tag).
+    /// an AF_XDP capture whose NIC strips the tag; flowscope#222).
     ///
     /// Re-insertion needs 4 bytes of headroom in front of each frame, which
     /// the builder reserves with `PACKET_RESERVE`. Packets of non-Ethernet

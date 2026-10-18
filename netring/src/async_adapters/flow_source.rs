@@ -130,7 +130,7 @@ pub(crate) fn view_from_parts(
     let ts = ts.unwrap_or_else(crate::async_adapters::flow_stream::current_timestamp);
     // AF_XDP frames are never cut: the wire length is the frame's. A tag
     // the NIC stripped into the metadata is not counted (see
-    // `Packet::view`).
+    // `Packet::view`, flowscope#222).
     PacketView::new(data, ts)
         .with_wire_len(data.len())
         .with_rx_metadata(rx_metadata)

@@ -102,7 +102,8 @@ forwards untagged as 0.31 did.
 Flow byte counts follow the frame: a tagged packet counts its tag when it
 was re-inserted, not when it stays stripped (`vlan_reinsert(false)`, a
 kernel before 3.14, AF_XDP with the NIC stripping it) — 4 bytes per packet
-apart.
+apart, until flowscope can count bytes missing from the front of a frame
+(flowscope#222).
 
 `BpfAncillary` is `#[non_exhaustive]`: build it with `BpfAncillary::NONE`,
 `stripped(tag)` or `reinserted(tag)`. Code reading the raw ring through

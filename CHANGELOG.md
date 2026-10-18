@@ -110,7 +110,8 @@ has an old → new snippet there.
   length too. Packets a snap length cut are tracked (flowscope 0.25
   skipped them). A VLAN tag that is not in the frame — re-insertion off,
   AF_XDP with the NIC stripping it — is not counted (4 bytes per tagged
-  packet; flowscope's wire length only extends a frame at its end).
+  packet; flowscope's wire length only extends a frame at its end —
+  flowscope#222).
 - **`AsyncPcapSource` with `loop_at_eof` re-read forever** a capture with
   no packet of a supported link type (802.11, PPP, …), yielding nothing;
   a pass that yields no packet now ends the stream.

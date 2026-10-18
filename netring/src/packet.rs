@@ -497,7 +497,8 @@ impl<'a> Packet<'a> {
     /// would read as a snap cut and every such packet as truncated. Byte
     /// counts of tagged traffic are then 4 bytes per packet lower than with
     /// re-insertion, as on AF_XDP, where the NIC strips the tag into the RX
-    /// metadata.
+    /// metadata. Counting it needs a flowscope API for bytes missing from
+    /// the front of a frame (flowscope#222).
     ///
     /// # Examples
     ///

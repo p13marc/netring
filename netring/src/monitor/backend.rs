@@ -171,7 +171,7 @@ impl AnyBackend {
                         // the NIC stripped into the metadata is not in it
                         // (flowscope has no place for front bytes), so
                         // tagged byte counts are 4 lower than re-inserted
-                        // AF_PACKET ones; see `Packet::view`.
+                        // AF_PACKET ones; see `Packet::view`, flowscope#222.
                         on_packet(
                             PacketView::new(pkt.data(), ts)
                                 .with_wire_len(pkt.data().len())

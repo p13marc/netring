@@ -21,8 +21,76 @@ use std::os::fd::{AsFd, AsRawFd, BorrowedFd};
 use std::time::Duration;
 
 use crate::afpacket::tx::Injector;
-use crate::async_adapters::registered::Registered;
+use crate::async_adapters::registered::{ProbeTimer, Registered, health_io};
 use crate::error::Error;
+
+/// How often a TX wait looks at the ring once writability can't be trusted
+/// (see [`AsyncInjector::wait_tx`]) — as the sync `Injector::wait_drained`
+/// does (#226).
+const TX_POLL: Duration = Duration::from_millis(1);
+/// How many [`TX_POLL`] ticks between liveness checks in that mode.
+const TX_POLL_HEALTH_EVERY: u32 = 1000;
+/// The first wait before kicking again a frame the device dropped (see
+/// [`Backoff`]); it doubles up to [`BACKOFF_MAX`]. Short: with qdisc
+/// bypass, `ENOBUFS` also means a busy NIC's TX queue is full for a
+/// moment, and a millisecond's pause there costs line rate.
+const BACKOFF_MIN: Duration = Duration::from_micros(20);
+/// The longest wait between two kicks of a frame the device keeps
+/// dropping.
+const BACKOFF_MAX: Duration = Duration::from_millis(100);
+
+/// What a kick of the adapter did.
+struct Kicked {
+    /// Frames the kernel took.
+    taken: usize,
+    /// No readiness event will say when to kick again: the device dropped
+    /// the frame at the kernel's TX position, or the interface is down.
+    retry_later: bool,
+}
+
+/// Waits between kicks that made no progress for a reason no readiness
+/// event reports the end of: the device dropping the frame at the kernel's
+/// TX position (`ENOBUFS` — its freed skb even raises a writability edge of
+/// its own, so a writability wait returned at once and the kick spun at
+/// 100% CPU). 20 µs, doubling to 100 ms (about a dozen wake-ups to get
+/// there, then ten a second); back to 20 µs on progress. A timerfd: no
+/// tokio time driver needed.
+struct Backoff {
+    timer: Option<ProbeTimer>,
+    next: Duration,
+}
+
+impl Backoff {
+    fn new() -> Self {
+        Self {
+            timer: None,
+            next: BACKOFF_MIN,
+        }
+    }
+
+    fn reset(&mut self) {
+        self.next = BACKOFF_MIN;
+    }
+
+    /// The next wait, doubling the one after it.
+    fn step(&mut self) -> Duration {
+        let wait = self.next;
+        self.next = (self.next * 2).min(BACKOFF_MAX);
+        wait
+    }
+
+    async fn wait(&mut self) -> Result<(), Error> {
+        if self.timer.is_none() {
+            self.timer = Some(ProbeTimer::disarmed().map_err(Error::Io)?);
+        }
+        let wait = self.step();
+        let Some(timer) = &self.timer else {
+            return Ok(());
+        };
+        timer.arm_once(wait).map_err(Error::Io)?;
+        timer.tick().await.map_err(Error::Io)
+    }
+}
 
 /// Async wrapper around [`Injector`] using tokio's [`AsyncFd`](tokio::io::unix::AsyncFd).
 ///
@@ -42,6 +110,25 @@ use crate::error::Error;
 /// transmitted by the next `flush()`.
 pub struct AsyncInjector {
     inner: Registered<Injector>,
+    /// Set once the registration reported write-closed: TX timestamps on
+    /// the socket's error queue make epoll report `EPOLLOUT | EPOLLERR`,
+    /// which tokio keeps as a sticky write-closed bit — every later
+    /// writability wait would resolve at once. TX waits then poll the ring
+    /// on [`TX_POLL`] instead.
+    write_closed: bool,
+    /// The [`TX_POLL`] clock (a timerfd, no time driver), made on first use.
+    poll_timer: Option<ProbeTimer>,
+    /// Ticks since the last liveness check in the polled mode.
+    poll_ticks: u32,
+    /// Between kicks of a frame the device keeps dropping.
+    backoff: Backoff,
+}
+
+/// The registration's liveness check: `ENETDOWN` once the injector's
+/// interface was removed (#225).
+fn sink_health(tx: &Injector) -> std::io::Result<()> {
+    use std::os::fd::AsFd;
+    health_io(crate::afpacket::socket::check_health(tx.as_fd()))
 }
 
 impl AsyncInjector {
@@ -51,13 +138,88 @@ impl AsyncInjector {
     /// `POLLOUT` (the kernel signals slot reclamation via `POLLOUT`), so the
     /// adapter holds one extra fd for its lifetime.
     ///
+    /// Write waits ([`send`](Self::send) when the ring is full,
+    /// [`wait_drained`](Self::wait_drained), [`send_stream`](Self::send_stream))
+    /// end with `ENETDOWN` once the injector's interface is removed: queued
+    /// frames can never drain then, and the kernel raises no event for a TX
+    /// socket. The wait checks every second of idle waiting, on a timerfd
+    /// opened on its first idle wait (#225).
+    ///
     /// # Errors
     ///
     /// Returns [`Error::Io`] if duplicating the fd or the `AsyncFd`
     /// registration fails.
     pub fn new(tx: Injector) -> Result<Self, Error> {
-        let inner = Registered::new(tx, tokio::io::Interest::WRITABLE).map_err(Error::Io)?;
-        Ok(Self { inner })
+        let inner =
+            Registered::new(tx, tokio::io::Interest::WRITABLE, sink_health).map_err(Error::Io)?;
+        Ok(Self {
+            inner,
+            write_closed: false,
+            poll_timer: None,
+            poll_ticks: 0,
+            backoff: Backoff::new(),
+        })
+    }
+
+    /// Wait for the TX ring to make progress (a slot freed, a frame
+    /// completed): the socket's writability — the kernel wakes writers as
+    /// the device completes frames — or, once writability is stuck on
+    /// (write-closed, see [`Self::write_closed`]), a 1 ms poll on a
+    /// timerfd. Ends with the injector's error once it is found dead.
+    async fn wait_tx(&mut self) -> Result<(), Error> {
+        if !self.write_closed {
+            let mut guard = self.inner.writable_mut().await.map_err(Error::Io)?;
+            if guard.ready().is_write_closed() {
+                self.write_closed = true;
+            }
+            guard.clear_ready();
+            if !self.write_closed {
+                return Ok(());
+            }
+        }
+        if self.poll_timer.is_none() {
+            self.poll_timer = Some(ProbeTimer::new(TX_POLL).map_err(Error::Io)?);
+        }
+        if let Some(timer) = &self.poll_timer {
+            timer.tick().await.map_err(Error::Io)?;
+        }
+        self.poll_ticks += 1;
+        if self.poll_ticks >= TX_POLL_HEALTH_EVERY {
+            self.poll_ticks = 0;
+            sink_health(self.inner.get_ref()).map_err(Error::Io)?;
+        }
+        Ok(())
+    }
+
+    /// Kick the queued frames without waiting for the device
+    /// ([`Injector::flush_nonblocking`]). A kick on a removed interface
+    /// fails with `ENXIO` (no device): it reports the liveness check's
+    /// `ENETDOWN` then, as the waits do. One on an interface that is only
+    /// down fails with `ENETDOWN` too, but the socket is still bound: the
+    /// frames stay queued, and the kick is retried later — a down interface
+    /// is waited out. Progress resets the backoff.
+    fn kick(&mut self) -> Result<Kicked, Error> {
+        match self.inner.get_mut().kick() {
+            Ok(k) => {
+                if k.taken > 0 {
+                    self.backoff.reset();
+                }
+                Ok(Kicked {
+                    taken: k.taken,
+                    retry_later: k.device_dropped,
+                })
+            }
+            Err(e) => {
+                sink_health(self.inner.get_ref()).map_err(Error::Io)?;
+                if matches!(&e, Error::Io(io) if io.raw_os_error() == Some(libc::ENETDOWN)) {
+                    return Ok(Kicked {
+                        taken: 0,
+                        retry_later: true,
+                    });
+                }
+                Err(e)
+            }
+        }
     }
 
     /// Open an async injector on `interface` with default settings.
@@ -112,29 +274,39 @@ impl AsyncInjector {
                 return Ok(());
             }
             // Ring full. Frames queued since the last flush leave the ring
-            // only on a kick (tpacket_snd() runs from sendto()): kick, and
-            // retry before waiting for a slot that would never come.
-            if self.inner.get_mut().flush()? > 0 {
+            // only on a kick (tpacket_snd() runs from sendto()): kick —
+            // without waiting for the device (#228) — and retry at once
+            // only if it handed something over. A kick that could hand over
+            // nothing (the send buffer is full of frames the device still
+            // holds) would fail again: wait for the device instead, so the
+            // task yields. A frame the device dropped (ENOBUFS) is tried
+            // again after a backoff: no event says when it would go.
+            let kick = self.kick()?;
+            if kick.taken > 0 {
                 continue;
             }
-            // Ring full: wait for kernel to reclaim a slot via POLLOUT.
-            let mut guard = self.inner.writable_mut().await.map_err(Error::Io)?;
-            // The reclamation might be partial; clear_ready re-arms the
-            // reactor so the next iteration's writable_mut() will block.
-            // We do not consult pending_count here (would re-borrow self.inner
-            // while guard is alive); the next allocate() attempt will tell us.
-            guard.clear_ready();
+            if kick.retry_later {
+                self.backoff.wait().await?;
+            } else {
+                self.wait_tx().await?;
+            }
         }
     }
 
-    /// Kick the kernel to transmit queued frames.
+    /// Kick the kernel to transmit queued frames, without waiting for the
+    /// device to complete them: forwards to
+    /// [`Injector::flush_nonblocking`] (`MSG_DONTWAIT`). The blocking
+    /// [`Injector::flush`] would wait for every frame in flight — on the
+    /// runtime's thread, possibly forever on a device that holds frames
+    /// (#228). Await [`wait_drained`](Self::wait_drained) to wait for
+    /// completion.
     ///
-    /// Forwards to [`Injector::flush`]; awaits no I/O readiness today
-    /// (the underlying syscall is non-blocking with `EAGAIN`/`ENOBUFS`
-    /// reported as transient success). Async signature reserves room for
-    /// future enhancements.
+    /// Returns the number of frames the kick handed to the kernel; frames
+    /// it could not (the socket's send buffer is full) stay queued for the
+    /// next `flush` / `send` — `0` too while the interface is down. Fails
+    /// with `ENETDOWN` once the interface was removed.
     pub async fn flush(&mut self) -> Result<usize, Error> {
-        self.inner.get_mut().flush()
+        self.kick().map(|k| k.taken)
     }
 
     /// Wait until every queued frame has been transmitted.
@@ -143,6 +315,13 @@ impl AsyncInjector {
     /// [`Injector::pending_count`] until it hits zero or `timeout`
     /// elapses. Use before drop when you need to observe transmission
     /// failures or guarantee the kernel has finished.
+    ///
+    /// # Errors
+    ///
+    /// [`Error::Io`] with `TimedOut` when `timeout` elapses first, with
+    /// `ENETDOWN` once the interface was removed (frames still queued can
+    /// never drain then), or when the readiness wait fails. An interface
+    /// that is down is waited out: its frames leave once it is up.
     pub async fn wait_drained(&mut self, timeout: Duration) -> Result<(), Error> {
         let deadline = tokio::time::Instant::now() + timeout;
         loop {
@@ -157,15 +336,27 @@ impl AsyncInjector {
                     )));
                 }
             };
+            // Frames a kick could not hand over (the send buffer was full)
+            // are kicked as the device frees room; one the device dropped,
+            // after a backoff.
+            let mut dropped = false;
+            if self.inner.get_ref().queued_count() > 0 {
+                let kick = self.kick()?;
+                dropped = kick.taken == 0 && kick.retry_later;
+            }
             // Cap each wait so we re-check pending_count even on partial
             // reclamation events.
             let slice = remaining.min(Duration::from_millis(10));
-            tokio::select! {
-                ready = self.inner.writable_mut() => {
-                    let mut guard = ready.map_err(Error::Io)?;
-                    guard.clear_ready();
+            if dropped {
+                tokio::select! {
+                    res = self.backoff.wait() => res?,
+                    _ = tokio::time::sleep(remaining) => {}
                 }
-                _ = tokio::time::sleep(slice) => {}
+            } else {
+                tokio::select! {
+                    res = self.wait_tx() => res?,
+                    _ = tokio::time::sleep(slice) => {}
+                }
             }
         }
     }
@@ -221,7 +412,7 @@ impl AsyncInjector {
         self.inner.get_ref().read_tx_timestamp()
     }
 
-    /// Borrow the inner sink (e.g., for `cumulative_stats`-style accessors).
+    /// Borrow the inner sink (e.g. for sink-level accessors).
     pub fn get_ref(&self) -> &Injector {
         self.inner.get_ref()
     }
@@ -416,5 +607,32 @@ mod pacer_tests {
             (wait.as_secs_f64() - 1.0).abs() < 1e-2,
             "expected ~1s, got {wait:?}"
         );
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Review r5: the backoff after a dropped frame started at 1 ms — with
+    /// qdisc bypass on a busy NIC, `ENOBUFS` is also a momentarily full TX
+    /// queue, and a millisecond's pause per such kick cuts line rate. It
+    /// starts at 20 µs and still doubles to 100 ms (no spin).
+    #[test]
+    fn backoff_starts_short_and_caps() {
+        let mut b = Backoff::new();
+        assert_eq!(b.step(), Duration::from_micros(20));
+        assert_eq!(b.step(), Duration::from_micros(40));
+        let mut last = Duration::ZERO;
+        let mut steps = 2;
+        while last < BACKOFF_MAX {
+            last = b.step();
+            steps += 1;
+        }
+        assert_eq!(last, BACKOFF_MAX);
+        assert!(steps <= 16, "{steps} waits to reach the cap");
+        assert_eq!(b.step(), BACKOFF_MAX);
+        b.reset();
+        assert_eq!(b.step(), Duration::from_micros(20));
     }
 }

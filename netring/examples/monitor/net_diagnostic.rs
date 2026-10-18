@@ -75,8 +75,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                     Severity::Warning
                 },
             )
-            .with("src", format!("{}", rst.key.a))
-            .with("dst", format!("{}", rst.key.b))
+            // The reset's flow is the handler's: the sink reads it from
+            // the initiator (`src`), not the key's address order.
+            .with_key(&rst.key)
             .with_metric("bytes", rst.stats.total_bytes() as f64)
             .emit();
             Ok(())

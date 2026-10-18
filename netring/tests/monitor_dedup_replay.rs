@@ -137,3 +137,139 @@ async fn loopback_profile_keeps_same_direction_twins() {
     let o = replay(&path, Some(Dedup::loopback())).await;
     assert_eq!(o.packets(), 2 * n as u64);
 }
+
+/// #217 (comment): dedup keys a packet on its **wire** length too. Two
+/// snap-truncated records with identical captured bytes, recorded in
+/// opposite directions 0.5 ms apart (the `lo` twin shape `Dedup::loopback`
+/// drops) but 1000 and 900 bytes long on the wire, are two packets. The
+/// Monitor's dedup keyed on the captured length only and dropped the
+/// second.
+#[tokio::test(flavor = "current_thread")]
+async fn snap_truncated_records_of_different_wire_lengths_are_kept() {
+    use netring::protocol::builtin::Udp;
+    use pcap_file::DataLink;
+    use pcap_file::pcapng::PcapNgWriter;
+    use pcap_file::pcapng::blocks::enhanced_packet::{EnhancedPacketBlock, EnhancedPacketOption};
+    use pcap_file::pcapng::blocks::interface_description::{
+        InterfaceDescriptionBlock, InterfaceDescriptionOption,
+    };
+
+    // A 1000-byte UDP datagram's first 64 bytes, twice.
+    let frame = flowscope::extract::parse::test_frames::ipv4_udp(
+        [10, 0, 0, 1],
+        [10, 0, 0, 2],
+        40_000,
+        9_999,
+        &[0x5a; 1000 - 42],
+    );
+    let captured = &frame[..64];
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("twins.pcapng");
+    {
+        let mut f = std::fs::File::create(&path).unwrap();
+        let mut w = PcapNgWriter::new(&mut f).expect("writer");
+        // Nanosecond timestamps (pcap-file writes the Duration's
+        // nanoseconds as the raw tick count).
+        w.write_pcapng_block(InterfaceDescriptionBlock {
+            linktype: DataLink::ETHERNET,
+            snaplen: 64,
+            options: vec![InterfaceDescriptionOption::IfTsResol(9)],
+        })
+        .expect("idb");
+        // Outbound (flags 0b10), then inbound (0b01) 0.5 ms later.
+        for (i, (wire, flags)) in [(1000u32, 2u32), (900, 1)].into_iter().enumerate() {
+            w.write_pcapng_block(EnhancedPacketBlock {
+                interface_id: 0,
+                timestamp: Duration::from_micros(1_000_000 + 500 * i as u64),
+                original_len: wire,
+                data: std::borrow::Cow::Borrowed(captured),
+                options: vec![EnhancedPacketOption::Flags(flags)],
+            })
+            .expect("epb");
+        }
+    }
+
+    let seen = Arc::new(AtomicUsize::new(0));
+    let s = Arc::clone(&seen);
+    Monitor::builder()
+        .pcap_source(&path)
+        .protocol::<Udp>()
+        .dedup(Dedup::loopback())
+        .on::<FlowPacket>(move |_: &FlowPacket| {
+            s.fetch_add(1, Ordering::Relaxed);
+            Ok(())
+        })
+        .build()
+        .unwrap()
+        .replay()
+        .await
+        .unwrap();
+    assert_eq!(
+        seen.load(Ordering::Relaxed),
+        2,
+        "different wire lengths: two packets, not a twin"
+    );
+}
+
+/// Guard: the same record twice — same wire length, opposite directions
+/// within the window — is still a twin `Dedup::loopback` drops.
+#[tokio::test(flavor = "current_thread")]
+async fn snap_truncated_twins_of_one_wire_length_are_dropped() {
+    use netring::protocol::builtin::Udp;
+    use pcap_file::DataLink;
+    use pcap_file::pcapng::PcapNgWriter;
+    use pcap_file::pcapng::blocks::enhanced_packet::{EnhancedPacketBlock, EnhancedPacketOption};
+    use pcap_file::pcapng::blocks::interface_description::{
+        InterfaceDescriptionBlock, InterfaceDescriptionOption,
+    };
+
+    let frame = flowscope::extract::parse::test_frames::ipv4_udp(
+        [10, 0, 0, 1],
+        [10, 0, 0, 2],
+        40_000,
+        9_999,
+        &[0x5a; 1000 - 42],
+    );
+    let captured = &frame[..64];
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("twins.pcapng");
+    {
+        let mut f = std::fs::File::create(&path).unwrap();
+        let mut w = PcapNgWriter::new(&mut f).expect("writer");
+        // Nanosecond timestamps (pcap-file writes the Duration's
+        // nanoseconds as the raw tick count).
+        w.write_pcapng_block(InterfaceDescriptionBlock {
+            linktype: DataLink::ETHERNET,
+            snaplen: 64,
+            options: vec![InterfaceDescriptionOption::IfTsResol(9)],
+        })
+        .expect("idb");
+        for (i, flags) in [2u32, 1].into_iter().enumerate() {
+            w.write_pcapng_block(EnhancedPacketBlock {
+                interface_id: 0,
+                timestamp: Duration::from_micros(1_000_000 + 500 * i as u64),
+                original_len: 1000,
+                data: std::borrow::Cow::Borrowed(captured),
+                options: vec![EnhancedPacketOption::Flags(flags)],
+            })
+            .expect("epb");
+        }
+    }
+
+    let seen = Arc::new(AtomicUsize::new(0));
+    let s = Arc::clone(&seen);
+    Monitor::builder()
+        .pcap_source(&path)
+        .protocol::<Udp>()
+        .dedup(Dedup::loopback())
+        .on::<FlowPacket>(move |_: &FlowPacket| {
+            s.fetch_add(1, Ordering::Relaxed);
+            Ok(())
+        })
+        .build()
+        .unwrap()
+        .replay()
+        .await
+        .unwrap();
+    assert_eq!(seen.load(Ordering::Relaxed), 1, "one packet and its twin");
+}

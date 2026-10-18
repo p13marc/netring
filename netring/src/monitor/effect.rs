@@ -94,28 +94,42 @@ impl Effects {
 
     /// Apply the effects to the monitor's anomaly sink. Called by
     /// `Dispatcher::dispatch_effects` after the batch is drained (the
-    /// `&mut Ctx` write phase).
-    pub(crate) fn apply(self, sink: &mut dyn crate::anomaly::sink::AnomalySink) {
+    /// `&mut Ctx` write phase), with the dispatched event's flow and its
+    /// initiator when it has one.
+    pub(crate) fn apply(
+        self,
+        sink: &mut dyn crate::anomaly::sink::AnomalySink,
+        flow: Option<(crate::protocol::FlowKey, flowscope::Orientation)>,
+    ) {
         for anomaly in self.anomalies {
-            apply_owned_anomaly(sink, anomaly);
+            apply_owned_anomaly(sink, anomaly, flow);
         }
     }
 }
 
-/// Write one [`OwnedAnomaly`] to a `&mut dyn AnomalySink`. Bridges the
-/// flattened owned form (post-`with_key`) back onto the sink's
-/// `write(kind, severity, ts, key, observations, metrics)` surface,
-/// reconstructing the 5-tuple key when the anomaly carries a complete one.
-fn apply_owned_anomaly(sink: &mut dyn crate::anomaly::sink::AnomalySink, a: OwnedAnomaly) {
+/// Write one [`OwnedAnomaly`] to a `&mut dyn AnomalySink`. When the
+/// anomaly's 5-tuple is the dispatched event's `flow` (either way round),
+/// the record's endpoints read it from the flow's initiator (directional);
+/// otherwise they are its fields as stored, not directional
+/// ([`Endpoints::from_owned`](crate::anomaly::sink::Endpoints::from_owned)).
+/// A complete 5-tuple is also attached as the flow key, in its canonical
+/// (address-sorted) form.
+fn apply_owned_anomaly(
+    sink: &mut dyn crate::anomaly::sink::AnomalySink,
+    a: OwnedAnomaly,
+    flow: Option<(crate::protocol::FlowKey, flowscope::Orientation)>,
+) {
     use std::borrow::Cow;
     use std::net::SocketAddr;
+
+    use crate::anomaly::sink::{AnomalyRecord, Endpoints};
 
     // `write` wants a `&'static str` kind. flowscope 0.22: `OwnedAnomaly::kind`
     // is a typed `DetectorKind` whose `as_str()` is `&'static str` for every
     // variant.
     let kind: &'static str = a.kind.as_str();
 
-    // Reconstruct a FiveTupleKey when the anomaly carries a full 5-tuple
+    // Reconstruct the flow key when the anomaly carries a full 5-tuple
     // (the common case for flow/session anomalies). Incomplete → no key.
     let key: Option<flowscope::extract::FiveTupleKey> = match (
         a.src_ip,
@@ -124,13 +138,15 @@ fn apply_owned_anomaly(sink: &mut dyn crate::anomaly::sink::AnomalySink, a: Owne
         a.dest_port,
         a.proto.and_then(l4proto_from_str),
     ) {
-        (Some(sip), Some(sp), Some(dip), Some(dp), Some(proto)) => {
-            Some(flowscope::extract::FiveTupleKey::new(
+        (Some(sip), Some(sp), Some(dip), Some(dp), Some(proto)) => Some(
+            flowscope::extract::FiveTupleKey::new(
                 proto,
                 SocketAddr::new(sip, sp),
                 SocketAddr::new(dip, dp),
-            ))
-        }
+            )
+            .canonical()
+            .0,
+        ),
         _ => None,
     };
 
@@ -141,16 +157,14 @@ fn apply_owned_anomaly(sink: &mut dyn crate::anomaly::sink::AnomalySink, a: Owne
         .map(|(l, v)| (*l, Cow::Borrowed(v.as_ref())))
         .collect();
 
-    let key_dyn: Option<&dyn crate::anomaly::key::Key> =
-        key.as_ref().map(|k| k as &dyn crate::anomaly::key::Key);
-    sink.write(
-        kind,
-        a.severity.into(),
-        a.ts,
-        key_dyn,
-        &observations,
-        &a.metrics,
-    );
+    let mut record = AnomalyRecord::new(kind, a.severity.into(), a.ts)
+        .with_observations(&observations)
+        .with_metrics(&a.metrics);
+    if let Some(k) = &key {
+        record = record.with_key(k);
+    }
+    record.endpoints = Endpoints::from_owned_in_flow(&a, flow);
+    sink.write(&record);
 }
 
 /// Map an `OwnedAnomaly::proto` label back to an `L4Proto` for key
@@ -161,7 +175,8 @@ fn l4proto_from_str(p: &str) -> Option<flowscope::L4Proto> {
         "tcp" | "TCP" => Some(L4Proto::Tcp),
         "udp" | "UDP" => Some(L4Proto::Udp),
         "icmp" | "ICMP" => Some(L4Proto::Icmp),
-        "icmpv6" | "icmp6" | "ipv6-icmp" => Some(L4Proto::IcmpV6),
+        "icmpv6" | "ICMPv6" | "icmp6" | "ipv6-icmp" | "IPv6-ICMP" => Some(L4Proto::IcmpV6),
+        "sctp" | "SCTP" => Some(L4Proto::Sctp),
         _ => None,
     }
 }
@@ -198,7 +213,7 @@ mod tests {
     use super::*;
     use crate::anomaly::Severity;
     use crate::anomaly::sink::NoopSink;
-    use crate::ctx::{CounterRegistry, SourceIdx, StateMap};
+    use crate::ctx::{CounterRegistry, StateMap};
     use crate::protocol::builtin::Tcp;
     use crate::protocol::event_typed::FlowStarted;
     use flowscope::Timestamp;
@@ -226,7 +241,7 @@ mod tests {
                 "10.0.0.2:80".parse().unwrap(),
             )),
             ts: Timestamp::new(0, 0),
-            source: SourceIdx(0),
+            source: None,
             monitor_name: None,
             state_map: state,
             sink,
@@ -237,6 +252,7 @@ mod tests {
             arp_table: None,
             side: None,
             orientation: None,
+            initiator: None,
         }
     }
 
@@ -281,52 +297,69 @@ mod tests {
 
     #[test]
     fn apply_writes_anomalies_to_the_sink_preserving_kind_and_reconstructed_key() {
-        use crate::anomaly::sink::AnomalySink;
-        use std::borrow::Cow;
+        use crate::anomaly::sink::{AnomalyRecord, AnomalySink, Endpoints};
 
         // A sink that records what `write` received.
         #[derive(Default)]
         struct Capturing {
-            writes: Vec<(&'static str, bool, usize)>, // (kind, has_key, obs_count)
+            // (kind, key, endpoints, obs_count)
+            writes: Vec<(
+                &'static str,
+                Option<flowscope::extract::FiveTupleKey>,
+                Option<Endpoints>,
+                usize,
+            )>,
         }
         impl AnomalySink for Capturing {
-            fn write(
-                &mut self,
-                kind: &'static str,
-                _severity: Severity,
-                _ts: Timestamp,
-                key: Option<&dyn crate::anomaly::key::Key>,
-                observations: &[(&'static str, Cow<'_, str>)],
-                _metrics: &[(&'static str, f64)],
-            ) {
-                self.writes.push((kind, key.is_some(), observations.len()));
+            fn write(&mut self, r: &AnomalyRecord<'_>) {
+                self.writes.push((
+                    r.kind,
+                    r.flow_key().copied(),
+                    r.endpoints,
+                    r.observations.len(),
+                ));
             }
         }
 
         let key = flowscope::extract::FiveTupleKey::new(
             flowscope::L4Proto::Tcp,
-            "10.0.0.1:1234".parse().unwrap(),
-            "10.0.0.2:443".parse().unwrap(),
+            "10.0.0.1:443".parse().unwrap(),
+            "10.0.0.2:1234".parse().unwrap(),
         );
-        let anomaly = OwnedAnomaly::new(
-            flowscope::DetectorKind::Other("ioc_match"),
-            Severity::Critical.into(),
-            Timestamp::new(0, 0),
-        )
-        .with_key(&key)
-        .with_observation("ja4", "t13d1516h2");
+        // 10.0.0.2 opened the flow (Reverse). The anomaly copies the
+        // address-sorted key, the shape an effect handler builds from
+        // `ctx.flow` (review r3).
+        let anomaly = || {
+            OwnedAnomaly::new(
+                flowscope::DetectorKind::Other("ioc_match"),
+                Severity::Critical.into(),
+                Timestamp::new(0, 0),
+            )
+            .with_key(&key)
+            .with_observation("ja4", "t13d1516h2")
+        };
 
+        // Dispatched for that flow: read from its initiator.
         let mut sink = Capturing::default();
-        Effects::emit(anomaly).apply(&mut sink);
-
+        Effects::emit(anomaly()).apply(&mut sink, Some((key, flowscope::Orientation::Reverse)));
         assert_eq!(sink.writes.len(), 1);
-        let (kind, has_key, obs) = sink.writes[0];
+        let (kind, got_key, endpoints, obs) = sink.writes[0];
         assert_eq!(kind, "ioc_match");
-        assert!(
-            has_key,
-            "complete 5-tuple should be reconstructed into a key"
-        );
+        // The complete 5-tuple is reconstructed into the canonical key …
+        assert_eq!(got_key, Some(key));
+        // … and the endpoints follow the flow's initiator (#215).
+        let e = endpoints.expect("endpoints");
+        assert_eq!(e.src(), Some(key.b));
+        assert_eq!(e.dest(), Some(key.a));
+        assert!(e.directional);
         assert_eq!(obs, 1);
+
+        // No flow to go by: as stored, and not claimed directional.
+        let mut sink = Capturing::default();
+        Effects::emit(anomaly()).apply(&mut sink, None);
+        let e = sink.writes[0].2.expect("endpoints");
+        assert_eq!(e.src(), Some(key.a));
+        assert!(!e.directional);
     }
 
     #[test]

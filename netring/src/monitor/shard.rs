@@ -34,6 +34,8 @@
 //! condition, or an error (failing to build or open its capture) — it
 //! sets the shared stop and its siblings' run loops stop too, so the
 //! runner returns that error instead of running on without the shard.
+//! A shard thread that can't even be spawned stops (and joins) the ones
+//! already running before the runner returns its error (#224).
 
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -82,8 +84,156 @@ impl Drop for StopOnExit {
 }
 
 use crate::config::FanoutMode;
-use crate::error::Result;
+use crate::error::{Error, Result};
 use crate::monitor::Monitor;
+
+/// One shard thread's work: `(shard index, the shared stop)` → its result.
+/// Shared by every thread, hence `Fn` behind an `Arc`.
+pub(crate) type ShardBody = Arc<dyn Fn(usize, Arc<ShardStop>) -> Result<()> + Send + Sync>;
+
+/// A spawned shard thread's handle.
+type ShardHandle = std::thread::JoinHandle<Result<()>>;
+
+/// Run `n` shard threads named `{name}-{i}`, each `body(i, stop)`, and wait
+/// for all of them — the spawn/join routine of both sharded runners
+/// (#213, #224).
+///
+/// Every thread shares one [`ShardStop`]: when any shard's run ends (its
+/// stop condition, an error, a panic) the others stop too. A thread that
+/// can't be spawned stops the ones already running; they are joined before
+/// the spawn error is returned — none is left running detached. Otherwise
+/// the result is the first shard error (a panic counts as one).
+///
+/// `pin`: the CPUs to pin shard `i` to, `cpu_for_shard(pin, i)` (see
+/// [`allowed_cpus`]); `None` leaves the threads unpinned.
+pub(crate) fn run_shard_threads(
+    n: usize,
+    name: &str,
+    pin: Option<Vec<usize>>,
+    body: ShardBody,
+) -> Result<()> {
+    run_shard_threads_with(n, name, pin, body, |name, f| {
+        std::thread::Builder::new().name(name).spawn(f)
+    })
+}
+
+/// [`run_shard_threads`] with the thread spawn injected (tests).
+pub(crate) fn run_shard_threads_with<S>(
+    n: usize,
+    name: &str,
+    pin: Option<Vec<usize>>,
+    body: ShardBody,
+    mut spawn: S,
+) -> Result<()>
+where
+    S: FnMut(String, Box<dyn FnOnce() -> Result<()> + Send>) -> std::io::Result<ShardHandle>,
+{
+    let stop = Arc::new(ShardStop::default());
+    let mut handles: Vec<ShardHandle> = Vec::with_capacity(n);
+    let mut first_err: Option<Error> = None;
+    for i in 0..n {
+        let cpu = pin.as_deref().and_then(|cpus| cpu_for_shard(cpus, i));
+        let stop_i = Arc::clone(&stop);
+        let body_i = Arc::clone(&body);
+        let thread_body: Box<dyn FnOnce() -> Result<()> + Send> = Box::new(move || {
+            // However this shard's run ends, its siblings stop too.
+            let _stop_siblings = StopOnExit(Arc::clone(&stop_i));
+            // Pin before doing any work, so the runtime + capture ring stay
+            // core-local.
+            if let Some(cpu) = cpu
+                && !pin_current_thread_to_cpu(cpu)
+            {
+                tracing::warn!(shard = i, cpu, "could not set CPU affinity for shard");
+            }
+            body_i(i, stop_i)
+        });
+        match spawn(format!("{name}-{i}"), thread_body) {
+            Ok(h) => handles.push(h),
+            Err(e) => {
+                // Don't leave the started shards running detached.
+                stop.stop();
+                first_err = Some(Error::Io(e));
+                break;
+            }
+        }
+    }
+    for h in handles {
+        let res = match h.join() {
+            Ok(res) => res,
+            Err(panic) => Err(Error::Io(std::io::Error::other(format!(
+                "{name} thread panicked: {}",
+                panic_message(panic.as_ref())
+            )))),
+        };
+        if let Err(e) = res
+            && first_err.is_none()
+        {
+            first_err = Some(e);
+        }
+    }
+    first_err.map_or(Ok(()), Err)
+}
+
+/// Join the merge worker: `Err` naming its panic when it panicked. The
+/// shards keep running without it (each warns once it finds it gone), so
+/// the panic surfaces when the run ends.
+fn join_merge_worker(h: std::thread::JoinHandle<()>) -> Result<()> {
+    h.join().map_err(|panic| {
+        Error::Io(std::io::Error::other(format!(
+            "netring-merge thread panicked: {}",
+            panic_message(panic.as_ref())
+        )))
+    })
+}
+
+/// A panic payload's message, when it has one.
+fn panic_message(panic: &(dyn std::any::Any + Send)) -> &str {
+    panic
+        .downcast_ref::<&str>()
+        .copied()
+        .or_else(|| panic.downcast_ref::<String>().map(String::as_str))
+        .unwrap_or("non-string panic payload")
+}
+
+/// The CPUs this thread may run on — its affinity mask
+/// (`sched_getaffinity`), so a `taskset` / cpuset restriction is honoured
+/// — in ascending order. Empty if the mask can't be read.
+pub(crate) fn allowed_cpus() -> Vec<usize> {
+    // SAFETY: `cpu_set_t` is a POD bitmask: zeroed is a valid empty set, and
+    // sched_getaffinity writes at most its size. pid 0 = the calling thread.
+    unsafe {
+        let mut set: libc::cpu_set_t = std::mem::zeroed();
+        if libc::sched_getaffinity(0, std::mem::size_of::<libc::cpu_set_t>(), &mut set) != 0 {
+            return Vec::new();
+        }
+        (0..libc::CPU_SETSIZE as usize)
+            .filter(|&cpu| libc::CPU_ISSET(cpu, &set))
+            .collect()
+    }
+}
+
+/// The CPU for shard `i`: the `i`-th allowed one, wrapping when there are
+/// more shards than CPUs. `None` with no allowed CPU.
+pub(crate) fn cpu_for_shard(allowed: &[usize], i: usize) -> Option<usize> {
+    (!allowed.is_empty()).then(|| allowed[i % allowed.len()])
+}
+
+/// Pin the calling OS thread to `cpu` (`sched_setaffinity`). `false` if the
+/// kernel refuses (a CPU outside the cpuset, an offline one) — callers
+/// treat that as a best-effort no-op.
+pub(crate) fn pin_current_thread_to_cpu(cpu: usize) -> bool {
+    if cpu >= libc::CPU_SETSIZE as usize {
+        return false;
+    }
+    // SAFETY: `cpu_set_t` is a POD bitmask; we zero it, set exactly one bit
+    // (in range, checked above), and pass its byte size. pid `0` targets the
+    // calling thread only.
+    unsafe {
+        let mut set: libc::cpu_set_t = std::mem::zeroed();
+        libc::CPU_SET(cpu, &mut set);
+        libc::sched_setaffinity(0, std::mem::size_of::<libc::cpu_set_t>(), &set) == 0
+    }
+}
 
 /// 0.21 C: per-CPU sharded monitor runner.
 ///
@@ -104,8 +254,8 @@ pub struct ShardedRunner {
     /// [`Self::merge_state`] / [`Self::state_auto_merge`] /
     /// [`Self::on_merge`]; driven by the merge-worker thread.
     merges: Vec<crate::monitor::merge::MergeSpec>,
-    /// 0.25 C1: pin each shard's OS thread to CPU `shard_index % n_cores`.
-    /// Off by default. See [`Self::pin_cpus`].
+    /// 0.25 C1: pin each shard's OS thread to its own CPU. Off by default.
+    /// See [`Self::pin_cpus`].
     pin_cpus: bool,
 }
 
@@ -176,8 +326,10 @@ impl ShardedRunner {
         }
     }
 
-    /// 0.25 C1: pin each shard's OS thread to a dedicated CPU core (shard `i`
-    /// → core `i % num_cores`) via `sched_setaffinity`.
+    /// 0.25 C1: pin each shard's OS thread to a dedicated CPU via
+    /// `sched_setaffinity`: shard `i` → the `i`-th CPU this process may run
+    /// on (its affinity mask, so `taskset` and cpusets are honoured),
+    /// wrapping when there are more shards than CPUs.
     ///
     /// With one shard per core and the kernel steering each flow to a fixed
     /// shard (`FanoutMode::Cpu`, or a symmetric hash), pinning keeps a flow's
@@ -195,13 +347,30 @@ impl ShardedRunner {
     /// 0.22 §5.1: periodically fold each shard's `T` state slot into a
     /// single primary via `merge(&mut primary, shard_value)`.
     ///
+    /// One merge per state type: a second `merge_state` /
+    /// [`Self::state_auto_merge`] for the same `T` makes the run fail with
+    /// [`BuildError::DuplicateMergeState`](crate::error::BuildError::DuplicateMergeState)
+    /// before any shard starts (a shard's delta is taken once, so only one
+    /// fold could ever see it).
+    ///
     /// Every `period`, a merge-worker thread probes each shard for its
-    /// `T` (removing it — the shard re-creates `T::default()` lazily, so
-    /// each interval folds the delta since the last probe), folds into a
-    /// persistent primary (the running grand total), and hands it to any
-    /// [`Self::on_merge`] observer. Pairs with `MonitorBuilder::state::<T>()`
-    /// in `build_shard`. **flowscope follow-up:** `RollingRate::merge_into`
-    /// would let a sharded `bandwidth_by_app` merge globally (0.15 wishlist).
+    /// `T` — taking it and re-seeding the slot the way it was registered
+    /// (`T::default()` for `MonitorBuilder::state::<T>()`, the factory for
+    /// `state_init`), so each interval folds the delta since the last
+    /// probe — folds it into a persistent primary (the running grand
+    /// total), and hands it to any [`Self::on_merge`] observer. A shard
+    /// that answers late is folded at the next probe; when the run ends,
+    /// every shard hands over its last delta and the primary is observed
+    /// once more, so the grand total covers the whole run (#216).
+    ///
+    /// A panic in `merge` (or an `on_merge` observer) ends the merge
+    /// worker: the shards keep running unmerged, and the run returns that
+    /// panic as its error.
+    ///
+    /// Register `T` in `build_shard` with `MonitorBuilder::state::<T>()` or
+    /// `state_init`: a `state_with(value)` slot can't be re-seeded.
+    /// **flowscope follow-up:** `RollingRate::merge_into` would let a
+    /// sharded `bandwidth_by_app` merge globally (0.15 wishlist).
     pub fn merge_state<T, F>(mut self, period: Duration, merge: F) -> Self
     where
         T: Default + Send + 'static,
@@ -273,8 +442,11 @@ impl ShardedRunner {
     }
 
     /// Run all shards until each individual `deadline` fires.
-    /// Returns the first error from any shard, or `Ok(())` if
-    /// every shard returned cleanly.
+    /// Returns the first error from any shard (a panic included), else the
+    /// merge worker's panic — a [`merge_state`](Self::merge_state) /
+    /// [`on_merge`](Self::on_merge) closure that panicked; the shards keep
+    /// capturing without merges until the run ends — or `Ok(())` if
+    /// everything returned cleanly.
     pub fn run_until(self, deadline: Instant) -> Result<()> {
         self.run_inner(RunMode::Deadline(deadline))
     }
@@ -294,138 +466,113 @@ impl ShardedRunner {
     }
 
     fn run_inner(self, mode: RunMode) -> Result<()> {
-        // A zero merge period would re-probe the shards back to back.
-        if self.merges.iter().any(|m| m.period().is_zero()) {
-            return Err(crate::error::BuildError::ZeroPeriod {
-                what: "merge_state / state_auto_merge",
-            }
-            .into());
-        }
-        let stop = Arc::new(AtomicBool::new(false));
-        let shard_stop = Arc::new(ShardStop::default());
+        // A zero period, or a second merge for one state type (#227).
+        crate::monitor::merge::validate(&self.merges)?;
         let build_shard = self.build_shard;
-        let pin_cpus = self.pin_cpus;
         // 0.22 §5.2: share the layer specs across shard threads; each
         // shard instantiates its own layer instances.
         let layer_specs = Arc::new(self.layer_specs);
-        let mut handles = Vec::with_capacity(self.num_shards);
 
         // 0.22 §5.1: if any merge is registered, create one request
         // channel per shard — the shard run loop owns the receiver, the
-        // merge worker holds all senders.
+        // merge worker holds all senders — and one reply channel every
+        // shard shares (#216: it outlives each probe, so a late reply is
+        // folded at the next pass instead of lost). Each shard takes its
+        // request receiver from its slot.
         let merges = self.merges;
-        let (merge_txs, mut merge_rxs): (Vec<_>, Vec<Option<_>>) = if merges.is_empty() {
+        let merge_types: Arc<[std::any::TypeId]> = merges.iter().map(|m| m.type_id()).collect();
+        let (reply_tx, reply_rx) = std::sync::mpsc::channel();
+        let (merge_txs, merge_rxs): (Vec<_>, Vec<_>) = if merges.is_empty() {
             (Vec::new(), Vec::new())
         } else {
             (0..self.num_shards)
                 .map(|_| {
                     let (tx, rx) = tokio::sync::mpsc::unbounded_channel();
-                    (tx, Some(rx))
+                    (tx, std::sync::Mutex::new(Some(rx)))
                 })
                 .unzip()
         };
+        let merge_rxs = Arc::new(merge_rxs);
 
-        for cpu in 0..self.num_shards {
-            let shard_stop = Arc::clone(&shard_stop);
-            let build = Arc::clone(&build_shard);
-            let layer_specs = Arc::clone(&layer_specs);
-            let merge_rx = merge_rxs.get_mut(cpu).and_then(Option::take);
-            let handle = std::thread::Builder::new()
-                .name(format!("netring-shard-{cpu}"))
-                .spawn(move || -> Result<()> {
-                    // However this shard's run ends, its siblings stop too.
-                    let _stop_siblings = StopOnExit(Arc::clone(&shard_stop));
-                    // 0.25 C1: pin this shard's thread to its core before doing
-                    // any work, so the runtime + capture ring stay core-local.
-                    if pin_cpus && !pin_current_thread_to_core(cpu) {
-                        tracing::warn!(shard = cpu, "could not set CPU affinity for shard");
-                    }
-                    // Each shard owns a current_thread tokio runtime.
-                    let rt = tokio::runtime::Builder::new_current_thread()
-                        .enable_all()
-                        .build()
-                        .map_err(crate::error::Error::Io)?;
-
-                    let mut monitor = build(cpu)?;
-                    // Apply per-shard secondary layers (fresh instances).
-                    for spec in layer_specs.iter() {
-                        monitor.wrap_sink(spec.instantiate());
-                    }
-                    // 0.22 §5.1: wire the merge-request receiver.
-                    if let Some(rx) = merge_rx {
-                        monitor.set_merge_rx(rx);
-                    }
-                    monitor.set_shard_stop(shard_stop);
-
-                    match mode {
-                        RunMode::Deadline(deadline) => {
-                            // Compute the per-shard duration so each
-                            // shard converges on the same exit time.
-                            let now = Instant::now();
-                            let dur = deadline.saturating_duration_since(now);
-                            rt.block_on(monitor.run_for(dur))?;
-                        }
-                        RunMode::Signal => {
-                            rt.block_on(monitor.run_until_signal())?;
-                        }
-                    }
-                    Ok(())
-                })
-                .map_err(crate::error::Error::Io)?;
-            handles.push(handle);
-        }
-
-        // 0.22 §5.1: spawn the merge worker (one extra OS thread, no
-        // runtime). It probes shards on each spec's cadence while they
-        // run, and exits when `stop` flips.
+        // 0.22 §5.1: the merge worker (one extra OS thread, no runtime)
+        // probes shards on each spec's cadence while they run. Started
+        // first: if it can't be, no shard is running yet. It is stopped
+        // only after every shard was joined, so it folds their final
+        // pushes (#216: the last partial interval used to be lost).
+        let stop = Arc::new(AtomicBool::new(false));
         let merge_handle = if merges.is_empty() {
             None
         } else {
             let stop = Arc::clone(&stop);
             let handle = std::thread::Builder::new()
                 .name("netring-merge".to_string())
-                .spawn(move || crate::monitor::merge::merge_worker(merge_txs, merges, stop))
-                .map_err(crate::error::Error::Io)?;
+                .spawn(move || {
+                    crate::monitor::merge::merge_worker(merge_txs, reply_rx, merges, stop)
+                })
+                .map_err(Error::Io)?;
             Some(handle)
         };
 
-        // Drain each shard. Return the first error encountered;
-        // continue joining the rest to avoid leaked threads.
-        let mut first_err: Option<crate::error::Error> = None;
-        for h in handles {
-            match h.join() {
-                Ok(Ok(())) => {}
-                Ok(Err(e)) => {
-                    if first_err.is_none() {
-                        first_err = Some(e);
-                    }
-                }
-                Err(panic) => {
-                    if first_err.is_none() {
-                        first_err = Some(crate::error::Error::Io(std::io::Error::other(format!(
-                            "shard thread panicked: {panic:?}"
-                        ))));
-                    }
-                }
+        let body: ShardBody = Arc::new(move |i, shard_stop| {
+            // Each shard owns a current_thread tokio runtime.
+            let rt = shard_runtime()?;
+            let mut monitor = build_shard(i)?;
+            // Apply per-shard secondary layers (fresh instances).
+            for spec in layer_specs.iter() {
+                monitor.wrap_sink(spec.instantiate());
             }
-        }
+            // 0.22 §5.1: wire the merge channels.
+            if let Some(requests) = merge_rxs
+                .get(i)
+                .and_then(|slot| slot.lock().ok().and_then(|mut rx| rx.take()))
+            {
+                monitor.set_merge_link(crate::monitor::merge::MergeLink {
+                    requests,
+                    replies: reply_tx.clone(),
+                    types: Arc::clone(&merge_types),
+                });
+            }
+            monitor.set_shard_stop(shard_stop);
+            rt.block_on(mode.run(monitor))
+        });
+        let pin = self.pin_cpus.then(allowed_cpus);
+        let res = run_shard_threads(self.num_shards, "netring-shard", pin, body);
+
+        // Every shard was joined: their final deltas are queued. Join the
+        // merge worker (it sees `stop` — or every reply sender gone — folds
+        // what is queued, observes once more, and exits). Its panic (a
+        // merge or observe closure that panicked) is the run's error,
+        // unless a shard failed: the first error in join order wins.
         stop.store(true, Ordering::Relaxed);
-        // Join the merge worker (it sees `stop`, does a final best-effort
-        // pass, and exits).
-        if let Some(h) = merge_handle {
-            let _ = h.join();
-        }
-        if let Some(e) = first_err {
-            return Err(e);
-        }
-        Ok(())
+        let merged = merge_handle.map_or(Ok(()), join_merge_worker);
+        res.and(merged)
     }
 }
 
+/// How long the sharded runners run: until a shared deadline, or until
+/// SIGINT/SIGTERM.
 #[derive(Copy, Clone)]
-enum RunMode {
+pub(crate) enum RunMode {
     Deadline(Instant),
     Signal,
+}
+
+impl RunMode {
+    /// Run one shard's monitor in this mode.
+    pub(crate) async fn run(self, monitor: Monitor) -> Result<()> {
+        match self {
+            RunMode::Deadline(deadline) => monitor.run_until(deadline).await,
+            RunMode::Signal => monitor.run_until_signal().await,
+        }
+    }
+}
+
+/// A shard's own `current_thread` tokio runtime.
+pub(crate) fn shard_runtime() -> Result<tokio::runtime::Runtime> {
+    tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .map_err(Error::Io)
 }
 
 /// `now + duration` for the runners' shared deadline. A duration too long
@@ -435,26 +582,6 @@ pub(crate) fn deadline_after(duration: Duration) -> Instant {
     let now = Instant::now();
     now.checked_add(duration)
         .unwrap_or_else(|| now + Duration::from_secs(86_400 * 365 * 30))
-}
-
-/// 0.25 C1: pin the calling OS thread to a single CPU core via
-/// `sched_setaffinity`. `index` is taken modulo the number of online cores, so
-/// `num_shards > cores` wraps instead of failing. Returns `false` if the
-/// syscall fails (e.g. a restricted cgroup cpuset) — callers treat that as a
-/// best-effort no-op.
-pub(crate) fn pin_current_thread_to_core(index: usize) -> bool {
-    let n = std::thread::available_parallelism()
-        .map(|n| n.get())
-        .unwrap_or(1)
-        .max(1);
-    let core = index % n;
-    // SAFETY: `cpu_set_t` is a POD bitmask; we zero it, set exactly one bit, and
-    // pass its byte size. pid `0` targets the calling thread only.
-    unsafe {
-        let mut set: libc::cpu_set_t = std::mem::zeroed();
-        libc::CPU_SET(core, &mut set);
-        libc::sched_setaffinity(0, std::mem::size_of::<libc::cpu_set_t>(), &set) == 0
-    }
 }
 
 impl std::fmt::Debug for ShardedRunner {
@@ -471,6 +598,8 @@ impl std::fmt::Debug for ShardedRunner {
 
 #[cfg(test)]
 mod tests {
+    use std::sync::Arc;
+    use std::sync::atomic::{AtomicBool, Ordering};
     use std::time::Duration;
 
     /// A zero merge period would re-probe the shards back to back: it is
@@ -496,38 +625,181 @@ mod tests {
         assert!(!built.load(std::sync::atomic::Ordering::Relaxed));
     }
 
-    /// 0.25 C1: pinning the current thread restricts its affinity to a single
-    /// core. Cap-free — `sched_setaffinity` on the calling thread needs no
-    /// privileges. Restores all-core affinity afterwards so it doesn't pin the
-    /// test runner.
+    /// #227: two merges for the same state type are a build error — a
+    /// shard's delta can be taken once, so only one of them could ever
+    /// fold it. Rejected before any shard is built.
     #[test]
-    fn pin_current_thread_sets_single_core_affinity() {
-        let n = std::thread::available_parallelism()
-            .map(|n| n.get())
-            .unwrap_or(1);
-        if n < 2 {
-            return; // single visible core → trivially "pinned"
-        }
-        if !super::pin_current_thread_to_core(0) {
-            return; // restricted cpuset (e.g. locked-down CI) → skip
-        }
-        // SAFETY: same POD-bitmask contract as the helper; pid 0 = this thread.
+    fn duplicate_merge_for_a_type_is_a_build_error() {
+        let built = Arc::new(AtomicBool::new(false));
+        let b = Arc::clone(&built);
+        let runner =
+            super::ShardedRunner::new("lo", crate::config::FanoutMode::Hash, 1, 2, move |_| {
+                b.store(true, Ordering::Relaxed);
+                Err(crate::error::Error::Config("not reached".into()))
+            })
+            .state_auto_merge::<u64>(Duration::from_secs(1))
+            .merge_state::<u64, _>(Duration::from_secs(5), |p: &mut u64, t: u64| {
+                *p = (*p).max(t)
+            });
+        let err = runner.run_for(Duration::from_millis(10)).unwrap_err();
+        assert!(
+            matches!(
+                &err,
+                crate::error::Error::Build(crate::error::BuildError::DuplicateMergeState { type_name })
+                    if type_name.contains("u64")
+            ),
+            "{err:?}"
+        );
+        assert!(!built.load(Ordering::Relaxed));
+    }
+
+    /// The calling thread's affinity mask, as CPU ids.
+    fn current_affinity() -> Vec<usize> {
+        // SAFETY: POD bitmask out-buffer of the right size; pid 0 = this thread.
         unsafe {
             let mut got: libc::cpu_set_t = std::mem::zeroed();
             let r = libc::sched_getaffinity(0, std::mem::size_of::<libc::cpu_set_t>(), &mut got);
             assert_eq!(r, 0, "sched_getaffinity failed");
-            assert!(libc::CPU_ISSET(0, &got), "core 0 should be set");
-            assert_eq!(
-                libc::CPU_COUNT(&got),
-                1,
-                "affinity should be pinned to exactly one core"
-            );
-            // Restore affinity to all cores so the test thread isn't left pinned.
-            let mut all: libc::cpu_set_t = std::mem::zeroed();
-            for c in 0..n {
-                libc::CPU_SET(c, &mut all);
-            }
-            libc::sched_setaffinity(0, std::mem::size_of::<libc::cpu_set_t>(), &all);
+            (0..libc::CPU_SETSIZE as usize)
+                .filter(|&c| libc::CPU_ISSET(c, &got))
+                .collect()
         }
+    }
+
+    /// Restrict the calling thread to `cpus`; `false` if the kernel refuses.
+    fn restrict_to(cpus: &[usize]) -> bool {
+        // SAFETY: as in `pin_current_thread_to_cpu`.
+        unsafe {
+            let mut set: libc::cpu_set_t = std::mem::zeroed();
+            for &c in cpus {
+                libc::CPU_SET(c, &mut set);
+            }
+            libc::sched_setaffinity(0, std::mem::size_of::<libc::cpu_set_t>(), &set) == 0
+        }
+    }
+
+    /// 0.25 C1: pinning restricts the calling thread to that one CPU.
+    /// Cap-free. Runs on its own thread so the test runner isn't left
+    /// pinned.
+    #[test]
+    fn pin_current_thread_sets_single_cpu_affinity() {
+        std::thread::spawn(|| {
+            let allowed = super::allowed_cpus();
+            let Some(&cpu) = allowed.last() else { return };
+            if !super::pin_current_thread_to_cpu(cpu) {
+                return; // restricted cpuset (e.g. locked-down CI) → skip
+            }
+            assert_eq!(current_affinity(), vec![cpu]);
+        })
+        .join()
+        .unwrap();
+    }
+
+    /// #216: shard `i` goes to the `i`-th CPU of the affinity mask,
+    /// wrapping — not to CPU `i % cpu_count`.
+    #[test]
+    fn cpu_for_shard_uses_nth_allowed_cpu() {
+        let allowed = [2, 3, 5];
+        let picked: Vec<_> = (0..5).map(|i| super::cpu_for_shard(&allowed, i)).collect();
+        assert_eq!(picked, [Some(2), Some(3), Some(5), Some(2), Some(3)]);
+        assert_eq!(super::cpu_for_shard(&[], 0), None);
+    }
+
+    /// #216: under `taskset -c 2,3,5`, the shards land on CPUs 2, 3 and 5.
+    /// (0.31 pinned shard 0 to CPU 0, outside the allowed set — or failed
+    /// silently under a cpuset.)
+    #[test]
+    fn pinned_shards_stay_inside_the_affinity_mask() {
+        std::thread::spawn(|| {
+            let mask = [2, 3, 5];
+            if !mask.iter().all(|c| super::allowed_cpus().contains(c)) || !restrict_to(&mask) {
+                eprintln!("skip: CPUs 2, 3 and 5 are not all available");
+                return;
+            }
+            let landed = Arc::new(std::sync::Mutex::new(vec![None; 3]));
+            let l = Arc::clone(&landed);
+            let body: super::ShardBody = Arc::new(move |i, _stop| {
+                l.lock().unwrap()[i] = Some(current_affinity());
+                Ok(())
+            });
+            super::run_shard_threads(3, "pin-test", Some(super::allowed_cpus()), body).unwrap();
+            assert_eq!(
+                *landed.lock().unwrap(),
+                vec![Some(vec![2]), Some(vec![3]), Some(vec![5])]
+            );
+        })
+        .join()
+        .unwrap();
+    }
+
+    /// #224 / #213: a shard thread that can't be spawned stops the shards
+    /// already running, which are joined before the error is returned —
+    /// none is left running detached.
+    #[test]
+    fn spawn_failure_stops_and_joins_started() {
+        let finished = Arc::new([AtomicBool::new(false), AtomicBool::new(false)]);
+        let f = Arc::clone(&finished);
+        let body: super::ShardBody = Arc::new(move |i, stop| {
+            // Runs until its siblings stop.
+            futures::executor::block_on(stop.stopped());
+            f[i].store(true, Ordering::SeqCst);
+            Ok(())
+        });
+        let res = super::run_shard_threads_with(4, "spawn-test", None, body, |name, f| {
+            if name == "spawn-test-2" {
+                return Err(std::io::Error::other("no more threads"));
+            }
+            std::thread::Builder::new().name(name).spawn(f)
+        });
+        let err = res.expect_err("the spawn failure is returned");
+        assert!(err.to_string().contains("no more threads"), "{err}");
+        // Both started shards stopped and were joined before the return.
+        assert!(finished[0].load(Ordering::SeqCst));
+        assert!(finished[1].load(Ordering::SeqCst));
+    }
+
+    /// A shard whose run fails stops its siblings; the runner returns the
+    /// failure.
+    #[test]
+    fn one_shard_error_stops_siblings() {
+        let body: super::ShardBody = Arc::new(|i, stop| {
+            if i == 1 {
+                std::thread::sleep(Duration::from_millis(20));
+                return Err(crate::error::Error::Config("shard 1 failed".into()));
+            }
+            futures::executor::block_on(stop.stopped());
+            Ok(())
+        });
+        let start = std::time::Instant::now();
+        let err = super::run_shard_threads(3, "error-test", None, body).unwrap_err();
+        assert!(matches!(&err, crate::error::Error::Config(m) if m == "shard 1 failed"));
+        assert!(start.elapsed() < Duration::from_secs(5));
+    }
+
+    /// A panicking shard stops its siblings too, and is reported.
+    #[test]
+    fn panicking_shard_stops_siblings() {
+        let body: super::ShardBody = Arc::new(|i, stop| {
+            if i == 0 {
+                panic!("shard 0 panicked");
+            }
+            futures::executor::block_on(stop.stopped());
+            Ok(())
+        });
+        let err = super::run_shard_threads(2, "panic-test", None, body).unwrap_err();
+        assert!(err.to_string().contains("shard 0 panicked"), "{err}");
+    }
+
+    /// The merge worker's panic is an error, not swallowed.
+    #[test]
+    fn a_panicked_merge_worker_is_an_error() {
+        let worker = std::thread::spawn(|| panic!("merge fold fails (test)"));
+        let err = super::join_merge_worker(worker).unwrap_err();
+        assert!(
+            err.to_string()
+                .contains("netring-merge thread panicked: merge fold fails (test)"),
+            "{err}"
+        );
+        assert!(super::join_merge_worker(std::thread::spawn(|| ())).is_ok());
     }
 }

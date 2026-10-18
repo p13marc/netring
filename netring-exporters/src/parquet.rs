@@ -13,15 +13,18 @@
 //! opt-in `parquet` feature).
 //!
 //! The schema uses OpenTelemetry / OCSF-style flat column names so files are
-//! self-describing:
+//! self-describing. `source.*` is the flow's **initiator** (the endpoint that
+//! opened it) and `destination.*` the responder (netring 0.32, #215 — they
+//! were the address-sorted key's `a` / `b`); `*.bytes` are wire (L2) bytes,
+//! `*.ip_bytes` IP octets:
 //!
 //! | column | type |
 //! |---|---|
 //! | `network.protocol.name` | Utf8 |
 //! | `source.address` / `source.port` | Utf8 / UInt16 |
 //! | `destination.address` / `destination.port` | Utf8 / UInt16 |
-//! | `source.packets` / `source.bytes` | UInt64 |
-//! | `destination.packets` / `destination.bytes` | UInt64 |
+//! | `source.packets` / `source.bytes` / `source.ip_bytes` | UInt64 |
+//! | `destination.packets` / `destination.bytes` / `destination.ip_bytes` | UInt64 |
 //! | `flow.start` / `flow.end` | Timestamp(ns) |
 //! | `flow.end_reason` | Utf8 (nullable) |
 //!
@@ -72,8 +75,10 @@ fn flow_schema() -> SchemaRef {
         Field::new("destination.port", DataType::UInt16, false),
         Field::new("source.packets", DataType::UInt64, false),
         Field::new("source.bytes", DataType::UInt64, false),
+        Field::new("source.ip_bytes", DataType::UInt64, false),
         Field::new("destination.packets", DataType::UInt64, false),
         Field::new("destination.bytes", DataType::UInt64, false),
+        Field::new("destination.ip_bytes", DataType::UInt64, false),
         Field::new(
             "flow.start",
             DataType::Timestamp(TimeUnit::Nanosecond, None),
@@ -96,16 +101,16 @@ fn build_batch(schema: &SchemaRef, recs: &[FlowRecord]) -> Result<RecordBatch, P
                 .map(|r| format!("{:?}", r.proto).to_ascii_lowercase()),
         )),
         Arc::new(StringArray::from_iter_values(
-            recs.iter().map(|r| r.a.ip().to_string()),
+            recs.iter().map(|r| r.initiator.ip().to_string()),
         )),
         Arc::new(UInt16Array::from_iter_values(
-            recs.iter().map(|r| r.a.port()),
+            recs.iter().map(|r| r.initiator.port()),
         )),
         Arc::new(StringArray::from_iter_values(
-            recs.iter().map(|r| r.b.ip().to_string()),
+            recs.iter().map(|r| r.responder.ip().to_string()),
         )),
         Arc::new(UInt16Array::from_iter_values(
-            recs.iter().map(|r| r.b.port()),
+            recs.iter().map(|r| r.responder.port()),
         )),
         Arc::new(UInt64Array::from_iter_values(
             recs.iter().map(|r| r.packets_initiator),
@@ -114,10 +119,16 @@ fn build_batch(schema: &SchemaRef, recs: &[FlowRecord]) -> Result<RecordBatch, P
             recs.iter().map(|r| r.bytes_initiator),
         )),
         Arc::new(UInt64Array::from_iter_values(
+            recs.iter().map(|r| r.ip_bytes_initiator),
+        )),
+        Arc::new(UInt64Array::from_iter_values(
             recs.iter().map(|r| r.packets_responder),
         )),
         Arc::new(UInt64Array::from_iter_values(
             recs.iter().map(|r| r.bytes_responder),
+        )),
+        Arc::new(UInt64Array::from_iter_values(
+            recs.iter().map(|r| r.ip_bytes_responder),
         )),
         Arc::new(TimestampNanosecondArray::from_iter_values(
             recs.iter().map(|r| ts_nanos(r.start)),
@@ -229,23 +240,82 @@ mod tests {
     use super::*;
     use std::net::{Ipv4Addr, SocketAddr};
 
-    use netring::flow::L4Proto;
+    use netring::flow::extract::FiveTupleKey;
+    use netring::flow::{FlowStats, L4Proto, Orientation};
     use parquet::arrow::arrow_reader::ParquetRecordBatchReaderBuilder;
 
-    fn record(proto: L4Proto, sp: u16, dp: u16, pkts_i: u64) -> FlowRecord {
-        FlowRecord {
+    /// A flow 10.0.0.1:`sp` → 203.0.113.7:`dp`; `reverse` makes the key's
+    /// `b` (203.0.113.7) the initiator instead.
+    fn record(proto: L4Proto, sp: u16, dp: u16, pkts_i: u64, reverse: bool) -> FlowRecord {
+        let key = FiveTupleKey::new(
             proto,
-            a: SocketAddr::new(Ipv4Addr::new(10, 0, 0, 1).into(), sp),
-            b: SocketAddr::new(Ipv4Addr::new(203, 0, 113, 7).into(), dp),
-            packets_initiator: pkts_i,
-            packets_responder: 5,
-            bytes_initiator: 1000,
-            bytes_responder: 2000,
-            start: Timestamp::new(1_700_000_000, 0),
-            end: Timestamp::new(1_700_000_005, 250),
-            reason: None,
-            community_id: None,
+            SocketAddr::new(Ipv4Addr::new(10, 0, 0, 1).into(), sp),
+            SocketAddr::new(Ipv4Addr::new(203, 0, 113, 7).into(), dp),
+        );
+        let mut s = FlowStats::default();
+        s.packets_initiator = pkts_i;
+        s.packets_responder = 5;
+        s.bytes_initiator = 1000;
+        s.bytes_responder = 2000;
+        s.ip_bytes_initiator = 860;
+        s.ip_bytes_responder = 1930;
+        s.started = Timestamp::new(1_700_000_000, 0);
+        s.last_seen = Timestamp::new(1_700_000_005, 250);
+        if reverse {
+            s.initiator_orientation = Orientation::Reverse;
         }
+        FlowRecord::from_stats(&key, &s, None)
+    }
+
+    /// Read the rows back as `(source.address, source.port, source.ip_bytes,
+    /// destination.address)`.
+    fn read_back(buf: Vec<u8>) -> Vec<(String, u16, u64, String)> {
+        let reader = ParquetRecordBatchReaderBuilder::try_new(bytes_from(buf))
+            .expect("reader builder")
+            .build()
+            .expect("reader");
+        let mut rows = Vec::new();
+        for batch in reader {
+            let batch = batch.expect("batch");
+            let col = |name: &str| batch.column_by_name(name).unwrap().clone();
+            let src = col("source.address");
+            let src = src.as_any().downcast_ref::<StringArray>().unwrap();
+            let sport = col("source.port");
+            let sport = sport.as_any().downcast_ref::<UInt16Array>().unwrap();
+            let ipb = col("source.ip_bytes");
+            let ipb = ipb.as_any().downcast_ref::<UInt64Array>().unwrap();
+            let dst = col("destination.address");
+            let dst = dst.as_any().downcast_ref::<StringArray>().unwrap();
+            for i in 0..batch.num_rows() {
+                rows.push((
+                    src.value(i).to_string(),
+                    sport.value(i),
+                    ipb.value(i),
+                    dst.value(i).to_string(),
+                ));
+            }
+        }
+        rows
+    }
+
+    /// netring 0.32 (#215): `source.*` is the initiator, also when it is the
+    /// key's `b`; `source.ip_bytes` its IP octets.
+    #[test]
+    fn source_columns_are_the_initiator() {
+        let mut buf: Vec<u8> = Vec::new();
+        {
+            let mut exporter = ParquetFlowExporter::new(&mut buf).expect("new");
+            exporter.export(&record(L4Proto::Tcp, 40000, 443, 9, false));
+            exporter.export(&record(L4Proto::Tcp, 40000, 443, 9, true));
+            exporter.flush().expect("flush");
+        }
+        assert_eq!(
+            read_back(buf),
+            vec![
+                ("10.0.0.1".into(), 40000, 860, "203.0.113.7".into()),
+                ("203.0.113.7".into(), 443, 860, "10.0.0.1".into()),
+            ]
+        );
     }
 
     #[test]
@@ -253,8 +323,8 @@ mod tests {
         let mut buf: Vec<u8> = Vec::new();
         {
             let mut exporter = ParquetFlowExporter::new(&mut buf).expect("new");
-            exporter.export(&record(L4Proto::Tcp, 40000, 443, 9));
-            exporter.export(&record(L4Proto::Udp, 5353, 53, 1));
+            exporter.export(&record(L4Proto::Tcp, 40000, 443, 9, false));
+            exporter.export(&record(L4Proto::Udp, 5353, 53, 1, false));
             exporter.flush().expect("flush");
             // drop writes the footer
         }
@@ -299,6 +369,8 @@ mod tests {
         let names: Vec<&str> = schema.fields().iter().map(|f| f.name().as_str()).collect();
         assert!(names.contains(&"network.protocol.name"));
         assert!(names.contains(&"source.address"));
+        assert!(names.contains(&"source.ip_bytes"));
+        assert!(names.contains(&"destination.ip_bytes"));
         assert!(names.contains(&"flow.end_reason"));
         // end_reason is the only nullable column.
         let reason = schema.field_with_name("flow.end_reason").unwrap();

@@ -247,7 +247,7 @@ macro_rules! pattern_detector {
                 if let ::std::option::Option::Some(score) = score_opt {
                     let owned =
                         <_ as $crate::anomaly::DetectorScore>::into_anomaly(score, __ctx.ts);
-                    $crate::anomaly::sink::publish_owned(__ctx.sink_mut(), &owned);
+                    __ctx.publish_owned(&owned);
                 }
                 ::std::result::Result::Ok(())
             };
@@ -326,7 +326,7 @@ mod tests {
 
     use crate::anomaly::Severity;
     use crate::anomaly::sink::NoopSink;
-    use crate::ctx::{CounterRegistry, Ctx, SourceIdx, StateMap};
+    use crate::ctx::{CounterRegistry, Ctx, StateMap};
     use crate::error::Result;
     use crate::monitor::Handler;
     use crate::protocol::builtin::Tcp;
@@ -341,7 +341,7 @@ mod tests {
         Ctx {
             flow: None,
             ts: Timestamp::new(0, 0),
-            source: SourceIdx(0),
+            source: None,
             monitor_name: None,
             state_map: state,
             sink,
@@ -352,6 +352,7 @@ mod tests {
             arp_table: None,
             side: None,
             orientation: None,
+            initiator: None,
         }
     }
 

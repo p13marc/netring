@@ -132,8 +132,9 @@ pub(crate) fn emit_analyzed_flow(
         && sev >= min
     {
         let slugs = af.risk.as_slugs().collect::<Vec<_>>().join(",");
+        // The sinks read the flow from its initiator (#215).
         ctx.emit("flow_risk", risk_severity_to_netring(sev))
-            .with_key(&af.key)
+            .with_flow(&af.key, af.stats.initiator_orientation)
             .with("risk", slugs)
             .with_metric("risk_score", af.score() as f64)
             .emit();

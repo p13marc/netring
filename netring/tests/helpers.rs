@@ -9,12 +9,38 @@ use std::sync::atomic::{AtomicU16, Ordering};
 /// Loopback interface name.
 pub const LOOPBACK: &str = "lo";
 
-/// Unique port counter to avoid collisions between parallel tests.
-static PORT_COUNTER: AtomicU16 = AtomicU16::new(30_000);
+/// First port of the test port space — below the kernel's default
+/// ephemeral range (32768–60999), so a test port never collides with a
+/// sender's ephemeral one.
+const PORT_BASE: u16 = 10_000;
+/// Ports each test process owns: [`private_port`] slots `0..16`, then
+/// [`unique_port`]'s counter.
+const PORT_BLOCK: u16 = 128;
+/// Ports handed out by [`unique_port`] start after the private slots.
+const PRIVATE_SLOTS: u16 = 16;
 
-/// Get a unique UDP port for testing.
+/// This process's block of [`PORT_BLOCK`] ports, derived from the pid, so
+/// concurrent test binaries on the shared `lo` (each one restarts its
+/// counter) use different ports — they all started at 30000 before.
+fn port_block_base() -> u16 {
+    let blocks = (32_768 - u32::from(PORT_BASE)) / u32::from(PORT_BLOCK);
+    PORT_BASE + (std::process::id() % blocks) as u16 * PORT_BLOCK
+}
+
+/// Unique port counter within this process's block.
+static PORT_COUNTER: AtomicU16 = AtomicU16::new(0);
+
+/// Get a unique UDP port for testing: distinct within the process, and
+/// from other test processes (see [`port_block_base`]).
 pub fn unique_port() -> u16 {
-    PORT_COUNTER.fetch_add(1, Ordering::Relaxed)
+    let seq = PORT_COUNTER.fetch_add(1, Ordering::Relaxed) % (PORT_BLOCK - PRIVATE_SLOTS);
+    port_block_base() + PRIVATE_SLOTS + seq
+}
+
+/// A fixed port of this process (`slot < 16`), for tests that name their
+/// ports as constants.
+pub fn private_port(slot: u16) -> u16 {
+    port_block_base() + slot % PRIVATE_SLOTS
 }
 
 /// Fanout group counter, so one process never reuses a group id either.
@@ -106,6 +132,217 @@ impl Drop for VethPair {
     }
 }
 
+/// A dummy interface (`ip link add <name> type dummy`), deleted on drop.
+/// Requires `CAP_NET_ADMIN`; the constructors return `None` without it.
+pub struct Dummy(pub String);
+
+impl Dummy {
+    /// `name` (≤ 15 bytes), up, with `mtu` when given.
+    pub fn create(name: &str, mtu: Option<u32>) -> Option<Self> {
+        let _ = Command::new("ip").args(["link", "delete", name]).output();
+        let ok = |args: &[&str]| {
+            Command::new("ip")
+                .args(args)
+                .status()
+                .is_ok_and(|s| s.success())
+        };
+        if !ok(&["link", "add", name, "type", "dummy"]) {
+            return None;
+        }
+        let d = Self(name.to_string());
+        if let Some(mtu) = mtu
+            && !ok(&["link", "set", name, "mtu", &mtu.to_string()])
+        {
+            return None;
+        }
+        ok(&["link", "set", name, "up"]).then_some(d)
+    }
+
+    /// `ip link set <name> <args…>` (e.g. `["mtu", "3000"]`, `["down"]`).
+    pub fn set(&self, args: &[&str]) -> bool {
+        Command::new("ip")
+            .args(["link", "set", &self.0])
+            .args(args)
+            .status()
+            .is_ok_and(|s| s.success())
+    }
+}
+
+impl Drop for Dummy {
+    fn drop(&mut self) {
+        let _ = Command::new("ip")
+            .args(["link", "delete", &self.0])
+            .output();
+    }
+}
+
+/// A dummy interface, up, whose root qdisc is `plug` — it holds every frame
+/// until released, so the frames an injector sends stay in flight. Deleted
+/// on drop.
+pub struct PluggedDummy(pub String);
+
+impl PluggedDummy {
+    /// `nrplug<pid>`; `None` without CAP_NET_ADMIN or `sch_plug`.
+    pub fn create() -> Option<Self> {
+        Self::create_named(&format!("nrplug{}", std::process::id() % 100_000))
+    }
+
+    /// The interface `name` (≤ 15 bytes).
+    pub fn create_named(name: &str) -> Option<Self> {
+        Self::create_with_limit(name, 1 << 20)
+    }
+
+    /// The interface `name`, whose plug holds at most `limit` bytes: it
+    /// drops what comes on top (`NET_XMIT_DROP`).
+    pub fn create_with_limit(name: &str, limit: u32) -> Option<Self> {
+        use std::process::Command;
+        let name = name.to_string();
+        let _ = Command::new("ip").args(["link", "delete", &name]).output();
+        let ok = |args: &[&str]| {
+            Command::new("ip")
+                .args(args)
+                .status()
+                .is_ok_and(|s| s.success())
+        };
+        if !ok(&["link", "add", &name, "type", "dummy"]) {
+            return None;
+        }
+        let d = Self(name);
+        if !ok(&["link", "set", &d.0, "up"]) {
+            return None;
+        }
+        let ifindex = nix::net::if_::if_nametoindex(d.0.as_str()).ok()?;
+        plug_qdisc_request(
+            ifindex,
+            0, // TCQ_PLUG_BUFFER
+            (libc::NLM_F_REQUEST | libc::NLM_F_ACK | libc::NLM_F_CREATE | libc::NLM_F_EXCL) as u16,
+            limit,
+        )
+        .ok()?;
+        Some(d)
+    }
+}
+
+impl PluggedDummy {
+    /// Let the held frames (and every later one) through.
+    pub fn release(&self) -> std::io::Result<()> {
+        let ifindex =
+            nix::net::if_::if_nametoindex(self.0.as_str()).map_err(std::io::Error::from)?;
+        release_plug_qdisc(ifindex)
+    }
+
+    /// Hold every frame again after a [`release`](Self::release)
+    /// (`tc qdisc change … plug block`).
+    pub fn block(&self) -> std::io::Result<()> {
+        let ifindex =
+            nix::net::if_::if_nametoindex(self.0.as_str()).map_err(std::io::Error::from)?;
+        plug_qdisc_request(
+            ifindex,
+            0,
+            (libc::NLM_F_REQUEST | libc::NLM_F_ACK) as u16,
+            1 << 20,
+        )
+    }
+}
+
+impl Drop for PluggedDummy {
+    fn drop(&mut self) {
+        let _ = std::process::Command::new("ip")
+            .args(["link", "delete", &self.0])
+            .output();
+    }
+}
+
+/// `tc qdisc add dev <ifindex> root plug limit 1MiB`, over rtnetlink (no
+/// `tc` binary needed). `plug` starts out holding (sch_plug: plug_init
+/// throttles): every frame is queued until a release that never comes.
+pub fn add_plug_qdisc(ifindex: u32) -> std::io::Result<()> {
+    plug_qdisc_request(
+        ifindex,
+        0, // TCQ_PLUG_BUFFER
+        (libc::NLM_F_REQUEST | libc::NLM_F_ACK | libc::NLM_F_CREATE | libc::NLM_F_EXCL) as u16,
+        1 << 20,
+    )
+}
+
+/// `tc qdisc change dev <ifindex> root plug release_indefinite`: the plug
+/// lets every held frame (and all later ones) through.
+pub fn release_plug_qdisc(ifindex: u32) -> std::io::Result<()> {
+    plug_qdisc_request(
+        ifindex,
+        2, // TCQ_PLUG_RELEASE_INDEFINITE
+        (libc::NLM_F_REQUEST | libc::NLM_F_ACK) as u16,
+        1 << 20,
+    )
+}
+
+/// One RTM_NEWQDISC for the root `plug` qdisc of `ifindex`, with
+/// `tc_plug_qopt { action, limit }`.
+fn plug_qdisc_request(ifindex: u32, action: i32, flags: u16, limit: u32) -> std::io::Result<()> {
+    use std::os::fd::{AsRawFd, FromRawFd, OwnedFd};
+
+    fn attr(buf: &mut Vec<u8>, kind: u16, data: &[u8]) {
+        let len = 4 + data.len();
+        buf.extend_from_slice(&(len as u16).to_ne_bytes());
+        buf.extend_from_slice(&kind.to_ne_bytes());
+        buf.extend_from_slice(data);
+        buf.resize(buf.len().next_multiple_of(4), 0);
+    }
+
+    const RTM_NEWQDISC: u16 = 36;
+    const TCA_KIND: u16 = 1;
+    const TCA_OPTIONS: u16 = 2;
+    let mut body = Vec::new();
+    // struct tcmsg { family: u8, pad: [u8; 3], ifindex: i32, handle: u32,
+    // parent: u32, info: u32 }
+    body.extend_from_slice(&[libc::AF_UNSPEC as u8, 0, 0, 0]);
+    body.extend_from_slice(&(ifindex as i32).to_ne_bytes());
+    body.extend_from_slice(&0x0001_0000u32.to_ne_bytes()); // handle 1:
+    body.extend_from_slice(&0xffff_ffffu32.to_ne_bytes()); // TC_H_ROOT
+    body.extend_from_slice(&0u32.to_ne_bytes());
+    attr(&mut body, TCA_KIND, b"plug\0");
+    // struct tc_plug_qopt { action: i32, limit: u32 }
+    let mut qopt = Vec::new();
+    qopt.extend_from_slice(&action.to_ne_bytes());
+    qopt.extend_from_slice(&limit.to_ne_bytes());
+    attr(&mut body, TCA_OPTIONS, &qopt);
+
+    let mut msg = Vec::new();
+    msg.extend_from_slice(&((16 + body.len()) as u32).to_ne_bytes());
+    msg.extend_from_slice(&RTM_NEWQDISC.to_ne_bytes());
+    msg.extend_from_slice(&flags.to_ne_bytes());
+    msg.extend_from_slice(&1u32.to_ne_bytes()); // seq
+    msg.extend_from_slice(&0u32.to_ne_bytes()); // pid
+    msg.extend_from_slice(&body);
+
+    // SAFETY: plain syscalls on a fresh fd we own; buffers sized as passed.
+    unsafe {
+        let raw = libc::socket(
+            libc::AF_NETLINK,
+            libc::SOCK_RAW | libc::SOCK_CLOEXEC,
+            libc::NETLINK_ROUTE,
+        );
+        if raw < 0 {
+            return Err(std::io::Error::last_os_error());
+        }
+        let fd = OwnedFd::from_raw_fd(raw);
+        if libc::send(fd.as_raw_fd(), msg.as_ptr().cast(), msg.len(), 0) < 0 {
+            return Err(std::io::Error::last_os_error());
+        }
+        let mut ack = [0u8; 256];
+        let n = libc::recv(fd.as_raw_fd(), ack.as_mut_ptr().cast(), ack.len(), 0);
+        if n < 20 {
+            return Err(std::io::Error::other("short netlink ack"));
+        }
+        // nlmsgerr: the error code follows the 16-byte header.
+        let errno = i32::from_ne_bytes([ack[16], ack[17], ack[18], ack[19]]);
+        if errno != 0 {
+            return Err(std::io::Error::from_raw_os_error(-errno));
+        }
+    }
+    Ok(())
+}
+
 /// Synthetic captures for the replay (no-privilege) tests.
 #[cfg(all(
     feature = "tokio",
@@ -141,7 +378,19 @@ pub mod pcap {
     /// [`flow`] with explicit client and server ports (`sp = 80` puts the
     /// flow on the HTTP parser).
     pub fn flow_to(cp: u16, sp: u16, segments: &[(u32, Vec<u8>)]) -> Vec<(Duration, Vec<u8>)> {
-        let (c, s) = ([10, 0, 0, 1], [10, 0, 0, 2]);
+        flow_between([10, 0, 0, 1], [10, 0, 0, 2], cp, sp, segments)
+    }
+
+    /// [`flow_to`] between explicit addresses: client `c`:`cp` opens the
+    /// connection to server `s`:`sp`. With `c > s` the initiator is the
+    /// flow key's `b` endpoint (the key is address-sorted).
+    pub fn flow_between(
+        c: [u8; 4],
+        s: [u8; 4],
+        cp: u16,
+        sp: u16,
+        segments: &[(u32, Vec<u8>)],
+    ) -> Vec<(Duration, Vec<u8>)> {
         let (cisn, sisn) = (1000u32, 5000u32);
         let m = [0u8; 6];
         let mut v = vec![

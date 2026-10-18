@@ -44,6 +44,198 @@ pub(crate) fn resolve_interface(name: &str) -> Result<i32, Error> {
     }
 }
 
+/// The MTU of interface `name`, read with `SIOCGIFMTU` through `fd` (so in
+/// the socket's network namespace — sysfs may show another one).
+pub(crate) fn interface_mtu(fd: BorrowedFd<'_>, name: &str) -> Result<u32, Error> {
+    /// `struct ifreq` with the `ifr_mtu` member of its union; the full 40
+    /// bytes the kernel copies in and out.
+    #[repr(C)]
+    struct IfreqMtu {
+        name: [libc::c_char; libc::IFNAMSIZ],
+        mtu: libc::c_int,
+        _pad: [u8; 20],
+    }
+    const _: () = assert!(std::mem::size_of::<IfreqMtu>() == 40);
+    let bytes = name.as_bytes();
+    if bytes.len() >= libc::IFNAMSIZ {
+        return Err(Error::InterfaceNotFound(name.to_string()));
+    }
+    let mut req = IfreqMtu {
+        name: [0; libc::IFNAMSIZ],
+        mtu: 0,
+        _pad: [0; 20],
+    };
+    for (d, s) in req.name.iter_mut().zip(bytes) {
+        *d = *s as libc::c_char;
+    }
+    // SAFETY: SIOCGIFMTU reads the name from and writes the MTU into a
+    // full-size `struct ifreq` we own.
+    let rc = unsafe { libc::ioctl(fd.as_raw_fd(), libc::SIOCGIFMTU, &mut req) };
+    if rc < 0 {
+        return Err(Error::Io(std::io::Error::last_os_error()));
+    }
+    Ok(req.mtu.max(0) as u32)
+}
+
+/// A `struct ifreq` (40 bytes): the interface name, then the 24-byte
+/// union each ioctl reads or writes its own way.
+#[repr(C)]
+struct Ifreq {
+    name: [libc::c_char; libc::IFNAMSIZ],
+    data: [u8; 24],
+}
+const _: () = assert!(std::mem::size_of::<Ifreq>() == 40);
+
+/// The name of interface `ifindex` (`SIOCGIFNAME`), in `fd`'s namespace.
+pub(crate) fn interface_name(fd: BorrowedFd<'_>, ifindex: i32) -> Result<String, Error> {
+    let mut req = Ifreq {
+        name: [0; libc::IFNAMSIZ],
+        data: [0; 24],
+    };
+    req.data[..4].copy_from_slice(&ifindex.to_ne_bytes());
+    // SAFETY: SIOCGIFNAME reads `ifr_ifindex` from and writes the name into
+    // a full-size `struct ifreq` we own.
+    let rc = unsafe { libc::ioctl(fd.as_raw_fd(), libc::SIOCGIFNAME, &mut req) };
+    if rc < 0 {
+        return Err(Error::Io(std::io::Error::last_os_error()));
+    }
+    let bytes: Vec<u8> = req
+        .name
+        .iter()
+        .take_while(|&&c| c != 0)
+        .map(|&c| c as u8)
+        .collect();
+    Ok(String::from_utf8_lossy(&bytes).into_owned())
+}
+
+/// The link type (`ARPHRD_*`, `dev->type`) of interface `name`: the
+/// `sa_family` of its hardware address (`SIOCGIFHWADDR`).
+pub(crate) fn interface_link_type(fd: BorrowedFd<'_>, name: &str) -> Result<u16, Error> {
+    let bytes = name.as_bytes();
+    if bytes.len() >= libc::IFNAMSIZ {
+        return Err(Error::InterfaceNotFound(name.to_string()));
+    }
+    let mut req = Ifreq {
+        name: [0; libc::IFNAMSIZ],
+        data: [0; 24],
+    };
+    for (d, s) in req.name.iter_mut().zip(bytes) {
+        *d = *s as libc::c_char;
+    }
+    // SAFETY: SIOCGIFHWADDR reads the name from and writes a `sockaddr`
+    // into a full-size `struct ifreq` we own.
+    let rc = unsafe { libc::ioctl(fd.as_raw_fd(), libc::SIOCGIFHWADDR, &mut req) };
+    if rc < 0 {
+        return Err(Error::Io(std::io::Error::last_os_error()));
+    }
+    Ok(u16::from_ne_bytes([req.data[0], req.data[1]]))
+}
+
+/// The `rtnl_link_ops` kind of interface `ifindex` (`IFLA_INFO_KIND`:
+/// `"veth"`, `"vlan"`, `"macvlan"`, …), `None` for a device without one (a
+/// NIC's own driver). Asked over rtnetlink in the calling thread's network
+/// namespace — the caller must be where it opened the socket the index
+/// belongs to.
+pub(crate) fn interface_kind(ifindex: i32) -> Result<Option<String>, Error> {
+    use std::os::fd::{FromRawFd, OwnedFd};
+    const RTM_GETLINK: u16 = 18;
+    const RTM_NEWLINK: u16 = 16;
+    const IFLA_LINKINFO: u16 = 18;
+    const IFLA_INFO_KIND: u16 = 1;
+    const NLA_TYPE_MASK: u16 = 0x3fff;
+    let io = |e: std::io::Error| Error::Io(e);
+
+    // struct nlmsghdr (16) + struct ifinfomsg (16).
+    let mut req = [0u8; 32];
+    req[0..4].copy_from_slice(&32u32.to_ne_bytes());
+    req[4..6].copy_from_slice(&RTM_GETLINK.to_ne_bytes());
+    req[6..8].copy_from_slice(&(libc::NLM_F_REQUEST as u16).to_ne_bytes());
+    req[8..12].copy_from_slice(&1u32.to_ne_bytes()); // seq
+    req[16] = libc::AF_UNSPEC as u8;
+    req[20..24].copy_from_slice(&ifindex.to_ne_bytes());
+
+    // SAFETY: plain socket(2); the fd is owned right away.
+    let raw = unsafe {
+        libc::socket(
+            libc::AF_NETLINK,
+            libc::SOCK_RAW | libc::SOCK_CLOEXEC,
+            libc::NETLINK_ROUTE,
+        )
+    };
+    if raw < 0 {
+        return Err(io(std::io::Error::last_os_error()));
+    }
+    // SAFETY: `raw` is a fresh fd we own exclusively.
+    let fd = unsafe { OwnedFd::from_raw_fd(raw) };
+    // SAFETY: send(2) of a buffer we own; the kernel is the default peer
+    // of an unbound NETLINK_ROUTE socket.
+    if unsafe { libc::send(fd.as_raw_fd(), req.as_ptr().cast(), req.len(), 0) } < 0 {
+        return Err(io(std::io::Error::last_os_error()));
+    }
+    let mut buf = vec![0u8; 32 * 1024];
+    let n = loop {
+        // SAFETY: recv(2) into a buffer we own.
+        let n = unsafe { libc::recv(fd.as_raw_fd(), buf.as_mut_ptr().cast(), buf.len(), 0) };
+        if n >= 0 {
+            break n as usize;
+        }
+        let e = std::io::Error::last_os_error();
+        if e.raw_os_error() != Some(libc::EINTR) {
+            return Err(io(e));
+        }
+    };
+    let msg = &buf[..n];
+    let u16_at = |b: &[u8], i: usize| u16::from_ne_bytes([b[i], b[i + 1]]);
+    if msg.len() < 32 {
+        return Err(io(std::io::Error::other("short rtnetlink reply")));
+    }
+    match u16_at(msg, 4) {
+        RTM_NEWLINK => {}
+        t if t == libc::NLMSG_ERROR as u16 => {
+            let errno = i32::from_ne_bytes([msg[16], msg[17], msg[18], msg[19]]);
+            return Err(io(std::io::Error::from_raw_os_error(-errno)));
+        }
+        t => {
+            return Err(io(std::io::Error::other(format!(
+                "rtnetlink reply type {t}"
+            ))));
+        }
+    }
+    // `nlmsg_len` bounded to the bytes received, and never below the two
+    // headers already checked (a shorter claim would make the slice below
+    // start past its end).
+    let len = (u32::from_ne_bytes([msg[0], msg[1], msg[2], msg[3]]) as usize).clamp(32, msg.len());
+    // Walk `rtattr`s: u16 len, u16 type, payload, 4-byte aligned.
+    let attrs = |b: &[u8]| {
+        let mut out = Vec::new();
+        let mut i = 0;
+        while i + 4 <= b.len() {
+            let alen = u16_at(b, i) as usize;
+            if alen < 4 || i + alen > b.len() {
+                break;
+            }
+            out.push((u16_at(b, i + 2) & NLA_TYPE_MASK, i + 4, i + alen));
+            i += alen.next_multiple_of(4);
+        }
+        out
+    };
+    let top = &msg[32..len];
+    for (ty, start, end) in attrs(top) {
+        if ty != IFLA_LINKINFO {
+            continue;
+        }
+        let info = &top[start..end];
+        for (ity, istart, iend) in attrs(info) {
+            if ity == IFLA_INFO_KIND {
+                let kind = &info[istart..iend];
+                let kind = kind.split(|&b| b == 0).next().unwrap_or(kind);
+                return Ok(Some(String::from_utf8_lossy(kind).into_owned()));
+            }
+        }
+    }
+    Ok(None)
+}
+
 // ── setsockopt wrappers ────────────────────────────────────────────────────
 
 /// Set `PACKET_VERSION` (`ffi::TPACKET_V3_INT` for RX, `ffi::TPACKET_V2_INT`
@@ -56,6 +248,20 @@ pub(crate) fn set_packet_version(fd: BorrowedFd<'_>, version: libc::c_int) -> Re
         ffi::PACKET_VERSION,
         &version,
         "PACKET_VERSION",
+    )
+}
+
+/// Reserve `bytes` of headroom in front of every packet in the ring
+/// (`PACKET_RESERVE`). Must precede `PACKET_RX_RING`: the kernel refuses it
+/// with `EBUSY` once a ring exists.
+pub(crate) fn set_packet_reserve(fd: BorrowedFd<'_>, bytes: u32) -> Result<(), Error> {
+    let val: libc::c_uint = bytes;
+    raw_setsockopt(
+        fd,
+        ffi::SOL_PACKET,
+        ffi::PACKET_RESERVE,
+        &val,
+        "PACKET_RESERVE",
     )
 }
 
@@ -279,17 +485,10 @@ pub(crate) fn set_timestamp_source(
 /// `POLLERR` means `sk_err` is set — `ENETDOWN` when the interface went
 /// down (packet_notifier()) or was down at bind() (packet_do_bind()). The
 /// kernel keeps reporting it on every poll until `SO_ERROR` is read, so a
-/// caller that ignores it polls in a tight loop. It is read (and so
-/// cleared) here:
-///
-/// - `ENETDOWN` with the device still registered is **transient**: the
-///   kernel re-arms the socket when the interface comes back up
-///   (NETDEV_UP), so it is logged and the read reports "no batch" — the
-///   next poll waits normally instead of spinning.
-/// - `ENETDOWN` after the device was unregistered (`getsockname` reports
-///   ifindex -1) is permanent and returned, like any other socket error.
-///   An interface deleted while already down raises no new `POLLERR` (the
-///   socket was no longer running), so an idle poll checks the binding too.
+/// caller that ignores it polls in a tight loop. [`check_health`] reads
+/// (and so clears) it. An interface deleted while already down raises no
+/// new `POLLERR` (the socket was no longer running), so an idle poll
+/// checks the binding too.
 ///
 /// `POLLHUP` / `POLLNVAL` are errors too.
 pub(crate) fn poll_error(
@@ -300,27 +499,49 @@ pub(crate) fn poll_error(
 
     let Some(revents) = revents.filter(|r| !r.is_empty()) else {
         // Nothing happened on this socket (timeout, or a stop wake-up).
-        return if bound_ifindex(fd)? < 0 {
-            Err(Error::Io(std::io::Error::from_raw_os_error(libc::ENETDOWN)))
-        } else {
-            Ok(())
-        };
+        return check_bound(fd);
     };
     if revents.contains(PollFlags::POLLNVAL) {
         return Err(Error::Io(std::io::Error::from_raw_os_error(libc::EBADF)));
     }
     if revents.contains(PollFlags::POLLERR) {
-        let err = take_socket_error(fd)?;
-        if err == libc::ENETDOWN && bound_ifindex(fd)? >= 0 {
-            tracing::warn!("capture interface is down; waiting for it to come back up");
-        } else if err != 0 {
-            return Err(Error::Io(std::io::Error::from_raw_os_error(err)));
-        }
+        check_health(fd)?;
     }
     if revents.contains(PollFlags::POLLHUP) {
         return Err(Error::Io(std::io::Error::other("hangup on packet socket")));
     }
     Ok(())
+}
+
+/// Whether a packet socket can still capture: reads (and so clears) its
+/// pending error.
+///
+/// - `ENETDOWN` with the device still registered is **transient**: the
+///   kernel re-arms the socket when the interface comes back up
+///   (NETDEV_UP), so it is logged and `Ok` — the caller keeps waiting.
+/// - `ENETDOWN` after the device was unregistered (`getsockname` reports
+///   ifindex -1) is permanent and returned, like any other socket error.
+/// - A socket with no error but no device either (the interface was
+///   deleted while down, which raises no error) is `ENETDOWN` too.
+pub(crate) fn check_health(fd: BorrowedFd<'_>) -> Result<(), Error> {
+    let err = take_socket_error(fd)?;
+    if err == libc::ENETDOWN && bound_ifindex(fd)? >= 0 {
+        tracing::warn!("capture interface is down; waiting for it to come back up");
+        return Ok(());
+    }
+    if err != 0 {
+        return Err(Error::Io(std::io::Error::from_raw_os_error(err)));
+    }
+    check_bound(fd)
+}
+
+/// `ENETDOWN` once the socket's device was unregistered.
+fn check_bound(fd: BorrowedFd<'_>) -> Result<(), Error> {
+    if bound_ifindex(fd)? < 0 {
+        Err(Error::Io(std::io::Error::from_raw_os_error(libc::ENETDOWN)))
+    } else {
+        Ok(())
+    }
 }
 
 /// The ifindex a packet socket is bound to: -1 once the device was
@@ -344,7 +565,7 @@ fn bound_ifindex(fd: BorrowedFd<'_>) -> Result<i32, Error> {
 }
 
 /// Read and clear the socket's pending error (`SO_ERROR`).
-fn take_socket_error(fd: BorrowedFd<'_>) -> Result<libc::c_int, Error> {
+pub(crate) fn take_socket_error(fd: BorrowedFd<'_>) -> Result<libc::c_int, Error> {
     let mut err: libc::c_int = 0;
     let mut len = std::mem::size_of::<libc::c_int>() as libc::socklen_t;
     // SAFETY: fd is valid; `err` / `len` are an int-sized out-buffer.

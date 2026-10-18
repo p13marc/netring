@@ -7,22 +7,22 @@
 //! for security detections/alerts, so a netring anomaly — a detector firing
 //! about a flow / host — lands naturally there.
 //!
-//! The 5-tuple key (when present) flattens into `src_endpoint` / `dst_endpoint`
-//! plus `connection_info`; observation labels land under `unmapped`. The output
+//! The record's [`Endpoints`](crate::anomaly::sink::Endpoints) (when present)
+//! become `src_endpoint` / `dst_endpoint` — the flow's initiator as the source
+//! when the emitter knew it — plus `connection_info`; observation labels land
+//! under `unmapped`. The output
 //! is schema-targetable by AWS Security Lake, Splunk (OCSF add-on), and any OCSF
 //! 1.x consumer — point it at `OcsfSink::stdout()` and pipe.
 //!
 //! Gated behind the opt-in `ocsf-sink` feature (pulls only `serde_json`).
 
-use std::borrow::Cow;
 use std::io::Write;
 
 use flowscope::Timestamp;
 use serde_json::{Map, Value, json};
 
 use crate::anomaly::Severity;
-use crate::anomaly::key::Key;
-use crate::anomaly::sink::AnomalySink;
+use crate::anomaly::sink::{AnomalyRecord, AnomalySink};
 
 /// OCSF schema version the emitted records conform to.
 const OCSF_VERSION: &str = "1.3.0";
@@ -91,21 +91,40 @@ fn proto_num(p: flowscope::L4Proto) -> u8 {
     }
 }
 
+/// IANA protocol number for an [`Endpoints::proto`](crate::anomaly::sink::Endpoints)
+/// label (`KeyFields::proto_str` spelling).
+fn proto_num_of(label: &str) -> Option<u8> {
+    Some(match label {
+        "TCP" => 6,
+        "UDP" => 17,
+        "ICMP" => 1,
+        "ICMPv6" => 58,
+        "SCTP" => 132,
+        _ => return None,
+    })
+}
+
+/// An OCSF network endpoint object (`ip`, `port` when known).
+fn endpoint_json(ip: Option<std::net::IpAddr>, port: Option<u16>) -> Value {
+    let mut o = Map::new();
+    if let Some(ip) = ip {
+        o.insert("ip".into(), json!(ip.to_string()));
+    }
+    if let Some(port) = port {
+        o.insert("port".into(), json!(port));
+    }
+    Value::Object(o)
+}
+
 fn ts_millis(ts: Timestamp) -> i64 {
     ts.sec as i64 * 1000 + ts.nsec as i64 / 1_000_000
 }
 
 impl<W: Write + Send> AnomalySink for OcsfSink<W> {
-    fn write(
-        &mut self,
-        kind: &'static str,
-        severity: Severity,
-        ts: Timestamp,
-        key: Option<&dyn Key>,
-        observations: &[(&'static str, Cow<'_, str>)],
-        metrics: &[(&'static str, f64)],
-    ) {
-        let (severity_id, severity_name) = ocsf_severity(severity);
+    fn write(&mut self, record: &AnomalyRecord<'_>) {
+        let (kind, ts) = (record.kind, record.ts);
+        let (observations, metrics) = (record.observations, record.metrics);
+        let (severity_id, severity_name) = ocsf_severity(record.severity);
 
         // Detection Finding (2004): activity_id 1 = Create.
         // type_uid = class_uid * 100 + activity_id.
@@ -131,15 +150,23 @@ impl<W: Write + Send> AnomalySink for OcsfSink<W> {
             "finding_info": { "title": kind, "uid": kind },
         });
 
-        // 5-tuple → endpoints + connection_info (when the key downcasts).
-        if let Some(k) = key
-            && let Some(fk) = k
-                .as_any()
-                .downcast_ref::<flowscope::extract::FiveTupleKey>()
-        {
-            ev["src_endpoint"] = json!({ "ip": fk.a.ip().to_string(), "port": fk.a.port() });
-            ev["dst_endpoint"] = json!({ "ip": fk.b.ip().to_string(), "port": fk.b.port() });
-            ev["connection_info"] = json!({ "protocol_num": proto_num(fk.proto) });
+        // Endpoints → src/dst endpoints + connection_info. 0.32 (#215): the
+        // source is the flow's initiator when the record knows it (it was
+        // the key's address-sorted `a`).
+        if let Some(e) = record.endpoints {
+            if e.src_ip.is_some() {
+                ev["src_endpoint"] = endpoint_json(e.src_ip, e.src_port);
+            }
+            if e.dest_ip.is_some() {
+                ev["dst_endpoint"] = endpoint_json(e.dest_ip, e.dest_port);
+            }
+            let num = record
+                .flow_key()
+                .map(|k| proto_num(k.proto))
+                .or_else(|| e.proto.and_then(proto_num_of));
+            if let Some(num) = num {
+                ev["connection_info"] = json!({ "protocol_num": num });
+            }
         }
 
         // Observation labels + metrics → `unmapped` (OCSF's escape hatch for
@@ -170,6 +197,7 @@ impl<W: Write + Send> AnomalySink for OcsfSink<W> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::borrow::Cow;
     use std::net::{IpAddr, Ipv4Addr, SocketAddr};
 
     fn key() -> flowscope::extract::FiveTupleKey {
@@ -185,15 +213,17 @@ mod tests {
         let mut sink = OcsfSink::new(Vec::<u8>::new());
         let k = key();
         sink.write(
-            "ioc_match",
-            Severity::Critical,
-            Timestamp {
-                sec: 1700,
-                nsec: 500_000_000,
-            },
-            Some(&k),
-            &[("indicator", Cow::Borrowed("evil.example"))],
-            &[("score", 9.5)],
+            &AnomalyRecord::new(
+                "ioc_match",
+                Severity::Critical,
+                Timestamp {
+                    sec: 1700,
+                    nsec: 500_000_000,
+                },
+            )
+            .with_key(&k)
+            .with_observations(&[("indicator", Cow::Borrowed("evil.example"))])
+            .with_metrics(&[("score", 9.5)]),
         );
         let bytes = sink.into_inner();
         let line = std::str::from_utf8(&bytes).unwrap().trim();
@@ -222,14 +252,11 @@ mod tests {
     #[test]
     fn flush_reaches_the_writer() {
         let mut sink = OcsfSink::new(std::io::BufWriter::new(Vec::<u8>::new()));
-        sink.write(
+        sink.write(&AnomalyRecord::new(
             "k",
             Severity::Info,
             Timestamp { sec: 1, nsec: 0 },
-            None,
-            &[],
-            &[],
-        );
+        ));
         assert!(sink.out.get_ref().is_empty(), "still buffered");
         sink.flush().unwrap();
         assert!(sink.out.get_ref().ends_with(b"}\n"));
@@ -238,18 +265,35 @@ mod tests {
     #[test]
     fn keyless_anomaly_omits_endpoints() {
         let mut sink = OcsfSink::new(Vec::<u8>::new());
-        sink.write(
+        sink.write(&AnomalyRecord::new(
             "PortScan",
             Severity::Warning,
             Timestamp { sec: 1, nsec: 0 },
-            None,
-            &[],
-            &[],
-        );
+        ));
         let bytes = sink.into_inner();
         let v: Value = serde_json::from_str(std::str::from_utf8(&bytes).unwrap().trim()).unwrap();
         assert_eq!(v["severity_id"], 3);
         assert!(v.get("src_endpoint").is_none());
         assert!(v.get("unmapped").is_none());
+    }
+
+    /// #215: directional endpoints put the initiator in `src_endpoint`,
+    /// even when it is the key's `b`.
+    #[test]
+    fn src_endpoint_is_the_initiator() {
+        use crate::anomaly::sink::Endpoints;
+        let k = key();
+        let mut sink = OcsfSink::new(Vec::<u8>::new());
+        sink.write(
+            &AnomalyRecord::new("x", Severity::Info, Timestamp { sec: 1, nsec: 0 })
+                .with_endpoints(Endpoints::from_flow(&k, flowscope::Orientation::Reverse))
+                .with_key(&k),
+        );
+        let bytes = sink.into_inner();
+        let v: Value = serde_json::from_str(std::str::from_utf8(&bytes).unwrap().trim()).unwrap();
+        assert_eq!(v["src_endpoint"]["ip"], "203.0.113.7");
+        assert_eq!(v["src_endpoint"]["port"], 443);
+        assert_eq!(v["dst_endpoint"]["ip"], "10.0.0.1");
+        assert_eq!(v["connection_info"]["protocol_num"], 6);
     }
 }

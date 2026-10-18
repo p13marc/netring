@@ -185,7 +185,7 @@ async fn monitor_lo_with_two_interfaces_tags_source() {
         .interfaces(["lo", "lo"])
         .protocol::<Tcp>()
         .on_ctx::<FlowStarted<Tcp>>(move |_evt: &FlowStarted<Tcp>, ctx: &mut Ctx<'_>| {
-            let idx = ctx.source.0 as usize;
+            let idx = ctx.source.map_or(usize::MAX, |s| s.0 as usize);
             if idx < 2 {
                 s.lock().unwrap()[idx] += 1;
             }
@@ -243,4 +243,86 @@ async fn monitor_lo_with_layers_and_sink_chain() {
         monitor.run_for(Duration::from_millis(100)),
     )
     .await;
+}
+
+/// A dummy interface, up and quiet; deleted on drop.
+struct QuietDummy(String);
+
+impl QuietDummy {
+    fn create() -> Option<Self> {
+        let name = format!("nrsrc{}", std::process::id() % 100_000);
+        let ip = |args: &[&str]| {
+            std::process::Command::new("ip")
+                .args(args)
+                .status()
+                .is_ok_and(|s| s.success())
+        };
+        let _ = std::process::Command::new("ip")
+            .args(["link", "delete", &name])
+            .output();
+        (ip(&["link", "add", &name, "type", "dummy"]) && ip(&["link", "set", &name, "up"]))
+            .then(|| Self(name))
+    }
+}
+
+impl Drop for QuietDummy {
+    fn drop(&mut self) {
+        let _ = std::process::Command::new("ip")
+            .args(["link", "delete", &self.0])
+            .output();
+    }
+}
+
+/// #216: a flow on the second capture interface that no packet ends —
+/// ended by the shutdown drain, like an idle sweep — reports that
+/// interface: `ctx.source == Some(SourceIdx(1))`. Events no packet drove
+/// used to be stamped source 0.
+#[tokio::test(flavor = "current_thread")]
+async fn flow_ended_by_housekeeping_reports_its_interface() {
+    let Some(dummy) = QuietDummy::create() else {
+        eprintln!("skip: cannot create a dummy interface (need CAP_NET_ADMIN)");
+        return;
+    };
+    let port = {
+        let s = std::net::UdpSocket::bind("127.0.0.1:0").unwrap();
+        s.local_addr().unwrap().port()
+    };
+    let sources: Arc<std::sync::Mutex<Vec<Option<SourceIdx>>>> = Arc::default();
+    let s = Arc::clone(&sources);
+    let monitor = Monitor::builder()
+        .interfaces([dummy.0.as_str(), "lo"])
+        .protocol::<Udp>()
+        .on_ctx::<FlowEnded<Udp>>(move |e: &FlowEnded<Udp>, ctx: &mut Ctx<'_>| {
+            if e.key.a.port() == port || e.key.b.port() == port {
+                s.lock().unwrap().push(ctx.source);
+            }
+            Ok(())
+        })
+        .build()
+        .expect("build");
+    let health = monitor.health();
+    let sender = std::thread::spawn(move || {
+        // Once the capture sockets are open.
+        let deadline = std::time::Instant::now() + Duration::from_secs(3);
+        while !health.is_ready() && std::time::Instant::now() < deadline {
+            std::thread::sleep(Duration::from_millis(5));
+        }
+        let sock = std::net::UdpSocket::bind("127.0.0.1:0").unwrap();
+        for _ in 0..5 {
+            let _ = sock.send_to(b"netring-source", ("127.0.0.1", port));
+            std::thread::sleep(Duration::from_millis(50));
+        }
+    });
+    let res = monitor.run_for(Duration::from_millis(1200)).await;
+    sender.join().unwrap();
+    if let Err(e) = res {
+        eprintln!("skip: run failed (needs CAP_NET_RAW): {e}");
+        return;
+    }
+    let sources = sources.lock().unwrap();
+    assert!(!sources.is_empty(), "the flow ended at shutdown");
+    assert!(
+        sources.iter().all(|s| *s == Some(SourceIdx(1))),
+        "{sources:?}"
+    );
 }

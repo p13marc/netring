@@ -87,34 +87,57 @@ impl<'a> XdpPacket<'a> {
         self.rx_metadata
     }
 
+    /// The VLAN tag the NIC stripped from the frame, as reported by the RX
+    /// metadata (`rx_metadata().vlan`; needs
+    /// [`XdpSocketBuilder::rx_metadata`](crate::XdpSocketBuilder::rx_metadata)
+    /// and driver support). AF_XDP hands out the frame as the NIC delivered
+    /// it — netring cannot re-insert the tag in front of it (the UMEM
+    /// headroom is the XDP program's). To keep tags in the frame, turn the
+    /// NIC's VLAN stripping off: `ethtool -K <if> rxvlan off`.
+    #[inline]
+    pub fn stripped_vlan(&self) -> Option<flowscope::VlanTag> {
+        self.rx_metadata.vlan
+    }
+
     /// Copy packet data out for long-lived storage.
     ///
-    /// When the socket reads RX metadata (issue #13), the hardware timestamp
-    /// and RSS flow hash are carried over; the remaining AF_PACKET-style fields
-    /// (status, direction, VLAN) stay zero / `Unknown` for AF_XDP origin — the
-    /// zero-copy [`rx_metadata`](Self::rx_metadata) view carries the full set.
+    /// When the socket reads RX metadata (issue #13), the hardware timestamp,
+    /// RSS flow hash and stripped VLAN tag are carried over; the remaining
+    /// AF_PACKET-style fields (status, direction) stay zero / `Unknown` for
+    /// AF_XDP origin — the zero-copy [`rx_metadata`](Self::rx_metadata) view
+    /// carries the full set.
     pub fn to_owned(&self) -> crate::OwnedPacket {
-        let (timestamp, timestamp_clock) = match self.rx_metadata.hw_timestamp {
-            Some(ts) => (ts, crate::packet::TimestampClock::RawHardware),
-            None => (
-                crate::Timestamp::default(),
-                crate::packet::TimestampClock::None,
-            ),
-        };
-        crate::OwnedPacket {
-            data: self.data.to_vec(),
-            timestamp,
-            timestamp_clock,
-            original_len: self.len(),
-            status: crate::packet::PacketStatus::default(),
-            direction: crate::packet::PacketDirection::Unknown(0),
-            rxhash: self.rx_metadata.rx_hash.map_or(0, |h| h.value),
-            vlan_tci: 0,
-            vlan_tpid: 0,
-            ll_protocol: 0,
-            source_ll_addr: [0u8; 8],
-            source_ll_addr_len: 0,
-        }
+        owned_from_xdp(self.data, self.len(), &self.rx_metadata)
+    }
+}
+
+/// The [`OwnedPacket`](crate::OwnedPacket) for an AF_XDP frame: `data`,
+/// `len` bytes on the wire, and what the RX metadata carries (hardware
+/// timestamp, RSS hash, the VLAN tag the NIC stripped — never in `data`).
+pub(crate) fn owned_from_xdp(
+    data: &[u8],
+    len: usize,
+    meta: &flowscope::RxMetadata,
+) -> crate::OwnedPacket {
+    let (timestamp, timestamp_clock) = match meta.hw_timestamp {
+        Some(ts) => (ts, crate::packet::TimestampClock::RawHardware),
+        None => (
+            crate::Timestamp::default(),
+            crate::packet::TimestampClock::None,
+        ),
+    };
+    crate::OwnedPacket {
+        data: data.to_vec(),
+        timestamp,
+        timestamp_clock,
+        original_len: len,
+        status: crate::packet::PacketStatus::default(),
+        direction: crate::packet::PacketDirection::Unknown(0),
+        rxhash: meta.rx_hash.map_or(0, |h| h.value),
+        vlan: meta.vlan,
+        ll_protocol: 0,
+        source_ll_addr: [0u8; 8],
+        source_ll_addr_len: 0,
     }
 }
 

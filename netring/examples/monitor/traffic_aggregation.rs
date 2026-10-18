@@ -26,8 +26,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             for (ip, bps) in r.top_talkers(5) {
                 println!("  talker {ip:<39} {bps:>12.0} B/s");
             }
-            for ((a, b), bps) in r.top_pairs(5) {
-                println!("  pair   {a} → {b:<28} {bps:>12.0} B/s");
+            // (initiator, responder): who opened the flows → who answered.
+            for ((initiator, responder), bps) in r.top_pairs(5) {
+                println!("  pair   {initiator} → {responder:<28} {bps:>12.0} B/s");
             }
             for (name, qps) in r.top_domains(5) {
                 println!("  domain {name:<39} {qps:>10.2} q/s");

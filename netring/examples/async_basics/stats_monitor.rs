@@ -2,10 +2,9 @@
 //!
 //! Demonstrates the [`StreamCapture`] trait (plan 20): the
 //! underlying capture moves into the stream when you call
-//! `cap.flow_stream(...)`, but `stream.capture_stats()` and
-//! `stream.capture_cumulative_stats()` keep working — out-of-band
-//! access to the same `PACKET_STATISTICS` socket option you'd
-//! poll on a sync `Capture` via [`stats_monitor`](./stats_monitor.rs).
+//! `cap.flow_stream(...)`, but `stream.capture_stats()` keeps
+//! working — out-of-band access to the same ring totals you'd read
+//! on a sync `Capture` via [`stats_monitor`](./stats_monitor.rs).
 //!
 //! Usage:
 //!     cargo run --example async_stats_monitor \
@@ -43,13 +42,13 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         // independent of stream polling — it reaches through the
         // `StreamCapture` trait to the underlying `AsyncCapture`.
         if Instant::now() >= next_report {
-            let stats = stream.capture_cumulative_stats()?;
+            let stats = stream.capture_stats()?;
             println!(
                 "[+{:>2}s] kernel: {} pkt, {} drops, {} freeze | flows: +{flow_started} / -{flow_ended}",
                 seconds - deadline.saturating_duration_since(Instant::now()).as_secs(),
-                stats.packets,
+                stats.delivered,
                 stats.drops,
-                stats.freeze_count,
+                stats.freezes,
             );
             next_report += Duration::from_secs(1);
         }
@@ -78,10 +77,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         }
     }
 
-    let final_stats = stream.capture_cumulative_stats()?;
+    let final_stats = stream.capture_stats()?;
     eprintln!(
         "final: {} pkt, {} drops, {} freeze, {flow_started} starts / {flow_ended} ends",
-        final_stats.packets, final_stats.drops, final_stats.freeze_count
+        final_stats.delivered, final_stats.drops, final_stats.freezes
     );
     Ok(())
 }

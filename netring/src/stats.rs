@@ -3,75 +3,88 @@
 use crate::afpacket::ffi;
 use std::fmt;
 
-/// Capture statistics from the kernel.
+/// Capture statistics: totals since the source was opened.
 ///
-/// `packets` counts every packet the socket received (passed the filter),
-/// **including the ones it then dropped**; `drops` is the dropped subset.
-/// The loss fraction is therefore `drops / packets`, and the packets
-/// actually handed to userspace are `packets - drops`. This is the kernel's
-/// own AF_PACKET convention (`PACKET_STATISTICS` reports
-/// `tp_packets += tp_drops`), and AF_XDP follows it since 0.31.2 (#183).
+/// One meaning on every backend and every accessor (#186):
 ///
-/// Reading stats via [`stats()`](crate::traits::PacketSource::stats) resets
-/// the AF_PACKET kernel counters; AF_XDP counters are monotonic. The
-/// cumulative accessors saturate at `u32::MAX`.
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+/// * [`delivered`](Self::delivered) — packets placed in the ring for
+///   userspace (they passed the socket filter and found room);
+/// * [`drops`](Self::drops) — packets that passed the filter but were
+///   dropped for lack of ring space;
+/// * [`freezes`](Self::freezes) — ring freezes (AF_PACKET only; `0` on
+///   AF_XDP).
+///
+/// [`received`](Self::received) is `delivered + drops`: every packet that
+/// reached the socket — the kernel's own `tp_packets` — and
+/// [`drop_ratio`](Self::drop_ratio) is `drops / received`.
+///
+/// Every public accessor returns **totals since the source was opened**
+/// and never resets them: two reads with no traffic in between are equal,
+/// and a rate over a window is `later.delta_since(&earlier)`. AF_PACKET's
+/// kernel counters are reset by each `PACKET_STATISTICS` read, so netring
+/// folds every read into a running total on the capture; AF_XDP's
+/// `XDP_STATISTICS` are monotonic already. The counters are `u64` and
+/// saturate rather than wrap.
+///
+/// ```
+/// use netring::CaptureStats;
+///
+/// let earlier = CaptureStats::new(1_000, 0, 0);
+/// let later = CaptureStats::new(1_900, 100, 1);
+/// let window = later.delta_since(&earlier);
+/// assert_eq!(window, CaptureStats::new(900, 100, 1));
+/// assert_eq!(window.received(), 1_000);
+/// assert_eq!(window.drop_ratio(), 0.1);
+/// ```
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Hash)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize))]
 #[non_exhaustive]
 pub struct CaptureStats {
-    /// Packets received (passed the filter), including dropped ones.
-    pub packets: u32,
-    /// Packets dropped because the ring had no room for them (AF_PACKET:
-    /// `tp_drops`; AF_XDP: `rx_dropped + rx_ring_full`). Included in
-    /// `packets`.
-    pub drops: u32,
-    /// Number of times the ring buffer was frozen (AF_PACKET only).
-    pub freeze_count: u32,
+    /// Packets placed in the ring for userspace: they passed the socket
+    /// filter and were not dropped. Excludes [`drops`](Self::drops).
+    pub delivered: u64,
+    /// Packets that passed the socket filter but were dropped because the
+    /// ring had no room for them (AF_PACKET: `tp_drops`; AF_XDP:
+    /// `rx_dropped + rx_ring_full`). A slow consumer or an undersized ring.
+    pub drops: u64,
+    /// Number of times the ring buffer was frozen (AF_PACKET
+    /// `tp_freeze_q_cnt`; always `0` on AF_XDP).
+    pub freezes: u64,
 }
 
-/// Crate-internal `u64` counters for one capture source: the Monitor's
-/// telemetry reads these instead of the `u32` [`CaptureStats`] so it never
-/// freezes on a saturated counter (#184).
-///
-/// Unlike `CaptureStats`, `delivered` **excludes** drops: it counts the
-/// packets placed in the ring for userspace.
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
-pub(crate) struct SourceCounters {
-    /// Packets placed in the ring for userspace.
-    pub(crate) delivered: u64,
-    /// Packets dropped for lack of ring space.
-    pub(crate) drops: u64,
-    /// Ring freezes (AF_PACKET only).
-    pub(crate) freezes: u64,
-}
-
-impl SourceCounters {
-    /// Fold one destructive `PACKET_STATISTICS` read into the totals. The
-    /// kernel reports `tp_packets` with the drops already added (in `u32`),
-    /// so the delivered count is split off per read, wrapping — exact
-    /// whenever fewer than 2³² packets reached the ring between two reads.
-    pub(crate) fn add_tpacket_v3(self, raw: ffi::tpacket_stats_v3) -> Self {
+impl CaptureStats {
+    /// Statistics with the given totals.
+    #[inline]
+    pub const fn new(delivered: u64, drops: u64, freezes: u64) -> Self {
         Self {
-            delivered: self
-                .delivered
-                .saturating_add(u64::from(raw.tp_packets.wrapping_sub(raw.tp_drops))),
-            drops: self.drops.saturating_add(u64::from(raw.tp_drops)),
-            freezes: self.freezes.saturating_add(u64::from(raw.tp_freeze_q_cnt)),
+            delivered,
+            drops,
+            freezes,
         }
     }
 
-    /// Field-wise saturating sum.
-    #[cfg_attr(not(all(feature = "flow", feature = "tokio")), allow(dead_code))]
-    pub(crate) fn saturating_add(self, other: Self) -> Self {
-        Self {
-            delivered: self.delivered.saturating_add(other.delivered),
-            drops: self.drops.saturating_add(other.drops),
-            freezes: self.freezes.saturating_add(other.freezes),
+    /// Every packet that reached the socket: `delivered + drops`
+    /// (saturating). This is the kernel's AF_PACKET `tp_packets`.
+    #[inline]
+    pub const fn received(&self) -> u64 {
+        self.delivered.saturating_add(self.drops)
+    }
+
+    /// The fraction of the [`received`](Self::received) packets that were
+    /// dropped, in `[0.0, 1.0]`; `0.0` when nothing was received.
+    #[inline]
+    pub fn drop_ratio(&self) -> f64 {
+        match self.received() {
+            0 => 0.0,
+            received => self.drops as f64 / received as f64,
         }
     }
 
-    /// Field-wise saturating difference (`self - earlier`).
-    #[cfg_attr(not(all(feature = "flow", feature = "tokio")), allow(dead_code))]
-    pub(crate) fn saturating_sub(self, earlier: Self) -> Self {
+    /// The counts between `earlier` and `self` (field-wise saturating
+    /// `self - earlier`): what a window between two reads of the same
+    /// source saw.
+    #[inline]
+    pub const fn delta_since(&self, earlier: &Self) -> Self {
         Self {
             delivered: self.delivered.saturating_sub(earlier.delivered),
             drops: self.drops.saturating_sub(earlier.drops),
@@ -79,25 +92,58 @@ impl SourceCounters {
         }
     }
 
-    /// The public `u32` view: `packets = delivered + drops`, each field
-    /// clamped at `u32::MAX` (so `drops <= packets` still holds).
-    pub(crate) fn to_capture_stats(self) -> CaptureStats {
-        let clamp = |v: u64| v.min(u64::from(u32::MAX)) as u32;
-        CaptureStats {
-            packets: clamp(self.delivered.saturating_add(self.drops)),
-            drops: clamp(self.drops),
-            freeze_count: clamp(self.freezes),
+    /// Field-wise saturating sum — the totals of two sources together.
+    #[inline]
+    #[must_use]
+    pub const fn saturating_add(self, other: Self) -> Self {
+        Self {
+            delivered: self.delivered.saturating_add(other.delivered),
+            drops: self.drops.saturating_add(other.drops),
+            freezes: self.freezes.saturating_add(other.freezes),
         }
+    }
+
+    /// Fold one destructive AF_PACKET `PACKET_STATISTICS` read into these
+    /// totals. The kernel reports `tp_packets` with the drops already added
+    /// (in `u32`), so the delivered count is split off per read, wrapping —
+    /// exact whenever fewer than 2³² packets reached the ring between two
+    /// reads.
+    #[inline]
+    pub(crate) fn add_tpacket_v3(self, raw: ffi::tpacket_stats_v3) -> Self {
+        self.saturating_add(Self {
+            delivered: u64::from(raw.tp_packets.wrapping_sub(raw.tp_drops)),
+            drops: u64::from(raw.tp_drops),
+            freezes: u64::from(raw.tp_freeze_q_cnt),
+        })
     }
 }
 
-impl From<ffi::tpacket_stats_v3> for CaptureStats {
-    fn from(s: ffi::tpacket_stats_v3) -> Self {
-        Self {
-            packets: s.tp_packets,
-            drops: s.tp_drops,
-            freeze_count: s.tp_freeze_q_cnt,
-        }
+impl std::ops::Add for CaptureStats {
+    type Output = Self;
+
+    /// Field-wise saturating sum (see [`CaptureStats::saturating_add`]).
+    #[inline]
+    fn add(self, other: Self) -> Self {
+        self.saturating_add(other)
+    }
+}
+
+impl std::ops::AddAssign for CaptureStats {
+    #[inline]
+    fn add_assign(&mut self, other: Self) {
+        *self = self.saturating_add(other);
+    }
+}
+
+impl std::iter::Sum for CaptureStats {
+    fn sum<I: Iterator<Item = Self>>(iter: I) -> Self {
+        iter.fold(Self::default(), Self::saturating_add)
+    }
+}
+
+impl<'a> std::iter::Sum<&'a CaptureStats> for CaptureStats {
+    fn sum<I: Iterator<Item = &'a Self>>(iter: I) -> Self {
+        iter.copied().sum()
     }
 }
 
@@ -230,8 +276,8 @@ impl fmt::Display for CaptureStats {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         write!(
             f,
-            "packets: {}, drops: {}, freezes: {}",
-            self.packets, self.drops, self.freeze_count
+            "delivered: {}, drops: {}, freezes: {}",
+            self.delivered, self.drops, self.freezes
         )
     }
 }
@@ -243,32 +289,73 @@ mod tests {
     #[test]
     fn default_is_zero() {
         let s = CaptureStats::default();
-        assert_eq!(s.packets, 0);
-        assert_eq!(s.drops, 0);
-        assert_eq!(s.freeze_count, 0);
+        assert_eq!(s, CaptureStats::new(0, 0, 0));
+        assert_eq!(s.received(), 0);
     }
 
     #[test]
-    fn from_tpacket_stats_v3() {
-        let raw = ffi::tpacket_stats_v3 {
-            tp_packets: 100,
-            tp_drops: 5,
-            tp_freeze_q_cnt: 1,
-        };
-        let s = CaptureStats::from(raw);
-        assert_eq!(s.packets, 100);
-        assert_eq!(s.drops, 5);
-        assert_eq!(s.freeze_count, 1);
+    fn received_is_delivered_plus_drops() {
+        let s = CaptureStats::new(100, 5, 1);
+        assert_eq!(s.received(), 105);
+        assert_eq!(CaptureStats::new(u64::MAX, 1, 0).received(), u64::MAX);
+    }
+
+    #[test]
+    fn drop_ratio_is_drops_over_received() {
+        assert_eq!(CaptureStats::new(900, 100, 0).drop_ratio(), 0.1);
+        assert_eq!(CaptureStats::new(0, 7, 0).drop_ratio(), 1.0);
+        assert_eq!(CaptureStats::new(7, 0, 3).drop_ratio(), 0.0);
+    }
+
+    #[test]
+    fn drop_ratio_of_nothing_is_zero_not_nan() {
+        let r = CaptureStats::default().drop_ratio();
+        assert_eq!(r, 0.0);
+        assert!(!r.is_nan());
+    }
+
+    #[test]
+    fn delta_since_is_field_wise_and_saturating() {
+        let earlier = CaptureStats::new(1_000, 10, 1);
+        let later = CaptureStats::new(1_500, 30, 1);
+        assert_eq!(later.delta_since(&earlier), CaptureStats::new(500, 20, 0));
+        assert_eq!(later.delta_since(&later), CaptureStats::default());
+        // Reversed operands saturate at zero rather than wrapping.
+        assert_eq!(earlier.delta_since(&later), CaptureStats::default());
+    }
+
+    #[test]
+    fn sum_add_and_add_assign_saturate() {
+        let a = CaptureStats::new(1, 2, 3);
+        let b = CaptureStats::new(10, 20, 30);
+        assert_eq!(a + b, CaptureStats::new(11, 22, 33));
+        let mut c = a;
+        c += b;
+        assert_eq!(c, a + b);
+        assert_eq!(
+            [a, b, a].into_iter().sum::<CaptureStats>(),
+            CaptureStats::new(12, 24, 36)
+        );
+        assert_eq!([a, b].iter().sum::<CaptureStats>(), a + b);
+        assert_eq!(
+            std::iter::empty::<CaptureStats>().sum::<CaptureStats>(),
+            CaptureStats::default()
+        );
+        let max = CaptureStats::new(u64::MAX, u64::MAX, u64::MAX);
+        assert_eq!(max + a, max);
     }
 
     #[test]
     fn display_format() {
-        let s = CaptureStats {
-            packets: 42,
-            drops: 3,
-            freeze_count: 0,
-        };
-        assert_eq!(s.to_string(), "packets: 42, drops: 3, freezes: 0");
+        let s = CaptureStats::new(42, 3, 0);
+        assert_eq!(s.to_string(), "delivered: 42, drops: 3, freezes: 0");
+    }
+
+    #[cfg(feature = "serde")]
+    #[test]
+    fn serializes_named_fields() {
+        let json = serde_json::to_string(&CaptureStats::new(42, 3, 1)).unwrap();
+        assert_eq!(json, r#"{"delivered":42,"drops":3,"freezes":1}"#);
     }
 
     #[test]
@@ -312,29 +399,21 @@ mod tests {
     /// #183: the kernel reports `tp_packets` with the drops added.
     #[test]
     fn tpacket_v3_read_splits_delivered_from_drops() {
-        let c = SourceCounters::default().add_tpacket_v3(ffi::tpacket_stats_v3 {
+        let c = CaptureStats::default().add_tpacket_v3(ffi::tpacket_stats_v3 {
             tp_packets: 1000,
             tp_drops: 900,
             tp_freeze_q_cnt: 3,
         });
-        assert_eq!(
-            c,
-            SourceCounters {
-                delivered: 100,
-                drops: 900,
-                freezes: 3
-            }
-        );
-        // The public view keeps the kernel convention.
-        let s = c.to_capture_stats();
-        assert_eq!((s.packets, s.drops, s.freeze_count), (1000, 900, 3));
+        assert_eq!(c, CaptureStats::new(100, 900, 3));
+        // `received()` is the kernel's own `tp_packets`.
+        assert_eq!(c.received(), 1000);
     }
 
     /// The kernel adds the drops in `u32`, so `tp_packets` can wrap below
     /// `tp_drops`; the per-read split must wrap too.
     #[test]
     fn tpacket_v3_read_split_handles_u32_wrap() {
-        let c = SourceCounters::default().add_tpacket_v3(ffi::tpacket_stats_v3 {
+        let c = CaptureStats::default().add_tpacket_v3(ffi::tpacket_stats_v3 {
             tp_packets: 5,
             tp_drops: 11,
             tp_freeze_q_cnt: 0,
@@ -343,37 +422,34 @@ mod tests {
         assert_eq!(c.drops, 11);
     }
 
-    /// #184: the internal totals keep counting past `u32::MAX`; only the
-    /// public view clamps, and it keeps `drops <= packets`.
+    /// #184 / #186: the totals are `u64` and keep counting past `u32::MAX`
+    /// — no clamp anywhere.
     #[test]
-    fn counters_grow_past_u32_and_clamp_only_in_the_public_view() {
-        let start = SourceCounters {
-            delivered: u64::from(u32::MAX) - 10,
-            drops: 0,
-            freezes: 0,
-        };
+    fn totals_grow_past_u32() {
+        let start = CaptureStats::new(u64::from(u32::MAX) - 10, 0, 0);
         let c = start.add_tpacket_v3(ffi::tpacket_stats_v3 {
             tp_packets: 100,
             tp_drops: 0,
             tp_freeze_q_cnt: 0,
         });
         assert_eq!(c.delivered, u64::from(u32::MAX) + 90);
+        let big = CaptureStats::new(4_000_000_000, 400_000_000, 0);
+        assert_eq!(big.received(), 4_400_000_000);
+    }
 
-        let big = SourceCounters {
-            delivered: 4_000_000_000,
-            drops: 400_000_000,
-            freezes: 0,
+    /// Consecutive destructive reads fold into one running total.
+    #[test]
+    fn tpacket_v3_reads_accumulate() {
+        let read = |p, d, f| ffi::tpacket_stats_v3 {
+            tp_packets: p,
+            tp_drops: d,
+            tp_freeze_q_cnt: f,
         };
-        let s = big.to_capture_stats();
-        assert_eq!(s.packets, u32::MAX);
-        assert_eq!(s.drops, 400_000_000);
-        let huge = SourceCounters {
-            delivered: 1,
-            drops: 5_000_000_000,
-            freezes: 0,
-        };
-        let s = huge.to_capture_stats();
-        assert_eq!((s.packets, s.drops), (u32::MAX, u32::MAX));
+        let total = CaptureStats::default()
+            .add_tpacket_v3(read(50, 0, 0))
+            .add_tpacket_v3(read(0, 0, 0))
+            .add_tpacket_v3(read(70, 20, 1));
+        assert_eq!(total, CaptureStats::new(100, 20, 1));
     }
 
     #[test]

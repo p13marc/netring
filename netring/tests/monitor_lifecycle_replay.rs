@@ -242,16 +242,7 @@ async fn fin_flushed_message_precedes_flow_ended() {
 struct FlushCounter(Arc<AtomicUsize>);
 
 impl AnomalySink for FlushCounter {
-    fn write(
-        &mut self,
-        _: &'static str,
-        _: netring::Severity,
-        _: flowscope::Timestamp,
-        _: Option<&dyn netring::anomaly::Key>,
-        _: &[(&'static str, std::borrow::Cow<'_, str>)],
-        _: &[(&'static str, f64)],
-    ) {
-    }
+    fn write(&mut self, _record: &netring::anomaly::sink::AnomalyRecord<'_>) {}
     fn flush(&mut self) -> Result<(), std::io::Error> {
         self.0.fetch_add(1, Ordering::SeqCst);
         Ok(())
@@ -341,4 +332,49 @@ async fn ticks_run_on_packet_time_during_replay() {
     // Armed at 1 s: due at 2, 3, 4, 5 (before the packets at those
     // times), then once for the 95 s gap.
     assert_eq!(*ticks.lock().unwrap(), vec![2, 3, 4, 5, 6]);
+}
+
+/// A reset says whether data moved before it: a refused connection
+/// (SYN, RST-ACK) is `zero_payload`, a transfer cut short is not. Before
+/// 0.32 `zero_payload` read `stats.total_bytes() == 0`, which counts the
+/// headers too: never true on a real flow.
+#[tokio::test(flavor = "current_thread")]
+async fn tcp_resets_tell_a_refused_connection_from_an_abort() {
+    use netring::ctx::Ctx;
+    use netring::protocol::event_typed::TcpRst;
+
+    let (c, s, m) = ([10, 0, 0, 1], [10, 0, 0, 2], [0u8; 6]);
+    let at = |ms: u64, f: Vec<u8>| (Duration::from_millis(ms), f);
+    let frames = [
+        // Port 40001: refused.
+        at(0, ipv4_tcp(m, m, c, s, 40001, 80, 100, 0, 0x02, &[])),
+        at(1, ipv4_tcp(m, m, s, c, 80, 40001, 0, 101, 0x14, &[])),
+        // Port 40002: handshake, a request, then the client resets.
+        at(2, ipv4_tcp(m, m, c, s, 40002, 80, 500, 0, 0x02, &[])),
+        at(3, ipv4_tcp(m, m, s, c, 80, 40002, 900, 501, 0x12, &[])),
+        at(4, ipv4_tcp(m, m, c, s, 40002, 80, 501, 901, 0x10, &[])),
+        at(
+            5,
+            ipv4_tcp(m, m, c, s, 40002, 80, 501, 901, 0x18, b"GET / HTTP/1.1\r\n"),
+        ),
+        at(6, ipv4_tcp(m, m, c, s, 40002, 80, 517, 901, 0x14, &[])),
+    ];
+    let file = pcap(&frames);
+    let seen: Arc<Mutex<Vec<(u16, bool)>>> = Arc::default();
+    let log = Arc::clone(&seen);
+    Monitor::builder()
+        .pcap_source(file.path())
+        .on_tcp_reset(move |rst: &TcpRst, _ctx: &mut Ctx<'_>| {
+            let port = rst.key.a.port().max(rst.key.b.port());
+            log.lock().unwrap().push((port, rst.zero_payload));
+            Ok(())
+        })
+        .build()
+        .unwrap()
+        .replay()
+        .await
+        .unwrap();
+    let mut seen = seen.lock().unwrap().clone();
+    seen.sort_unstable();
+    assert_eq!(seen, [(40001, true), (40002, false)]);
 }

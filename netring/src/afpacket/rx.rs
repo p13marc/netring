@@ -2,7 +2,6 @@
 
 use std::cell::Cell;
 use std::marker::PhantomData;
-use std::mem::ManuallyDrop;
 use std::os::fd::{AsFd, AsRawFd, BorrowedFd, OwnedFd};
 use std::time::{Duration, Instant};
 
@@ -12,8 +11,8 @@ use crate::config::{
     BpfFilter, BpfInsn, BusyPollConfig, FanoutFlags, FanoutMode, RingProfile, TimestampSource,
 };
 use crate::error::Error;
-use crate::packet::{BatchIter, Packet, PacketBatch};
-use crate::stats::{CaptureStats, SourceCounters};
+use crate::packet::{BatchIter, Packet, PacketBatch, VlanMode};
+use crate::stats::CaptureStats;
 use crate::traits::PacketSource;
 
 /// AF_PACKET TPACKET_V3 packet capture.
@@ -50,20 +49,42 @@ pub struct Capture {
     // Drop order: ring (munmap) before fd (close).
     ring: MmapRing,
     fd: OwnedFd,
+    /// The next block to take from the kernel.
     current_block: usize,
     expected_seq: u64,
+    /// A user-owned block a [`Packets`] loop has partly read (#211): kept
+    /// across `Packets` values and handed to the next `packets()` /
+    /// `next_batch()` call, so packets nobody read are never released.
+    pending: Option<PendingBlock>,
     /// Default poll timeout used by [`packets()`](Self::packets).
     /// Configured via [`CaptureBuilder::poll_timeout`].
     poll_timeout: Duration,
-    /// Running totals across calls to [`cumulative_stats`](Self::cumulative_stats).
-    /// `stats()` (the destructive variant) does not touch this.
-    cumulative: Cell<SourceCounters>,
+    /// Running totals behind [`stats`](Self::stats): every destructive
+    /// `PACKET_STATISTICS` read is folded in here.
+    cumulative: Cell<CaptureStats>,
     /// Busy-poll trio applied at build time. Inspected via
     /// [`busy_poll_config`](Self::busy_poll_config). Empty (all
     /// `None`) when no busy-poll knobs were set.
     busy_poll: BusyPollConfig,
     /// Created by [`Capture::stop_handle`]; polled with the socket.
     stop: Option<std::sync::Arc<StopSignal>>,
+    /// The snap length every installed socket filter is clamped to
+    /// ([`CaptureBuilder::snap_len`]).
+    snap_len: Option<u32>,
+    /// Re-insert stripped VLAN tags ([`CaptureBuilder::vlan_reinsert`]).
+    vlan_mode: VlanMode,
+}
+
+/// The cursor into a user-owned block that has packets left to read.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct PendingBlock {
+    /// Ring index of the block.
+    index: usize,
+    /// Offset of the next `tpacket3_hdr` from the block base.
+    offset: u32,
+    /// Packets left in the block (`0` once the last one was lent; the
+    /// block is then released on the next read or when `Packets` drops).
+    remaining: u32,
 }
 
 /// The eventfd behind [`StopHandle`].
@@ -189,34 +210,22 @@ impl Capture {
 
     // ── Stats ────────────────────────────────────────────────────────────
 
-    /// Capture statistics since the last call. **Resets kernel counters.**
+    /// Capture statistics: totals since this capture was opened.
     ///
-    /// For monotonic totals (no kernel-counter reset), use
-    /// [`cumulative_stats`](Self::cumulative_stats).
+    /// Reads (and thereby resets) the kernel's `PACKET_STATISTICS`
+    /// counters, folds them into a running total kept on the capture and
+    /// returns that total, so the result never goes backwards and repeated
+    /// calls never lose a count. Two reads with no traffic in between are
+    /// equal; the counts of a window are
+    /// [`later.delta_since(&earlier)`](CaptureStats::delta_since). See
+    /// [`CaptureStats`] for the meaning of each field.
+    ///
+    /// # Errors
+    ///
+    /// [`Error::SockOpt`] if `getsockopt(PACKET_STATISTICS)` fails.
     pub fn stats(&self) -> Result<CaptureStats, Error> {
         let raw = socket::get_packet_stats(self.fd.as_fd())?;
-        Ok(CaptureStats::from(raw))
-    }
-
-    /// Accumulated statistics since this capture was opened.
-    ///
-    /// Internally calls `stats()` (which resets kernel counters) and adds
-    /// the delta to a running total stored on `self`. Returned counters
-    /// are monotonically non-decreasing across calls (and saturate at
-    /// `u32::MAX`). **Do not mix with `stats()` on the same capture** — each
-    /// `stats()` call also resets the kernel counter and bypasses the
-    /// running total.
-    pub fn cumulative_stats(&self) -> Result<CaptureStats, Error> {
-        self.cumulative_counters()
-            .map(SourceCounters::to_capture_stats)
-    }
-
-    /// The running totals behind [`cumulative_stats`](Self::cumulative_stats)
-    /// in `u64`, with delivered packets split from drops — what the Monitor
-    /// telemetry reads (#183, #184).
-    pub(crate) fn cumulative_counters(&self) -> Result<SourceCounters, Error> {
-        let delta = socket::get_packet_stats(self.fd.as_fd())?;
-        let total = self.cumulative.get().add_tpacket_v3(delta);
+        let total = self.cumulative.get().add_tpacket_v3(raw);
         self.cumulative.set(total);
         Ok(total)
     }
@@ -233,14 +242,25 @@ impl Capture {
     /// `next_packet` returns `None` only on I/O error — inspect via
     /// [`Packets::take_error`].
     ///
+    /// # Stopping early keeps the rest of the block
+    ///
+    /// The kernel hands packets over a block at a time. Dropping a
+    /// [`Packets`] (or stopping it — a deadline, a [`StopHandle`]) after
+    /// some packets of a block leaves the **unread ones in place**: the
+    /// next `packets()` loop, or [`next_batch`](Self::next_batch), starts
+    /// with them, in order (#211). Only a fully read block goes back to
+    /// the kernel. (Before 0.32 the rest of the block was released and
+    /// lost.)
+    ///
     /// # Soundness
     ///
-    /// Each [`Packet`] is a zero-copy view into the *current* ring block, which
-    /// is recycled to the kernel on the next call. `next_packet` borrows
-    /// `&mut self`, so the borrow checker forbids holding two packets at once or
-    /// collecting them into a `Vec` — the constraint that makes it sound. (This
-    /// replaced an earlier `Iterator` impl whose `.collect()` could dangle into
-    /// recycled blocks.) [`to_owned`](Packet::to_owned) a packet to retain it:
+    /// Each [`Packet`] is a zero-copy view into a ring block, which is
+    /// recycled to the kernel once all of its packets were lent.
+    /// `next_packet` borrows `&mut self`, so the borrow checker forbids
+    /// holding two packets at once or collecting them into a `Vec` — the
+    /// constraint that makes it sound. (This replaced an earlier `Iterator`
+    /// impl whose `.collect()` could dangle into recycled blocks.)
+    /// [`to_owned`](Packet::to_owned) a packet to retain it:
     ///
     /// ```no_run
     /// # let mut cap = netring::Capture::open("lo").unwrap();
@@ -250,6 +270,7 @@ impl Capture {
     ///     let Some(pkt) = pkts.next_packet() else { break };
     ///     owned.push(pkt.to_owned());
     /// }
+    /// drop(pkts); // packets past the 100th stay in the ring for the next loop
     /// ```
     ///
     /// # Bounded iteration
@@ -261,21 +282,19 @@ impl Capture {
             cap: self as *mut Capture,
             timeout: self.poll_timeout,
             deadline: None,
-            batch: None,
-            iter: None,
             last_error: None,
             _marker: PhantomData,
         }
     }
 
-    /// Iterator that stops at `deadline`.
+    /// Iterator that stops at `deadline`. Packets of a block it already
+    /// started are lent past the deadline only until that block is
+    /// exhausted; no new block is taken once it passed.
     pub fn packets_until(&mut self, deadline: Instant) -> Packets<'_> {
         Packets {
             cap: self as *mut Capture,
             timeout: self.poll_timeout,
             deadline: Some(deadline),
-            batch: None,
-            iter: None,
             last_error: None,
             _marker: PhantomData,
         }
@@ -288,11 +307,31 @@ impl Capture {
 
     // ── Filter / fanout management ───────────────────────────────────────
 
+    /// The snap length set with [`CaptureBuilder::snap_len`]: every
+    /// classic filter this capture installs ([`set_filter`](Self::set_filter),
+    /// [`detach_filter`](Self::detach_filter), the builder's filter) cuts
+    /// accepted packets to at most this many bytes. `None`: whole packets.
+    pub fn snap_len(&self) -> Option<u32> {
+        self.snap_len
+    }
+
+    /// Whether this capture re-inserts the VLAN tag the kernel stripped
+    /// into each packet's data ([`CaptureBuilder::vlan_reinsert`]).
+    pub fn vlan_reinsert(&self) -> bool {
+        matches!(self.vlan_mode, VlanMode::Reinsert { .. })
+    }
+
     /// Attach an eBPF socket filter program.
     ///
     /// Replaces any existing filter (classic BPF or eBPF). The program
     /// must be `BPF_PROG_TYPE_SOCKET_FILTER`. Packets not accepted by
     /// the program are dropped before reaching the ring.
+    ///
+    /// The program's return value **is the capture length**: the kernel
+    /// keeps `min(packet length, return value)` bytes (`0` drops). It
+    /// replaces the classic filter that carried the
+    /// [`snap_len`](CaptureBuilder::snap_len) clamp, so to keep a snap
+    /// length return `min(len, snap)` from the program yourself.
     ///
     /// `prog` is borrowed for the call — the kernel keeps its own
     /// reference until you detach or close the socket.
@@ -309,8 +348,12 @@ impl Capture {
     }
 
     /// Detach any attached BPF/eBPF filter.
+    ///
+    /// With a [`snap_len`](CaptureBuilder::snap_len) set, the socket keeps
+    /// a one-instruction `ret #snap_len` filter instead, so every packet is
+    /// still captured — cut to the snap length.
     pub fn detach_filter(&self) -> Result<(), Error> {
-        filter::detach_bpf_filter(self.fd.as_fd())
+        self.install_filter(None)
     }
 
     /// Plan 21: replace the BPF filter on this capture without
@@ -327,8 +370,16 @@ impl Capture {
     /// strict cutover, drain a few batches after `set_filter` or
     /// install a `(old OR new)` filter first, drain old matches,
     /// then narrow.
+    ///
+    /// With a [`snap_len`](CaptureBuilder::snap_len) set, the filter is
+    /// installed through [`BpfFilter::with_snap_len`].
     pub fn set_filter(&self, filter: &crate::config::BpfFilter) -> Result<(), Error> {
-        filter::attach_bpf_filter(self.fd.as_fd(), filter)
+        self.install_filter(Some(filter))
+    }
+
+    /// Install `f` (or no filter), clamped to the capture's snap length.
+    fn install_filter(&self, f: Option<&BpfFilter>) -> Result<(), Error> {
+        install_filter(self.fd.as_fd(), f, self.snap_len)
     }
 
     // ── Busy-poll introspection ──────────────────────────────────────────
@@ -366,64 +417,138 @@ impl Capture {
     /// Take the next retired block as a [`PacketBatch`] (non-blocking).
     ///
     /// Returns `None` if the kernel hasn't retired a block yet. The batch
-    /// borrows `&mut self`; only one batch can be live at a time.
+    /// borrows `&mut self`; only one batch can be live at a time. If a
+    /// [`Packets`] loop stopped part-way through a block, the batch is the
+    /// **rest of that block** (its [`len`](PacketBatch::len) counts the
+    /// unread packets). Dropping the batch returns the whole block to the
+    /// kernel.
     pub fn next_batch(&mut self) -> Option<PacketBatch<'_>> {
-        let bd = self.ring.block_ptr(self.current_block);
-
-        // SAFETY: bd points to a valid block descriptor in our mmap region.
-        let status = unsafe { ring::read_block_status(bd) };
-
-        if status & ffi::TP_STATUS_USER == 0 {
+        if !self.acquire() {
             return None;
         }
-
-        // Read sequence number for gap detection
-        // SAFETY: block is user-owned (Acquire fence done in read_block_status).
-        let seq = unsafe { (*bd.as_ptr()).hdr.bh1.seq_num };
-        if seq != self.expected_seq && self.expected_seq != 0 {
-            tracing::warn!(
-                expected = self.expected_seq,
-                actual = seq,
-                dropped = seq.saturating_sub(self.expected_seq),
-                "block sequence gap"
-            );
-        }
-        self.expected_seq = seq + 1;
-
-        // SAFETY: block is user-owned, bd is valid, block_size is correct.
-        let batch = unsafe { PacketBatch::new(bd) };
-        self.current_block = (self.current_block + 1) % self.ring.block_count();
-        Some(batch)
+        let p = self.pending.take()?;
+        let bd = self.ring.block_ptr(p.index);
+        // SAFETY: `acquire` observed the block in `TP_STATUS_USER` (with
+        // Acquire ordering) and nothing released it since; the batch
+        // borrows `&mut self`, so it is the only user of the block and
+        // releases it on drop. `offset` / `remaining` came from the block
+        // header or a `BatchIter::position` over this block.
+        Some(
+            unsafe { PacketBatch::resume(bd, p.offset, p.remaining) }
+                .with_vlan_mode(self.vlan_mode),
+        )
     }
 
-    /// Block until a batch is available, or `timeout` elapses.
+    /// Make sure a user-owned block with unread packets is pending: `true`
+    /// if one is (already, or newly taken from the kernel), `false` if the
+    /// kernel has not retired the next block yet.
     ///
-    /// EINTR is handled internally — callers see `Ok(None)` on timeout, not
-    /// a spurious error from a signal interrupting the underlying `poll(2)`.
-    /// Also returns `Ok(None)` right away once a stop was requested
-    /// through a [`StopHandle`].
-    ///
-    /// # Errors
-    ///
-    /// [`Error::Io`] with `ENETDOWN` when the interface was removed, and
-    /// for a failed `poll(2)`. An interface that is merely down (or was
-    /// down when the capture was opened) is not an error: the read waits
-    /// out its timeout, logging a warning, and packets flow again once the
-    /// interface is back up.
-    pub fn next_batch_blocking(
-        &mut self,
-        timeout: Duration,
-    ) -> Result<Option<PacketBatch<'_>>, Error> {
-        if self.stop_requested() {
-            return Ok(None);
+    /// A retired block with no packets (the kernel does not normally close
+    /// empty blocks) is released and skipped.
+    fn acquire(&mut self) -> bool {
+        self.release_pending_if_exhausted();
+        if self.pending.is_some() {
+            return true;
         }
-        // Check if a batch is already available (non-blocking).
-        {
+        for _ in 0..self.ring.block_count() {
             let bd = self.ring.block_ptr(self.current_block);
+
+            // SAFETY: bd points to a valid block descriptor in our mmap region.
             let status = unsafe { ring::read_block_status(bd) };
-            if status & ffi::TP_STATUS_USER != 0 {
-                return Ok(self.next_batch());
+            if status & ffi::TP_STATUS_USER == 0 {
+                return false;
             }
+
+            // SAFETY: the block is user-owned (Acquire fence done in
+            // read_block_status); the header fields are read by value.
+            let (seq, num_pkts, first_offset) = unsafe {
+                let bh1 = &raw const (*bd.as_ptr()).hdr.bh1;
+                ((*bh1).seq_num, (*bh1).num_pkts, (*bh1).offset_to_first_pkt)
+            };
+            // Sequence number for gap detection.
+            if seq != self.expected_seq && self.expected_seq != 0 {
+                tracing::warn!(
+                    expected = self.expected_seq,
+                    actual = seq,
+                    dropped = seq.saturating_sub(self.expected_seq),
+                    "block sequence gap"
+                );
+            }
+            self.expected_seq = seq + 1;
+
+            let index = self.current_block;
+            self.current_block = (self.current_block + 1) % self.ring.block_count();
+            if num_pkts == 0 {
+                // SAFETY: user-owned block we are done with.
+                unsafe { ring::release_block(bd) };
+                continue;
+            }
+            self.pending = Some(PendingBlock {
+                index,
+                offset: first_offset,
+                remaining: num_pkts,
+            });
+            return true;
+        }
+        false
+    }
+
+    /// Lend the next unread packet of the pending block, advancing the
+    /// cursor. A pending block whose packets were all lent is released
+    /// here (the borrow of its last packet ended when this `&mut self`
+    /// call began) and `None` is returned; `None` too when nothing is
+    /// pending.
+    fn next_pending_packet(&mut self) -> Option<Packet<'_>> {
+        let p = self.pending?;
+        let bd = self.ring.block_ptr(p.index);
+        if p.remaining > 0 {
+            // SAFETY: the block is user-owned (taken by `acquire`, not yet
+            // released) and its header is read by value.
+            let blk_len = unsafe { (*bd.as_ptr()).hdr.bh1.blk_len };
+            // SAFETY: as above; the iterator and the packet it lends
+            // borrow `&mut self`, so the block cannot be released while
+            // the packet lives.
+            let mut it = unsafe { BatchIter::at(bd, p.offset, p.remaining, blk_len) }
+                .with_vlan_mode(self.vlan_mode);
+            if let Some(pkt) = it.next() {
+                let (offset, remaining) = it.position(bd);
+                self.pending = Some(PendingBlock {
+                    index: p.index,
+                    offset,
+                    remaining,
+                });
+                return Some(pkt);
+            }
+            // A header or packet ran past the block: the iterator logged
+            // it; treat the block as exhausted.
+        }
+        self.pending = None;
+        // SAFETY: user-owned block; no packet of it is borrowed any more.
+        unsafe { ring::release_block(bd) };
+        None
+    }
+
+    /// Release the pending block if all of its packets were lent.
+    fn release_pending_if_exhausted(&mut self) {
+        if let Some(p) = self.pending
+            && p.remaining == 0
+        {
+            self.pending = None;
+            // SAFETY: user-owned block; no packet of it is borrowed (the
+            // caller holds `&mut self`).
+            unsafe { ring::release_block(self.ring.block_ptr(p.index)) };
+        }
+    }
+
+    /// Block until a block with unread packets is pending, `timeout`
+    /// elapses, or a stop is requested: `Ok(true)` when one is pending.
+    fn wait_for_block(&mut self, timeout: Duration) -> Result<bool, Error> {
+        if self.stop_requested() {
+            return Ok(false);
+        }
+        // Unread packets, or a retired block, are ready now.
+        if self.acquire() {
+            return Ok(true);
         }
 
         let revents = match self.stop.as_ref() {
@@ -445,10 +570,38 @@ impl Capture {
             }
         };
         if self.stop_requested() {
-            return Ok(None);
+            return Ok(false);
         }
         socket::poll_error(self.fd.as_fd(), revents)?;
-        Ok(self.next_batch())
+        Ok(self.acquire())
+    }
+
+    /// Block until a batch is available, or `timeout` elapses.
+    ///
+    /// The rest of a block a [`Packets`] loop left partly read is
+    /// available at once (see [`next_batch`](Self::next_batch)).
+    ///
+    /// EINTR is handled internally — callers see `Ok(None)` on timeout, not
+    /// a spurious error from a signal interrupting the underlying `poll(2)`.
+    /// Also returns `Ok(None)` right away once a stop was requested
+    /// through a [`StopHandle`].
+    ///
+    /// # Errors
+    ///
+    /// [`Error::Io`] with `ENETDOWN` when the interface was removed, and
+    /// for a failed `poll(2)`. An interface that is merely down (or was
+    /// down when the capture was opened) is not an error: the read waits
+    /// out its timeout, logging a warning, and packets flow again once the
+    /// interface is back up.
+    pub fn next_batch_blocking(
+        &mut self,
+        timeout: Duration,
+    ) -> Result<Option<PacketBatch<'_>>, Error> {
+        if self.wait_for_block(timeout)? {
+            Ok(self.next_batch())
+        } else {
+            Ok(None)
+        }
     }
 
     /// A handle that stops blocking reads on this capture from another
@@ -495,8 +648,10 @@ impl PacketSource for Capture {
         Capture::stats(self)
     }
 
-    fn cumulative_stats(&self) -> Result<CaptureStats, Error> {
-        Capture::cumulative_stats(self)
+    /// A down interface is `Ok` (it may come back); a removed one is
+    /// `ENETDOWN`. Reads (and clears) the socket's pending error.
+    fn check_health(&self) -> Result<(), Error> {
+        socket::check_health(self.fd.as_fd())
     }
 }
 
@@ -513,6 +668,7 @@ impl std::fmt::Debug for Capture {
             .field("ring_size", &self.ring.size())
             .field("block_count", &self.ring.block_count())
             .field("current_block", &self.current_block)
+            .field("pending", &self.pending)
             .field("poll_timeout", &self.poll_timeout)
             .finish()
     }
@@ -540,14 +696,14 @@ unsafe impl Send for Capture {}
 /// Created by [`Capture::packets`] / [`Capture::packets_for`] /
 /// [`Capture::packets_until`]. Designed for `for` loop consumption — see
 /// the soundness note on [`Capture::packets`] before retaining yielded
-/// packets across iterations.
+/// packets across iterations. The read position lives in the [`Capture`],
+/// so dropping a `Packets` part-way through a block keeps that block's
+/// unread packets for the next loop.
 pub struct Packets<'cap> {
     cap: *mut Capture,
     timeout: Duration,
     /// Optional deadline; `next()` returns `None` once it elapses.
     deadline: Option<Instant>,
-    batch: Option<ManuallyDrop<PacketBatch<'static>>>,
-    iter: Option<BatchIter<'static>>,
     last_error: Option<Error>,
     _marker: PhantomData<&'cap mut Capture>,
 }
@@ -559,14 +715,6 @@ impl<'cap> Packets<'cap> {
     /// The error is consumed; a second call returns `None`.
     pub fn take_error(&mut self) -> Option<Error> {
         self.last_error.take()
-    }
-
-    fn drop_batch(&mut self) {
-        // The iter borrows from the batch — drop it first.
-        self.iter = None;
-        if let Some(batch) = self.batch.take() {
-            let _ = ManuallyDrop::into_inner(batch);
-        }
     }
 }
 
@@ -652,69 +800,37 @@ impl<'cap> Packets<'cap> {
 
     /// The body of [`next_packet`](Self::next_packet): `retry` keeps
     /// waiting across poll timeouts. Errors land in `last_error`.
+    ///
+    /// A stop request or the deadline returns `None` **without** releasing
+    /// the pending block: its unread packets stay for the next loop.
     fn next_inner(&mut self, retry: bool) -> Option<Packet<'_>> {
         loop {
-            // SAFETY: see below — `cap` outlives every `Packets`.
+            // SAFETY: `cap` is valid and exclusively ours for `'cap` (the
+            // `PhantomData<&'cap mut Capture>`); each access goes through a
+            // fresh reborrow of the raw pointer.
             if unsafe { (*self.cap).stop_requested() } {
-                self.drop_batch();
                 return None;
             }
-            if let Some(it) = self.iter.as_mut() {
-                if let Some(pkt) = it.next() {
-                    // SAFETY: `pkt` borrows the `'static`-erased batch stored in
-                    // `self.batch` (see the `PacketBatch` transmute below). We
-                    // re-impose the **`&mut self`** lifetime as the upper bound:
-                    // the returned packet cannot outlive this `&mut self` borrow,
-                    // and `self.batch` is not recycled until the next
-                    // `next_packet`/`for_each` call — which needs `&mut self`
-                    // again, so it can't run while this packet is alive. This is
-                    // the lending-iterator pattern; binding to `&mut self`
-                    // (instead of the old, unsound `'cap`) is what closes the
-                    // use-after-free that `.collect()` could trigger.
-                    let pkt: Packet<'_> = unsafe { std::mem::transmute(pkt) };
-                    return Some(pkt);
-                }
-                // BatchIter exhausted — drop the batch before requesting
-                // another (releases the block back to the kernel).
-                self.drop_batch();
+            // SAFETY: as above. The packet borrows the pending block, which
+            // the capture releases only on a later `&mut` call — after this
+            // `&mut self` borrow (and so the packet) has ended. This is the
+            // lending-iterator pattern; binding the packet to `&mut self`
+            // (not `'cap`) is what keeps `.collect()` from dangling.
+            if let Some(pkt) = unsafe { (*self.cap).next_pending_packet() } {
+                return Some(pkt);
             }
 
-            // SAFETY: `cap` is valid for `'cap`; no batch is live (we just
-            // dropped it). The pointer dereference is guarded by `&mut self`
-            // on next() — only one Packets exists per Capture.
-            let cap = unsafe { &mut *self.cap };
-
-            // Effective timeout = min(self.timeout, deadline - now).
+            // Nothing unread: take a new block, or wait for one. Never
+            // past the deadline.
             let effective_timeout = match self.deadline {
                 Some(d) => d.checked_duration_since(Instant::now())?.min(self.timeout),
                 None => self.timeout,
             };
-            match cap.next_batch_blocking(effective_timeout) {
-                Ok(Some(batch)) => {
-                    if batch.is_empty() {
-                        drop(batch);
-                        continue;
-                    }
-                    // SAFETY: lifetime erasure from `PacketBatch<'_>` to
-                    // `PacketBatch<'static>`. Sound because:
-                    //   1. The Capture (and its mmap ring) is valid for `'cap`.
-                    //   2. We only release the block via ManuallyDrop in
-                    //      drop_batch / Drop.
-                    //   3. The yielded `Packet<'cap>` is bounded by `'cap`
-                    //      via the transmute back (assuming the caller doesn't
-                    //      retain across iterations — soundness note above).
-                    let erased_batch: PacketBatch<'static> = unsafe { std::mem::transmute(batch) };
-                    self.batch = Some(ManuallyDrop::new(erased_batch));
-
-                    // SAFETY: same erasure logic — iter borrows from the
-                    // batch we just stored; both share `'static` and are
-                    // dropped together.
-                    let iter: BatchIter<'_> = self.batch.as_ref().unwrap().iter();
-                    let iter_erased: BatchIter<'static> = unsafe { std::mem::transmute(iter) };
-                    self.iter = Some(iter_erased);
-                }
-                Ok(None) if retry => continue,
-                Ok(None) => return None,
+            // SAFETY: as above; no packet is borrowed here.
+            match unsafe { (*self.cap).wait_for_block(effective_timeout) } {
+                Ok(true) => continue,
+                Ok(false) if retry => continue,
+                Ok(false) => return None,
                 Err(e) => {
                     self.last_error = Some(e);
                     return None;
@@ -747,7 +863,11 @@ impl<'cap> Packets<'cap> {
 
 impl Drop for Packets<'_> {
     fn drop(&mut self) {
-        self.drop_batch();
+        // Release the block of the last lent packet if it was the block's
+        // last one (no packet can be borrowed past `self`). A partly read
+        // block stays pending in the capture.
+        // SAFETY: `cap` is valid for `'cap`.
+        unsafe { (*self.cap).release_pending_if_exhausted() };
     }
 }
 
@@ -778,7 +898,9 @@ pub struct CaptureBuilder {
     poll_timeout: Duration,
     fanout: Option<(FanoutMode, u16)>,
     fanout_flags: FanoutFlags,
-    bpf_filter: Option<Vec<BpfInsn>>,
+    bpf_filter: Option<BpfFilter>,
+    snap_len: Option<u32>,
+    vlan_reinsert: bool,
 }
 
 impl Default for CaptureBuilder {
@@ -803,6 +925,8 @@ impl Default for CaptureBuilder {
             fanout: None,
             fanout_flags: FanoutFlags::empty(),
             bpf_filter: None,
+            snap_len: None,
+            vlan_reinsert: true,
         }
     }
 }
@@ -826,10 +950,55 @@ impl CaptureBuilder {
 
     /// Capture only the first `len` bytes of each packet (snap length).
     ///
-    /// Internally sets `frame_size` to `snap_len + TPACKET3_HDRLEN` (aligned).
+    /// Enforced by the socket filter, the only per-packet capture length
+    /// TPACKET_V3 honours: the kernel keeps `min(packet length, filter
+    /// return value)` bytes. The builder's [`bpf_filter`](Self::bpf_filter)
+    /// — and every later [`Capture::set_filter`] /
+    /// [`Capture::detach_filter`] — is installed through
+    /// [`BpfFilter::with_snap_len`]; without a filter the socket gets a
+    /// one-instruction `ret #len`. A cut packet has
+    /// [`Packet::len`] < [`Packet::original_len`] and
+    /// [`PacketStatus::truncated`](crate::PacketStatus::truncated) set.
+    ///
+    /// Before 0.32 this set the ring's `frame_size`, which TPACKET_V3
+    /// ignores for the capture length (#210). An eBPF filter
+    /// ([`Capture::attach_ebpf_filter`]) sets the length itself.
+    ///
+    /// `build()` fails with [`Error::Config`] for `len == 0`.
     pub fn snap_len(mut self, len: u32) -> Self {
-        let frame = ffi::tpacket_align(ffi::TPACKET3_HDRLEN + len as usize);
-        self.frame_size = frame;
+        self.snap_len = Some(len);
+        self
+    }
+
+    /// Re-insert the VLAN tag the kernel stripped into each packet's data.
+    /// Default: `true` — libpcap's behaviour.
+    ///
+    /// Linux removes the outer 802.1Q / 802.1ad tag of a received frame
+    /// before packet taps run (and a device with VLAN offload never had it
+    /// in the frame), reporting it in the ring header instead (#209). With
+    /// re-insertion on, every packet is handed out as it was on the wire:
+    /// the tag is moved back in front of the EtherType, in place in the
+    /// ring, the first time the packet is read (`len()` / `original_len()`
+    /// grow by 4, `len()` capped at the [snap length](Self::snap_len)), so
+    /// parsers, flow extractors, pcap files and a [`Bridge`](crate::Bridge)
+    /// see the tag. [`Packet::vlan`](crate::Packet::vlan) reports it either
+    /// way; [`Packet::stripped_vlan`](crate::Packet::stripped_vlan) is the
+    /// tag when it is *not* in the data.
+    ///
+    /// Byte counts follow the data: with re-insertion off, a tagged
+    /// packet's [`view`](crate::Packet::view) — and every flow count built
+    /// on it — is 4 bytes shorter than what was on the wire (the same as
+    /// an AF_XDP capture whose NIC strips the tag; flowscope#222).
+    ///
+    /// Re-insertion needs 4 bytes of headroom in front of each frame, which
+    /// the builder reserves with `PACKET_RESERVE`. Packets of non-Ethernet
+    /// devices, and packets with fewer than 12 bytes captured, are left as
+    /// they are. It needs Linux 3.14 or later (it marks a rewritten packet
+    /// in a header field older kernels don't reset); on an older kernel it
+    /// stays off, with a warning — [`Capture::vlan_reinsert`] says what
+    /// applies.
+    pub fn vlan_reinsert(mut self, enable: bool) -> Self {
+        self.vlan_reinsert = enable;
         self
     }
 
@@ -976,7 +1145,7 @@ impl CaptureBuilder {
     /// To attach pre-built bytecode (e.g. from `tcpdump -dd`), wrap it
     /// in [`BpfFilter::new`] first.
     pub fn bpf_filter(mut self, filter: BpfFilter) -> Self {
-        self.bpf_filter = Some(filter.into_instructions());
+        self.bpf_filter = Some(filter);
         self
     }
 
@@ -1036,15 +1205,31 @@ fn is_enomem(e: &std::io::Error) -> bool {
     e.raw_os_error() == Some(libc::ENOMEM)
 }
 
-/// A classic BPF program that drops every packet (`ret #0`).
-fn reject_all_filter() -> BpfFilter {
-    let ret_0 = BpfInsn {
+/// A one-instruction classic BPF program: `ret #k` (`0` drops every
+/// packet; `k > 0` accepts every packet, cut to `k` bytes).
+fn ret_k_filter(k: u32) -> BpfFilter {
+    let ret_k = BpfInsn {
         code: 0x06, // BPF_RET | BPF_K
         jt: 0,
         jf: 0,
-        k: 0,
+        k,
     };
-    BpfFilter::new(vec![ret_0]).expect("one instruction")
+    BpfFilter::new(vec![ret_k]).expect("one instruction")
+}
+
+/// Install the socket filter of a capture: `f` clamped to `snap`, a bare
+/// `ret #snap` when only a snap length is set, or no filter at all.
+fn install_filter(
+    fd: BorrowedFd<'_>,
+    f: Option<&BpfFilter>,
+    snap: Option<u32>,
+) -> Result<(), Error> {
+    match (f, snap) {
+        (Some(f), Some(snap)) => filter::attach_bpf_filter(fd, &f.with_snap_len(snap)?),
+        (Some(f), None) => filter::attach_bpf_filter(fd, f),
+        (None, Some(snap)) => filter::attach_bpf_filter(fd, &ret_k_filter(snap)),
+        (None, None) => filter::detach_bpf_filter(fd),
+    }
 }
 
 /// Single attempt at building a Capture with `block_count` blocks.
@@ -1082,6 +1267,12 @@ fn build_inner(b: &CaptureBuilder, block_count: usize) -> Result<Capture, Error>
         return Err(Error::Config("block_count must be > 0".into()));
     }
 
+    if b.snap_len == Some(0) {
+        return Err(Error::Config(
+            "snap_len must be > 0 (a 0-byte snap length drops every packet)".into(),
+        ));
+    }
+
     let geometry = RingGeometry::new(b.block_size, block_count, b.frame_size)?;
 
     // Create the socket with protocol 0: `socket(ETH_P_ALL)` hooks it into
@@ -1094,6 +1285,20 @@ fn build_inner(b: &CaptureBuilder, block_count: usize) -> Result<Capture, Error>
 
     // Set TPACKET_V3
     socket::set_packet_version(fd.as_fd(), ffi::TPACKET_V3_INT)?;
+
+    // Re-insertion marks rewritten packets in `tp_padding`, which the
+    // kernel zeroes per packet only since 3.14: off on older kernels.
+    let vlan_reinsert = b.vlan_reinsert && crate::afpacket::vlan_reinsert_supported();
+    if b.vlan_reinsert && !vlan_reinsert {
+        tracing::warn!(
+            "VLAN re-insertion needs Linux 3.14+: off; tags stay in Packet::stripped_vlan()"
+        );
+    }
+    // Headroom for re-inserting a stripped VLAN tag. Only before the ring
+    // exists: the kernel answers PACKET_RESERVE with EBUSY afterwards.
+    if vlan_reinsert {
+        socket::set_packet_reserve(fd.as_fd(), ffi::VLAN_TAG_LEN as u32)?;
+    }
 
     // Configure RX ring
     let mut req: ffi::tpacket_req3 = unsafe { std::mem::zeroed() };
@@ -1139,18 +1344,14 @@ fn build_inner(b: &CaptureBuilder, block_count: usize) -> Result<Capture, Error>
     if b.timestamp_source != TimestampSource::Software {
         socket::set_timestamp_source(fd.as_fd(), b.timestamp_source)?;
     }
-    let bpf_filter = b
-        .bpf_filter
-        .as_ref()
-        .map(|insns| BpfFilter::new(insns.clone()))
-        .transpose()?;
+    let bpf_filter = b.bpf_filter.as_ref();
     if b.fanout.is_some() {
         // PACKET_FANOUT needs a bound socket, and until it joins the group
         // the socket gets every packet on the interface: drop them all
         // until the group decides what this member sees.
-        filter::attach_bpf_filter(fd.as_fd(), &reject_all_filter())?;
-    } else if let Some(filt) = &bpf_filter {
-        filter::attach_bpf_filter(fd.as_fd(), filt)?;
+        filter::attach_bpf_filter(fd.as_fd(), &ret_k_filter(0))?;
+    } else if bpf_filter.is_some() || b.snap_len.is_some() {
+        install_filter(fd.as_fd(), bpf_filter, b.snap_len)?;
     }
 
     // Bind to interface: the socket starts receiving here.
@@ -1162,10 +1363,8 @@ fn build_inner(b: &CaptureBuilder, block_count: usize) -> Result<Capture, Error>
     }
     if let Some((mode, group_id)) = b.fanout {
         fanout::join_fanout(fd.as_fd(), group_id, mode, b.fanout_flags)?;
-        match &bpf_filter {
-            Some(filt) => filter::attach_bpf_filter(fd.as_fd(), filt)?,
-            None => filter::detach_bpf_filter(fd.as_fd())?,
-        }
+        // Replaces the reject-all filter (or removes it).
+        install_filter(fd.as_fd(), bpf_filter, b.snap_len)?;
     }
 
     let busy_poll = BusyPollConfig {
@@ -1189,10 +1388,19 @@ fn build_inner(b: &CaptureBuilder, block_count: usize) -> Result<Capture, Error>
         fd,
         current_block: 0,
         expected_seq: 0,
+        pending: None,
         poll_timeout: b.poll_timeout,
-        cumulative: Cell::new(SourceCounters::default()),
+        cumulative: Cell::new(CaptureStats::default()),
         busy_poll,
         stop: None,
+        snap_len: b.snap_len,
+        vlan_mode: if vlan_reinsert {
+            VlanMode::Reinsert {
+                snap_cap: b.snap_len.unwrap_or(u32::MAX),
+            }
+        } else {
+            VlanMode::Off
+        },
     })
 }
 
@@ -1346,6 +1554,31 @@ mod tests {
         assert!(matches!(err, Error::Config(_)), "{err:?}");
     }
 
+    /// #210: a zero snap length would drop every packet — a config error,
+    /// caught before the socket exists.
+    #[test]
+    fn builder_rejects_zero_snap_len() {
+        let err = CaptureBuilder::default()
+            .interface("lo")
+            .snap_len(0)
+            .build()
+            .unwrap_err();
+        assert!(
+            matches!(err, Error::Config(ref m) if m.contains("snap_len")),
+            "{err:?}"
+        );
+    }
+
+    /// #210: the snap length no longer rides on `frame_size` (TPACKET_V3
+    /// ignores it for the capture length); it is kept for the filter.
+    #[test]
+    fn builder_snap_len_is_kept_apart_from_frame_size() {
+        let b = CaptureBuilder::default().snap_len(96);
+        assert_eq!(b.snap_len, Some(96));
+        assert_eq!(b.frame_size, 2048);
+        assert_eq!(CaptureBuilder::default().snap_len, None);
+    }
+
     #[test]
     fn builder_defaults() {
         let b = CaptureBuilder::default();
@@ -1357,6 +1590,8 @@ mod tests {
         assert!(!b.promiscuous);
         assert!(!b.ignore_outgoing);
         assert_eq!(b.poll_timeout, Duration::from_millis(100));
+        assert!(b.vlan_reinsert, "libpcap's default");
+        assert!(!CaptureBuilder::default().vlan_reinsert(false).vlan_reinsert);
     }
 
     #[test]

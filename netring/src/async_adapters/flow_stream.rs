@@ -474,7 +474,7 @@ where
             let outcome = cap.poll_drain(cx, &mut |sp: SourcePacket<'_>| {
                 // Plan 17: optional pre-tracking dedup (on the unclamped ts).
                 if let Some(d) = dedup.as_mut()
-                    && !d.keep_raw(sp.data, sp.direction, sp.view.timestamp)
+                    && !d.keep_raw(sp.data, sp.original_len, sp.direction, sp.view.timestamp)
                 {
                     return;
                 }
@@ -663,8 +663,8 @@ where
         self.dedup.as_mut()
     }
 
-    fn capture_stats(&self) -> Option<Result<crate::stats::CaptureStats, Error>> {
-        self.cap.capture_stats()
+    fn ring_stats(&self) -> Option<Result<crate::stats::CaptureStats, Error>> {
+        self.cap.ring_stats()
     }
 
     fn packets_read(&self) -> Option<u64> {

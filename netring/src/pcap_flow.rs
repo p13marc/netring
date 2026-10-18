@@ -100,7 +100,7 @@ impl Replay {
             match Pin::new(&mut self.source).poll_next(cx) {
                 Poll::Ready(Some(Ok(pkt))) => {
                     if let Some(d) = self.dedup.as_mut()
-                        && !d.keep_raw(&pkt.data, pkt.direction, pkt.timestamp)
+                        && !d.keep_raw(&pkt.data, pkt.original_len, pkt.direction, pkt.timestamp)
                     {
                         continue;
                     }
@@ -161,7 +161,7 @@ macro_rules! replay_builders {
         }
 
         /// Number of packets the upstream source has yielded so far.
-        /// Analogue of `capture_stats().packets` for offline replay.
+        /// Analogue of `capture_stats().delivered` for offline replay.
         pub fn packets_read(&self) -> u64 {
             self.replay.source.packets_yielded()
         }
@@ -244,7 +244,7 @@ where
 impl<E> crate::async_adapters::multi_source::Sealed for PcapFlowStream<E> where E: FlowExtractor {}
 
 /// A replay source for [`MultiFlowStream`](crate::MultiFlowStream)
-/// (`push_source`): no kernel ring, so `capture_stats()` is `None` and
+/// (`push_source`): no kernel ring, so `ring_stats()` is `None` and
 /// `packets_read()` counts the frames read from the file.
 impl<E> crate::async_adapters::multi_source::MultiSource<E> for PcapFlowStream<E>
 where
@@ -271,7 +271,7 @@ where
         self.replay.dedup.as_mut()
     }
 
-    fn capture_stats(&self) -> Option<Result<crate::stats::CaptureStats, Error>> {
+    fn ring_stats(&self) -> Option<Result<crate::stats::CaptureStats, Error>> {
         None
     }
 
@@ -301,8 +301,10 @@ where
                     if let Some(now) = sweep {
                         this.pending.extend(this.tracker.sweep(now));
                     }
-                    this.pending
-                        .extend(this.tracker.track(PacketView::new(&pkt.data, ts)));
+                    this.pending.extend(
+                        this.tracker
+                            .track(PacketView::new(&pkt.data, ts).with_wire_len(pkt.original_len)),
+                    );
                 }
                 Step::Eof => {
                     // End-of-input flush: every still-open flow exceeds
@@ -511,7 +513,7 @@ macro_rules! pcap_l7_stream {
         }
 
         /// A replay source for the matching `Multi*Stream` fan-in
-        /// (`push_source`): no kernel ring, so `capture_stats()` is
+        /// (`push_source`): no kernel ring, so `ring_stats()` is
         /// `None` and `packets_read()` counts the frames read from the
         /// file.
         impl<E, P> crate::async_adapters::multi_source::MultiSource<E> for $name<E, P>
@@ -536,7 +538,7 @@ macro_rules! pcap_l7_stream {
                 self.replay.dedup.as_mut()
             }
 
-            fn capture_stats(&self) -> Option<Result<crate::stats::CaptureStats, Error>> {
+            fn ring_stats(&self) -> Option<Result<crate::stats::CaptureStats, Error>> {
                 None
             }
 
@@ -568,8 +570,10 @@ macro_rules! pcap_l7_stream {
                             if let Some(now) = sweep {
                                 this.driver.sweep_into(now, &mut this.scratch);
                             }
-                            this.driver
-                                .track_into(PacketView::new(&pkt.data, ts), &mut this.scratch);
+                            this.driver.track_into(
+                                PacketView::new(&pkt.data, ts).with_wire_len(pkt.original_len),
+                                &mut this.scratch,
+                            );
                         }
                         Step::Eof => {
                             // End-of-input flush: final `on_tick`, then every

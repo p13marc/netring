@@ -51,6 +51,11 @@ impl Ctx<'_> {
     /// `dyn AnomalySink` is the registered sink. They live in
     /// distinct struct fields of `Ctx`, so projecting both at
     /// once is sound.
+    ///
+    /// Anomalies begun on the returned sink don't know the current flow
+    /// (see [`Ctx::sink_mut`]): use
+    /// [`AnomalyWriter::with_flow`](crate::anomaly::sink::AnomalyWriter::with_flow)
+    /// to name its initiator.
     pub fn split_state_sink<T>(&mut self) -> (&mut T, &mut dyn AnomalySink)
     where
         T: Default + Send + 'static,
@@ -128,7 +133,7 @@ mod tests {
     use super::*;
     use crate::anomaly::Severity;
     use crate::anomaly::sink::NoopSink;
-    use crate::ctx::{CounterRegistry, SourceIdx, StateMap};
+    use crate::ctx::{CounterRegistry, StateMap};
 
     #[derive(Default)]
     struct State1 {
@@ -149,7 +154,7 @@ mod tests {
         Ctx {
             flow: None,
             ts: Timestamp::new(0, 0),
-            source: SourceIdx(0),
+            source: None,
             monitor_name: None,
             state_map: state,
             sink,
@@ -160,6 +165,7 @@ mod tests {
             arp_table: None,
             side: None,
             orientation: None,
+            initiator: None,
         }
     }
 
@@ -173,7 +179,11 @@ mod tests {
 
         let (s, k) = ctx.split_state_sink::<State1>();
         s.n = 9;
-        k.write("k", Severity::Info, Timestamp::new(0, 0), None, &[], &[]);
+        k.write(&crate::anomaly::sink::AnomalyRecord::new(
+            "k",
+            Severity::Info,
+            Timestamp::new(0, 0),
+        ));
         // Both borrows are still live here — the test compiles
         // iff the projection actually emits disjoint refs.
         assert_eq!(s.n, 9);
@@ -211,7 +221,11 @@ mod tests {
 
         let (k, c) = ctx.split_sink_counter::<u16>();
         c.bump(42u16, Timestamp::new(0, 0));
-        k.write("k", Severity::Info, Timestamp::new(0, 0), None, &[], &[]);
+        k.write(&crate::anomaly::sink::AnomalyRecord::new(
+            "k",
+            Severity::Info,
+            Timestamp::new(0, 0),
+        ));
     }
 
     #[test]
@@ -229,7 +243,11 @@ mod tests {
         let (s, k, c) = ctx.split_state_sink_counter::<State2, u64>();
         s.m = 11;
         c.bump(99u64, Timestamp::new(0, 0));
-        k.write("k", Severity::Info, Timestamp::new(0, 0), None, &[], &[]);
+        k.write(&crate::anomaly::sink::AnomalyRecord::new(
+            "k",
+            Severity::Info,
+            Timestamp::new(0, 0),
+        ));
         assert_eq!(s.m, 11);
     }
 

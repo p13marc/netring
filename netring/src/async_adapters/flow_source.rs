@@ -33,8 +33,8 @@ pub(crate) struct SourcePacket<'a> {
     pub view: PacketView<'a>,
     pub data: &'a [u8],
     pub direction: PacketDirection,
-    // Read only by the pcap-tap leg; without `pcap` it is genuinely unused.
-    #[cfg_attr(not(feature = "pcap"), allow(dead_code))]
+    /// The packet's length on the wire (dedup keys on it; the pcap tap
+    /// records it).
     pub original_len: usize,
 }
 
@@ -64,11 +64,11 @@ pub(crate) trait AsyncFlowSource {
         sink: &mut dyn FnMut(SourcePacket<'_>),
     ) -> Poll<std::io::Result<DrainOutcome>>;
 
-    /// Kernel-ring statistics when the source has a ring (AF_PACKET,
-    /// AF_XDP); `None` otherwise. Backs
-    /// [`MultiSource::capture_stats`](super::multi_source::MultiSource::capture_stats)
+    /// Kernel-ring statistics (totals since the source was opened) when the
+    /// source has a ring (AF_PACKET, AF_XDP); `None` otherwise. Backs
+    /// [`MultiSource::ring_stats`](super::multi_source::MultiSource::ring_stats)
     /// for the live streams.
-    fn capture_stats(&self) -> Option<Result<crate::stats::CaptureStats, crate::error::Error>> {
+    fn ring_stats(&self) -> Option<Result<crate::stats::CaptureStats, crate::error::Error>> {
         None
     }
 }
@@ -112,7 +112,7 @@ where
         }
     }
 
-    fn capture_stats(&self) -> Option<Result<crate::stats::CaptureStats, crate::error::Error>> {
+    fn ring_stats(&self) -> Option<Result<crate::stats::CaptureStats, crate::error::Error>> {
         Some(self.stats())
     }
 }
@@ -128,7 +128,12 @@ pub(crate) fn view_from_parts(
     rx_metadata: flowscope::RxMetadata,
 ) -> PacketView<'_> {
     let ts = ts.unwrap_or_else(crate::async_adapters::flow_stream::current_timestamp);
-    PacketView::new(data, ts).with_rx_metadata(rx_metadata)
+    // AF_XDP frames are never cut: the wire length is the frame's. A tag
+    // the NIC stripped into the metadata is not counted (see
+    // `Packet::view`, flowscope#222).
+    PacketView::new(data, ts)
+        .with_wire_len(data.len())
+        .with_rx_metadata(rx_metadata)
 }
 
 // ── AF_XDP: AsyncXdpCapture ────────────────────────────────────────────────
@@ -153,7 +158,7 @@ impl AsyncFlowSource for crate::AsyncXdpCapture {
         }
     }
 
-    fn capture_stats(&self) -> Option<Result<crate::stats::CaptureStats, crate::error::Error>> {
+    fn ring_stats(&self) -> Option<Result<crate::stats::CaptureStats, crate::error::Error>> {
         Some(self.capture_stats())
     }
 }

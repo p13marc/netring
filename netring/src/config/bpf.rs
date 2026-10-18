@@ -17,6 +17,8 @@
 //! use [`aya`](https://crates.io/crates/aya) and attach to the
 //! socket fd via `AsFd`.
 
+use flowscope::{VlanProto, VlanTag};
+
 /// A single classic BPF instruction.
 ///
 /// Identical memory layout to `libc::sock_filter` so that
@@ -55,6 +57,76 @@ impl From<libc::sock_filter> for BpfInsn {
             jf: sf.jf,
             k: sf.k,
         }
+    }
+}
+
+/// The per-packet metadata a socket filter can read besides the frame
+/// bytes — the kernel's BPF "ancillary data" (`SKF_AD_*` loads) — for
+/// [`BpfFilter::matches_with`].
+///
+/// Linux strips the **outer** 802.1Q / 802.1ad tag from a received frame
+/// before packet taps see it (v6.12 net/core/dev.c
+/// `__netif_receive_skb_core`: `if (eth_type_vlan(skb->protocol)) skb =
+/// skb_vlan_untag(skb);`, ahead of the `ptype_all` delivery; a NIC with VLAN
+/// offload strips it in hardware), so the socket filter sees the frame
+/// without it and reads the tag through `SKF_AD_VLAN_TAG` /
+/// `SKF_AD_VLAN_TAG_PRESENT` / `SKF_AD_VLAN_TPID`. netring re-inserts the
+/// tag in the ring by default (libpcap's behaviour,
+/// [`CaptureBuilder::vlan_reinsert`](crate::CaptureBuilder)), so the bytes
+/// userspace sees can differ from the ones the filter ran on: this struct
+/// says how.
+///
+/// - [`NONE`](Self::NONE): no tag outside the frame — tcpdump-offline
+///   semantics (`matches`).
+/// - [`stripped(tag)`](Self::stripped): the kernel stripped `tag`; the frame
+///   passed to `matches_with` is the one without it (what the filter saw).
+/// - [`reinserted(tag)`](Self::reinserted): the kernel stripped `tag` and
+///   it was put back at bytes 12..16 of the frame passed to `matches_with`;
+///   the interpreter reads the frame as if those four bytes were absent.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+#[non_exhaustive]
+pub struct BpfAncillary {
+    /// The VLAN tag the kernel took out of the frame, if any.
+    pub vlan: Option<VlanTag>,
+    /// The tag is back in the frame (at bytes 12..16): the filter ran on
+    /// the frame without those four bytes.
+    pub vlan_in_frame: bool,
+}
+
+impl BpfAncillary {
+    /// No ancillary data: every tag is in the frame.
+    pub const NONE: Self = Self {
+        vlan: None,
+        vlan_in_frame: false,
+    };
+
+    /// The kernel stripped `tag`; the frame is the one without it.
+    pub const fn stripped(tag: VlanTag) -> Self {
+        Self {
+            vlan: Some(tag),
+            vlan_in_frame: false,
+        }
+    }
+
+    /// The kernel stripped `tag` and it was re-inserted at bytes 12..16 of
+    /// the frame (netring's and libpcap's default on capture).
+    pub const fn reinserted(tag: VlanTag) -> Self {
+        Self {
+            vlan: Some(tag),
+            vlan_in_frame: true,
+        }
+    }
+}
+
+/// The TPID (EtherType) of a VLAN protocol.
+pub(crate) fn vlan_tpid(proto: VlanProto) -> u16 {
+    match proto {
+        VlanProto::Dot1Q => 0x8100,
+        VlanProto::Dot1Ad => 0x88a8,
+        VlanProto::Other(tpid) => tpid,
+        // flowscope's `VlanProto` is non-exhaustive; a future named variant
+        // is reported as the 802.1Q default.
+        _ => 0x8100,
     }
 }
 
@@ -141,6 +213,83 @@ impl BpfFilter {
     /// Whether the filter has no instructions.
     pub fn is_empty(&self) -> bool {
         self.instructions.is_empty()
+    }
+
+    /// This filter with every accepted packet cut to at most `snap` bytes —
+    /// a snap length enforced by the socket filter itself.
+    ///
+    /// A socket filter's return value is the number of bytes the kernel
+    /// keeps (v6.12 net/packet/af_packet.c tpacket_rcv():
+    /// `res = run_filter(skb, sk, snaplen); … if (snaplen > res) snaplen =
+    /// res;`), which is the only per-packet capture length TPACKET_V3
+    /// honours. The rewrite:
+    ///
+    /// - every `ret #k` with `k > 0` becomes `ret #min(k, snap)` (`ret #0`,
+    ///   drop, is kept);
+    /// - every `ret a` / `ret x` becomes a jump to a tail that returns
+    ///   `min(a, snap)` / `min(x, snap)`:
+    ///   `tail_x: txa; tail_a: jgt #snap, 0, 1; ret #snap; ret a`.
+    ///
+    /// The program grows by at most four instructions (only when it returns
+    /// `a` or `x`); other jumps keep their targets. The symbolic source is
+    /// kept, so [`to_human`](Self::to_human) renders the same expression.
+    /// [`CaptureBuilder::snap_len`](crate::CaptureBuilder::snap_len) applies
+    /// this to every filter a capture installs. A `snap` of `0` drops every
+    /// packet.
+    ///
+    /// # Errors
+    ///
+    /// [`BpfBuildError::TooManyInstructions`] if the tail would take the
+    /// program past [`MAX_INSNS`](Self::MAX_INSNS).
+    pub fn with_snap_len(&self, snap: u32) -> Result<BpfFilter, BpfBuildError> {
+        use super::bpf_compile::{
+            BPF_JMP_JA, BPF_JMP_JGT_K, BPF_MISC_TXA, BPF_RET_A, BPF_RET_K, BPF_RET_X,
+        };
+        let insn = |code, jt, jf, k| BpfInsn { code, jt, jf, k };
+
+        let n = self.instructions.len();
+        let returns_x = self.instructions.iter().any(|i| i.code == BPF_RET_X);
+        let returns_a = self.instructions.iter().any(|i| i.code == BPF_RET_A);
+        // Tail layout after the original `n` instructions:
+        //   [txa]                     only when some `ret x` exists
+        //   jgt #snap, jt 0, jf 1     tail_a
+        //   ret #snap
+        //   ret a
+        let tail_x = n;
+        let tail_a = if returns_x { n + 1 } else { n };
+        let tail_len = match (returns_a || returns_x, returns_x) {
+            (false, _) => 0,
+            (true, false) => 3,
+            (true, true) => 4,
+        };
+        let total = n + tail_len;
+        if total > Self::MAX_INSNS {
+            return Err(BpfBuildError::TooManyInstructions { count: total });
+        }
+
+        let mut out = Vec::with_capacity(total);
+        for (pc, i) in self.instructions.iter().enumerate() {
+            // `ja` takes `k` as the offset from the next instruction.
+            let ja_to = |target: usize| insn(BPF_JMP_JA, 0, 0, (target - (pc + 1)) as u32);
+            out.push(match i.code {
+                BPF_RET_K if i.k > 0 => insn(BPF_RET_K, 0, 0, i.k.min(snap)),
+                BPF_RET_A => ja_to(tail_a),
+                BPF_RET_X => ja_to(tail_x),
+                _ => *i,
+            });
+        }
+        if tail_len > 0 {
+            if returns_x {
+                out.push(insn(BPF_MISC_TXA, 0, 0, 0));
+            }
+            out.push(insn(BPF_JMP_JGT_K, 0, 1, snap));
+            out.push(insn(BPF_RET_K, 0, 0, snap));
+            out.push(insn(BPF_RET_A, 0, 0, 0));
+        }
+        Ok(Self {
+            instructions: out,
+            source: self.source.clone(),
+        })
     }
 
     /// Render the filter as a canonical
@@ -292,13 +441,130 @@ mod tests {
                 code: 0x06,
                 jt: 0,
                 jf: 0,
-                k: 0xFFFF,
+                k: u32::MAX,
             },
         ];
         let filter = BpfFilter::new(insns.clone()).unwrap();
         assert_eq!(filter.len(), 2);
         assert!(!filter.is_empty());
         assert_eq!(filter.instructions(), &insns);
+    }
+
+    fn ins(code: u16, jt: u8, jf: u8, k: u32) -> BpfInsn {
+        BpfInsn { code, jt, jf, k }
+    }
+
+    /// Ethernet + a 20-byte IPv4 header + 8 bytes of UDP, padded to 200.
+    fn ipv4_frame() -> Vec<u8> {
+        let mut f = vec![0u8; 12];
+        f.extend_from_slice(&[0x08, 0x00, 0x45, 0, 0, 186, 0, 0, 0, 0, 64, 17, 0, 0]);
+        f.extend_from_slice(&[10, 0, 0, 1, 10, 0, 0, 2, 0, 1, 0, 2, 0, 166, 0, 0]);
+        f.resize(200, 0);
+        f
+    }
+
+    #[test]
+    fn with_snap_len_clamps_ret_k_keeps_ret_0() {
+        // ldh [12]; jeq #0x800, 0, 1; ret #4294967295; ret #0
+        let f = BpfFilter::new(vec![
+            ins(0x28, 0, 0, 12),
+            ins(0x15, 0, 1, 0x0800),
+            ins(0x06, 0, 0, u32::MAX),
+            ins(0x06, 0, 0, 0),
+        ])
+        .unwrap();
+        let s = f.with_snap_len(96).unwrap();
+        assert_eq!(s.len(), 4, "no tail without ret a / ret x");
+        assert_eq!(s.instructions()[2], ins(0x06, 0, 0, 96));
+        assert_eq!(s.instructions()[3], ins(0x06, 0, 0, 0), "drop stays drop");
+        // A `ret #k` already below the snap length is unchanged.
+        let small = BpfFilter::new(vec![ins(0x06, 0, 0, 40)]).unwrap();
+        assert_eq!(
+            small.with_snap_len(96).unwrap().instructions(),
+            &[ins(0x06, 0, 0, 40)]
+        );
+
+        let frame = ipv4_frame();
+        assert_eq!(f.verdict(&frame), u32::MAX);
+        assert_eq!(s.verdict(&frame), 96);
+        let mut arp = frame.clone();
+        arp[12..14].copy_from_slice(&[0x08, 0x06]);
+        assert_eq!(s.verdict(&arp), 0);
+    }
+
+    #[test]
+    fn with_snap_len_rewrites_ret_a_and_ret_x() {
+        // `ldh [12]; ret a` returns the EtherType: 2048 for IPv4.
+        let ret_a = BpfFilter::new(vec![ins(0x28, 0, 0, 12), ins(0x16, 0, 0, 0)]).unwrap();
+        let frame = ipv4_frame();
+        assert_eq!(ret_a.verdict(&frame), 2048);
+        let clamped = ret_a.with_snap_len(100).unwrap();
+        assert_eq!(clamped.verdict(&frame), 100);
+        assert_eq!(clamped.len(), 2 + 3, "jgt; ret #snap; ret a");
+        assert_eq!(
+            clamped.instructions()[1],
+            ins(0x05, 0, 0, 0),
+            "ja to tail_a"
+        );
+        // A snap length above the returned value leaves it alone.
+        assert_eq!(ret_a.with_snap_len(4096).unwrap().verdict(&frame), 2048);
+
+        // `ldxb 4*([14]&0xf); ret x` returns the IPv4 header length (20);
+        // `ret a` on another path still reaches tail_a past the txa.
+        let both = BpfFilter::new(vec![
+            ins(0x28, 0, 0, 12),     // 0: ldh [12]
+            ins(0x15, 0, 2, 0x0800), // 1: jeq #0x800 → 2, else 4
+            ins(0xb1, 0, 0, 14),     // 2: ldxb 4*([14]&0xf)
+            ins(0x0e, 0, 0, 0),      // 3: ret x
+            ins(0x16, 0, 0, 0),      // 4: ret a
+        ])
+        .unwrap();
+        assert_eq!(both.verdict(&frame), 20);
+        let mut arp = frame.clone();
+        arp[12..14].copy_from_slice(&[0x08, 0x06]);
+        assert_eq!(both.verdict(&arp), 0x0806);
+        let c = both.with_snap_len(10).unwrap();
+        assert_eq!(c.len(), 5 + 4, "txa; jgt; ret #snap; ret a");
+        assert_eq!(c.verdict(&frame), 10, "min(x, snap)");
+        assert_eq!(c.verdict(&arp), 10, "min(a, snap)");
+        let c = both.with_snap_len(5000).unwrap();
+        assert_eq!(c.verdict(&frame), 20);
+        assert_eq!(c.verdict(&arp), 0x0806);
+    }
+
+    #[test]
+    fn with_snap_len_keeps_the_symbolic_source() {
+        let f = BpfFilter::builder().udp().dst_port(53).build().unwrap();
+        let s = f.with_snap_len(64).unwrap();
+        assert_eq!(s.to_human(), f.to_human());
+        assert_eq!(s.len(), f.len());
+    }
+
+    #[test]
+    fn with_snap_len_overflow_is_an_error() {
+        let mut insns = vec![ins(0x28, 0, 0, 12); BpfFilter::MAX_INSNS - 1];
+        insns.push(ins(0x16, 0, 0, 0)); // ret a
+        let f = BpfFilter::new(insns).unwrap();
+        let err = f.with_snap_len(64).unwrap_err();
+        assert!(
+            matches!(err, BpfBuildError::TooManyInstructions { count } if count == BpfFilter::MAX_INSNS + 3),
+            "{err:?}"
+        );
+        // Without `ret a` / `ret x` there is no tail: a full program still fits.
+        let mut insns = vec![ins(0x28, 0, 0, 12); BpfFilter::MAX_INSNS - 1];
+        insns.push(ins(0x06, 0, 0, u32::MAX));
+        assert!(BpfFilter::new(insns).unwrap().with_snap_len(64).is_ok());
+    }
+
+    /// #222: the typed builder accepts the whole packet. `0xFFFF` cut every
+    /// frame longer than 65535 bytes (lo's MTU makes 65549-byte frames).
+    #[test]
+    fn empty_builder_accepts_whole_packet() {
+        let f = BpfFilter::builder().build().unwrap();
+        assert_eq!(f.instructions(), &[ins(0x06, 0, 0, u32::MAX)]);
+        assert_eq!(f.verdict(&ipv4_frame()), u32::MAX);
+        let f = BpfFilter::builder().udp().build().unwrap();
+        assert_eq!(f.verdict(&ipv4_frame()), u32::MAX);
     }
 
     #[test]
@@ -308,7 +574,7 @@ mod tests {
                 code: 0x06,
                 jt: 0,
                 jf: 0,
-                k: 0xFFFF,
+                k: u32::MAX,
             };
             BpfFilter::MAX_INSNS + 1
         ];

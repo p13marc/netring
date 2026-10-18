@@ -47,6 +47,18 @@ let cap = Capture::builder()
 let mut acap = AsyncCapture::new(cap)?;
 ```
 
+### When the interface goes away
+
+A read wait ends with `Error::Io(ENETDOWN)` once the capture's interface
+is removed — noticed on the kernel's error report, or within a second
+when the interface was already down. An interface that is merely down is
+waited out: frames flow again when it comes back up. The same holds for
+`AsyncXdpSocket` and `Bridge::run_async`. (The idle check is clocked by a
+timerfd on tokio's IO reactor — one more fd, opened on the first idle
+wait — so it works on any runtime with IO enabled.) A Monitor turns the
+error into its `BackendErrorPolicy`: stop, retire the source, or re-open
+it.
+
 ### Three reception modes
 
 There are three ways to take a batch off `AsyncCapture`. They differ in
@@ -255,7 +267,7 @@ loop {
         _ = tokio::signal::ctrl_c() => break,
     }
 }
-let stats = cap.cumulative_stats()?;
+let stats = cap.stats()?; // totals since the capture was opened
 println!("done: {stats}");
 ```
 
@@ -276,9 +288,9 @@ loop {
             }
         }
         _ = tick.tick() => {
-            // delta since last tick — feeds into Prometheus etc.
-            let delta = cap.stats()?;
-            netring::metrics::record_capture_delta("eth0", &delta);
+            // lifetime totals, published as absolute counter values —
+            // feeds into Prometheus etc. without double counting.
+            netring::metrics::record_capture_stats("eth0", &cap.stats()?);
         }
     }
 }

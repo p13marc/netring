@@ -845,3 +845,210 @@ async fn effect_handlers_receive_parser_events() {
     assert_eq!(calls.get("side tcp"), 1);
     assert_eq!(calls.get("closed http"), 1);
 }
+
+/// Counts what reaches it.
+struct CountingSink(Arc<AtomicUsize>);
+
+impl netring::anomaly::sink::AnomalySink for CountingSink {
+    fn write(&mut self, _record: &netring::anomaly::sink::AnomalyRecord<'_>) {
+        self.0.fetch_add(1, Ordering::SeqCst);
+    }
+}
+
+/// Replay two UDP flows an hour apart, emitting the same anomaly at each
+/// `FlowStarted`, through `layer`; returns how many reached the sink.
+async fn anomalies_through(layer: impl netring::layer::Layer + 'static) -> usize {
+    use netring::protocol::builtin::Udp;
+    use netring::protocol::event_typed::FlowStarted;
+    let udp = |sport: u16, t: u64| {
+        (
+            Duration::from_secs(t),
+            ipv4_udp([10, 0, 0, 1], [10, 0, 0, 2], sport, 53, b"query"),
+        )
+    };
+    let file = pcap(&[udp(5000, 1), udp(6000, 3_601)]);
+    let written = Arc::new(AtomicUsize::new(0));
+    Monitor::builder()
+        .pcap_source(file.path())
+        .protocol::<Udp>()
+        .on_ctx::<FlowStarted<Udp>>(|_e: &FlowStarted<Udp>, ctx: &mut Ctx<'_>| {
+            let ts = ctx.ts;
+            ctx.sink_mut()
+                .begin("Probe", netring::anomaly::Severity::Warning, ts)
+                .with_key(&1u32)
+                .emit();
+            Ok(())
+        })
+        .layer(layer)
+        .sink(CountingSink(Arc::clone(&written)))
+        .build()
+        .unwrap()
+        .replay()
+        .await
+        .unwrap();
+    written.load(Ordering::SeqCst)
+}
+
+/// #216: `DedupeAnomalies` and `RateLimitAnomalies` measure their windows
+/// in packet time. Two identical anomalies an hour apart in the capture
+/// both pass a 10-minute window, although the replay takes milliseconds:
+/// on the wall clock they were one instant apart, and the second was
+/// suppressed.
+#[tokio::test(flavor = "current_thread")]
+async fn anomaly_layers_measure_windows_in_packet_time() {
+    use netring::layer::{DedupeAnomalies, RateLimitAnomalies};
+    let ten_minutes = Duration::from_secs(600);
+    assert_eq!(
+        anomalies_through(DedupeAnomalies::within(ten_minutes)).await,
+        2,
+        "dedupe"
+    );
+    assert_eq!(
+        anomalies_through(RateLimitAnomalies::new(1, ten_minutes)).await,
+        2,
+        "rate limit"
+    );
+}
+
+/// Replay `http_flow()` (a request and a response) through a monitor set
+/// up by `declare`, with an `on::<Http>` handler and one subscriber;
+/// returns (handler calls, messages the subscriber got).
+#[cfg(feature = "http")]
+async fn http_deliveries(
+    declare: impl FnOnce(netring::monitor::MonitorBuilder) -> netring::monitor::MonitorBuilder,
+) -> (usize, usize) {
+    use netring::protocol::builtin::{Http, Tcp};
+    let file = pcap(&timed(http_flow()));
+    let calls = Arc::new(AtomicUsize::new(0));
+    let c = Arc::clone(&calls);
+    let builder = Monitor::builder()
+        .pcap_source(file.path())
+        .protocol::<Tcp>();
+    let monitor = declare(builder)
+        .on::<Http>(move |_msg: &flowscope::http::HttpMessage| {
+            c.fetch_add(1, Ordering::SeqCst);
+            Ok(())
+        })
+        .build()
+        .unwrap();
+    let mut stream = monitor.subscribe::<Http>().unwrap();
+    monitor.replay().await.unwrap();
+    let mut out = Vec::new();
+    let received = stream.recv_many(&mut out, 16);
+    (calls.load(Ordering::SeqCst), received)
+}
+
+/// #216: `with_broadcast::<P>()` after `protocol::<P>()` upgrades P's one
+/// parser slot to a broadcast slot. It used to install a second slot, so
+/// handlers saw every message twice.
+#[cfg(feature = "http")]
+#[tokio::test(flavor = "current_thread")]
+async fn protocol_then_broadcast_delivers_once() {
+    use netring::protocol::builtin::Http;
+    let (handled, subscribed) =
+        http_deliveries(|b| b.protocol::<Http>().with_broadcast::<Http>()).await;
+    assert_eq!(handled, 2, "each message once to the handler");
+    assert_eq!(subscribed, 2, "and once to the subscriber");
+}
+
+/// The other order: `protocol::<P>()` after `with_broadcast::<P>()` keeps
+/// the broadcast slot.
+#[cfg(feature = "http")]
+#[tokio::test(flavor = "current_thread")]
+async fn broadcast_then_protocol_delivers_once() {
+    use netring::protocol::builtin::Http;
+    let (handled, subscribed) =
+        http_deliveries(|b| b.with_broadcast::<Http>().protocol::<Http>()).await;
+    assert_eq!((handled, subscribed), (2, 2));
+}
+
+/// Declaring the broadcast twice is one slot too (it used to be two).
+#[cfg(feature = "http")]
+#[tokio::test(flavor = "current_thread")]
+async fn broadcast_twice_delivers_once() {
+    use netring::protocol::builtin::Http;
+    let (handled, subscribed) =
+        http_deliveries(|b| b.with_broadcast::<Http>().with_broadcast::<Http>()).await;
+    assert_eq!((handled, subscribed), (2, 2));
+}
+
+#[derive(Default)]
+struct PerFlow(u32);
+
+/// `(packet source port, per-flow count, ctx.initiator())` per packet.
+type PacketTierSeen = Arc<Mutex<Vec<(u16, u32, Option<flowscope::Orientation>)>>>;
+
+/// #216: a packet-tier handler's `ctx.flow` is the flow's canonical
+/// (address-sorted) key, so per-flow state (`flow_state_mut`) is one slot
+/// for both directions, and `FlowEnded` frees it. It used to be the
+/// packet's directional key: each direction got its own slot, and the
+/// one whose key isn't canonical was never freed.
+#[tokio::test(flavor = "current_thread")]
+async fn packet_tier_flow_state_is_canonical_and_freed() {
+    use netring::monitor::subscription::packet;
+    use netring::protocol::builtin::Udp;
+    use netring::protocol::event_typed::FlowEnded;
+    // The client has the higher address: its packets are `Reverse`.
+    let (client, server) = ([10, 0, 0, 2], [10, 0, 0, 1]);
+    let file = pcap(&[
+        (
+            Duration::from_secs(1),
+            ipv4_udp(client, server, 40_000, 53, b"query"),
+        ),
+        (
+            Duration::from_millis(1_001),
+            ipv4_udp(server, client, 53, 40_000, b"answer"),
+        ),
+        // After the UDP idle timeout: the sweep this packet drives ends
+        // the first flow, then it starts a new one on the same 5-tuple.
+        (
+            Duration::from_secs(200),
+            ipv4_udp(client, server, 40_000, 53, b"query"),
+        ),
+    ]);
+    let seen: PacketTierSeen = Arc::default();
+    let at_end: Arc<Mutex<Vec<u32>>> = Arc::default();
+    let (s, e) = (Arc::clone(&seen), Arc::clone(&at_end));
+    Monitor::builder()
+        .pcap_source(file.path())
+        .protocol::<Udp>()
+        .flow_state::<PerFlow>(Duration::from_secs(3600))
+        .subscribe(packet().udp().to(move |view, ctx| {
+            let n = {
+                let st = ctx.flow_state_mut::<PerFlow>().expect("registered");
+                st.0 += 1;
+                st.0
+            };
+            // The source port of this packet: which direction it went.
+            use flowscope::FlowExtractor;
+            let fields = flowscope::extract::FiveTuple::directional()
+                .extract(*view)
+                .expect("udp");
+            s.lock()
+                .unwrap()
+                .push((fields.key.a.port(), n, ctx.initiator()));
+            Ok(())
+        }))
+        .on_ctx::<FlowEnded<Udp>>(move |_e: &FlowEnded<Udp>, ctx: &mut Ctx<'_>| {
+            e.lock()
+                .unwrap()
+                .push(ctx.flow_state_mut::<PerFlow>().expect("registered").0);
+            Ok(())
+        })
+        .build()
+        .unwrap()
+        .replay()
+        .await
+        .unwrap();
+    use flowscope::Orientation::Reverse;
+    assert_eq!(
+        *seen.lock().unwrap(),
+        vec![
+            (40_000, 1, Some(Reverse)),
+            (53, 2, Some(Reverse)),
+            (40_000, 1, Some(Reverse)),
+        ],
+        "one slot for both directions, fresh after FlowEnded; the client initiated"
+    );
+    assert_eq!(*at_end.lock().unwrap(), vec![2, 1]);
+}

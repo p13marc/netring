@@ -57,7 +57,7 @@ fn flow_state_mut_lazy_creates_then_returns_same() {
     let mut ctx = Ctx::new(
         Some(key()),
         Timestamp::new(0, 0),
-        SourceIdx(0),
+        Some(SourceIdx(0)),
         &mut state,
         &mut sink,
         &mut counters,
@@ -100,7 +100,7 @@ fn flow_state_mut_returns_none_without_flow_key() {
     let mut ctx = Ctx::new(
         None,
         Timestamp::new(0, 0),
-        SourceIdx(0),
+        Some(SourceIdx(0)),
         &mut state,
         &mut sink,
         &mut counters,
@@ -139,7 +139,7 @@ fn flow_state_mut_returns_none_for_unregistered_type() {
     let mut ctx = Ctx::new(
         Some(key()),
         Timestamp::new(0, 0),
-        SourceIdx(0),
+        Some(SourceIdx(0)),
         &mut state,
         &mut sink,
         &mut counters,
@@ -166,7 +166,7 @@ fn flow_state_separate_per_key() {
     let mut ctx = Ctx::new(
         Some(key()),
         Timestamp::new(0, 0),
-        SourceIdx(0),
+        Some(SourceIdx(0)),
         &mut state,
         &mut sink,
         &mut counters,

@@ -142,11 +142,18 @@ impl<T> SubscriptionBuilder<T> {
     pub fn proto(self, proto: L4Proto) -> Self {
         self.and_atom(Atom::Proto(proto))
     }
-    /// Match L4 source port.
+    /// Match L4 source port. "Source" depends on the tier: on
+    /// [`packet()`](fn@packet) it is the packet's own source (as the
+    /// kernel filter sees it); on `flow::<P>()` / `session::<P>()` it is
+    /// the flow's **initiator**, whichever side sent the message (0.32,
+    /// #215; 0.31 used the address-sorted key's lower address). The same
+    /// holds for every `src_*` / `dst_*` combinator.
     pub fn src_port(self, port: u16) -> Self {
         self.and_atom(Atom::SrcPort(port))
     }
-    /// Match L4 destination port.
+    /// Match L4 destination port: the packet's destination on
+    /// [`packet()`](fn@packet), the flow's responder on the flow and
+    /// session tiers (see [`src_port`](Self::src_port)).
     pub fn dst_port(self, port: u16) -> Self {
         self.and_atom(Atom::DstPort(port))
     }
@@ -154,11 +161,14 @@ impl<T> SubscriptionBuilder<T> {
     pub fn port(self, port: u16) -> Self {
         self.and_atom(Atom::AnyPort(port))
     }
-    /// Match source IP host.
+    /// Match source IP host: the packet's source on
+    /// [`packet()`](fn@packet), the flow's initiator on the flow and
+    /// session tiers (see [`src_port`](Self::src_port)).
     pub fn src_host(self, ip: IpAddr) -> Self {
         self.and_atom(Atom::SrcHost(ip))
     }
-    /// Match destination IP host.
+    /// Match destination IP host: the packet's destination, or the flow's
+    /// responder (see [`src_port`](Self::src_port)).
     pub fn dst_host(self, ip: IpAddr) -> Self {
         self.and_atom(Atom::DstHost(ip))
     }
@@ -166,11 +176,13 @@ impl<T> SubscriptionBuilder<T> {
     pub fn host(self, ip: IpAddr) -> Self {
         self.and_atom(Atom::AnyHost(ip))
     }
-    /// Match source network.
+    /// Match source network: the packet's source, or the flow's initiator
+    /// (see [`src_port`](Self::src_port)).
     pub fn src_net(self, net: IpNet) -> Self {
         self.and_atom(Atom::SrcNet(net))
     }
-    /// Match destination network.
+    /// Match destination network: the packet's destination, or the flow's
+    /// responder (see [`src_port`](Self::src_port)).
     pub fn dst_net(self, net: IpNet) -> Self {
         self.and_atom(Atom::DstNet(net))
     }
@@ -202,6 +214,11 @@ impl SubscriptionBuilder<PacketTier> {
     /// Finish a packet subscription with its handler. The handler sees every
     /// frame matching the filter as a borrowed `PacketView`, with `&mut Ctx`
     /// for emitting / state — synchronous (it runs in the zero-copy drain).
+    /// The filter's `src` / `dst` are the packet's own; `ctx.flow` is its
+    /// flow's canonical key (the one `FlowEnded` carries), with
+    /// `ctx.orientation()` / `ctx.side()` / `ctx.initiator()` saying which way
+    /// the packet went — so `ctx.flow_state_mut` is one slot per flow, freed
+    /// at its end (0.32).
     /// Register the result with
     /// [`MonitorBuilder::subscribe`](crate::monitor::MonitorBuilder::subscribe).
     pub fn to<H>(self, handler: H) -> super::packet::PacketSubscription

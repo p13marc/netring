@@ -72,15 +72,18 @@ pub trait MultiSource<E: FlowExtractor>: Sealed {
     fn dedup_mut(&mut self) -> Option<&mut Dedup>;
 
     /// Kernel-ring statistics: `Some` for an AF_PACKET / AF_XDP source,
-    /// `None` for a replay source, which has no ring. An AF_PACKET read
-    /// resets the kernel's counters (a delta, like
-    /// [`StreamCapture::capture_stats`](crate::StreamCapture::capture_stats));
-    /// AF_XDP counters are monotonic, so an AF_XDP source returns its
-    /// totals (#186 tracks unifying the two).
-    fn capture_stats(&self) -> Option<Result<CaptureStats, Error>>;
+    /// `None` for a replay source, which has no ring. Totals since the
+    /// source was opened, on both backends — the same values as
+    /// [`StreamCapture::capture_stats`](crate::StreamCapture::capture_stats);
+    /// reading never resets them (#186).
+    ///
+    /// Named `ring_stats` (was `capture_stats` before 0.32) so a stream that
+    /// implements both this trait and [`StreamCapture`](crate::StreamCapture)
+    /// has one unambiguous `capture_stats()`.
+    fn ring_stats(&self) -> Option<Result<CaptureStats, Error>>;
 
     /// Frames a replay source has read from its file so far: `Some`
     /// for the `Pcap*Stream`s (their `packets_read()`), `None` for a
-    /// kernel source (use [`Self::capture_stats`]).
+    /// kernel source (use [`Self::ring_stats`]).
     fn packets_read(&self) -> Option<u64>;
 }

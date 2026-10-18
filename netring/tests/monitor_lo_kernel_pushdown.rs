@@ -20,6 +20,8 @@
 
 #![cfg(all(feature = "tokio", feature = "flow", feature = "integration-tests"))]
 
+mod helpers;
+
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Duration;
@@ -27,8 +29,13 @@ use std::time::Duration;
 use netring::monitor::Monitor;
 use netring::monitor::subscription::packet;
 
-const MATCH_PORT: u16 = 54545;
-const NOISE_PORT: u16 = 54546;
+/// This process's ports (concurrent test binaries share `lo`).
+fn match_port() -> u16 {
+    helpers::private_port(0)
+}
+fn noise_port() -> u16 {
+    helpers::private_port(1)
+}
 
 /// Blast non-matching UDP at ~10:1 over matching UDP on `lo` for `dur`.
 /// Returns `(matching_sent, noise_sent)`.
@@ -41,7 +48,7 @@ async fn blast_udp(dur: Duration) -> (u64, u64) {
     let deadline = tokio::time::Instant::now() + dur;
     while tokio::time::Instant::now() < deadline {
         if tx
-            .send_to(b"match", ("127.0.0.1", MATCH_PORT))
+            .send_to(b"match", ("127.0.0.1", match_port()))
             .await
             .is_ok()
         {
@@ -49,7 +56,7 @@ async fn blast_udp(dur: Duration) -> (u64, u64) {
         }
         for _ in 0..10 {
             if tx
-                .send_to(b"noise", ("127.0.0.1", NOISE_PORT))
+                .send_to(b"noise", ("127.0.0.1", noise_port()))
                 .await
                 .is_ok()
             {
@@ -74,10 +81,15 @@ async fn packet_tier_and_kernel_prefilter_on_live_lo() {
     let builder = Monitor::builder()
         .interface("lo")
         .on_capture_stats(Duration::from_millis(100), |_telemetry, _ctx| Ok(()))
-        .subscribe(packet().udp().dst_port(MATCH_PORT).to(move |_view, _ctx| {
-            h.fetch_add(1, Ordering::Relaxed);
-            Ok(())
-        }));
+        .subscribe(
+            packet()
+                .udp()
+                .dst_port(match_port())
+                .to(move |_view, _ctx| {
+                    h.fetch_add(1, Ordering::Relaxed);
+                    Ok(())
+                }),
+        );
 
     // Sanity: a packet-sub-only monitor really does compile a narrow filter.
     assert!(
@@ -119,7 +131,8 @@ async fn packet_tier_and_kernel_prefilter_on_live_lo() {
 
     assert!(
         fired >= 1,
-        "packet tier should fire on live udp/{MATCH_PORT} (sent {matched_sent})",
+        "packet tier should fire on live udp/{} (sent {matched_sent})",
+        match_port(),
     );
 
     // If the generator couldn't put traffic on the wire we can't judge the

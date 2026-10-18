@@ -257,8 +257,12 @@ mod mq {
         /// without hardcoding the number. Best-effort: ignored if the node is
         /// unknown (`-1`, virtual interface). An explicit
         /// [`numa_node`](Self::numa_node) takes precedence. Default: off.
-        pub fn numa_auto(mut self) -> Self {
-            self.numa_auto = true;
+        /// [`XdpCapture::umem_placements`] reports what each socket got.
+        ///
+        /// Takes a `bool` since 0.32 (was argument-less), like the other
+        /// switches and `XdpShardedRunner::numa_auto`.
+        pub fn numa_auto(mut self, on: bool) -> Self {
+            self.numa_auto = on;
             self
         }
 
@@ -454,6 +458,12 @@ mod mq {
             &mut self.sockets
         }
 
+        /// Where each per-queue socket's UMEM ended up (hugepages, NUMA node),
+        /// in queue order — see [`XdpSocket::umem_placement`].
+        pub fn umem_placements(&self) -> Vec<crate::xdp::UmemPlacement> {
+            self.sockets.iter().map(XdpSocket::umem_placement).collect()
+        }
+
         /// `XDP_STATISTICS` summed across the per-queue sockets (each
         /// counter saturating). See [`XdpStats`] for what each one means.
         pub fn statistics(&self) -> Result<XdpStats, Error> {
@@ -461,10 +471,11 @@ mod mq {
         }
 
         /// Unified [`CaptureStats`](crate::CaptureStats) summed across the
-        /// per-queue sockets — see [`XdpSocket::capture_stats`].
+        /// per-queue sockets: totals since the capture was opened — see
+        /// [`XdpSocket::capture_stats`].
         pub fn capture_stats(&self) -> Result<crate::CaptureStats, Error> {
             let (stats, received) = crate::afxdp::sum_socket_stats(&self.sockets)?;
-            Ok(stats.to_capture_stats(received))
+            Ok(stats.capture_stats(received))
         }
 
         /// Non-blocking unified RX: round-robins the queues and returns the next

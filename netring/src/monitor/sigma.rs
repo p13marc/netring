@@ -267,18 +267,10 @@ fn base_event(ctx: &Ctx<'_>) -> Event {
     let mut e = Event::new();
     if let Some(k) = ctx.flow {
         // The key is address-sorted: `a` is the initiator only when it has
-        // the lower address. The message's side and canonical direction
-        // tell: sent by the initiator a→b, or by the responder b→a, means
-        // `a` initiated.
-        let (src, dst) = match (ctx.side(), ctx.orientation()) {
-            (Some(side), Some(orientation))
-                if (side == flowscope::FlowSide::Initiator)
-                    != (orientation == flowscope::Orientation::Forward) =>
-            {
-                (k.b, k.a)
-            }
-            _ => (k.a, k.b),
-        };
+        // the lower address. `Ctx::initiator_responder` turns it the way the flow was
+        // opened (from the dispatch, else the message's side and direction);
+        // without that, the stored order.
+        let (src, dst) = ctx.initiator_responder().unwrap_or((k.a, k.b));
         let proto = format!("{:?}", k.proto).to_ascii_lowercase();
         e.insert("src_ip", src.ip().to_string());
         e.insert("dst_ip", dst.ip().to_string());

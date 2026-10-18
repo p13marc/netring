@@ -20,6 +20,84 @@ built on AF_PACKET with TPACKET_V3 (block-based mmap ring buffers) and AF_XDP.
 
 ## Implementation Status
 
+**0.32.0 — unreleased** (breaking; milestone "0.32" — the 0.31.2 audit
+follow-ups #186, #208–#217, #222–#228; CHANGELOG `## 0.32.0`,
+`docs/MIGRATING_0.31_TO_0.32.md`; depends on **flowscope 0.26.0**
+(published 2026-10-18); ships with **netring-exporters 0.9.0**). Built on two branches merged for
+the release: the capture layer (`s2-capture`) and the Monitor / runtime
+(`s3-monitor`). Key design points when touching the code:
+
+- **Lifetime statistics** (`stats.rs`, #186): every stats accessor returns
+  `u64` totals since open; AF_PACKET folds each destructive
+  `PACKET_STATISTICS` read into a running total on the `Capture`.
+  `MultiSource::ring_stats` (renamed from `capture_stats`).
+- **Pending block cursor** (`afpacket/rx.rs`, #211): the read position
+  (current block + next packet) lives in the `Capture`, not in `Packets`; a
+  block goes back to the kernel once all its packets were lent. Mixing a
+  sync `packets()` loop with an async stream leaves a pending block that the
+  async reads only resume at the next readiness edge (documented on
+  `AsyncCapture::get_mut`).
+- **Snap length via the filter** (#210, #222): TPACKET_V3 cuts only to the
+  socket filter's return value, so `snap_len` is enforced by clamping every
+  `ret` of the installed filter (`BpfFilter::with_snap_len`; a bare
+  `ret #snap` without one); builder filters accept with `ACCEPT_RETVAL =
+  u32::MAX`, not libpcap's 65535.
+- **VLAN** (#208, #209): `vlan()` filters compile to two OR blocks (the
+  stripped tag via `SKF_AD_VLAN_TAG*` ancillary loads, else an in-frame
+  tag); the capture re-inserts the stripped tag in place in the ring
+  (`PACKET_RESERVE` 4 bytes of headroom; `hv1.tp_padding =
+  NETRING_VLAN_REINSERTED` marks a rewritten packet so it happens once;
+  `tp_len` grows by 4). `Packet` holds its own `&sockaddr_ll` (Stacked
+  Borrows). `BpfFilter::matches` = offline verdict, `matches_with(frame,
+  &pkt.bpf_ancillary())` = the kernel's.
+- **Dead interfaces** (`async_adapters/registered.rs`, #212, #225): each
+  async adapter registers `Interest::ERROR` (tokio hands EPOLLERR only to
+  error waiters) and, while idle, a lazily created `CLOCK_MONOTONIC`
+  `timerfd` on the IO reactor (no tokio time driver needed) that asks the
+  source `PacketSource::check_health()` once a second. A removed interface
+  ends a wait with `Error::Io(ENETDOWN)`, a down one is waited out.
+- **`BackendErrorPolicy`** (`monitor/run.rs`): every backend error
+  (readiness and drain) goes through it; `SkipSource` retires the source
+  (`AnyBackend::Closed`), `Reopen` drops the failed backend before opening
+  the new one and retries on a 500 ms timer.
+- **Source attribution** (`monitor/flow_ctx.rs`, #216): packets carry their
+  capture leg (`PacketView::with_source_idx(i + 1)`) into flowscope;
+  housekeeping events resolve the flow's leg; `Ctx.source:
+  Option<SourceIdx>`; `Ctx::initiator()` / `initiator_responder()`; packet-tier
+  `ctx.flow` is the canonical key.
+- **Initiator-first outputs** (#215, #217): `AnomalySink::write(&AnomalyRecord)`
+  with resolved `Endpoints` (`Ctx::emit` hands the writer the current flow +
+  initiator; `with_flow` / `with_initiator` elsewhere); `FlowRecord` has
+  `key` + `initiator` / `responder` + `ip_bytes_*`; IPFIX source =
+  initiator, IE 1 / 85 = IP octets, IE 352 / 353 = wire bytes; views and
+  dedup carry the wire length (`Packet::view()` → `with_wire_len`,
+  `Dedup::keep_raw(data, original_len, ..)`).
+- **Accumulators after tracking** (`monitor/nprint.rs`, `yara.rs`, #214):
+  YARA / nPrint are fed the tracker's key, side and tracked frame
+  (reassembled datagrams), pruned after each sweep; YARA has a global
+  memory budget (`yara_memory_budget`, 256 MiB).
+- **Bounded aggregation** (`monitor/aggregate.rs`, #214):
+  `AggregateConfig::max_keys` (4096) per bucket per dimension via
+  flowscope 0.26's bounded `BandwidthByKey` / `RollingRate`; overflow
+  counted; the report tick evicts expired buckets.
+- **Sharded merges** (`monitor/shard.rs`, `merge.rs`, #216, #227): one
+  reply channel for the whole run (late replies folded), a final push per
+  shard at the end, `StateMap::take_reset` re-seeds from the
+  `state_init` factory (now `Fn`), duplicate `merge_state` rejected; one
+  spawn/join routine for `ShardedRunner` and `XdpShardedRunner` with a
+  shared stop; pinning follows the affinity mask.
+- **TX kicks** (#226, #228): async kicks (`AsyncInjector`, the async
+  `Bridge` loops, `Injector`'s drop) use `MSG_DONTWAIT`
+  (`Injector::flush_nonblocking`); the sync `flush` and `Bridge::run` wait
+  (backpressure); `wait_drained` sleeps between ring checks.
+- **NUMA / RSS** (`afxdp/umem.rs`, `afxdp/rss.rs`, #213): the UMEM is
+  `mbind`'d before it is faulted in (`MADV_POPULATE_WRITE`), placement is
+  reported (`UmemPlacement`); `RssConfig::set_symmetric()` verifies by
+  read-back (Toeplitz + symmetric key fallback) and returns an `RssGuard`
+  that restores the NIC.
+- **Kernel prefilter** keeps running with IP-fragment reassembly armed
+  (`BpfFilterBuilder::pass_ip_fragments`, #217).
+
 **0.31.3 — RELEASED 2026-10-17** (published to crates.io, tag `0.31.3`, with
 netring-exporters 0.8.0; PR #221; dependency refresh, #220, milestone "0.31.3 —
 dependency refresh"; patch, CHANGELOG `## 0.31.3`; ships with
@@ -44,14 +122,21 @@ Started from GitHub #138 (AF_XDP drops double-counted) and became a
 whole-crate audit: five read-only subsystem reviews, then fixes each pinned
 by a test that fails on 0.31.1. Things worth knowing when touching the code:
 
-- **Capture statistics** (`stats.rs`): `CaptureStats::packets` includes
-  drops on both backends (the kernel's AF_PACKET convention); the Monitor
-  reads crate-internal `SourceCounters` (`u64`, delivered split from drops
-  per kernel read) and `TelemetrySampler` rebases across Reopen. AF_XDP
-  counts received packets in the RX ring (`XdpRing::received_total`,
-  counted at release).
+- **Capture statistics** (`stats.rs`, 0.32 #186): `CaptureStats` is
+  `u64` `delivered` / `drops` / `freezes`, totals since open on every
+  accessor; `received()` = delivered + drops (the kernel's `tp_packets`).
+  `Capture::stats` folds each destructive `PACKET_STATISTICS` read into
+  `Capture.cumulative` (delivered split from drops per read). The Monitor
+  reads the same totals and `TelemetrySampler` rebases across Reopen.
+  AF_XDP counts received packets in the RX ring
+  (`XdpRing::received_total`, counted at release).
 - **TX ring** (`afpacket/tx.rs`): `TPACKET_V2` + `tpacket2_hdr`, frames
-  addressed per block; the version and the header must agree (#187).
+  addressed per block; the version and the header must agree (#187). The
+  kernel sends strictly in ring order from its TX position (`tx_ring.head`)
+  and stops at the first slot it can't take; `TxQueue` mirrors that
+  position, `allocate` hands out slots in the same order (a dropped
+  `TxSlot` rewinds), and a kick reads only the slots it took (O(taken), no
+  ring scans).
 - **AF_PACKET RX** (`afpacket/rx.rs`): socket created with protocol 0,
   bound only after ring + filter (fanout members behind `ret #0` until they
   join); a down interface is waited out, a removed one is `ENETDOWN`
@@ -75,7 +160,7 @@ Depends on **flowscope 0.25.1**; `netring-exporters` stays 0.7.0.
 
 - **`MultiSource`** (`async_adapters/multi_source.rs`, sealed):
   per-source introspection of every source stream (tracker, flow
-  snapshots, dedup, `capture_stats` = None for replay, `packets_read`
+  snapshots, dedup, `ring_stats` = None for replay, `packets_read`
   = None for kernel sources). The `Multi*Stream` fan-ins hold
   `SelectState<AnySource<E, Native, Ev>>` — the constructor's concrete
   stream or a boxed `push_source`d one — and expose `source(idx)` /
@@ -379,8 +464,9 @@ fields + `state()`/`label_table()`/`lookup_icmp_flow()`/`bandwidth()`/
 
 **Sharding completion.** `src/monitor/merge.rs` — cross-shard
 `ShardedRunner::{merge_state, state_auto_merge, on_merge}` merge-worker
-thread (tokio-mpsc request + std-mpsc reply; a gated run-loop `select!`
-branch; `StateMap::take_dyn`). `LayerSpec` + `LayerFactory`
+thread (tokio-mpsc request + one shared std-mpsc reply channel; a gated
+run-loop `select!` branch; `StateMap::take_reset`; a final push per shard
+at run end, 0.32). `LayerSpec` + `LayerFactory`
 (`src/layer/mod.rs`) + `ShardedRunner::layer` + `Monitor::wrap_sink`.
 (Replaces the old "Tee + ChannelSink collator" workaround.)
 
@@ -571,7 +657,8 @@ the existing 0.19 `ProtocolMonitor` / `AnomalyMonitor` surface
 
 **Phase C — Perf hardening + AnomalyWriter + dhat bench:**
 - `src/anomaly/sink.rs` — real `AnomalySink` trait body:
-  `write(kind, severity, ts, key, observations, metrics)` +
+  `write(kind, severity, ts, key, observations, metrics)` (0.32:
+  `write(&AnomalyRecord)`, with initiator-first `Endpoints`) +
   default `flush()`. Object-safe. `begin(...)` lives on both
   `impl dyn AnomalySink + '_` and a blanket `AnomalySinkExt`
   trait — works through trait objects (layered chains) AND
@@ -633,7 +720,7 @@ the existing 0.19 `ProtocolMonitor` / `AnomalyMonitor` surface
   starve quiet ones.
 - `dispatch_lifecycle` gains a `SourceIdx` parameter; the per-arm
   `Ctx` construction macro stamps the real source so handlers
-  see `ctx.source.0 == i` for interface index `i`.
+  see `ctx.source == Some(SourceIdx(i))` for interface index `i` (0.32: `None` for ticks; housekeeping events keep their flow's source).
 - Root-gated integration test in `tests/monitor_lo_dispatch.rs`
   (`monitor_lo_with_two_interfaces_tags_source`) opens lo twice
   + asserts both `SourceIdx` values reach the handler.
@@ -1237,8 +1324,11 @@ Cargo features unique to 0.21:
     `dispatch_lifecycle_async`. `ShutdownSignal` for SIGINT/SIGTERM.
   - `tick.rs` — `TickRegistration` boxed callback (Phase F
     consumer).
-- `src/anomaly/sink.rs` — `AnomalySink` trait + `AnomalyWriter`
-  + `NoopSink` + `AnomalySinkExt`. `ANOMALY_INLINE_CAPACITY = 8`.
+- `src/anomaly/sink.rs` — `AnomalySink` trait (`write(&AnomalyRecord)`)
+  + `AnomalyRecord` / `Endpoints` + `AnomalyWriter` + `NoopSink` +
+  `AnomalySinkExt`. `ANOMALY_INLINE_CAPACITY = 8`. `Ctx::emit` hands the
+  writer the current flow + initiator, so a key that is that flow reaches
+  sinks initiator-first (#215).
 - `src/anomaly/shipped_sinks.rs` — `StdoutSink`, `StdoutJsonSink`
   (`feature = "serde"`), `TracingSink`, `ChannelSink` +
   `OwnedAnomaly`.
@@ -1267,7 +1357,7 @@ Cargo features unique to 0.21:
 - XDP loader (when `xdp-loader` enabled): `_xdp_attachment: Option<XdpAttachment>`
   in `XdpSocket` drops before the rings + fd, so the program detaches from
   the interface before AF_XDP shuts down
-- `flowscope` is a non-optional dep (currently `0.25`) with
+- `flowscope` is a non-optional dep (currently `0.26`) with
   `default-features = false` (just `bitflags` + `thiserror`);
   `Timestamp` and `PacketView` are unconditionally re-exported
   from it. The `parse` / `flow` features add flowscope's
@@ -1288,6 +1378,21 @@ Cargo features unique to 0.21:
   source's own fd: `AsyncFd::register` is `unsafe` and the adapters expose `&mut` to
   the source (#219)
 - `MAP_LOCKED` fallback: catches EPERM, ENOMEM, and EAGAIN, retries without MAP_LOCKED
+- TPACKET_V3 cuts a packet only to the socket filter's return value: a snap
+  length is a filter clamp (`with_snap_len`), never a ring frame size; every
+  filter install path goes through it (#210)
+- The kernel strips the outer VLAN tag before packet taps; captures
+  re-insert it in place (needs the 4-byte `PACKET_RESERVE`) and BPF `vlan`
+  filters read it through ancillary loads (#208, #209)
+- tokio delivers `EPOLLERR` only to `Interest::ERROR` waiters and some
+  interface deaths raise no event: async adapters watch errors and probe
+  `check_health()` on a timerfd while idle (#212)
+- A blocking `sendto` on a TX ring waits for every frame in flight to
+  complete (tpacket_snd `need_wait`): async code kicks with `MSG_DONTWAIT`
+  (#228)
+- Flow keys are address-sorted: anything that reports "source" must read
+  the flow from its initiator (`FiveTupleKey::oriented(initiator)`,
+  `Endpoints::from_flow`, `Ctx::initiator_responder`), never `key.a` (#215)
 - Integration tests must use deadline-based loops with `next_batch_blocking()`, NOT `packets()` (which blocks forever on timeout)
 - `xdp-loader` ships a vendored 1 KB ELF (`redirect_all.bpf.o`); regenerating
   needs `clang` but only the maintainer touches it
@@ -1297,15 +1402,15 @@ Cargo features unique to 0.21:
 
 ## Pre-publish checklist
 
-For the `0.31.3` release (a non-breaking patch; flowscope 0.25.3 must be on
-crates.io first; `netring-exporters` 0.8.0 is published after netring).
+For the `0.32.0` release (breaking; flowscope 0.26.0 must be on crates.io
+first; `netring-exporters` 0.9.0 is published after netring):
 
-1. Merge the 0.31.3 PR once `ci.yml` and the integration lane are green
+1. Merge the 0.32.0 PR once `ci.yml` and the integration lane are green
    (the integration lane posts failures as a PR comment).
-2. Date the `## 0.31.3` CHANGELOG banner and flip "Implementation Status"
-   above to "RELEASED"; commit on master (`release: mark 0.31.3 released
+2. Date the `## 0.32.0` CHANGELOG banner and flip "Implementation Status"
+   above to "RELEASED"; commit on master (`release: mark 0.32.0 released
    (<date>)`).
-3. `git tag 0.31.3` (no `v` prefix); `release.yml` attaches the tarball +
+3. `git tag 0.32.0` (no `v` prefix); `release.yml` attaches the tarball +
    `SHA256SUMS`.
 4. Publish from the dev host: `cargo publish -p netring --dry-run`, then
    `cargo publish -p netring`, then `-p netring-exporters` (crates.io credentials live in

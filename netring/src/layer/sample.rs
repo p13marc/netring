@@ -1,12 +1,8 @@
 //! Probabilistic per-anomaly sampling.
 
-use std::borrow::Cow;
 use std::cell::Cell;
 
-use flowscope::Timestamp;
-
-use crate::anomaly::Severity;
-use crate::anomaly::sink::AnomalySink;
+use crate::anomaly::sink::{AnomalyRecord, AnomalySink};
 use crate::layer::Layer;
 
 /// Forwards each anomaly with probability `rate`. Rate is clamped
@@ -88,21 +84,12 @@ impl SampleLayered {
 }
 
 impl AnomalySink for SampleLayered {
-    fn write(
-        &mut self,
-        kind: &'static str,
-        severity: Severity,
-        ts: Timestamp,
-        key: Option<&dyn crate::anomaly::Key>,
-        observations: &[(&'static str, Cow<'_, str>)],
-        metrics: &[(&'static str, f64)],
-    ) {
+    fn write(&mut self, record: &AnomalyRecord<'_>) {
         let r = self.next_unit();
         if r >= self.rate {
             return;
         }
-        self.inner
-            .write(kind, severity, ts, key, observations, metrics);
+        self.inner.write(record);
     }
 
     fn flush(&mut self) -> Result<(), std::io::Error> {
@@ -114,7 +101,10 @@ impl AnomalySink for SampleLayered {
 mod tests {
     use std::sync::{Arc, Mutex};
 
+    use flowscope::Timestamp;
+
     use super::*;
+    use crate::anomaly::Severity;
 
     #[derive(Default)]
     struct Capture(Arc<Mutex<u32>>);
@@ -124,15 +114,7 @@ mod tests {
         }
     }
     impl AnomalySink for Capture {
-        fn write(
-            &mut self,
-            _: &'static str,
-            _: Severity,
-            _: Timestamp,
-            _: Option<&dyn crate::anomaly::Key>,
-            _: &[(&'static str, Cow<'_, str>)],
-            _: &[(&'static str, f64)],
-        ) {
+        fn write(&mut self, _record: &AnomalyRecord<'_>) {
             *self.0.lock().unwrap() += 1;
         }
     }

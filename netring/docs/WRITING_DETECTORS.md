@@ -86,10 +86,14 @@ memory, coarser ones make the window edge fuzzy.
 ```rust
 .counter::<std::net::IpAddr>(Duration::from_secs(10), Duration::from_secs(1))
 .on_ctx::<Dns>(|msg: &flowscope::dns::DnsMessage, ctx: &mut Ctx<'_>| {
-    let (Some(key), flowscope::dns::DnsMessage::Query(_)) = (ctx.flow, msg) else {
+    // The querier is the flow's initiator. (`ctx.flow` is address-sorted:
+    // its `a` is just the lower address.)
+    let (Some((client, _)), flowscope::dns::DnsMessage::Query(_)) =
+        (ctx.initiator_responder(), msg)
+    else {
         return Ok(());
     };
-    let src = key.a.ip(); // pick the client side for your topology
+    let src = client.ip();
     let now = ctx.ts;
     let counter = ctx.counter_mut::<std::net::IpAddr>();
     counter.bump(src, now);
@@ -217,7 +221,7 @@ Monitor::builder()
     })
     .on_ctx::<FlowStarted<Tcp>>(|evt: &FlowStarted<Tcp>, ctx: &mut Ctx<'_>| {
         let ts = ctx.ts;
-        let dst = evt.key.b.ip(); // pick the server side for your topology
+        let dst = evt.responder().ip(); // the side the flow was opened to
         if ctx.state_mut::<Resolved>().0.get(&dst, ts).is_none() {
             ctx.emit("TcpToUnresolvedIp", Severity::Info)
                 .with("dst", dst.to_string())
@@ -252,16 +256,8 @@ use netring::prelude::*;
 struct Kinds(Arc<Mutex<Vec<&'static str>>>);
 
 impl AnomalySink for Kinds {
-    fn write(
-        &mut self,
-        kind: &'static str,
-        _: Severity,
-        _: flowscope::Timestamp,
-        _: Option<&dyn netring::anomaly::Key>,
-        _: &[(&'static str, std::borrow::Cow<'_, str>)],
-        _: &[(&'static str, f64)],
-    ) {
-        self.0.lock().unwrap().push(kind);
+    fn write(&mut self, record: &netring::anomaly::sink::AnomalyRecord<'_>) {
+        self.0.lock().unwrap().push(record.kind);
     }
 }
 

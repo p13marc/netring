@@ -33,6 +33,15 @@ ip link show
 # Common names: lo, eth0, ens33, enp0s3, wlan0
 ```
 
+### `Error::Io` — "Network is down (os error 100)" (`ENETDOWN`)
+
+The capture's interface was removed (deleted, or its driver unbound)
+while the capture was open. A down interface is not an error — reads
+wait for it to come back — but a removed one can't come back on the same
+socket: open a new capture once the interface exists again. A Monitor
+does that for you with `.backend_error_policy(BackendErrorPolicy::Reopen)`,
+or keeps its other sources running with `SkipSource`.
+
 ### `Error::Mmap` with ENOMEM
 
 The ring buffer is too large for available memory.

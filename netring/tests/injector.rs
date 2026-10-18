@@ -222,3 +222,276 @@ fn injector_does_not_queue_received_traffic() {
     assert_eq!(rc, 0, "SIOCINQ: {}", std::io::Error::last_os_error());
     assert_eq!(queued, 0, "the TX socket queued received packets");
 }
+
+/// CPU time the calling thread has used.
+fn thread_cpu() -> Duration {
+    let mut ts = libc::timespec {
+        tv_sec: 0,
+        tv_nsec: 0,
+    };
+    // SAFETY: valid out-pointer for the call.
+    unsafe { libc::clock_gettime(libc::CLOCK_THREAD_CPUTIME_ID, &mut ts) };
+    Duration::new(ts.tv_sec as u64, ts.tv_nsec as u32)
+}
+
+/// Queue `frame` (allocate + send, no kick).
+fn queue(tx: &mut Injector, frame: &[u8]) {
+    let mut slot = tx.allocate(frame.len()).expect("a free slot");
+    slot.data_mut()[..frame.len()].copy_from_slice(frame);
+    slot.set_len(frame.len());
+    slot.send();
+}
+
+/// #226: `Injector::wait_drained` must sleep, not spin, while frames are
+/// pending. poll(2) on a TX-ring packet socket reports POLLOUT whenever its
+/// write memory is below half `sk_sndbuf` (datagram_poll()), whatever the
+/// ring holds, and POLLERR while TX timestamps sit unread in its error
+/// queue — so the poll returned at once, every time, and the wait burnt a
+/// core until its timeout. (A queued, never-kicked frame can't drain:
+/// the wait times out, which is the point here.)
+#[test]
+fn wait_drained_does_not_spin() {
+    let frame = marked_frame(b"netring-wait-drained", 0);
+    for timestamps in [false, true] {
+        let mut tx = match Injector::builder()
+            .interface("lo")
+            .frame_count(8)
+            .tx_timestamps(timestamps)
+            .build()
+        {
+            Ok(tx) => tx,
+            Err(e) => {
+                eprintln!("skip (needs CAP_NET_RAW): {e}");
+                return;
+            }
+        };
+        if timestamps {
+            // Transmit a few, so egress timestamps wait, unread, in the
+            // socket's error queue.
+            for _ in 0..4 {
+                queue(&mut tx, &frame);
+            }
+            tx.flush().unwrap();
+            tx.wait_drained(Duration::from_secs(2)).unwrap();
+        }
+        queue(&mut tx, &frame);
+        let (cpu, start) = (thread_cpu(), Instant::now());
+        let err = tx
+            .wait_drained(Duration::from_millis(300))
+            .expect_err("a never-kicked frame never drains");
+        let (cpu, wall) = (thread_cpu() - cpu, start.elapsed());
+        assert!(
+            matches!(&err, netring::Error::Io(e) if e.kind() == std::io::ErrorKind::TimedOut),
+            "{err:?}"
+        );
+        assert!(
+            wall >= Duration::from_millis(300),
+            "returned early: {wall:?}"
+        );
+        assert!(
+            cpu < Duration::from_millis(100),
+            "timestamps={timestamps}: {cpu:?} of CPU in a {wall:?} wait"
+        );
+    }
+}
+
+/// Review: one frame the kernel refuses (here longer than the device's MTU
+/// allows) stopped the kick with `EMSGSIZE` and left the kernel's TX
+/// position on that slot, so every frame queued after it stayed queued.
+/// Injectors now let the kernel drop a refused frame (`PACKET_LOSS`) and
+/// go on; `drop_rejected(false)` keeps the strict behaviour.
+#[test]
+fn a_refused_frame_does_not_block_the_ring() {
+    let Some(v) = helpers::VethPair::create("nrtxrej0", "nrtxrej1") else {
+        eprintln!("skipping: needs CAP_NET_ADMIN to create veth");
+        return;
+    };
+    let marker = format!("netring_tx_rejected_{}", helpers::unique_port());
+    let mut sink = netring::CaptureBuilder::default()
+        .interface(&v.b)
+        .block_timeout_ms(10)
+        .build()
+        .expect("capture on the peer");
+    let frame = |len: usize, seq: u8| {
+        let mut f = vec![0xffu8; 6];
+        f.extend_from_slice(&[0x02, 0, 0, 0, 0, 0x04]);
+        f.extend_from_slice(&0x88b5u16.to_be_bytes());
+        f.push(seq);
+        f.extend_from_slice(marker.as_bytes());
+        f.resize(len, 0);
+        f
+    };
+    let mut tx = netring::Injector::builder()
+        .interface(&v.a)
+        .frame_count(8)
+        .build()
+        .expect("injector");
+    // 1600 bytes on a 1500-byte MTU, then three ordinary frames.
+    for (len, seq) in [(1600, 0u8), (100, 1), (100, 2), (100, 3)] {
+        let f = frame(len, seq);
+        let mut slot = tx.allocate(f.len()).expect("allocate");
+        slot.data_mut()[..f.len()].copy_from_slice(&f);
+        slot.set_len(f.len());
+        slot.send();
+    }
+    tx.flush()
+        .expect("a refused frame is dropped, not an error");
+    tx.wait_drained(Duration::from_secs(2))
+        .expect("nothing left queued");
+    let mut seen = 0;
+    let deadline = std::time::Instant::now() + Duration::from_secs(2);
+    while std::time::Instant::now() < deadline && seen < 3 {
+        if let Some(batch) = sink.next_batch_blocking(Duration::from_millis(50)).unwrap() {
+            seen += batch
+                .iter()
+                .filter(|p| {
+                    p.data()
+                        .windows(marker.len())
+                        .any(|w| w == marker.as_bytes())
+                })
+                .count();
+        }
+    }
+    assert_eq!(seen, 3, "the frames queued after the refused one");
+
+    // Strict mode: the kick reports the refusal.
+    let mut strict = netring::Injector::builder()
+        .interface(&v.a)
+        .frame_count(8)
+        .drop_rejected(false)
+        .build()
+        .expect("strict injector");
+    let f = frame(1600, 9);
+    let mut slot = strict.allocate(f.len()).expect("allocate");
+    slot.data_mut()[..f.len()].copy_from_slice(&f);
+    slot.set_len(f.len());
+    slot.send();
+    let err = strict.flush().expect_err("EMSGSIZE");
+    assert!(
+        matches!(&err, netring::Error::Io(e) if e.raw_os_error() == Some(libc::EMSGSIZE)),
+        "{err}"
+    );
+    assert_eq!(strict.rejected_slots(), 1);
+}
+
+/// `sh -c cmd`, true on success.
+fn sh(cmd: &str) -> bool {
+    std::process::Command::new("sh")
+        .args(["-c", cmd])
+        .stderr(std::process::Stdio::null())
+        .status()
+        .is_ok_and(|s| s.success())
+}
+
+/// Queue one `len`-byte frame and kick it, blocking: `Ok` when the kernel
+/// took it.
+fn send_one(tx: &mut Injector, len: usize) -> Result<usize, netring::Error> {
+    let mut f = vec![0u8; len];
+    f[..6].copy_from_slice(&[0xff; 6]);
+    f[12..14].copy_from_slice(&0x88b5u16.to_be_bytes());
+    let mut slot = tx.allocate(len).expect("allocate");
+    slot.data_mut()[..len].copy_from_slice(&f);
+    slot.set_len(len);
+    slot.send();
+    tx.flush()
+}
+
+/// Review r5: a device stacked on a VLAN without VLAN TX offload (a
+/// macvlan on a VLAN on a dummy) inherits the VLAN's 18-byte header
+/// length, so the kernel takes `mtu + 18`; `max_frame_len` said
+/// `mtu + 14` (and the bridge dropped what lay between). Whether the
+/// header is 18 or 14 bytes depends on the lower device's VLAN offload,
+/// so it's the kernel's to judge: `max_frame_len` is `None` there, and a
+/// 1518-byte frame reaches the kernel, which takes it or refuses it
+/// itself — never netring. A plain device keeps its exact limit.
+#[test]
+fn max_frame_len_is_none_on_a_device_stacked_on_a_vlan() {
+    // Below the VLAN: a dummy (no VLAN TX offload: the VLAN's header is
+    // 18 bytes), then a veth (offload: 14). The test passes either way the
+    // kernel goes; the two lower devices make it go both ways here.
+    for (lower, create) in [
+        ("nrr5d0", "ip link add nrr5d0 type dummy"),
+        ("nrr5v0", "ip link add nrr5v0 type veth peer name nrr5v1"),
+    ] {
+        stacked_on_a_vlan(lower, create);
+    }
+}
+
+/// The macvlan-on-a-VLAN-on-`lower` case of
+/// [`max_frame_len_is_none_on_a_device_stacked_on_a_vlan`].
+fn stacked_on_a_vlan(lower: &str, create: &str) {
+    let _ = sh(&format!("ip link del {lower}"));
+    let (vlan_dev, mv) = (format!("{lower}.7"), format!("{lower}m"));
+    if !sh(&format!(
+        "{create} && ip link set {lower} up \
+         && ip link add link {lower} name {vlan_dev} type vlan id 7 && ip link set {vlan_dev} up \
+         && ip link add link {vlan_dev} name {mv} type macvlan mode bridge && ip link set {mv} up"
+    )) {
+        let _ = sh(&format!("ip link del {lower}"));
+        eprintln!("skip: needs CAP_NET_ADMIN and the 8021q / macvlan modules");
+        return;
+    }
+    let build = |iface: &str| {
+        Injector::builder()
+            .interface(iface)
+            .frame_count(4)
+            .drop_rejected(false)
+            .build()
+            .expect("injector")
+    };
+    let mut macvlan = build(&mv);
+    let mfl = macvlan.max_frame_len().unwrap();
+    let took = send_one(&mut macvlan, 1518);
+    let rejected = macvlan.rejected_slots();
+    let vlan = build(&vlan_dev).max_frame_len().unwrap();
+    let plain = build(lower).max_frame_len().unwrap();
+    let _ = sh(&format!("ip link del {lower}"));
+    // The frame reached the kernel, which decided: sent (an 18-byte header:
+    // no VLAN TX offload below), or refused with EMSGSIZE and its slot
+    // left WRONG_FORMAT (a 14-byte header). Never netring.
+    match &took {
+        Ok(_) => assert_eq!(rejected, 0, "sent: nothing refused"),
+        Err(netring::Error::Io(e)) if e.raw_os_error() == Some(libc::EMSGSIZE) => {
+            assert_eq!(rejected, 1, "refused by the kernel, which marked the slot");
+        }
+        Err(e) => panic!("the kernel neither took nor refused the frame: {e}"),
+    }
+    eprintln!("1518 bytes on a macvlan over a VLAN over {lower}: {took:?}");
+    assert_eq!(mfl, None, "a macvlan over a VLAN is the kernel's to judge");
+    assert_eq!(vlan, None, "so is the VLAN");
+    assert_eq!(plain, Some(1514), "{lower} has the plain Ethernet limit");
+}
+
+/// Review r5: the VLAN check read `/proc/net/vlan` through `/proc/self`
+/// — the namespace of the process's main thread, not the socket's — so an
+/// injector built inside `NetNs::run_in` on a VLAN there was taken for
+/// plain Ethernet. The device is looked up where the socket was opened.
+#[test]
+fn max_frame_len_looks_at_the_sockets_namespace() {
+    let _ = sh("ip netns del nrr5in");
+    if !sh(
+        "ip netns add nrr5in && ip -n nrr5in link add nrr5e0 type dummy \
+         && ip -n nrr5in link set nrr5e0 up \
+         && ip -n nrr5in link add link nrr5e0 name nrr5e0.9 type vlan id 9 \
+         && ip -n nrr5in link set nrr5e0.9 up",
+    ) {
+        let _ = sh("ip netns del nrr5in");
+        eprintln!("skip: needs CAP_SYS_ADMIN / CAP_NET_ADMIN and 8021q");
+        return;
+    }
+    let ns = netring::netns::NetNs::from_name("nrr5in").expect("netns");
+    let res = ns.run_in(|| {
+        let mfl = |iface: &str| {
+            Injector::builder()
+                .interface(iface)
+                .frame_count(4)
+                .build()
+                .and_then(|tx| tx.max_frame_len())
+        };
+        (mfl("nrr5e0.9"), mfl("nrr5e0"))
+    });
+    let _ = sh("ip netns del nrr5in");
+    let (vlan, plain) = res.expect("run_in");
+    assert_eq!(vlan.unwrap(), None, "a VLAN in the socket's namespace");
+    assert_eq!(plain.unwrap(), Some(1514));
+}

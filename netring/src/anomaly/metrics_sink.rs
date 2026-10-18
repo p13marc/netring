@@ -21,13 +21,7 @@
 //! contract are tunable. If you need per-host counters, build a
 //! second sink instead.
 
-use std::borrow::Cow;
-
-use flowscope::Timestamp;
-
-use crate::anomaly::Severity;
-use crate::anomaly::key::Key;
-use crate::anomaly::sink::AnomalySink;
+use crate::anomaly::sink::{AnomalyRecord, AnomalySink};
 
 /// Sink adapter over the [`metrics`] crate facade. Increments a
 /// counter per anomaly emission and records a histogram value
@@ -99,15 +93,8 @@ impl MetricsSink {
 }
 
 impl AnomalySink for MetricsSink {
-    fn write(
-        &mut self,
-        kind: &'static str,
-        severity: Severity,
-        _ts: Timestamp,
-        _key: Option<&dyn Key>,
-        _observations: &[(&'static str, Cow<'_, str>)],
-        metrics: &[(&'static str, f64)],
-    ) {
+    fn write(&mut self, record: &AnomalyRecord<'_>) {
+        let (kind, severity, metrics) = (record.kind, record.severity, record.metrics);
         // The `metrics` crate's `counter!` and `histogram!`
         // macros take `&'static str` labels by value, exactly
         // what we have. No allocation on the hot path.
@@ -139,7 +126,9 @@ impl AnomalySink for MetricsSink {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::anomaly::Severity;
     use crate::anomaly::sink::AnomalySinkExt;
+    use flowscope::Timestamp;
 
     #[test]
     fn default_names_match_plan() {

@@ -159,3 +159,83 @@ async fn matrix_is_capped_at_max_packets() {
 
     assert_eq!(*rows.lock().unwrap(), 2, "matrix stops at max_packets=2");
 }
+
+/// One IPv4 fragment `10.0.0.3 → 10.0.0.4` (UDP) carrying `payload` at
+/// byte offset 0, More-Fragments set: a datagram whose rest never comes.
+fn lone_first_fragment(payload: &[u8]) -> Vec<u8> {
+    let mut f = vec![0x02, 0, 0, 0, 0, 4, 0x02, 0, 0, 0, 0, 3, 0x08, 0x00];
+    let mut ip = [0u8; 20];
+    ip[0] = 0x45;
+    ip[2..4].copy_from_slice(&((20 + payload.len()) as u16).to_be_bytes());
+    ip[4..6].copy_from_slice(&0x5151u16.to_be_bytes());
+    ip[6..8].copy_from_slice(&0x2000u16.to_be_bytes());
+    ip[8] = 64;
+    ip[9] = 17;
+    ip[12..16].copy_from_slice(&[10, 0, 0, 3]);
+    ip[16..20].copy_from_slice(&[10, 0, 0, 4]);
+    let mut sum: u32 = ip
+        .chunks(2)
+        .map(|w| u32::from(u16::from_be_bytes([w[0], w[1]])))
+        .sum();
+    while sum > 0xffff {
+        sum = (sum & 0xffff) + (sum >> 16);
+    }
+    ip[10..12].copy_from_slice(&(!(sum as u16)).to_be_bytes());
+    f.extend_from_slice(&ip);
+    f.extend_from_slice(payload);
+    f
+}
+
+/// #214: with IP reassembly armed, a fragment of a datagram that never
+/// completes doesn't leave an nPrint matrix behind: the accumulators are
+/// fed what the tracker tracked, and the tracker never saw that datagram.
+/// They used to be fed raw frames — the lone first fragment (it carries
+/// the ports) opened a matrix no `FlowEnded` ever flushed.
+#[tokio::test(flavor = "current_thread")]
+async fn fragments_do_not_leak_nprint_flows() {
+    use netring::protocol::builtin::Udp;
+    use pcap_file::pcap::{PcapHeader, PcapPacket, PcapWriter};
+    let udp = flowscope::extract::parse::test_frames::ipv4_udp;
+    let mut datagram = Vec::new();
+    datagram.extend_from_slice(&40_000u16.to_be_bytes());
+    datagram.extend_from_slice(&9_999u16.to_be_bytes());
+    datagram.extend_from_slice(&64u16.to_be_bytes());
+    datagram.extend_from_slice(&[0, 0]);
+    datagram.extend_from_slice(&[0x55; 16]);
+    let frames = vec![
+        udp([10, 0, 0, 1], [10, 0, 0, 2], 40_000, 53, b"query"),
+        udp([10, 0, 0, 2], [10, 0, 0, 1], 53, 40_000, b"answer"),
+        lone_first_fragment(&datagram),
+    ];
+    let file = NamedTempFile::new().expect("tempfile");
+    let header = PcapHeader {
+        datalink: pcap_file::DataLink::ETHERNET,
+        ts_resolution: pcap_file::TsResolution::NanoSecond,
+        ..Default::default()
+    };
+    let mut w = PcapWriter::with_header(file.reopen().unwrap(), header).expect("writer");
+    for (i, frame) in frames.into_iter().enumerate() {
+        let pkt =
+            PcapPacket::new_owned(Duration::new(100 + i as u64, 0), frame.len() as u32, frame);
+        w.write_packet(&pkt).expect("write");
+    }
+    drop(w);
+
+    let flushed = Arc::new(Mutex::new(0usize));
+    let f = Arc::clone(&flushed);
+    let monitor = Monitor::builder()
+        .pcap_source(file.path())
+        .protocol::<Udp>()
+        .reassemble_ip_fragments()
+        .nprint(NPrintConfig::default())
+        .on_nprint(move |_key: &FlowKey, _m: &NPrintMatrix| {
+            *f.lock().unwrap() += 1;
+        })
+        .build()
+        .expect("build");
+    let health = monitor.health();
+    monitor.replay().await.expect("replay");
+    assert_eq!(*flushed.lock().unwrap(), 1, "one tracked flow, one matrix");
+    assert_eq!(health.accumulator_live_flows(), 0, "no matrix left behind");
+    assert_eq!(health.snapshot().accumulator_flows_skipped, 0);
+}

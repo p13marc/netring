@@ -45,11 +45,9 @@ impl<P: FlowProtocol> std::fmt::Debug for FlowSubscription<P> {
 }
 
 /// [`FieldSource`] view over a completed flow for predicate evaluation: 5-tuple
-/// from the (canonicalised) key, byte/packet counts from the final stats.
-///
-/// The key is bidirectionally canonicalised (`a`/`b` sorted), so `src_*`/`dst_*`
-/// map to `a`/`b` as a best effort — flow filters use `port`/`host` (either
-/// endpoint) and the count atoms, which are orientation-independent.
+/// read from the flow's **initiator** (`src_*` = the endpoint that opened it,
+/// from the final stats' `initiator_orientation`; 0.32, #215 — it was the
+/// address-sorted key's `a`), byte/packet counts from the final stats.
 pub(crate) struct FlowEndedFields<'a, P: FlowProtocol> {
     pub(crate) evt: &'a FlowEnded<P>,
 }
@@ -59,16 +57,16 @@ impl<P: FlowProtocol> FieldSource for FlowEndedFields<'_, P> {
         self.evt.l4.or(Some(self.evt.key.proto))
     }
     fn src_port(&self) -> Option<u16> {
-        Some(self.evt.key.a.port())
+        Some(self.evt.initiator().port())
     }
     fn dst_port(&self) -> Option<u16> {
-        Some(self.evt.key.b.port())
+        Some(self.evt.responder().port())
     }
     fn src_ip(&self) -> Option<IpAddr> {
-        Some(self.evt.key.a.ip())
+        Some(self.evt.initiator().ip())
     }
     fn dst_ip(&self) -> Option<IpAddr> {
-        Some(self.evt.key.b.ip())
+        Some(self.evt.responder().ip())
     }
     fn total_bytes(&self) -> Option<u64> {
         Some(self.evt.stats.total_bytes())

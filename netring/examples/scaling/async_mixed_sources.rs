@@ -139,8 +139,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             .dedup()
             .map(|d| format!("{} of {} dropped", d.dropped(), d.seen()))
             .unwrap_or_else(|| "no dedup".into());
-        let input = match (src.capture_stats(), src.packets_read()) {
-            (Some(Ok(s)), _) => format!("ring: {} pkts, {} drops", s.packets, s.drops),
+        let input = match (src.ring_stats(), src.packets_read()) {
+            (Some(Ok(s)), _) => format!("ring: {} pkts, {} drops", s.delivered, s.drops),
             (Some(Err(e)), _) => format!("ring stats error: {e}"),
             (None, Some(n)) => format!("file: {n} frames read"),
             (None, None) => "no input counters".into(),

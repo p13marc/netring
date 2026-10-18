@@ -19,7 +19,9 @@
 //!   microsecond (RFC 5424 allows at most 6 fractional digits).
 //! - `MSGID` = the detector's `kind` slug.
 //! - `SD` = one structured-data element `[netring@<PEN> …]` carrying the
-//!   5-tuple key (when present) + observation/metric params, or `-` when
+//!   endpoints (`src="ip:port" dst="ip:port" proto="TCP"` — the flow's
+//!   initiator as `src` when the emitter knew it), or else the key's
+//!   `Debug` text as `key="…"`, + observation/metric params; `-` when
 //!   empty.
 //! - `MSG` = a short human-readable summary.
 //!
@@ -44,8 +46,7 @@ use std::io::Write;
 use flowscope::Timestamp;
 
 use crate::anomaly::Severity;
-use crate::anomaly::key::Key;
-use crate::anomaly::sink::AnomalySink;
+use crate::anomaly::sink::{AnomalyRecord, AnomalySink, endpoint_text};
 
 /// RFC 5424 facility (§6.2.1). Only the values that make sense for an
 /// application emitting security telemetry are surfaced; the numeric code
@@ -188,23 +189,19 @@ impl SyslogSink<std::io::Stdout> {
 
 /// Render one RFC 5424 line into `out`. Pure (no I/O) so it's directly
 /// golden-testable. `out` is cleared first.
-#[allow(clippy::too_many_arguments)]
 fn render_rfc5424(
     out: &mut String,
     facility: SyslogFacility,
-    severity: Severity,
     app_name: &str,
     hostname: &str,
     procid: &str,
     enterprise_id: &str,
-    kind: &'static str,
-    ts: Timestamp,
-    key: Option<&dyn Key>,
-    observations: &[(&'static str, Cow<'_, str>)],
-    metrics: &[(&'static str, f64)],
+    record: &AnomalyRecord<'_>,
 ) {
     use std::fmt::Write as _;
 
+    let (severity, kind, ts) = (record.severity, record.kind, record.ts);
+    let (observations, metrics) = (record.observations, record.metrics);
     out.clear();
     let pri = (facility.code() as u16) * 8 + syslog_severity(severity) as u16;
 
@@ -221,10 +218,25 @@ fn render_rfc5424(
     );
 
     // STRUCTURED-DATA: one element, or `-` when there's nothing to carry.
-    let has_sd = key.is_some() || !observations.is_empty() || !metrics.is_empty();
+    let has_sd = record.endpoints.is_some()
+        || record.key.is_some()
+        || !observations.is_empty()
+        || !metrics.is_empty();
     if has_sd {
         let _ = write!(out, "[netring@{enterprise_id}");
-        if let Some(k) = key {
+        if let Some(e) = record.endpoints {
+            // Addresses and protocol labels hold no character SD escaping
+            // touches (`"`, `\`, `]`, controls).
+            let _ = write!(
+                out,
+                " src=\"{}\" dst=\"{}\"",
+                endpoint_text(e.src_ip, e.src_port),
+                endpoint_text(e.dest_ip, e.dest_port)
+            );
+            if let Some(p) = e.proto {
+                let _ = write!(out, " proto=\"{p}\"");
+            }
+        } else if let Some(k) = record.key {
             out.push_str(" key=\"");
             // Use the Debug rendering of the key; escape per RFC 5424.
             let mut keybuf = String::new();
@@ -300,28 +312,15 @@ fn push_char_escaped(out: &mut String, ch: char) {
 }
 
 impl<W: Write + Send> AnomalySink for SyslogSink<W> {
-    fn write(
-        &mut self,
-        kind: &'static str,
-        severity: Severity,
-        ts: Timestamp,
-        key: Option<&dyn Key>,
-        observations: &[(&'static str, Cow<'_, str>)],
-        metrics: &[(&'static str, f64)],
-    ) {
+    fn write(&mut self, record: &AnomalyRecord<'_>) {
         render_rfc5424(
             &mut self.scratch,
             self.facility,
-            severity,
             &self.app_name,
             &self.hostname,
             &self.procid,
             &self.enterprise_id,
-            kind,
-            ts,
-            key,
-            observations,
-            metrics,
+            record,
         );
         // One write per line. Swallow errors like the other shipped sinks
         // (a broken syslog stream is operator-recoverable, not a panic).
@@ -352,16 +351,13 @@ mod tests {
         render_rfc5424(
             &mut out,
             SyslogFacility::Local0,
-            sev,
             "netring",
             "host1",
             "-",
             "32473",
-            kind,
-            ts_fixed(),
-            None,
-            obs,
-            metrics,
+            &AnomalyRecord::new(kind, sev, ts_fixed())
+                .with_observations(obs)
+                .with_metrics(metrics),
         );
         out
     }
@@ -394,16 +390,15 @@ mod tests {
         render_rfc5424(
             &mut out,
             SyslogFacility::Local0,
-            Severity::Info,
             "netring",
             "-",
             "-",
             "32473",
-            "k",
-            Timestamp::new(1_780_790_400, 123_456_789),
-            None,
-            &[],
-            &[],
+            &AnomalyRecord::new(
+                "k",
+                Severity::Info,
+                Timestamp::new(1_780_790_400, 123_456_789),
+            ),
         );
         assert!(
             out.starts_with("<134>1 2026-06-07T00:00:00.123456Z - "),
@@ -427,6 +422,35 @@ mod tests {
         assert!(line.ends_with(" dns_burst src=10.0.0.5"), "line = {line}");
     }
 
+    /// #215: the endpoints are SD params, the initiator as `src`.
+    #[test]
+    fn structured_data_carries_the_endpoints() {
+        use crate::anomaly::sink::Endpoints;
+        let key = flowscope::extract::FiveTupleKey::new(
+            flowscope::L4Proto::Tcp,
+            "[2001:db8::1]:80".parse().unwrap(),
+            "[2001:db8::9]:40000".parse().unwrap(),
+        );
+        let mut out = String::new();
+        render_rfc5424(
+            &mut out,
+            SyslogFacility::Local0,
+            "netring",
+            "-",
+            "-",
+            "32473",
+            &AnomalyRecord::new("k", Severity::Info, ts_fixed())
+                .with_endpoints(Endpoints::from_flow(&key, flowscope::Orientation::Reverse))
+                .with_key(&key),
+        );
+        assert!(
+            out.contains(
+                r#"[netring@32473 src="[2001:db8::9]:40000" dst="[2001:db8::1]:80" proto="TCP"]"#
+            ),
+            "{out}"
+        );
+    }
+
     #[test]
     fn sd_param_values_are_escaped() {
         let mut out = String::new();
@@ -441,12 +465,8 @@ mod tests {
     fn control_characters_cannot_forge_a_record() {
         let mut sink = SyslogSink::new(Vec::<u8>::new());
         sink.write(
-            "dga",
-            Severity::Warning,
-            ts_fixed(),
-            None,
-            &[("qname", Cow::Borrowed("x\n<34>1 forged\r\0\u{85}é"))],
-            &[],
+            &AnomalyRecord::new("dga", Severity::Warning, ts_fixed())
+                .with_observations(&[("qname", Cow::Borrowed("x\n<34>1 forged\r\0\u{85}é"))]),
         );
         let out = String::from_utf8(sink.into_inner()).unwrap();
         let line = out.strip_suffix('\n').expect("LF-framed");
@@ -464,8 +484,8 @@ mod tests {
     #[test]
     fn sink_writes_one_line_per_anomaly() {
         let mut sink = SyslogSink::new(Vec::<u8>::new()).hostname("h");
-        sink.write("k1", Severity::Info, ts_fixed(), None, &[], &[]);
-        sink.write("k2", Severity::Warning, ts_fixed(), None, &[], &[]);
+        sink.write(&AnomalyRecord::new("k1", Severity::Info, ts_fixed()));
+        sink.write(&AnomalyRecord::new("k2", Severity::Warning, ts_fixed()));
         let out = String::from_utf8(sink.into_inner()).unwrap();
         let lines: Vec<&str> = out.lines().collect();
         assert_eq!(lines.len(), 2);

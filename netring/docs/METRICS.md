@@ -32,7 +32,7 @@ per source per metric — bounded by your interface count. Safe.
 > reflects *current* loss, where a ratio computed from the cumulative
 > gauges would be smeared across the whole run. (Should you compute one:
 > the gauges' packets exclude drops, so it is `drops / (packets + drops)`;
-> the `record_capture_delta` counters follow the kernel and include them,
+> the `record_capture_stats` counters follow the kernel and include them,
 > so there it is `…_drops_total / …_packets_total`.)
 >
 > Before 0.31.2 the gauges and `drop_rate` were wrong on both backends
@@ -43,20 +43,29 @@ per source per metric — bounded by your interface count. Safe.
 ## Capture counters (low-level)
 
 Emitted by
-[`metrics::record_capture_delta`](https://docs.rs/netring/latest/netring/metrics/fn.record_capture_delta.html)
+[`metrics::record_capture_stats`](https://docs.rs/netring/latest/netring/metrics/fn.record_capture_stats.html)
 for callers driving a raw `Capture` (no `Monitor`). These are
-**counters** fed *deltas* from `Capture::stats()` (which resets the
-kernel counters on read).
+**counters** set to the *absolute* lifetime totals `Capture::stats()`
+returns (`Counter::absolute`), so recording on every tick never double
+counts — for **one capture per `iface` label**: the `metrics` crate's
+counters apply `absolute` as "at least" (`fetch_max`), so several captures
+under one label (fanout workers) show only the largest total, and a
+re-opened capture leaves the counter frozen until its new totals pass the
+old. For a shared label, each capture adds its windows with
+[`metrics::record_capture_delta`](https://docs.rs/netring/latest/netring/metrics/fn.record_capture_delta.html)
+(`now.delta_since(&before)` of two `stats()` readings — not `stats()`
+itself, which since 0.32 is a lifetime total; in 0.31 it was a delta read
+that a second reader of the same capture silently stole from).
 
 | Metric | Type | Labels | Meaning |
 |--------|------|--------|---------|
-| `netring_capture_packets_total` | counter | `iface` | Total packets received past the kernel filter. |
-| `netring_capture_drops_total`   | counter | `iface` | Total packets dropped (ring exhaustion). |
-| `netring_capture_freezes_total` | counter | `iface` | Total ring-freeze events. |
+| `netring_capture_packets_total` | counter | `iface` | Total packets that reached the socket (passed the kernel filter), including the dropped ones — `CaptureStats::received()`. |
+| `netring_capture_drops_total`   | counter | `iface` | Total packets dropped (ring exhaustion) — `CaptureStats::drops`. |
+| `netring_capture_freezes_total` | counter | `iface` | Total ring-freeze events — `CaptureStats::freezes`. |
 
 **Cardinality:** one series per interface. Safe. Don't mix these with
 the Phase C gauges for the same capture — pick the `Monitor` gauges
-(absolute) *or* the raw-`Capture` counters (deltas), not both.
+*or* the raw-`Capture` counters, not both.
 
 ## Monitor resilience & health (Phase B/C)
 
@@ -68,10 +77,10 @@ handle has no built-in cadence). **Gauges.**
 | Metric | Type | Labels | Meaning |
 |--------|------|--------|---------|
 | `netring_monitor_handler_errors` | gauge | — | Cumulative handler errors swallowed under `HandlerErrorPolicy::Isolate`. |
-| `netring_monitor_backend_errors` | gauge | — | Cumulative capture-backend errors swallowed under `BackendErrorPolicy::SkipSource`. |
+| `netring_monitor_backend_errors` | gauge | — | Cumulative capture-backend errors absorbed under `BackendErrorPolicy::SkipSource` / `Reopen` (a source retired or re-opened). |
 | `netring_monitor_active_flows`   | gauge | — | Active flows in the tracker as of the last event. |
 
-> These are the "silent failure" signals: `Isolate` / `SkipSource` keep the
+> These are the "silent failure" signals: `Isolate` / `SkipSource` / `Reopen` keep the
 > pipeline alive by swallowing errors, so a **rising** handler/backend error
 > count is what you alert on. Unlabeled — one series each. Safe.
 

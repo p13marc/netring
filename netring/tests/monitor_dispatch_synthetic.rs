@@ -36,7 +36,7 @@ fn fresh_ctx<'a>(
     Ctx::new(
         None,
         Timestamp::new(0, 0),
-        SourceIdx(0),
+        Some(SourceIdx(0)),
         state,
         sink,
         counters,

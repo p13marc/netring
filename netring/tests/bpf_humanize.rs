@@ -76,7 +76,7 @@ fn raw_bytecode_falls_back_to_count() {
         code: 0x06,
         jt: 0,
         jf: 0,
-        k: 0xFFFF,
+        k: u32::MAX,
     }])
     .unwrap();
     let s = raw.to_human();

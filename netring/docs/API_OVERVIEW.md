@@ -68,8 +68,9 @@ while let Some(batch) = cap.next_batch_blocking(Duration::from_millis(100))? {
 ### Stats
 
 ```rust,no_run
-let s = cap.stats()?;             // since last call (resets kernel counters)
-let s2 = cap.cumulative_stats()?; // since open (monotonic)
+let s = cap.stats()?;             // totals since open; never resets
+// s.delivered / s.drops / s.freezes, s.received(), s.drop_ratio()
+let window = cap.stats()?.delta_since(&s); // counts between two reads
 ```
 
 ## Injector (TX)
@@ -234,8 +235,8 @@ Each stream chain accepts the same builder knobs:
 - `.snapshot_flow_stats()` — live `(K, FlowStats)` pairs, owned (the same shape on every stream).
 
 The [`StreamCapture`](https://docs.rs/netring/latest/netring/trait.StreamCapture.html)
-trait gives all four stream types `capture()`, `capture_stats()`, and
-`capture_cumulative_stats()` for out-of-band ring observability +
+trait gives all four stream types `capture()` and `capture_stats()`
+(lifetime ring totals) for out-of-band ring observability +
 plan-21 `stream.capture().set_filter(...)` BPF swap.
 
 Parsers (`SessionParser` / `DatagramParser`) get a periodic
@@ -406,7 +407,16 @@ runner.run_until_signal().await?;
 | `TracingSink` | core | `tracing::event!` at matching `Level` |
 | `ChannelSink` | core | tokio mpsc of `OwnedAnomaly` |
 | `EveSink` | `eve-sink` | Suricata-compatible EVE JSON |
+| `OcsfSink` | `ocsf-sink` | OCSF 2004 Detection Finding NDJSON |
+| `SyslogSink` | `syslog` | RFC 5424 syslog lines |
 | `MetricsSink` | `metrics` | Prometheus-style counter facade |
+
+A custom sink implements `AnomalySink::write(&mut self, &AnomalyRecord)`
+(0.32). The record's `endpoints` (`Endpoints`: `src_*` / `dest_*` /
+`proto` / `directional`) put the flow's **initiator** first whenever the
+emitter knew it — `ctx.emit(..).with_key(&flow)` for the current flow,
+`AnomalyWriter::with_flow(&key, initiator)` elsewhere; `directional:
+false` means a key read in its address-sorted order.
 
 ### Middleware layers
 
@@ -436,7 +446,7 @@ runner.run_until_signal().await?;
 | `.block_size(bytes)` | 4 MiB | Block size (power of 2, multiple of PAGE_SIZE) |
 | `.block_count(n)` | 64 | Number of blocks |
 | `.frame_size(bytes)` | 2048 | Min frame size (multiple of 16, ≥ 68) |
-| `.snap_len(bytes)` | unset | Shortcut: sets frame_size to fit only the first N bytes |
+| `.snap_len(bytes)` | unset | Capture only the first N bytes of each packet — enforced by the socket filter (every installed classic filter goes through `BpfFilter::with_snap_len`; without one a `ret #N` is installed) |
 | `.block_timeout_ms(ms)` | 60 | Block retirement timeout |
 | `.fill_rxhash(bool)` | true | Kernel populates `tp_rxhash` |
 | `.promiscuous(bool)` | false | Promiscuous mode |
@@ -511,7 +521,7 @@ while let Some((queue_id, batch)) = cap.next_batch_blocking(timeout)? {
 | `.next_batch()` / `.next_batch_blocking(t)` | unified round-robin RX → `(queue_id, batch)` |
 | `.into_parts()` | `(Vec<XdpSocket>, XdpCaptureGuard)` for worker-per-queue |
 | `.is_zerocopy()` / `.queue_ids()` / `.socket_count()` | introspection |
-| `.busy_poll(us)` / `.numa_auto()` | **(issue #6)** per-queue `SO_BUSY_POLL` + NIC-NUMA UMEM binding (line-rate levers) |
+| `.busy_poll(us)` / `.numa_auto(true)` | **(issue #6)** per-queue `SO_BUSY_POLL` + NIC-NUMA UMEM binding (line-rate levers; `umem_placements()` reports what each UMEM got) |
 | `netring::xdp::queue_count(iface)` / `interface_numa_node(iface)` | RSS queue count (`ETHTOOL_GCHANNELS`) / NIC NUMA node (sysfs) |
 | `netring::monitor::XdpShardedRunner` | one `Monitor` per RX queue (worker-per-core, busy-poll) — the line-rate tier |
 

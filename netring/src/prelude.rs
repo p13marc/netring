@@ -108,7 +108,9 @@ pub use crate::anomaly::ocsf_sink::OcsfSink;
 #[cfg(feature = "serde")]
 pub use crate::anomaly::shipped_sinks::StdoutJsonSink;
 pub use crate::anomaly::shipped_sinks::{ChannelSink, StdoutSink, TracingSink};
-pub use crate::anomaly::sink::{AnomalySink, AnomalySinkExt, AnomalyWriter, NoopSink};
+pub use crate::anomaly::sink::{
+    AnomalyRecord, AnomalySink, AnomalySinkExt, AnomalyWriter, Endpoints, NoopSink,
+};
 /// 0.21 B.1 — structured-anomaly + key accessor traits +
 /// `DetectorScore` trait routing detector outputs through
 /// `OwnedAnomaly`. Re-exported from flowscope.

@@ -67,37 +67,38 @@ pub trait PacketSource: AsFd {
     /// Returns [`Error::Io`] if the underlying `poll()` syscall fails.
     fn next_batch_blocking(&mut self, timeout: Duration) -> Result<Option<PacketBatch<'_>>, Error>;
 
-    /// Capture statistics since last read.
+    /// Capture statistics: totals since the source was opened.
     ///
-    /// Returns packet counts, drop counts, and freeze counts from the kernel.
-    /// **Reading resets the kernel counters** — call periodically for rate
-    /// calculations, or use [`cumulative_stats`](Self::cumulative_stats)
-    /// for monotonic totals.
+    /// Packets delivered to the ring, packets dropped for lack of ring
+    /// space, and ring freezes — see [`CaptureStats`] for the exact
+    /// meaning. Reading **never resets** anything: two calls with no
+    /// traffic in between return equal values, and a rate over a window
+    /// is [`later.delta_since(&earlier)`](CaptureStats::delta_since).
+    /// Backends whose kernel counters reset on read (AF_PACKET's
+    /// `PACKET_STATISTICS`) fold each read into a running total.
     ///
     /// # Errors
     ///
-    /// Returns [`Error::SockOpt`] if `getsockopt(PACKET_STATISTICS)` fails.
+    /// Returns [`Error::SockOpt`] if reading the kernel counters fails
+    /// (AF_PACKET: `getsockopt(PACKET_STATISTICS)`).
     fn stats(&self) -> Result<CaptureStats, Error>;
 
-    /// Accumulated stats since the source was created.
+    /// Whether the source can still deliver packets.
     ///
-    /// Internally calls [`stats()`](Self::stats) (which resets kernel
-    /// counters) and adds the delta to a running total stored on the
-    /// source. The result is monotonically non-decreasing across calls.
+    /// `Ok(())` — it can, even if nothing arrives right now (an idle or
+    /// administratively down interface may come back). `Err` — it is gone
+    /// for good, e.g. `ENETDOWN` once its interface was removed.
     ///
-    /// **Do not mix with `stats()` calls on the same source** — each
-    /// `stats()` invocation resets the kernel counters and bypasses the
-    /// running total, so deltas are lost. Pick one accessor per source.
-    ///
-    /// Default implementation just calls `stats()` (no accumulation —
-    /// suitable for backends that already report monotonic totals).
-    /// Backends with destructive stats reads should override.
+    /// The async adapters call this when the kernel reports an error on
+    /// the source's fd and every second of idle waiting, and end the wait
+    /// with its error (#212). It may consume a pending socket error
+    /// (`SO_ERROR`). Default: always `Ok(())`.
     ///
     /// # Errors
     ///
-    /// Same as [`stats()`](Self::stats).
-    fn cumulative_stats(&self) -> Result<CaptureStats, Error> {
-        self.stats()
+    /// The source's fatal error.
+    fn check_health(&self) -> Result<(), Error> {
+        Ok(())
     }
 }
 

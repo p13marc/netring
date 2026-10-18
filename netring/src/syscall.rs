@@ -56,23 +56,36 @@ pub(crate) fn sendto_kick_eintr_safe(fd: RawFd, flags: i32) -> Result<(), std::i
     sendto_kick_status(fd, flags).map(|_| ())
 }
 
-/// [`sendto_kick_eintr_safe`], telling `EAGAIN` apart: `Ok(true)` when the
-/// kernel answered `EAGAIN` (it stopped with work left — an AF_XDP copy-mode
-/// kick transmits at most one batch), `Ok(false)` on success or `ENOBUFS`.
-pub(crate) fn sendto_kick_status(fd: RawFd, flags: i32) -> Result<bool, std::io::Error> {
+/// How a TX kick ended, when it didn't fail.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum KickStatus {
+    /// `sendto` returned success.
+    Done,
+    /// `EAGAIN`: the kernel stopped with work left — an AF_XDP copy-mode
+    /// kick transmits at most one batch; a TPACKET kick found the socket's
+    /// send buffer full before its first frame.
+    Again,
+    /// `ENOBUFS`: the device (or its qdisc) dropped the frame being sent —
+    /// no carrier, a queue at its limit. A TPACKET kick leaves that frame
+    /// queued and tries it again on the next kick.
+    NoBufs,
+}
+
+/// [`sendto_kick_eintr_safe`], telling `EAGAIN` and `ENOBUFS` apart.
+pub(crate) fn sendto_kick_status(fd: RawFd, flags: i32) -> Result<KickStatus, std::io::Error> {
     loop {
         // SAFETY: standard sendto() syscall with NULL buffer and NULL addr —
         // the conventional TPACKET TX kick. `fd` validity is the caller's
         // contract.
         let ret = unsafe { libc::sendto(fd, std::ptr::null(), 0, flags, std::ptr::null(), 0) };
         if ret >= 0 {
-            return Ok(false);
+            return Ok(KickStatus::Done);
         }
         let err = std::io::Error::last_os_error();
         match err.raw_os_error() {
             Some(libc::EINTR) => continue,
-            Some(libc::EAGAIN) => return Ok(true),
-            Some(libc::ENOBUFS) => return Ok(false),
+            Some(libc::EAGAIN) => return Ok(KickStatus::Again),
+            Some(libc::ENOBUFS) => return Ok(KickStatus::NoBufs),
             _ => return Err(err),
         }
     }
@@ -83,6 +96,14 @@ pub(crate) fn sendto_kick_status(fd: RawFd, flags: i32) -> Result<bool, std::io:
 /// Best-effort: `EINTR` is retried, any other result ignored, as in libxdp.
 #[cfg(feature = "af-xdp")]
 pub(crate) fn recvfrom_kick(fd: RawFd) {
+    let _ = recvfrom_probe(fd);
+}
+
+/// `recvfrom(fd, NULL, 0, MSG_DONTWAIT, NULL, NULL)`, reporting its error
+/// (`EINTR` retried). On an AF_XDP socket this is the RX wakeup, and fails
+/// with `ENXIO` once the socket is unbound.
+#[cfg(feature = "af-xdp")]
+pub(crate) fn recvfrom_probe(fd: RawFd) -> Result<(), std::io::Error> {
     loop {
         // SAFETY: zero-length recvfrom() with NULL buffer and address — the
         // kernel writes nothing. `fd` validity is the caller's contract.
@@ -96,8 +117,12 @@ pub(crate) fn recvfrom_kick(fd: RawFd) {
                 std::ptr::null_mut(),
             )
         };
-        if ret >= 0 || std::io::Error::last_os_error().raw_os_error() != Some(libc::EINTR) {
-            return;
+        if ret >= 0 {
+            return Ok(());
+        }
+        let err = std::io::Error::last_os_error();
+        if err.raw_os_error() != Some(libc::EINTR) {
+            return Err(err);
         }
     }
 }

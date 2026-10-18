@@ -131,11 +131,33 @@ impl Dedup {
         )
     }
 
-    /// Same logic but operating on (data, direction, timestamp)
-    /// directly. Useful for pcap-replay or synthetic-frame use
-    /// where you don't have a `Packet`.
-    pub fn keep_raw(&mut self, data: &[u8], direction: PacketDirection, ts: Timestamp) -> bool {
-        self.keep_frame(data, data.len(), direction, ts)
+    /// Same logic on the parts of a packet: its captured bytes, its
+    /// length on the wire (`original_len`; `data.len()` for a frame that
+    /// was not cut), direction and timestamp. For pcap replay or synthetic
+    /// frames, where there is no [`Packet`].
+    ///
+    /// 0.32: takes the wire length — two packets a snap length cut to the
+    /// same bytes are different packets unless their wire lengths agree
+    /// (it keyed on `data.len()` before, merging them).
+    pub fn keep_raw(
+        &mut self,
+        data: &[u8],
+        original_len: usize,
+        direction: PacketDirection,
+        ts: Timestamp,
+    ) -> bool {
+        self.keep_frame(data, original_len, direction, ts)
+    }
+
+    /// Same logic on a [`flowscope::PacketView`]: its frame, its
+    /// [`wire_len`](flowscope::PacketView::wire_len) and timestamp.
+    /// New in 0.32.0.
+    pub fn keep_view(
+        &mut self,
+        view: &flowscope::PacketView<'_>,
+        direction: PacketDirection,
+    ) -> bool {
+        self.keep_frame(view.frame, view.wire_len(), direction, view.timestamp)
     }
 
     /// The match key is the captured bytes' hash plus the **wire** length:
@@ -235,9 +257,9 @@ mod tests {
     fn loopback_drops_outgoing_then_host_within_window() {
         let mut d = Dedup::loopback();
         // Outgoing first
-        assert!(d.keep_raw(b"abc", PacketDirection::Outgoing, ts(0, 0)));
+        assert!(d.keep_raw(b"abc", 3, PacketDirection::Outgoing, ts(0, 0)));
         // Host echo 100 µs later — should be dropped
-        assert!(!d.keep_raw(b"abc", PacketDirection::Host, ts(0, 100_000)));
+        assert!(!d.keep_raw(b"abc", 3, PacketDirection::Host, ts(0, 100_000)));
         assert_eq!(d.dropped(), 1);
         assert_eq!(d.seen(), 2);
     }
@@ -245,27 +267,27 @@ mod tests {
     #[test]
     fn loopback_keeps_outside_window() {
         let mut d = Dedup::loopback();
-        assert!(d.keep_raw(b"abc", PacketDirection::Outgoing, ts(0, 0)));
+        assert!(d.keep_raw(b"abc", 3, PacketDirection::Outgoing, ts(0, 0)));
         // 2 ms later — past the 1 ms window
-        assert!(d.keep_raw(b"abc", PacketDirection::Host, ts(0, 2_000_000)));
+        assert!(d.keep_raw(b"abc", 3, PacketDirection::Host, ts(0, 2_000_000)));
         assert_eq!(d.dropped(), 0);
     }
 
     #[test]
     fn loopback_keeps_same_direction_repeats() {
         let mut d = Dedup::loopback();
-        assert!(d.keep_raw(b"abc", PacketDirection::Outgoing, ts(0, 0)));
+        assert!(d.keep_raw(b"abc", 3, PacketDirection::Outgoing, ts(0, 0)));
         // Same direction within window: legitimate retransmit
-        assert!(d.keep_raw(b"abc", PacketDirection::Outgoing, ts(0, 100_000)));
+        assert!(d.keep_raw(b"abc", 3, PacketDirection::Outgoing, ts(0, 100_000)));
         assert_eq!(d.dropped(), 0);
     }
 
     #[test]
     fn content_drops_same_hash_regardless_of_direction() {
         let mut d = Dedup::content(Duration::from_millis(5), 64);
-        assert!(d.keep_raw(b"abc", PacketDirection::Outgoing, ts(0, 0)));
+        assert!(d.keep_raw(b"abc", 3, PacketDirection::Outgoing, ts(0, 0)));
         // Same direction — direction-agnostic mode still drops it
-        assert!(!d.keep_raw(b"abc", PacketDirection::Outgoing, ts(0, 100_000)));
+        assert!(!d.keep_raw(b"abc", 3, PacketDirection::Outgoing, ts(0, 100_000)));
         assert_eq!(d.dropped(), 1);
     }
 
@@ -274,14 +296,14 @@ mod tests {
         let mut d = Dedup::content(Duration::from_secs(1), 4);
         // Fill the ring with 4 distinct packets
         for i in 0..4u8 {
-            assert!(d.keep_raw(&[i], PacketDirection::Host, ts(0, 0)));
+            assert!(d.keep_raw(&[i], 1, PacketDirection::Host, ts(0, 0)));
         }
         // Insert a 5th — evicts the oldest [0]
-        assert!(d.keep_raw(&[4], PacketDirection::Host, ts(0, 0)));
+        assert!(d.keep_raw(&[4], 1, PacketDirection::Host, ts(0, 0)));
         // Re-feed [0] — should be kept (its ring entry was evicted)
-        assert!(d.keep_raw(&[0], PacketDirection::Host, ts(0, 0)));
+        assert!(d.keep_raw(&[0], 1, PacketDirection::Host, ts(0, 0)));
         // Re-feed [4] — should be dropped (still in ring)
-        assert!(!d.keep_raw(&[4], PacketDirection::Host, ts(0, 0)));
+        assert!(!d.keep_raw(&[4], 1, PacketDirection::Host, ts(0, 0)));
     }
 
     #[test]
@@ -289,31 +311,31 @@ mod tests {
         // Length is part of the match key, so even a hash collision
         // requires same-length packets to be flagged as duplicates.
         let mut d = Dedup::content(Duration::from_secs(1), 64);
-        assert!(d.keep_raw(b"abc", PacketDirection::Host, ts(0, 0)));
+        assert!(d.keep_raw(b"abc", 3, PacketDirection::Host, ts(0, 0)));
         // Different content + length → different hash + len → keep
-        assert!(d.keep_raw(b"abcd", PacketDirection::Host, ts(0, 0)));
+        assert!(d.keep_raw(b"abcd", 4, PacketDirection::Host, ts(0, 0)));
         assert_eq!(d.dropped(), 0);
     }
 
     #[test]
     fn reset_clears_state() {
         let mut d = Dedup::loopback();
-        d.keep_raw(b"abc", PacketDirection::Outgoing, ts(0, 0));
-        d.keep_raw(b"abc", PacketDirection::Host, ts(0, 100_000));
+        d.keep_raw(b"abc", 3, PacketDirection::Outgoing, ts(0, 0));
+        d.keep_raw(b"abc", 3, PacketDirection::Host, ts(0, 100_000));
         assert_eq!(d.dropped(), 1);
         d.reset();
         assert_eq!(d.dropped(), 0);
         assert_eq!(d.seen(), 0);
         // After reset, the same sequence should re-trigger
-        assert!(d.keep_raw(b"abc", PacketDirection::Outgoing, ts(0, 0)));
-        assert!(!d.keep_raw(b"abc", PacketDirection::Host, ts(0, 100_000)));
+        assert!(d.keep_raw(b"abc", 3, PacketDirection::Outgoing, ts(0, 0)));
+        assert!(!d.keep_raw(b"abc", 3, PacketDirection::Host, ts(0, 100_000)));
     }
 
     #[test]
     fn empty_payload_handled() {
         let mut d = Dedup::loopback();
-        assert!(d.keep_raw(b"", PacketDirection::Outgoing, ts(0, 0)));
-        assert!(!d.keep_raw(b"", PacketDirection::Host, ts(0, 1_000)));
+        assert!(d.keep_raw(b"", 0, PacketDirection::Outgoing, ts(0, 0)));
+        assert!(!d.keep_raw(b"", 0, PacketDirection::Host, ts(0, 1_000)));
     }
 
     #[test]
@@ -328,16 +350,22 @@ mod tests {
     }
 
     /// Two packets truncated to the same captured bytes are still different
-    /// packets when their wire lengths differ.
+    /// packets when their wire lengths differ — through every entry point.
     #[test]
-    fn content_keeps_truncated_packets_of_different_wire_lengths() {
+    fn same_bytes_different_wire_len_are_distinct() {
         let mut d = Dedup::content(Duration::from_millis(5), 64);
         let head = [0xabu8; 64]; // both captured as these 64 bytes
-        assert!(d.keep_frame(&head, 1500, PacketDirection::Host, ts(0, 0)));
-        assert!(d.keep_frame(&head, 900, PacketDirection::Host, ts(0, 1_000)));
+        assert!(d.keep_raw(&head, 1500, PacketDirection::Host, ts(0, 0)));
+        assert!(d.keep_raw(&head, 900, PacketDirection::Host, ts(0, 1_000)));
         assert_eq!(d.dropped(), 0);
         // Same wire length too: a duplicate.
-        assert!(!d.keep_frame(&head, 900, PacketDirection::Host, ts(0, 2_000)));
+        assert!(!d.keep_raw(&head, 900, PacketDirection::Host, ts(0, 2_000)));
+        // A view keys on its wire length.
+        let cut = flowscope::PacketView::new(&head, ts(0, 3_000)).with_wire_len(700);
+        assert!(d.keep_view(&cut, PacketDirection::Host));
+        let again = flowscope::PacketView::new(&head, ts(0, 4_000)).with_wire_len(700);
+        assert!(!d.keep_view(&again, PacketDirection::Host));
+        assert_eq!(d.dropped(), 2);
     }
 
     /// A timestamp far *behind* the remembered one is outside the window,
@@ -345,8 +373,8 @@ mod tests {
     #[test]
     fn content_keeps_a_repeat_from_far_back_in_time() {
         let mut d = Dedup::content(Duration::from_millis(5), 64);
-        assert!(d.keep_raw(b"abc", PacketDirection::Host, ts(100, 0)));
-        assert!(d.keep_raw(b"abc", PacketDirection::Host, ts(90, 0)));
+        assert!(d.keep_raw(b"abc", 3, PacketDirection::Host, ts(100, 0)));
+        assert!(d.keep_raw(b"abc", 3, PacketDirection::Host, ts(90, 0)));
         assert_eq!(d.dropped(), 0);
     }
 
@@ -356,8 +384,8 @@ mod tests {
         // The distance between timestamps is compared, so a slightly
         // earlier one is still inside the window.
         let mut d = Dedup::loopback();
-        assert!(d.keep_raw(b"abc", PacketDirection::Outgoing, ts(1, 0)));
+        assert!(d.keep_raw(b"abc", 3, PacketDirection::Outgoing, ts(1, 0)));
         // "Earlier" timestamp — must still be considered within the window
-        assert!(!d.keep_raw(b"abc", PacketDirection::Host, ts(0, 999_999_999)));
+        assert!(!d.keep_raw(b"abc", 3, PacketDirection::Host, ts(0, 999_999_999)));
     }
 }

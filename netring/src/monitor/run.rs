@@ -20,6 +20,7 @@
 //!    closure *and* dispatch the typed `Tick` event so users
 //!    who registered via `.on::<Tick>(...)` see it too.
 
+use std::ops::ControlFlow;
 use std::task::{Context, Poll};
 use std::time::{Duration, Instant};
 
@@ -34,6 +35,7 @@ use crate::ctx::{CounterRegistry, Ctx, SourceIdx, StateMap};
 use crate::error::Result;
 use crate::monitor::backend::AnyBackend;
 use crate::monitor::dispatcher::Dispatcher;
+use crate::monitor::flow_ctx::{FlowCtx, Origin};
 use crate::monitor::subscription::PacketSubscription;
 use crate::monitor::subscription::packet::{PacketFields, packet_field_extractor};
 use crate::monitor::{BackendErrorPolicy, HandlerErrorPolicy, Monitor};
@@ -91,6 +93,17 @@ enum BackendSpec {
     /// from the Monitor's `injected_xdp` vec at first open. Not reopenable.
     #[cfg(feature = "af-xdp")]
     XdpProvided,
+}
+
+impl BackendSpec {
+    /// Whether `BackendErrorPolicy::Reopen` can rebuild this source.
+    fn reopenable(&self) -> bool {
+        match self {
+            #[cfg(feature = "af-xdp")]
+            BackendSpec::XdpProvided => false,
+            _ => true,
+        }
+    }
 }
 
 /// Open (or re-open) one capture backend from its [`BackendSpec`], applying the
@@ -211,7 +224,7 @@ pub(crate) async fn run_loop(monitor: Monitor, stop: StopCondition) -> Result<()
         mut flow_states,
         fanout,
         label_table,
-        mut merge_rx,
+        mut merge_link,
         shard_stop,
         handler_error_policy,
         backend_error_policy,
@@ -330,6 +343,8 @@ pub(crate) async fn run_loop(monitor: Monitor, stop: StopCondition) -> Result<()
     let ready = health.ready_while_running();
 
     let mut events: Vec<FsEvent<FlowKey>> = Vec::with_capacity(64);
+    // #216: the flows a dispatched batch ends (reused across batches).
+    let mut flow_ctx_scratch = crate::monitor::flow_ctx::ended_flows();
     let mut shutdown = ShutdownSignal::new(stop);
     // Periodic sweep: idle flows end (FlowEnded), parsers' `on_tick`
     // runs, out-of-order holes expire, per-flow state is released.
@@ -344,9 +359,11 @@ pub(crate) async fn run_loop(monitor: Monitor, stop: StopCondition) -> Result<()
     // clock step, not reordering.
     let mut packet_clock = PacketClock::new(caps.len(), sweep_period);
     let mut rr_anchor: usize = 0;
-    // 0.24 Phase B: consecutive backend-error count for the SkipSource circuit
-    // breaker. Reset on every successful readable wake.
-    let mut backend_errors: u64 = 0;
+    // #212: `BackendErrorPolicy::Reopen` bookkeeping, plus the timer that
+    // retries a failed re-open (polled only while one is due).
+    let mut reopen = ReopenState::new(caps.len());
+    let mut reopen_timer = periodic(REOPEN_RETRY);
+    let open = |spec: &BackendSpec| open_backend(spec, fanout, &kernel_prefilter, promiscuous);
     // 0.21 E.2: bumped on every readable wake (traffic only). Idle
     // mode computes its deadline as `last_event_at + window`,
     // so refreshing this resets the idle timer. Initialized to
@@ -425,7 +442,8 @@ pub(crate) async fn run_loop(monitor: Monitor, stop: StopCondition) -> Result<()
                             &mut state_map,
                             &mut counters,
                             &mut events,
-                            SourceIdx(0),
+                            Origin::Housekeeping,
+                            &mut flow_ctx_scratch,
                             monitor_name_borrow,
                             &mut flow_states,
                             &label_table,
@@ -442,6 +460,13 @@ pub(crate) async fn run_loop(monitor: Monitor, stop: StopCondition) -> Result<()
                         // were released by their `FlowEnded`, whose
                         // handlers could still read the state.
                         flow_states.sweep(now);
+                        // #214: and the accumulators' flows the tracker let
+                        // go without one.
+                        crate::monitor::nprint::retain_tracked(
+                            &mut byte_accumulators,
+                            driver.tracker(),
+                            &health,
+                        );
                     }
                     continue;
                 }
@@ -480,10 +505,18 @@ pub(crate) async fn run_loop(monitor: Monitor, stop: StopCondition) -> Result<()
                 // 0.22 §5.1: cross-shard merge probe. Gated so non-merged
                 // monitors never poll it (zero cost, like the tick branch).
                 // Out-of-band — doesn't touch the idle timer.
-                req = recv_merge(&mut merge_rx), if merge_rx.is_some() => {
-                    if let Some(req) = req {
-                        let taken = state_map.take_dyn(req.type_id);
-                        let _ = req.reply.send(taken);
+                req = recv_merge(&mut merge_link), if merge_link.is_some() => {
+                    match (req, merge_link.as_ref()) {
+                        (Some(req), Some(link)) => link.reply(&mut state_map, req.type_id),
+                        // The merge worker is gone (it panicked, or the
+                        // runner tore it down): its channel now resolves at
+                        // once, forever — stop polling it, or this branch
+                        // would starve the capture.
+                        (None, _) => {
+                            tracing::warn!("merge worker gone: this shard stops answering merges");
+                            merge_link = None;
+                        }
+                        (Some(_), None) => {}
                     }
                     continue;
                 }
@@ -532,56 +565,56 @@ pub(crate) async fn run_loop(monitor: Monitor, stop: StopCondition) -> Result<()
                     }
                     continue;
                 }
+                // #212: retry the sources whose re-open failed. Gated like the
+                // telemetry branch; not traffic.
+                _ = reopen_timer.tick(), if reopen.any_due() => {
+                    for i in 0..caps.len() {
+                        if !reopen.due[i] {
+                            continue;
+                        }
+                        if let ControlFlow::Break(res) = reopen_source(
+                            i,
+                            &mut caps,
+                            &specs,
+                            &mut reopen,
+                            &mut reopen_timer,
+                            &open,
+                        ) {
+                            return res;
+                        }
+                    }
+                    continue;
+                }
                 idx = ready_capture(&mut caps, &mut rr_anchor) => idx,
             };
+            // A backend error goes through the `BackendErrorPolicy` (#212).
+            macro_rules! backend_error {
+                ($i:expr, $e:expr) => {
+                    match on_backend_error(
+                        $i,
+                        $e,
+                        backend_error_policy,
+                        &mut caps,
+                        &specs,
+                        &mut reopen,
+                        &mut reopen_timer,
+                        capture_stats.is_some().then_some(&mut telemetry_sampler),
+                        &health,
+                        &open,
+                    ) {
+                        ControlFlow::Continue(()) => {}
+                        ControlFlow::Break(res) => return res,
+                    }
+                };
+            }
             let i = match ready {
                 Some((i, Ok(()))) => i,
-                Some((i, Err(e))) => match backend_error_policy {
-                    BackendErrorPolicy::FailFast => return Err(e),
-                    BackendErrorPolicy::SkipSource => {
-                        backend_errors += 1;
-                        health.record_backend_error();
-                        tracing::warn!(error = %e, count = backend_errors, "capture backend error (SkipSource)");
-                        // Circuit breaker: a persistently-failing fd would otherwise
-                        // spin the readiness select. Back off, and after many
-                        // consecutive failures give up rather than burn a core.
-                        if backend_errors > 64 {
-                            return Err(e);
-                        }
-                        tokio::time::sleep(Duration::from_millis(50)).await;
-                        continue;
-                    }
-                    // 0.25 W1e: try to rebuild the failed source in place from its
-                    // recorded spec. A failed re-open leaves the (still-broken)
-                    // backend as-is so the next error retries it; same circuit
-                    // breaker as SkipSource bounds a hard-down source.
-                    BackendErrorPolicy::Reopen => {
-                        backend_errors += 1;
-                        health.record_backend_error();
-                        match open_backend(&specs[i], fanout, &kernel_prefilter, promiscuous) {
-                            Ok(b) => {
-                                // The new backend's counters start at zero:
-                                // hand the old one's totals to the sampler.
-                                if capture_stats.is_some() {
-                                    telemetry_sampler.retire(i, caps[i].counters().ok());
-                                }
-                                caps[i] = b;
-                                tracing::warn!(error = %e, idx = i, count = backend_errors, "capture backend error (Reopen) — source reopened");
-                            }
-                            Err(e2) => {
-                                tracing::warn!(error = %e, reopen_error = %e2, idx = i, count = backend_errors, "capture backend error (Reopen) — reopen failed, will retry");
-                            }
-                        }
-                        if backend_errors > 64 {
-                            return Err(e);
-                        }
-                        tokio::time::sleep(Duration::from_millis(50)).await;
-                        continue;
-                    }
-                },
+                Some((i, Err(e))) => {
+                    backend_error!(i, e);
+                    continue;
+                }
                 None => break, // all captures exhausted (AF_PACKET never reports this)
             };
-            backend_errors = 0; // a successful wake clears the circuit breaker
             let source = SourceIdx(i as u8);
             // Reset idle timer on every readable wake.
             last_event_at = Instant::now();
@@ -606,13 +639,18 @@ pub(crate) async fn run_loop(monitor: Monitor, stop: StopCondition) -> Result<()
             let mut packet_err: Option<crate::error::Error> = None;
             // #178: the source's dedup ring, checked first for every frame.
             let mut dedup_i = dedups[i].as_mut();
-            let (last_ts, more_ready) = caps[i]
+            let leg = crate::monitor::flow_ctx::leg_tag(i);
+            let drained = caps[i]
                 .drain_batch(|view, direction| {
                     if let Some(d) = dedup_i.as_deref_mut()
-                        && !d.keep_raw(view.frame, direction, view.timestamp)
+                        && !d.keep_view(&view, direction)
                     {
                         return;
                     }
+                    // #216: tag the capture leg (1-based), so flowscope binds
+                    // it into the flow's stats (`source_idx_forward` /
+                    // `_reverse`) and events no packet drives can name it.
+                    let view = view.with_source_idx(leg);
                     if !packet_subs.is_empty()
                         && packet_err.is_none()
                         && let Err(e) = dispatch_packet_subs(
@@ -624,6 +662,7 @@ pub(crate) async fn run_loop(monitor: Monitor, stop: StopCondition) -> Result<()
                             &mut counters,
                             &mut flow_states,
                             &label_table,
+                            driver.tracker(),
                             source,
                             monitor_name_borrow,
                             handler_error_policy,
@@ -758,36 +797,57 @@ pub(crate) async fn run_loop(monitor: Monitor, stop: StopCondition) -> Result<()
                     {
                         packet_err = Some(e);
                     }
-                    // Issue #72: append this frame's nPrint row to its flow's
-                    // matrix (keyed canonically, matching FlowEnded). Synchronous,
-                    // in-borrow — the borrow drops before the dispatch `.await`.
-                    for acc in byte_accumulators.iter_mut() {
-                        acc.feed(&view);
-                    }
                     // Issue #134: reassemble IPv4 fragments before the tracker sees
-                    // them (taps/accumulators above already saw the raw fragment).
+                    // them (the taps above already saw the raw fragment). Issue
+                    // #72 / #45 (#214): the per-flow accumulators (nPrint, YARA)
+                    // are fed what the tracker tracked — its key and side, a
+                    // reassembled datagram, never a raw fragment. Synchronous,
+                    // in-borrow — the borrow drops before the dispatch `.await`.
                     match ip_reassembly.as_mut() {
-                        None => driver.track_into(view, &mut events),
+                        None => {
+                            driver.track_into(view, &mut events);
+                            crate::monitor::nprint::feed_tracked(
+                                &mut byte_accumulators,
+                                &driver,
+                                &view,
+                            );
+                        }
                         Some(r) => match r.intercept(&view) {
                             crate::monitor::ip_frag::FragAction::PassThrough => {
-                                driver.track_into(view, &mut events)
+                                driver.track_into(view, &mut events);
+                                crate::monitor::nprint::feed_tracked(
+                                    &mut byte_accumulators,
+                                    &driver,
+                                    &view,
+                                );
                             }
                             crate::monitor::ip_frag::FragAction::Buffered => {}
                             crate::monitor::ip_frag::FragAction::Reassembled(frame) => {
                                 let rv = flowscope::PacketView::new(&frame, view.timestamp)
                                     .with_rx_metadata(view.rx_metadata);
                                 driver.track_into(rv, &mut events);
+                                crate::monitor::nprint::feed_tracked(
+                                    &mut byte_accumulators,
+                                    &driver,
+                                    &rv,
+                                );
                             }
                         },
                     }
                 })
-                .await?;
+                .await;
             if let Some(e) = packet_err {
                 return Err(e);
             }
+            let backend_err = drained.error;
 
             // A spurious wake (no retired block) leaves `last_ts == None`.
-            let Some(ts) = last_ts else { continue };
+            let Some(ts) = drained.last_ts else {
+                if let Some(e) = backend_err {
+                    backend_error!(i, e);
+                }
+                continue;
+            };
             // Issue #134: age out fragment datagrams that never completed.
             if let Some(r) = ip_reassembly.as_mut() {
                 r.evict(ts);
@@ -812,7 +872,8 @@ pub(crate) async fn run_loop(monitor: Monitor, stop: StopCondition) -> Result<()
                 &mut state_map,
                 &mut counters,
                 &mut events,
-                source,
+                Origin::Packet(source),
+                &mut flow_ctx_scratch,
                 monitor_name_borrow,
                 &mut flow_states,
                 &label_table,
@@ -836,8 +897,13 @@ pub(crate) async fn run_loop(monitor: Monitor, stop: StopCondition) -> Result<()
             // `Pending`, so the runtime would never turn its timer driver
             // and the timers above would never fire (on a current-thread
             // runtime nothing else does). Yield first.
-            if more_ready {
+            if drained.more_ready {
                 tokio::task::yield_now().await;
+            }
+            // The packets delivered before a backend error are dispatched;
+            // now the error.
+            if let Some(e) = backend_err {
+                backend_error!(i, e);
             }
         }
         #[allow(unreachable_code)]
@@ -855,6 +921,9 @@ pub(crate) async fn run_loop(monitor: Monitor, stop: StopCondition) -> Result<()
     // events.
     if let Err(e) = run {
         let _ = flush_outputs(sink.as_mut(), &mut flow_exporters, &mut report_flushers);
+        if let Some(link) = &merge_link {
+            link.push_final(&mut state_map);
+        }
         return Err(e);
     }
     let mut drained = Ok(());
@@ -882,7 +951,15 @@ pub(crate) async fn run_loop(monitor: Monitor, stop: StopCondition) -> Result<()
     }
 
     // Flush even when the drain failed; the drain's error wins.
+    // #214: what the accumulators still hold once every flow ended — a
+    // leak, if anything.
+    crate::monitor::nprint::publish(&byte_accumulators, &health);
     let flushed = flush_outputs(sink.as_mut(), &mut flow_exporters, &mut report_flushers);
+    // #216: a sharded shard hands the merge worker what it accumulated
+    // since the last probe — the drain phase's events included.
+    if let Some(link) = &merge_link {
+        link.push_final(&mut state_map);
+    }
     drained.and(flushed)
 }
 
@@ -927,7 +1004,7 @@ pub(crate) async fn replay_loop(
         mut flow_states,
         fanout: _,
         label_table,
-        merge_rx: _, // replay is single-shard; no cross-shard merge
+        merge_link: _, // replay is single-shard; no cross-shard merge
         shard_stop: _,
         handler_error_policy,
         backend_error_policy: _, // replay has no live capture backend
@@ -978,6 +1055,8 @@ pub(crate) async fn replay_loop(
 
     let mut source = crate::pcap_source::AsyncPcapSource::open_with_config(&path, config).await?;
     let mut events: Vec<FsEvent<FlowKey>> = Vec::with_capacity(64);
+    // #216: the flows a dispatched batch ends (reused across batches).
+    let mut flow_ctx_scratch = crate::monitor::flow_ctx::ended_flows();
     // Replay sweeps on packet time, every `sweep_interval` of it.
     let sweep_interval = driver.tracker().config().sweep_interval;
     let mut last_sweep: Option<flowscope::Timestamp> = None;
@@ -1022,7 +1101,8 @@ pub(crate) async fn replay_loop(
                     &mut state_map,
                     &mut counters,
                     &mut events,
-                    SourceIdx(0),
+                    Origin::Housekeeping,
+                    &mut flow_ctx_scratch,
                     monitor_name_borrow,
                     &mut flow_states,
                     &label_table,
@@ -1037,6 +1117,11 @@ pub(crate) async fn replay_loop(
                 .await?;
                 // After the `FlowEnded` handlers (see `run_loop`).
                 flow_states.sweep(now);
+                crate::monitor::nprint::retain_tracked(
+                    &mut byte_accumulators,
+                    driver.tracker(),
+                    &health,
+                );
             }
 
             // Ticks that fell due before this packet, at their
@@ -1079,11 +1164,16 @@ pub(crate) async fn replay_loop(
             // no direction, so `Dedup::loopback` is inert here — see
             // `MonitorBuilder::dedup`).
             if let Some(d) = dedup.as_mut()
-                && !d.keep_raw(&pkt.data, pkt.direction, pkt.timestamp)
+                && !d.keep_raw(&pkt.data, pkt.original_len, pkt.direction, pkt.timestamp)
             {
                 continue;
             }
-            let view = flowscope::PacketView::new(&pkt.data, pkt.timestamp);
+            // A replay is capture source 0: leg 1 (#216). The view's wire
+            // length is the record's original length: flowscope 0.26
+            // counts it and treats what a snap length cut as a gap.
+            let view = pkt
+                .view()
+                .with_source_idx(crate::monitor::flow_ctx::leg_tag(0));
 
             // 0.25 A1: packet-tier subs fire before tracking, as on the live path.
             if !packet_subs.is_empty() {
@@ -1096,6 +1186,7 @@ pub(crate) async fn replay_loop(
                     &mut counters,
                     &mut flow_states,
                     &label_table,
+                    driver.tracker(),
                     SourceIdx(0),
                     monitor_name_borrow,
                     handler_error_policy,
@@ -1213,22 +1304,28 @@ pub(crate) async fn replay_loop(
             let arp_table_ref: ArpTableRef<'_> = None;
 
             events.clear();
-            // Issue #72: append this frame's nPrint row before the tracker keys it.
-            for acc in byte_accumulators.iter_mut() {
-                acc.feed(&view);
-            }
-            // Issue #134: reassemble IPv4 fragments for the tracker (offline replay).
+            // Issue #134: reassemble IPv4 fragments for the tracker (offline
+            // replay); the accumulators get what it tracked, as live (#214).
             match ip_reassembly.as_mut() {
-                None => driver.track_into(view, &mut events),
+                None => {
+                    driver.track_into(view, &mut events);
+                    crate::monitor::nprint::feed_tracked(&mut byte_accumulators, &driver, &view);
+                }
                 Some(r) => match r.intercept(&view) {
                     crate::monitor::ip_frag::FragAction::PassThrough => {
-                        driver.track_into(view, &mut events)
+                        driver.track_into(view, &mut events);
+                        crate::monitor::nprint::feed_tracked(
+                            &mut byte_accumulators,
+                            &driver,
+                            &view,
+                        );
                     }
                     crate::monitor::ip_frag::FragAction::Buffered => {}
                     crate::monitor::ip_frag::FragAction::Reassembled(frame) => {
                         let rv = flowscope::PacketView::new(&frame, view.timestamp)
                             .with_rx_metadata(view.rx_metadata);
                         driver.track_into(rv, &mut events);
+                        crate::monitor::nprint::feed_tracked(&mut byte_accumulators, &driver, &rv);
                     }
                 },
             }
@@ -1240,7 +1337,8 @@ pub(crate) async fn replay_loop(
                 &mut state_map,
                 &mut counters,
                 &mut events,
-                SourceIdx(0),
+                Origin::Packet(SourceIdx(0)),
+                &mut flow_ctx_scratch,
                 monitor_name_borrow,
                 &mut flow_states,
                 &label_table,
@@ -1295,6 +1393,9 @@ pub(crate) async fn replay_loop(
     }
 
     // Flush even when the drain failed; the drain's error wins.
+    // #214: what the accumulators still hold once every flow ended — a
+    // leak, if anything.
+    crate::monitor::nprint::publish(&byte_accumulators, &health);
     let flushed = flush_outputs(sink.as_mut(), &mut flow_exporters, &mut report_flushers);
     drained.and(flushed)
 }
@@ -1338,7 +1439,8 @@ async fn drain_phase(
         state_map,
         counters,
         &mut leftover,
-        SourceIdx(0),
+        Origin::Housekeeping,
+        &mut crate::monitor::flow_ctx::ended_flows(),
         monitor_name,
         flow_states,
         label_table,
@@ -1421,6 +1523,170 @@ async fn ready_capture(caps: &mut [AnyBackend], anchor: &mut usize) -> Option<(u
     .await
 }
 
+/// How often a failed `BackendErrorPolicy::Reopen` re-open is retried —
+/// also the least time between two re-opens of one source (#212).
+const REOPEN_RETRY: Duration = Duration::from_millis(500);
+
+/// Consecutive failed re-opens of one source that end the run.
+const REOPEN_MAX_FAILURES: u32 = 64;
+
+/// Per-source `BackendErrorPolicy::Reopen` state (#212), parallel to `caps`.
+struct ReopenState {
+    /// The last re-open failed (or was deferred): the reopen timer retries.
+    due: Vec<bool>,
+    /// Consecutive failed re-opens.
+    failures: Vec<u32>,
+    /// When the source was last (re-)opened by the policy.
+    last: Vec<Option<Instant>>,
+}
+
+impl ReopenState {
+    fn new(sources: usize) -> Self {
+        Self {
+            due: vec![false; sources],
+            failures: vec![0; sources],
+            last: vec![None; sources],
+        }
+    }
+
+    fn any_due(&self) -> bool {
+        self.due.iter().any(|d| *d)
+    }
+
+    /// Mark source `i` for a retry, starting the retry period when it is
+    /// the only source due.
+    fn defer(&mut self, i: usize, timer: &mut tokio::time::Interval) {
+        if !self.any_due() {
+            timer.reset();
+        }
+        self.due[i] = true;
+    }
+}
+
+/// Apply the [`BackendErrorPolicy`] to source `i`'s error `e` — a readiness
+/// error and a drain error alike (#212). `Continue` keeps the run going;
+/// `Break` ends it with its result.
+///
+/// - `FailFast`: end the run with `e`.
+/// - `SkipSource`: retire the source (its final counters go to the
+///   telemetry sampler); the run ends with `e` once no source is left.
+/// - `Reopen`: rebuild the source in place, dropping the failed backend
+///   first (an AF_XDP backend holds its queue and the XDP attachment, which
+///   the new one needs). A failed re-open is retried every
+///   [`REOPEN_RETRY`]; [`REOPEN_MAX_FAILURES`] in a row end the run. An
+///   injected AF_XDP backend (`XdpShardedRunner`) can't be rebuilt: like
+///   `FailFast`.
+#[allow(clippy::too_many_arguments)]
+fn on_backend_error(
+    i: usize,
+    e: crate::error::Error,
+    policy: BackendErrorPolicy,
+    caps: &mut [AnyBackend],
+    specs: &[BackendSpec],
+    reopen: &mut ReopenState,
+    reopen_timer: &mut tokio::time::Interval,
+    telemetry: Option<&mut crate::monitor::telemetry::TelemetrySampler>,
+    health: &crate::monitor::health::HealthState,
+    open: &impl Fn(&BackendSpec) -> Result<AnyBackend>,
+) -> ControlFlow<Result<()>> {
+    match policy {
+        BackendErrorPolicy::FailFast => return ControlFlow::Break(Err(e)),
+        BackendErrorPolicy::SkipSource | BackendErrorPolicy::Reopen => {
+            health.record_backend_error()
+        }
+    }
+    match policy {
+        BackendErrorPolicy::FailFast => ControlFlow::Break(Err(e)),
+        BackendErrorPolicy::SkipSource => {
+            if let Some(sampler) = telemetry {
+                sampler.retire(i, caps[i].counters().ok());
+            }
+            caps[i] = AnyBackend::Closed;
+            if caps.iter().all(AnyBackend::is_closed) {
+                tracing::error!(error = %e, source = i, "capture backend error (SkipSource): no capture source left");
+                return ControlFlow::Break(Err(e));
+            }
+            tracing::warn!(error = %e, source = i, "capture backend error (SkipSource): source retired");
+            ControlFlow::Continue(())
+        }
+        BackendErrorPolicy::Reopen => {
+            if !specs[i].reopenable() {
+                tracing::error!(
+                    error = %e,
+                    source = i,
+                    "capture backend error (Reopen): an injected AF_XDP backend (XdpShardedRunner) \
+                     cannot be re-opened; stopping"
+                );
+                return ControlFlow::Break(Err(e));
+            }
+            tracing::warn!(error = %e, source = i, "capture backend error (Reopen): re-opening the source");
+            // The new backend's counters start at zero: hand the old one's
+            // totals to the sampler.
+            if let Some(sampler) = telemetry {
+                sampler.retire(i, caps[i].counters().ok());
+            }
+            // Failing again right after a re-open: wait for the retry timer
+            // rather than re-open in a loop.
+            if reopen.last[i].is_some_and(|t| t.elapsed() < REOPEN_RETRY) {
+                caps[i] = AnyBackend::Closed;
+                reopen.defer(i, reopen_timer);
+                return ControlFlow::Continue(());
+            }
+            reopen_source(i, caps, specs, reopen, reopen_timer, open)
+        }
+    }
+}
+
+/// Re-open source `i` in place (`BackendErrorPolicy::Reopen`). A failure
+/// leaves the source closed and due for a retry; the
+/// [`REOPEN_MAX_FAILURES`]th in a row ends the run with its error.
+fn reopen_source(
+    i: usize,
+    caps: &mut [AnyBackend],
+    specs: &[BackendSpec],
+    reopen: &mut ReopenState,
+    reopen_timer: &mut tokio::time::Interval,
+    open: &impl Fn(&BackendSpec) -> Result<AnyBackend>,
+) -> ControlFlow<Result<()>> {
+    reopen.last[i] = Some(Instant::now());
+    match replace_then_open(&mut caps[i], AnyBackend::Closed, || open(&specs[i])) {
+        Ok(()) => {
+            reopen.due[i] = false;
+            reopen.failures[i] = 0;
+            tracing::info!(source = i, "capture source re-opened");
+            ControlFlow::Continue(())
+        }
+        Err(e) => {
+            reopen.failures[i] += 1;
+            let attempts = reopen.failures[i];
+            if attempts >= REOPEN_MAX_FAILURES {
+                tracing::error!(error = %e, source = i, attempts, "re-opening the capture source keeps failing; stopping");
+                return ControlFlow::Break(Err(e));
+            }
+            tracing::warn!(error = %e, source = i, attempts, "re-opening the capture source failed; will retry");
+            if !reopen.due[i] {
+                reopen.defer(i, reopen_timer);
+            }
+            ControlFlow::Continue(())
+        }
+    }
+}
+
+/// Replace `slot`'s value with what `open` builds — dropping the old value
+/// (leaving `placeholder`) **before** `open` runs, so whatever exclusive
+/// kernel resources it held (an AF_XDP queue binding, an XDP program
+/// attachment) are free for the new one. On failure `slot` keeps
+/// `placeholder`.
+fn replace_then_open<B>(
+    slot: &mut B,
+    placeholder: B,
+    open: impl FnOnce() -> Result<B>,
+) -> Result<()> {
+    drop(std::mem::replace(slot, placeholder));
+    *slot = open()?;
+    Ok(())
+}
+
 /// A tokio interval for `period` (non-zero — `build()` rejects zero
 /// periods): first tick one `period` from now, missed ticks skipped (a
 /// slow handler doesn't pile up a backlog). A period too long to
@@ -1458,13 +1724,13 @@ async fn next_tick(intervals: &mut [tokio::time::Interval]) -> usize {
 }
 
 /// 0.22 §5.1: await the next cross-shard merge probe. When no merge
-/// receiver is wired the future never resolves (the `select!` branch is
-/// gated `if merge_rx.is_some()`, so this only runs in the `Some` case).
+/// link is wired the future never resolves (the `select!` branch is
+/// gated `if merge_link.is_some()`, so this only runs in the `Some` case).
 async fn recv_merge(
-    rx: &mut Option<tokio::sync::mpsc::UnboundedReceiver<crate::monitor::merge::MergeRequest>>,
+    link: &mut Option<crate::monitor::merge::MergeLink>,
 ) -> Option<crate::monitor::merge::MergeRequest> {
-    match rx {
-        Some(r) => r.recv().await,
+    match link {
+        Some(l) => l.requests.recv().await,
         None => std::future::pending().await,
     }
 }
@@ -1531,7 +1797,7 @@ fn emit_active_flow_records(
         live.insert(*key);
         let last = last_export.get(key).copied().unwrap_or(stats.started);
         if now.saturating_sub(last) >= period {
-            let rec = FlowRecord::from_active(key, stats);
+            let rec = FlowRecord::from_stats(key, stats, None);
             for ex in exporters.iter_mut() {
                 ex.export(&rec);
             }
@@ -1574,6 +1840,15 @@ fn sample_and_fire_capture_stats(
     let mut total_packets: u64 = 0;
     let mut total_drops: u64 = 0;
     for (i, cap) in caps.iter().enumerate() {
+        // A retired source (#212): nothing to sample, but what it counted
+        // still counts toward the health totals.
+        if cap.is_closed() {
+            if let Some(retired) = sampler.retired_total(i) {
+                total_packets += retired.delivered;
+                total_drops += retired.drops;
+            }
+            continue;
+        }
         let (cum, detail) = match cap.counters() {
             Ok(s) => s,
             Err(e) => {
@@ -1599,7 +1874,7 @@ fn sample_and_fire_capture_stats(
         let mut ctx = Ctx::new(
             None,
             now,
-            SourceIdx(i as u8),
+            Some(SourceIdx(i as u8)),
             state_map,
             sink,
             counters,
@@ -1645,7 +1920,8 @@ async fn dispatch_batch(
     state_map: &mut StateMap,
     counters: &mut CounterRegistry,
     events: &mut Vec<FsEvent<FlowKey>>,
-    source: SourceIdx,
+    origin: Origin,
+    ended: &mut crate::monitor::flow_ctx::EndedFlows,
     monitor_name: Option<&str>,
     flow_states: &mut crate::ctx::FlowStateRegistry,
     label_table: &flowscope::well_known::LabelTable,
@@ -1661,6 +1937,10 @@ async fn dispatch_batch(
     for slot in protocol_slots.iter_mut() {
         slot.fetch();
     }
+    // #216: the flows this batch ends, for the events and messages of
+    // theirs dispatched once the tracker has let them go.
+    crate::monitor::flow_ctx::scan_ended(events, ended);
+    let ended: &crate::monitor::flow_ctx::EndedFlows = ended;
     let mut batch = std::mem::take(events);
     for (i, evt) in batch.drain(..).enumerate() {
         if deadline.is_some_and(|d| Instant::now() >= d) {
@@ -1674,7 +1954,8 @@ async fn dispatch_batch(
             state_map,
             counters,
             flow_states,
-            source,
+            origin,
+            ended,
             monitor_name,
             label_table,
             policy,
@@ -1683,6 +1964,9 @@ async fn dispatch_batch(
             base + i as u64,
         )
         .await?;
+        let fctx = crate::monitor::flow_ctx::resolve(&evt, origin, &|key| {
+            crate::monitor::flow_ctx::lookup(driver.tracker(), ended, key)
+        });
         dispatch_tracked_event(
             dispatcher,
             protocol_slots,
@@ -1690,7 +1974,7 @@ async fn dispatch_batch(
             state_map,
             counters,
             evt,
-            source,
+            fctx,
             monitor_name,
             flow_states,
             label_table,
@@ -1713,7 +1997,8 @@ async fn dispatch_batch(
         state_map,
         counters,
         flow_states,
-        source,
+        origin,
+        ended,
         monitor_name,
         label_table,
         policy,
@@ -1736,7 +2021,8 @@ async fn dispatch_slot_messages(
     state_map: &mut StateMap,
     counters: &mut CounterRegistry,
     flow_states: &mut crate::ctx::FlowStateRegistry,
-    source: SourceIdx,
+    origin: Origin,
+    ended: &crate::monitor::flow_ctx::EndedFlows,
     monitor_name: Option<&str>,
     label_table: &flowscope::well_known::LabelTable,
     policy: HandlerErrorPolicy,
@@ -1757,15 +2043,22 @@ async fn dispatch_slot_messages(
         let Some((i, _)) = next else {
             return Ok(());
         };
+        // #216: the message's flow decides its source when no packet does.
+        let fctx = crate::monitor::flow_ctx::resolve_key(
+            protocol_slots[i].next_key().as_ref(),
+            origin,
+            &|key| crate::monitor::flow_ctx::lookup(driver.tracker(), ended, key),
+        );
         let mut ctx = Ctx::new(
             None,
             flowscope::Timestamp::default(),
-            source,
+            fctx.source,
             state_map,
             sink,
             counters,
             flow_states,
         );
+        ctx.initiator = fctx.initiator;
         ctx.monitor_name = monitor_name;
         ctx.label_table = label_table;
         ctx.tracker = Some(driver.tracker());
@@ -1808,7 +2101,7 @@ async fn dispatch_tracked_event(
     state_map: &mut StateMap,
     counters: &mut CounterRegistry,
     evt: FsEvent<FlowKey>,
-    source: SourceIdx,
+    fctx: FlowCtx,
     monitor_name: Option<&str>,
     flow_states: &mut crate::ctx::FlowStateRegistry,
     label_table: &flowscope::well_known::LabelTable,
@@ -1827,7 +2120,7 @@ async fn dispatch_tracked_event(
         cell.registry.observe_event(&evt, &mut cell.out);
         if !cell.out.is_empty() {
             for owned in cell.out.drain(..) {
-                crate::anomaly::sink::publish_owned(sink, &owned);
+                crate::anomaly::sink::publish_detector_owned(sink, &owned);
             }
         }
     }
@@ -1840,7 +2133,7 @@ async fn dispatch_tracked_event(
             key, stats, reason, ..
         } = &evt
     {
-        let record = crate::export::FlowRecord::from_ended(key, stats, *reason);
+        let record = crate::export::FlowRecord::from_stats(key, stats, Some(*reason));
         for exporter in flow_exporters.iter_mut() {
             exporter.export(&record);
         }
@@ -1925,12 +2218,13 @@ async fn dispatch_tracked_event(
             let mut ctx = Ctx::new(
                 Some(key),
                 ts,
-                source,
+                fctx.source,
                 state_map,
                 sink,
                 counters,
                 flow_states,
             );
+            ctx.initiator = fctx.initiator;
             ctx.monitor_name = monitor_name;
             ctx.label_table = label_table;
             let mut res = owner.dispatch_parser_event(dispatcher, &mut ctx, &pe);
@@ -1978,7 +2272,7 @@ async fn dispatch_tracked_event(
             state_map,
             counters,
             e,
-            source,
+            fctx,
             monitor_name,
             flow_states,
             label_table,
@@ -2004,7 +2298,7 @@ async fn dispatch_tracked_event(
                     state_map,
                     counters,
                     e,
-                    source,
+                    fctx,
                     monitor_name,
                     flow_states,
                     label_table,
@@ -2067,15 +2361,7 @@ async fn fire_tick(
         period: reg.period,
     };
     let res = {
-        let mut ctx = Ctx::new(
-            None,
-            tick.now,
-            SourceIdx(0),
-            state_map,
-            sink,
-            counters,
-            flow_states,
-        );
+        let mut ctx = Ctx::new(None, tick.now, None, state_map, sink, counters, flow_states);
         ctx.monitor_name = monitor_name;
         ctx.label_table = label_table;
         if dispatcher.catch_panics() {
@@ -2085,15 +2371,7 @@ async fn fire_tick(
         }
     };
     apply_handler_error_policy(res, policy, health, "tick")?;
-    let mut ctx = Ctx::new(
-        None,
-        tick.now,
-        SourceIdx(0),
-        state_map,
-        sink,
-        counters,
-        flow_states,
-    );
+    let mut ctx = Ctx::new(None, tick.now, None, state_map, sink, counters, flow_states);
     ctx.monitor_name = monitor_name;
     ctx.label_table = label_table;
     let mut res = dispatcher.dispatch::<Tick>(&tick, &mut ctx);
@@ -2296,9 +2574,9 @@ async fn dispatch_lifecycle_async(
             key,
             reason,
             stats,
+            history,
             ts,
             l4,
-            ..
         } => match l4 {
             Some(L4Proto::Tcp) => {
                 // 0.22 §2.6: async TcpRst synthesis mirrors the sync arm.
@@ -2308,7 +2586,7 @@ async fn dispatch_lifecycle_async(
                     .await?;
                 if is_rst {
                     dispatcher
-                        .dispatch_async(&TcpRst::new(key, stats, ts))
+                        .dispatch_async(&TcpRst::new(key, stats, &history, ts))
                         .await?;
                 }
             }
@@ -2478,7 +2756,12 @@ async fn dispatch_lifecycle_async(
 ///
 /// Extracts the 5-tuple once (directional — `a`=src, `b`=dst), builds one
 /// `Ctx`, and invokes every sub whose [`Predicate`](crate::monitor::subscription::Predicate)
-/// matches the frame's fields. Synchronous — called from inside the zero-copy
+/// matches the frame's fields. The predicates see the directional fields;
+/// `ctx.flow` is the flow's canonical (address-sorted) key — the one
+/// `FlowEnded` carries — with `ctx.orientation` / `ctx.side` saying which
+/// way this packet went, so per-flow state (`flow_state_mut`) is one slot
+/// for both directions and is freed at flow end (#216). The initiator comes
+/// from the tracker, or is this packet's sender for a flow it will start. Synchronous — called from inside the zero-copy
 /// drain (or the replay packet loop) before flow tracking, so the borrowed
 /// `PacketView` reaches the handler with no copy. Returns `Err` only under
 /// [`HandlerErrorPolicy::Propagate`]; `Isolate` records the error on the
@@ -2496,6 +2779,7 @@ fn dispatch_packet_subs(
     counters: &mut CounterRegistry,
     flow_states: &mut crate::ctx::FlowStateRegistry,
     label_table: &flowscope::well_known::LabelTable,
+    tracker: &flowscope::FlowTracker<FiveTuple, ()>,
     source: SourceIdx,
     monitor_name: Option<&str>,
     policy: HandlerErrorPolicy,
@@ -2504,13 +2788,30 @@ fn dispatch_packet_subs(
     let Some((key, fields)) = PacketFields::extract(view, extractor) else {
         return Ok(());
     };
+    // The canonical key, as FiveTuple::bidirectional() sorts it (`src > dst`
+    // swaps).
+    let (flow, orientation) = if key.a > key.b {
+        (
+            flowscope::extract::FiveTupleKey::new(key.proto, key.b, key.a),
+            flowscope::Orientation::Reverse,
+        )
+    } else {
+        (key, flowscope::Orientation::Forward)
+    };
+    let initiator = tracker
+        .get(&flow)
+        .map_or(orientation, |entry| entry.initiator_orientation());
+    let side = if orientation == initiator {
+        flowscope::FlowSide::Initiator
+    } else {
+        flowscope::FlowSide::Responder
+    };
     // Build the Ctx once and reuse it across subs (sequential dispatch). The
-    // packet tier is pre-flow, so `tracker` is `None` (no flow correlation
-    // before this frame is tracked).
+    // packet tier runs before this frame is tracked, so `tracker` is `None`.
     let mut ctx = Ctx {
-        flow: Some(key),
+        flow: Some(flow),
         ts: view.timestamp,
-        source,
+        source: Some(source),
         monitor_name,
         state_map,
         sink,
@@ -2519,8 +2820,9 @@ fn dispatch_packet_subs(
         label_table,
         tracker: None,
         arp_table: None,
-        side: None,
-        orientation: None,
+        side: Some(side),
+        orientation: Some(orientation),
+        initiator: Some(initiator),
     };
     for sub in subs {
         if sub.predicate.load().eval(&fields)
@@ -2573,7 +2875,7 @@ fn dispatch_arp(
     let mut ctx = Ctx {
         flow: None, // ARP is L2 — no 5-tuple flow key.
         ts: view.timestamp,
-        source,
+        source: Some(source),
         monitor_name,
         state_map,
         sink,
@@ -2587,6 +2889,7 @@ fn dispatch_arp(
         arp_table: Some(&watch.table),
         side: None,
         orientation: None,
+        initiator: None,
     };
 
     // Helper: apply the error policy uniformly to one handler result.
@@ -2650,7 +2953,7 @@ fn dispatch_ndp(
     let mut ctx = Ctx {
         flow: None, // NDP is L3 control plane — no 5-tuple flow key.
         ts: view.timestamp,
-        source,
+        source: Some(source),
         monitor_name,
         state_map,
         sink,
@@ -2661,6 +2964,7 @@ fn dispatch_ndp(
         arp_table: None, // the ARP (IPv4) table; NDP's IPv6 table isn't exposed on Ctx.
         side: None,
         orientation: None,
+        initiator: None,
     };
 
     macro_rules! guard {
@@ -2716,7 +3020,7 @@ fn dispatch_lldp(
     let mut ctx = Ctx {
         flow: None, // LLDP is L2 — no 5-tuple flow key.
         ts: view.timestamp,
-        source,
+        source: Some(source),
         monitor_name,
         state_map,
         sink,
@@ -2727,6 +3031,7 @@ fn dispatch_lldp(
         arp_table: None,
         side: None,
         orientation: None,
+        initiator: None,
     };
 
     macro_rules! guard {
@@ -2775,7 +3080,7 @@ fn dispatch_cdp(
     let mut ctx = Ctx {
         flow: None, // CDP is L2 — no 5-tuple flow key.
         ts: view.timestamp,
-        source,
+        source: Some(source),
         monitor_name,
         state_map,
         sink,
@@ -2786,6 +3091,7 @@ fn dispatch_cdp(
         arp_table: None,
         side: None,
         orientation: None,
+        initiator: None,
     };
 
     macro_rules! guard {
@@ -2832,7 +3138,7 @@ fn absorb_frame_assets(
     let mut ctx = Ctx {
         flow: None, // asset records are L2-keyed — no 5-tuple flow key.
         ts: view.timestamp,
-        source,
+        source: Some(source),
         monitor_name,
         state_map,
         sink,
@@ -2843,6 +3149,7 @@ fn absorb_frame_assets(
         arp_table: None,
         side: None,
         orientation: None,
+        initiator: None,
     };
 
     macro_rules! guard {
@@ -2987,7 +3294,7 @@ fn dispatch_p0f(
     let mut ctx = Ctx {
         flow: None, // p0f is a per-packet artifact — no 5-tuple flow key.
         ts: view.timestamp,
-        source,
+        source: Some(source),
         monitor_name,
         state_map,
         sink,
@@ -2998,6 +3305,7 @@ fn dispatch_p0f(
         arp_table: None,
         side: None,
         orientation: None,
+        initiator: None,
     };
 
     macro_rules! guard {
@@ -3027,7 +3335,7 @@ fn dispatch_lifecycle(
     state_map: &mut StateMap,
     counters: &mut CounterRegistry,
     evt: FsEvent<FlowKey>,
-    source: SourceIdx,
+    fctx: FlowCtx,
     monitor_name: Option<&str>,
     flow_states: &mut crate::ctx::FlowStateRegistry,
     label_table: &flowscope::well_known::LabelTable,
@@ -3042,7 +3350,7 @@ fn dispatch_lifecycle(
             let mut ctx = Ctx {
                 flow: $flow,
                 ts: $ts,
-                source,
+                source: fctx.source,
                 monitor_name,
                 state_map: &mut *state_map,
                 sink: &mut *sink,
@@ -3054,6 +3362,7 @@ fn dispatch_lifecycle(
                 arp_table,
                 side: None,
                 orientation: None,
+                initiator: fctx.initiator,
             };
             dispatcher.dispatch::<$ty>(&$payload, &mut ctx)?;
         }};
@@ -3097,9 +3406,9 @@ fn dispatch_lifecycle(
             key,
             reason,
             stats,
+            history,
             ts,
             l4,
-            ..
         } => match l4 {
             Some(L4Proto::Tcp) => {
                 // 0.22 §2.6: synthesise a TcpRst alongside FlowEnded<Tcp>
@@ -3114,7 +3423,7 @@ fn dispatch_lifecycle(
                     ts
                 );
                 if is_rst {
-                    dispatch_one!(TcpRst, TcpRst::new(key, stats, ts), Some(key), ts);
+                    dispatch_one!(TcpRst, TcpRst::new(key, stats, &history, ts), Some(key), ts);
                 }
             }
             Some(L4Proto::Udp) => {
@@ -3305,7 +3614,7 @@ async fn dispatch_lifecycle_effects(
     state_map: &mut StateMap,
     counters: &mut CounterRegistry,
     evt: FsEvent<FlowKey>,
-    source: SourceIdx,
+    fctx: FlowCtx,
     monitor_name: Option<&str>,
     flow_states: &mut crate::ctx::FlowStateRegistry,
     label_table: &flowscope::well_known::LabelTable,
@@ -3319,7 +3628,7 @@ async fn dispatch_lifecycle_effects(
             let mut ctx = Ctx {
                 flow: $flow,
                 ts: $ts,
-                source,
+                source: fctx.source,
                 monitor_name,
                 state_map: &mut *state_map,
                 sink: &mut *sink,
@@ -3330,6 +3639,7 @@ async fn dispatch_lifecycle_effects(
                 arp_table: None,
                 side: None,
                 orientation: None,
+                initiator: fctx.initiator,
             };
             dispatcher
                 .dispatch_effects::<$ty>(&$payload, &mut ctx)
@@ -3375,9 +3685,9 @@ async fn dispatch_lifecycle_effects(
             key,
             reason,
             stats,
+            history,
             ts,
             l4,
-            ..
         } => match l4 {
             Some(L4Proto::Tcp) => {
                 let is_rst = reason == flowscope::EndReason::Rst;
@@ -3388,7 +3698,7 @@ async fn dispatch_lifecycle_effects(
                     ts
                 );
                 if is_rst {
-                    dispatch_one!(TcpRst, TcpRst::new(key, stats, ts), Some(key), ts);
+                    dispatch_one!(TcpRst, TcpRst::new(key, stats, &history, ts), Some(key), ts);
                 }
             }
             Some(L4Proto::Udp) => {
@@ -3747,5 +4057,186 @@ mod packet_clock_tests {
         clock.sources[1] = Some((secs(500), t0 + Duration::from_secs(1)));
         let now = clock.now_at(t0 + Duration::from_secs(60)).unwrap();
         assert!(now >= secs(559) && now < secs(561), "{now:?}");
+    }
+}
+
+#[cfg(test)]
+mod backend_error_tests {
+    use std::sync::Arc;
+    use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+
+    use super::*;
+    use crate::error::Error;
+    use crate::monitor::health::HealthState;
+
+    /// Sets its flag when dropped.
+    struct Probe(Arc<AtomicBool>);
+
+    impl Drop for Probe {
+        fn drop(&mut self) {
+            self.0.store(true, Ordering::SeqCst);
+        }
+    }
+
+    /// #212: `Reopen` drops the failed backend before building its
+    /// replacement — an AF_XDP backend holds its queue binding and the XDP
+    /// attachment, so building the new one first failed with EBUSY.
+    #[test]
+    fn replace_then_open_drops_old_first() {
+        let old_dropped = Arc::new(AtomicBool::new(false));
+        let mut slot = Some(Probe(Arc::clone(&old_dropped)));
+        replace_then_open(&mut slot, None, || {
+            assert!(
+                old_dropped.load(Ordering::SeqCst),
+                "the old value is still alive while its replacement is built"
+            );
+            Ok(Some(Probe(Arc::new(AtomicBool::new(false)))))
+        })
+        .unwrap();
+        assert!(slot.is_some());
+
+        // A failed open leaves the placeholder.
+        let res = replace_then_open(&mut slot, None, || Err(Error::Config("no".into())));
+        assert!(res.is_err());
+        assert!(slot.is_none());
+    }
+
+    fn enetdown() -> Error {
+        Error::Io(std::io::Error::from_raw_os_error(libc::ENETDOWN))
+    }
+
+    fn spec() -> Vec<BackendSpec> {
+        vec![BackendSpec::AfPacket(
+            crate::monitor::AfPacketIfaceSpec::host("nr-test0"),
+        )]
+    }
+
+    /// `Reopen` with the interface gone: the source is closed and retried
+    /// from the timer until a re-open succeeds.
+    #[tokio::test]
+    async fn reopen_retries_until_the_source_is_back() {
+        let health = HealthState::new();
+        let specs = spec();
+        let mut caps = vec![AnyBackend::Closed];
+        let mut reopen = ReopenState::new(1);
+        let mut timer = periodic(REOPEN_RETRY);
+        let attempts = AtomicUsize::new(0);
+        // Fails twice, then "opens" (a closed stand-in: a real backend
+        // needs privileges).
+        let open = |_: &BackendSpec| {
+            if attempts.fetch_add(1, Ordering::SeqCst) < 2 {
+                Err(Error::InterfaceNotFound("nr-test0".into()))
+            } else {
+                Ok(AnyBackend::Closed)
+            }
+        };
+        let flow = on_backend_error(
+            0,
+            enetdown(),
+            BackendErrorPolicy::Reopen,
+            &mut caps,
+            &specs,
+            &mut reopen,
+            &mut timer,
+            None,
+            &health,
+            &open,
+        );
+        assert!(flow.is_continue());
+        assert!(reopen.due[0], "a failed re-open is retried");
+        assert_eq!(reopen.failures[0], 1);
+        assert!(reopen_source(0, &mut caps, &specs, &mut reopen, &mut timer, &open).is_continue());
+        assert!(reopen.due[0]);
+        assert!(reopen_source(0, &mut caps, &specs, &mut reopen, &mut timer, &open).is_continue());
+        assert!(!reopen.due[0], "re-opened");
+        assert_eq!(reopen.failures[0], 0);
+        assert_eq!(attempts.load(Ordering::SeqCst), 3);
+
+        // Failing again at once waits for the timer instead of re-opening
+        // in a loop.
+        let flow = on_backend_error(
+            0,
+            enetdown(),
+            BackendErrorPolicy::Reopen,
+            &mut caps,
+            &specs,
+            &mut reopen,
+            &mut timer,
+            None,
+            &health,
+            &open,
+        );
+        assert!(flow.is_continue());
+        assert!(reopen.due[0]);
+        assert_eq!(attempts.load(Ordering::SeqCst), 3);
+        let handle = crate::monitor::MonitorHealth::new(Arc::clone(&health));
+        assert_eq!(handle.backend_errors(), 2);
+    }
+
+    /// `Reopen` gives up after `REOPEN_MAX_FAILURES` failed re-opens in a
+    /// row, with the last re-open error.
+    #[tokio::test]
+    async fn reopen_gives_up_after_repeated_failures() {
+        let health = HealthState::new();
+        let specs = spec();
+        let mut caps = vec![AnyBackend::Closed];
+        let mut reopen = ReopenState::new(1);
+        let mut timer = periodic(REOPEN_RETRY);
+        let open = |_: &BackendSpec| Err(Error::InterfaceNotFound("nr-test0".into()));
+        let mut flow = on_backend_error(
+            0,
+            enetdown(),
+            BackendErrorPolicy::Reopen,
+            &mut caps,
+            &specs,
+            &mut reopen,
+            &mut timer,
+            None,
+            &health,
+            &open,
+        );
+        let mut tries = 1;
+        while flow.is_continue() {
+            flow = reopen_source(0, &mut caps, &specs, &mut reopen, &mut timer, &open);
+            tries += 1;
+            assert!(tries <= REOPEN_MAX_FAILURES, "never gave up");
+        }
+        assert_eq!(tries, REOPEN_MAX_FAILURES);
+        match flow {
+            ControlFlow::Break(Err(Error::InterfaceNotFound(_))) => {}
+            ControlFlow::Break(other) => panic!("{other:?}"),
+            ControlFlow::Continue(()) => unreachable!(),
+        }
+    }
+
+    /// `SkipSource` ends the run once no source is left; `FailFast` at once.
+    #[tokio::test]
+    async fn skip_source_stops_with_no_source_left() {
+        let health = HealthState::new();
+        let specs = spec();
+        let mut reopen = ReopenState::new(1);
+        let mut timer = periodic(REOPEN_RETRY);
+        let open = |_: &BackendSpec| -> Result<AnyBackend> { unreachable!("no re-open") };
+        for policy in [BackendErrorPolicy::SkipSource, BackendErrorPolicy::FailFast] {
+            let mut caps = vec![AnyBackend::Closed];
+            let flow = on_backend_error(
+                0,
+                enetdown(),
+                policy,
+                &mut caps,
+                &specs,
+                &mut reopen,
+                &mut timer,
+                None,
+                &health,
+                &open,
+            );
+            match flow {
+                ControlFlow::Break(Err(Error::Io(e))) => {
+                    assert_eq!(e.raw_os_error(), Some(libc::ENETDOWN))
+                }
+                _ => panic!("{policy:?} kept running with no source"),
+            }
+        }
     }
 }

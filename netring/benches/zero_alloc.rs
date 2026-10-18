@@ -53,12 +53,12 @@ fn build_dispatcher() -> Dispatcher {
         ctx.counter_mut::<u32>().bump(1u32, now);
         Ok(())
     });
-    reg.register::<FlowStarted<Tcp>, _, _>(|_evt: &FlowStarted<Tcp>, ctx: &mut Ctx<'_>| {
-        // Read ctx.ts before reborrowing the sink — the sink_mut
-        // borrow would block any other ctx access otherwise.
-        let now = ctx.ts;
-        ctx.sink_mut()
-            .write("FlowStartedTcp", Severity::Info, now, None, &[], &[]);
+    reg.register::<FlowStarted<Tcp>, _, _>(|evt: &FlowStarted<Tcp>, ctx: &mut Ctx<'_>| {
+        // A keyed emit: the writer resolves the flow's endpoints (0.32,
+        // #215) on the stack.
+        ctx.emit("FlowStartedTcp", Severity::Info)
+            .with_key(&evt.key)
+            .emit();
         Ok(())
     });
     reg.into_dispatcher()

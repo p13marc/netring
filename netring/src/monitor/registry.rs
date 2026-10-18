@@ -331,6 +331,14 @@ pub trait ProtocolSlot: Send + Sync {
     /// `(lifecycle_pos, seq)` of the next pending message, if any.
     fn next_order(&self) -> Option<(u64, u64)>;
 
+    /// The flow key of the next pending message, if any — what the run
+    /// loop resolves the message's capture source from before
+    /// [`Self::dispatch_next`] (#216). `None` by default: the message is
+    /// then attributed to the batch's packet, or to no source.
+    fn next_key(&self) -> Option<flowscope::extract::FiveTupleKey> {
+        None
+    }
+
     /// Dispatch the next pending message. `ctx.flow` / `ctx.ts` (and
     /// the message side) are set for the call and restored after.
     fn dispatch_next(&mut self, dispatcher: &mut Dispatcher, ctx: &mut Ctx<'_>) -> Result<()>;
@@ -547,6 +555,10 @@ fn order_of<M>(pending: &Pending<M>) -> Option<(u64, u64)> {
     pending.front().map(|m| (m.lifecycle_pos, m.seq))
 }
 
+fn key_of<M>(pending: &Pending<M>) -> Option<flowscope::extract::FiveTupleKey> {
+    pending.front().map(|m| m.key)
+}
+
 /// Run `f` with `ctx` stamped for one message, restoring it after.
 fn with_message_ctx<M, R>(
     ctx: &mut Ctx<'_>,
@@ -632,6 +644,10 @@ impl<P: Protocol> ProtocolSlot for TypedProtocolSlot<P> {
 
     fn next_order(&self) -> Option<(u64, u64)> {
         order_of(&self.pending)
+    }
+
+    fn next_key(&self) -> Option<flowscope::extract::FiveTupleKey> {
+        key_of(&self.pending)
     }
 
     fn dispatch_next(&mut self, dispatcher: &mut Dispatcher, ctx: &mut Ctx<'_>) -> Result<()> {
@@ -737,6 +753,10 @@ impl ProtocolSlot for IcmpSlot {
 
     fn next_order(&self) -> Option<(u64, u64)> {
         order_of(&self.pending)
+    }
+
+    fn next_key(&self) -> Option<flowscope::extract::FiveTupleKey> {
+        key_of(&self.pending)
     }
 
     fn dispatch_next(&mut self, dispatcher: &mut Dispatcher, ctx: &mut Ctx<'_>) -> Result<()> {
@@ -846,6 +866,10 @@ where
         order_of(&self.pending)
     }
 
+    fn next_key(&self) -> Option<flowscope::extract::FiveTupleKey> {
+        key_of(&self.pending)
+    }
+
     fn dispatch_next(&mut self, dispatcher: &mut Dispatcher, ctx: &mut Ctx<'_>) -> Result<()> {
         self.last = None;
         let Some(msg) = self.pending.pop_front() else {
@@ -908,7 +932,7 @@ mod tests {
 
     use super::*;
     use crate::anomaly::sink::NoopSink;
-    use crate::ctx::{CounterRegistry, SourceIdx, StateMap};
+    use crate::ctx::{CounterRegistry, StateMap};
     use crate::error::Error;
     use crate::protocol::builtin::Tcp;
     use crate::protocol::event_typed::FlowStarted;
@@ -922,7 +946,7 @@ mod tests {
         Ctx {
             flow: None,
             ts: Timestamp::new(0, 0),
-            source: SourceIdx(0),
+            source: None,
             monitor_name: None,
             state_map: state,
             sink,
@@ -933,6 +957,7 @@ mod tests {
             arp_table: None,
             side: None,
             orientation: None,
+            initiator: None,
         }
     }
 

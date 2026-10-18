@@ -122,14 +122,14 @@ fn finished_source_keeps_final_stats() {
         let src = m.source(0).expect("kept after EOF");
         assert_eq!(src.packets_read(), Some(frames.len() as u64));
         assert_eq!(src.dedup().unwrap().dropped(), frames.len() as u64 / 2);
-        assert!(src.capture_stats().is_none());
+        assert!(src.ring_stats().is_none());
         assert_eq!(src.tracker_stats().flows_ended, 1);
         assert_eq!(src.active_flows(), 0);
         let cs = m.per_source_capture_stats();
         assert_eq!(cs.len(), 1);
         assert_eq!(cs[0].0, "dup");
         assert!(cs[0].1.is_none(), "a replay source has no kernel ring");
-        assert_eq!(m.capture_stats().packets, 0);
+        assert_eq!(m.capture_stats(), netring::CaptureStats::default());
         m.source_mut(0).unwrap().dedup_mut().unwrap().reset();
         assert_eq!(m.source(0).unwrap().dedup().unwrap().dropped(), 0);
     });

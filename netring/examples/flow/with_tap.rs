@@ -56,10 +56,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             biased;
             _ = stats_tick.tick() => {
                 if let Ok(stats) = stream.capture_stats() {
-                    eprintln!(
-                        "[stats] packets={} drops={} freeze_count={}",
-                        stats.packets, stats.drops, stats.freeze_count,
-                    );
+                    eprintln!("[stats] {stats}");
                 }
             }
             evt = stream.next() => match evt {

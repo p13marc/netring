@@ -60,6 +60,8 @@ pub use capture::{Queues, interface_numa_node, queue_count};
 #[cfg(all(feature = "af-xdp", feature = "xdp-loader"))]
 pub use capture::{XdpCapture, XdpCaptureBuilder, XdpCaptureGuard};
 pub use stats::XdpStats;
+#[cfg(feature = "af-xdp")]
+pub use umem::UmemPlacement;
 
 /// Sum `XDP_STATISTICS` and the RX received counts over a multi-queue
 /// capture's sockets (`XdpCapture` / `AsyncXdpCapture`).
@@ -259,9 +261,11 @@ impl XdpSocketBuilder {
     ///
     /// Requires hugepages reserved on the host
     /// (`sysctl vm.nr_hugepages` / `hugeadm`). Best-effort: if the hugepage
-    /// mapping fails (none reserved), `build()` falls back to regular pages with
-    /// a `warn` rather than failing. The UMEM region is rounded up to a
-    /// hugepage multiple.
+    /// mapping fails (none reserved), or its pages cannot be faulted in (none
+    /// free on the [`numa_node`](Self::numa_node)), `build()` falls back to
+    /// regular pages with a `warn` rather than failing —
+    /// [`XdpSocket::umem_placement`] reports which one it got. The UMEM
+    /// region is rounded up to a hugepage multiple.
     pub fn hugepages(mut self, enable: bool) -> Self {
         self.hugepages = enable;
         self
@@ -269,8 +273,14 @@ impl XdpSocketBuilder {
 
     /// 0.25 W4: bind the UMEM's pages to NUMA `node` (`mbind` / `MPOL_BIND`) —
     /// set this to the NIC's NUMA node to avoid cross-node DMA + cache traffic.
-    /// Best-effort: a binding failure (single-node host, missing privilege) is
-    /// logged at `warn` and ignored.
+    ///
+    /// The UMEM is mapped without pre-faulting, bound, and only then faulted
+    /// in, so the pages really land on `node` (0.32, #213: before, the pages
+    /// were faulted on the allocating CPU's node before the policy was set,
+    /// and `XDP_UMEM_REG` pinned them there). Best-effort: a binding failure
+    /// (unknown node, missing privilege, no memory on the node) is logged at
+    /// `warn` and the UMEM stays unbound — check
+    /// [`XdpSocket::umem_placement`].
     pub fn numa_node(mut self, node: u32) -> Self {
         self.numa_node = Some(node);
         self
@@ -1002,6 +1012,14 @@ impl XdpSocket {
         self.rx_metadata
     }
 
+    /// Where the socket's UMEM pages ended up (#213): whether hugepages
+    /// back it and the NUMA node it is bound to. Both builder options are
+    /// best-effort; this reports what they achieved.
+    #[cfg(feature = "af-xdp")]
+    pub fn umem_placement(&self) -> UmemPlacement {
+        self.umem.placement()
+    }
+
     /// Read + parse the RX-metadata struct from the headroom preceding the
     /// frame at `addr`. Returns absent metadata when disabled, when no program
     /// wrote it, or when the magic check fails (the degrade path).
@@ -1068,23 +1086,7 @@ impl XdpSocket {
             let desc: libc::xdp_desc = self.rx.read_at(tok, i);
             let meta = self.read_rx_metadata(desc.addr);
             match self.umem.data_checked(desc.addr, desc.len as usize) {
-                Some(data) => packets.push(OwnedPacket {
-                    data: data.to_vec(),
-                    timestamp: meta.hw_timestamp.unwrap_or_default(),
-                    timestamp_clock: match meta.hw_timestamp {
-                        Some(_) => crate::packet::TimestampClock::RawHardware,
-                        None => crate::packet::TimestampClock::None,
-                    },
-                    original_len: desc.len as usize,
-                    status: crate::packet::PacketStatus::default(),
-                    direction: crate::packet::PacketDirection::Unknown(0),
-                    rxhash: meta.rx_hash.map_or(0, |h| h.value),
-                    vlan_tci: 0,
-                    vlan_tpid: 0,
-                    ll_protocol: 0,
-                    source_ll_addr: [0u8; 8],
-                    source_ll_addr_len: 0,
-                }),
+                Some(data) => packets.push(batch::owned_from_xdp(data, desc.len as usize, &meta)),
                 None => {
                     // Defense in depth: a misbehaving kernel shouldn't
                     // panic the consumer.
@@ -1199,9 +1201,10 @@ impl XdpSocket {
         const KERNEL_TX_BATCH: u32 = 32;
         let max_kicks = self.tx.size() / KERNEL_TX_BATCH + 1;
         for _ in 0..max_kicks {
-            let again = crate::syscall::sendto_kick_status(self.fd.as_raw_fd(), libc::MSG_DONTWAIT)
-                .map_err(Error::Io)?;
-            if !again {
+            let status =
+                crate::syscall::sendto_kick_status(self.fd.as_raw_fd(), libc::MSG_DONTWAIT)
+                    .map_err(Error::Io)?;
+            if status != crate::syscall::KickStatus::Again {
                 break;
             }
         }
@@ -1221,6 +1224,37 @@ impl XdpSocket {
         Ok(n > 0)
     }
 
+    /// Whether the socket can still receive.
+    ///
+    /// `Ok(())` while it is bound to its device, even if that device is
+    /// administratively down. `Err` once the device was unregistered: the
+    /// kernel sets `ENETDOWN` on the socket and unbinds it
+    /// (xsk_notifier()), after which `poll(2)` reports nothing at all, so
+    /// an epoll-driven wait can only learn of it by asking. Reads (and so
+    /// clears) the socket's pending error; an unbound socket with none
+    /// left is `ENETDOWN` too. [`AsyncXdpSocket`](crate::AsyncXdpSocket)
+    /// calls this on an error event and every second of idle waiting
+    /// (#212).
+    ///
+    /// # Errors
+    ///
+    /// The socket's pending error, or `ENETDOWN` once it is unbound.
+    #[cfg(feature = "af-xdp")]
+    pub fn check_health(&self) -> Result<(), Error> {
+        let err = crate::afpacket::socket::take_socket_error(self.fd.as_fd())?;
+        if err != 0 {
+            return Err(Error::Io(std::io::Error::from_raw_os_error(err)));
+        }
+        // xsk_check_common(): ENXIO for an unbound socket (ENETDOWN for a
+        // down device, which is not fatal).
+        match crate::syscall::recvfrom_probe(self.fd.as_raw_fd()) {
+            Err(e) if e.raw_os_error() == Some(libc::ENXIO) => {
+                Err(Error::Io(std::io::Error::from_raw_os_error(libc::ENETDOWN)))
+            }
+            _ => Ok(()),
+        }
+    }
+
     /// Get XDP socket statistics from the kernel.
     ///
     /// Counters are monotonically non-decreasing for the socket's lifetime
@@ -1231,14 +1265,14 @@ impl XdpSocket {
     }
 
     /// Unified [`CaptureStats`](crate::CaptureStats) for this socket, with
-    /// the same meaning as on AF_PACKET: `packets` = packets received
-    /// (placed in the RX ring, counted in userspace since `XDP_STATISTICS`
-    /// has none) **plus** the dropped ones, `drops` = `rx_dropped +
-    /// rx_ring_full`. Monotonic; each field saturates at `u32::MAX`. For
-    /// the per-cause counters use [`statistics`](Self::statistics).
+    /// the same meaning as on AF_PACKET — totals since the socket was
+    /// opened: `delivered` = packets placed in the RX ring (counted in
+    /// userspace, since `XDP_STATISTICS` has no RX count), `drops` =
+    /// `rx_dropped + rx_ring_full`, `freezes` = 0. Never resets. For the
+    /// per-cause counters use [`statistics`](Self::statistics).
     #[cfg(feature = "af-xdp")]
     pub fn capture_stats(&self) -> Result<crate::CaptureStats, Error> {
-        Ok(self.statistics()?.to_capture_stats(self.rx_received()))
+        Ok(self.statistics()?.capture_stats(self.rx_received()))
     }
 
     /// Packets the kernel has placed in this socket's RX ring so far

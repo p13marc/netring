@@ -15,7 +15,7 @@
 #[tokio::main]
 async fn main() -> Result<(), netring::Error> {
     use netring::AsyncCapture;
-    use netring::metrics::record_capture_delta;
+    use netring::metrics::record_capture_stats;
     use std::time::Duration;
 
     let iface = std::env::args().nth(1).unwrap_or_else(|| "lo".into());
@@ -49,13 +49,14 @@ async fn main() -> Result<(), netring::Error> {
                 }
             }
             _ = tick.tick() => {
-                // Delta since last tick — feeds Prometheus / OTel /
-                // statsd via whatever recorder is installed.
-                let delta = cap.stats()?;
-                record_capture_delta(&iface, &delta);
+                // Totals since the capture opened, published as absolute
+                // counter values — feeds Prometheus / OTel / statsd via
+                // whatever recorder is installed, and never double counts.
+                let totals = cap.stats()?;
+                record_capture_stats(&iface, &totals);
                 eprintln!(
-                    "[1Hz] kernel: pkts={} drops={} freezes={} | local: {local_packets}/{local_bytes}B",
-                    delta.packets, delta.drops, delta.freeze_count
+                    "[1Hz] kernel: delivered={} drops={} freezes={} | local: {local_packets}/{local_bytes}B",
+                    totals.delivered, totals.drops, totals.freezes
                 );
             }
             _ = tokio::time::sleep_until(deadline) => break,

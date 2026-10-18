@@ -132,6 +132,16 @@ pub const ETHTOOL_SRSSH: u32 = 0x0000_0047;
 /// `input_xfrm`: XOR-fold the source/destination fields before hashing, making
 /// the hash symmetric (`hash(a→b) == hash(b→a)`). Kernel ≥ 6.8; driver-gated.
 pub const RXH_XFRM_SYM_XOR: u8 = 1 << 0;
+/// `input_xfrm`: the "OR-XOR" symmetric transform (newer kernels, after
+/// v6.12). Reported by drivers that use it; also symmetric.
+pub const RXH_XFRM_SYM_OR_XOR: u8 = 1 << 1;
+/// `hfunc`: Toeplitz (`ETH_RSS_HASH_TOP`, `1 << ETH_RSS_HASH_TOP_BIT`) — the
+/// hash function a symmetric key makes symmetric.
+pub const ETH_RSS_HASH_TOP: u8 = 1 << 0;
+/// `hfunc`: XOR (`ETH_RSS_HASH_XOR`).
+pub const ETH_RSS_HASH_XOR: u8 = 1 << 1;
+/// `hfunc`: CRC32 (`ETH_RSS_HASH_CRC32`).
+pub const ETH_RSS_HASH_CRC32: u8 = 1 << 2;
 /// `input_xfrm` sentinel: leave the transform unchanged on `ETHTOOL_SRSSH`.
 pub const RXH_XFRM_NO_CHANGE: u8 = 0xff;
 /// `hfunc` sentinel: leave the hash function unchanged on `ETHTOOL_SRSSH`.

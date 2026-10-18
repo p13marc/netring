@@ -23,6 +23,8 @@ fn main() -> Result<(), netring::Error> {
 
     // Measure inter-packet latency via timestamps
     let mut prev_nsec: Option<u64> = None;
+    // Stopping after N keeps the unread rest of the current ring block: a
+    // later `packets()` loop (or `next_batch`) starts with it.
     let mut pkts = cap.packets();
     let mut seen = 0;
     while seen < 100 {

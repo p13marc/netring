@@ -50,7 +50,12 @@ fn loopback_dedup_no_false_positives_at_1khz_same_direction() {
     let mut ts_ns: u64 = 0;
     for seq in 0u32..10_000 {
         let pkt = synth_packet(seq);
-        if d.keep_raw(&pkt, PacketDirection::Outgoing, ts_from_ns(ts_ns)) {
+        if d.keep_raw(
+            &pkt,
+            pkt.len(),
+            PacketDirection::Outgoing,
+            ts_from_ns(ts_ns),
+        ) {
             kept += 1;
         }
         ts_ns += 1_000_000; // 1 ms tick → 1 kHz
@@ -68,7 +73,12 @@ fn loopback_dedup_no_false_positives_at_2khz_subms() {
     for seq in 0u32..10_000 {
         let pkt = synth_packet(seq);
         assert!(
-            d.keep_raw(&pkt, PacketDirection::Outgoing, ts_from_ns(ts_ns)),
+            d.keep_raw(
+                &pkt,
+                pkt.len(),
+                PacketDirection::Outgoing,
+                ts_from_ns(ts_ns)
+            ),
             "dedup dropped distinct packet seq={seq}"
         );
         ts_ns += 500_000;

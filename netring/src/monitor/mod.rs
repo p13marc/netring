@@ -83,10 +83,19 @@ pub mod ml_features;
 pub(crate) mod nprint;
 pub mod overload;
 pub mod owner_bandwidth;
-/// Default cap on concurrently-tracked per-flow-accumulator flows (nPrint #72 /
-/// YARA #45) when the corresponding `max_tracked_*_flows` is not set.
+/// Default cap on concurrently-tracked nPrint flows (#72) when
+/// [`MonitorBuilder::max_tracked_nprint_flows`] is not set. (Until 0.32 it
+/// capped YARA's flows too: see [`DEFAULT_YARA_MAX_FLOWS`].)
 #[cfg(any(feature = "nprint", feature = "yara"))]
 pub const DEFAULT_NPRINT_MAX_FLOWS: usize = 10_000;
+/// Default cap on concurrently-buffered YARA flows (#45) when
+/// [`MonitorBuilder::max_tracked_yara_flows`] is not set.
+#[cfg(feature = "yara")]
+pub const DEFAULT_YARA_MAX_FLOWS: usize = 10_000;
+/// Default cap on the memory all YARA payload buffers hold together (#214)
+/// when [`MonitorBuilder::yara_memory_budget`] is not set — 256 MiB.
+#[cfg(feature = "yara")]
+pub const DEFAULT_YARA_MEMORY_BUDGET: usize = 256 * 1024 * 1024;
 #[cfg(feature = "yara")]
 pub mod yara;
 /// Default per-direction payload scan window (issue #45) when
@@ -144,6 +153,9 @@ pub use xdp_shard::XdpShardedRunner;
 
 // 0.22 §5.1: cross-shard state merging (internal; driven by ShardedRunner).
 pub(crate) mod merge;
+
+// #216: which capture source (and initiator) a dispatched event gets.
+pub(crate) mod flow_ctx;
 
 // 0.22 §2.3: bandwidth-by-app primitive (gated with the rest of the
 // monitor API on `flow + tokio`).
@@ -208,7 +220,7 @@ impl AfPacketIfaceSpec {
 /// [`Monitor::capture_sources`].
 ///
 /// The position in the returned slice **is** the [`SourceIdx`](crate::ctx::SourceIdx)
-/// that handlers see on `ctx.source`, so a consumer can build a
+/// that handlers see in `ctx.source` (`Some(SourceIdx(i))`), so a consumer can build a
 /// `SourceIdx -> (interface, namespace)` map once at startup and look events up
 /// against it.
 ///
@@ -327,12 +339,13 @@ pub struct Monitor {
     /// [`crate::ctx::Ctx`] at dispatch time.
     pub(crate) label_table: flowscope::well_known::LabelTable,
     /// 0.22 §5.1: when this monitor runs as a shard under a
-    /// [`ShardedRunner`] with a registered merge, the run loop polls
-    /// this for "hand me your `T` slot" probes. `None` for ordinary
-    /// (non-merged) monitors — the run-loop branch is then disabled at
-    /// zero cost. Injected by `ShardedRunner::run_inner` via
-    /// [`Self::set_merge_rx`].
-    pub(crate) merge_rx: Option<tokio::sync::mpsc::UnboundedReceiver<merge::MergeRequest>>,
+    /// [`ShardedRunner`] with a registered merge, the run loop answers
+    /// the merge worker's "hand me your `T` slot" probes through this,
+    /// and pushes its final deltas through it when the run ends. `None`
+    /// for ordinary (non-merged) monitors — the run-loop branch is then
+    /// disabled at zero cost. Injected by `ShardedRunner::run_inner` via
+    /// [`Self::set_merge_link`].
+    pub(crate) merge_link: Option<merge::MergeLink>,
     /// The [`ShardedRunner`]'s shared stop when this monitor runs as one of
     /// its shards: the run loop also stops when a sibling's run ends.
     /// Injected via [`Self::set_shard_stop`]; `None` otherwise.
@@ -459,22 +472,35 @@ pub enum HandlerErrorPolicy {
     Isolate,
 }
 
-/// How the run loop reacts when a capture backend errors (e.g. a readiness or
-/// receive failure). See [`MonitorBuilder::backend_error_policy`].
+/// How the run loop reacts when a capture backend errors — a readiness or
+/// receive failure, typically `ENETDOWN` once a capture interface was
+/// removed. See [`MonitorBuilder::backend_error_policy`].
+///
+/// An interface that is merely **down** is not an error under any policy:
+/// its source delivers nothing until the interface is back up. A removed
+/// one is noticed on the kernel's error report, or within a second when it
+/// was already down (#212). Every backend error counts in
+/// [`MonitorHealth::backend_errors`].
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 #[non_exhaustive]
 pub enum BackendErrorPolicy {
     /// Propagate the error and stop the monitor (the default).
     #[default]
     FailFast,
-    /// Log + count the error and keep servicing the other capture sources.
+    /// Log the error and **retire** the failed source: the monitor keeps
+    /// running on the others, and stops with the error once no source is
+    /// left.
     SkipSource,
-    /// Log + count the error and **re-open** the failed source in place (0.25
-    /// W1e) — same kind/filter as the original — so a transient backend fault
-    /// (interface flap, driver reset) self-heals without tearing down the
-    /// monitor. If the re-open itself fails, the source is left out (like
-    /// [`Self::SkipSource`]) and retried on its next error; after many
-    /// consecutive failures the monitor gives up (circuit breaker).
+    /// Log the error and **re-open** the failed source in place (0.25 W1e) —
+    /// same kind/filter/namespace as the original — so a transient backend
+    /// fault (an interface removed and re-created, a driver reset)
+    /// self-heals without tearing down the monitor. The failed backend is
+    /// closed first (an AF_XDP backend releases its queue and XDP program
+    /// for the new one). A re-open that fails (the interface isn't back
+    /// yet) is retried every 500 ms; 64 failures in a row stop the monitor
+    /// with the last one. A backend injected by an `XdpShardedRunner` can't
+    /// be re-opened: its error stops the monitor, as with
+    /// [`Self::FailFast`].
     Reopen,
 }
 
@@ -656,14 +682,15 @@ impl Monitor {
     /// Issue #135: the monitor's capture sources, **in `SourceIdx` order**.
     ///
     /// `capture_sources()[i]` describes the source that stamps
-    /// `SourceIdx(i)` on `ctx.source`, so a handler can be given a
+    /// `Some(SourceIdx(i))` on `ctx.source`, so a handler can be given a
     /// `SourceIdx -> (interface, namespace)` map built once at startup:
     ///
     /// ```ignore
     /// let sources = monitor.capture_sources();
-    /// // inside a handler:
-    /// let src = &sources[ctx.source.0 as usize];
-    /// tracing::info!(iface = %src.interface, netns = ?src.netns_label, "event");
+    /// // inside a handler (`None` for ticks and flowless anomalies):
+    /// if let Some(src) = ctx.source.map(|s| &sources[s.0 as usize]) {
+    ///     tracing::info!(iface = %src.interface, netns = ?src.netns_label, "event");
+    /// }
     /// ```
     ///
     /// The ordering is the run loop's open order — AF_PACKET interfaces first
@@ -753,14 +780,11 @@ impl Monitor {
         self.sink = layer.wrap(inner);
     }
 
-    /// 0.22 §5.1: inject the merge-request receiver so this shard's run
-    /// loop answers the merge worker's probes. Called by
-    /// `ShardedRunner::run_inner` after `build`.
-    pub(crate) fn set_merge_rx(
-        &mut self,
-        rx: tokio::sync::mpsc::UnboundedReceiver<merge::MergeRequest>,
-    ) {
-        self.merge_rx = Some(rx);
+    /// 0.22 §5.1: inject this shard's merge channels so its run loop
+    /// answers the merge worker's probes (and pushes its final deltas).
+    /// Called by `ShardedRunner::run_inner` after `build`.
+    pub(crate) fn set_merge_link(&mut self, link: merge::MergeLink) {
+        self.merge_link = Some(link);
     }
 
     /// Run as a [`ShardedRunner`] shard: stop with the siblings. Called by
@@ -923,6 +947,48 @@ impl ReloadHandle {
     }
 }
 
+/// Installs `P`'s broadcast parser slot on the driver builder: the drain
+/// slot plus the subscribe-template handle. `None` if `P` can't broadcast.
+type InstallBroadcast = fn(
+    &mut DriverBuilder<FiveTuple>,
+)
+    -> Option<(Box<dyn ProtocolSlot>, Box<dyn std::any::Any + Send + Sync>)>;
+
+/// A protocol's parser slot, installed at `build()` (#216).
+/// [`MonitorBuilder::protocol`] and [`MonitorBuilder::with_broadcast`]
+/// only record or upgrade it, so each protocol gets exactly one slot
+/// whatever the order of the calls.
+struct SlotIntent {
+    type_id: std::any::TypeId,
+    /// `protocol::<P>()`'s slot. `None` from a lifecycle-only marker.
+    plain: fn(&mut DriverBuilder<FiveTuple>) -> Option<Box<dyn ProtocolSlot>>,
+    /// Set by `with_broadcast::<P>()`: installed instead of `plain`.
+    broadcast: Option<InstallBroadcast>,
+}
+
+/// `P::register`, then the slot type `P` chooses (0.22 §2.5:
+/// `TypedProtocolSlot<P>` by default; `Icmp` installs an `IcmpSlot`).
+/// `None` for a lifecycle-only marker, whose `register` errs.
+fn install_plain<P: Protocol>(
+    builder: &mut DriverBuilder<FiveTuple>,
+) -> Option<Box<dyn ProtocolSlot>> {
+    P::register(builder).ok().map(P::make_slot)
+}
+
+/// `P::register_broadcast`: a [`TypedBroadcastProtocolSlot`] for the run
+/// loop's drain, plus the handle `Monitor::subscribe` clones from.
+fn install_broadcast<P: crate::protocol::MessageProtocol>(
+    builder: &mut DriverBuilder<FiveTuple>,
+) -> Option<(Box<dyn ProtocolSlot>, Box<dyn std::any::Any + Send + Sync>)>
+where
+    P::Message: Send + Sync + Clone + 'static,
+{
+    let handle = P::register_broadcast(builder).ok()?;
+    let slot: Box<dyn ProtocolSlot> =
+        Box::new(TypedBroadcastProtocolSlot::<P>::new(handle.clone()));
+    Some((slot, Box::new(handle)))
+}
+
 /// Builder for [`Monitor`]. Construct via [`Monitor::builder`].
 #[derive(Default)]
 pub struct MonitorBuilder {
@@ -939,8 +1005,11 @@ pub struct MonitorBuilder {
     /// [`Self::capture`] — the resolved backend description, surfaced through
     /// [`Self::resolved_capture_plan`] so operators can see what `Auto` picked.
     resolved_backends: Vec<(String, String)>,
-    driver_builder: Option<DriverBuilder<FiveTuple>>,
-    protocol_slots: Vec<Box<dyn ProtocolSlot>>,
+    /// The protocol parser slots to install — one per protocol, in
+    /// first-declaration order. [`Self::protocol`] and
+    /// [`Self::with_broadcast`] only record or upgrade an intent;
+    /// `build()` installs each (#216).
+    slot_intents: Vec<SlotIntent>,
     handlers: HandlerRegistry,
     state_map: StateMap,
     counters: CounterRegistry,
@@ -1022,9 +1091,13 @@ pub struct MonitorBuilder {
     #[cfg(feature = "yara")]
     yara_handlers: Vec<yara::YaraHandler>,
     /// Issue #45: cap on concurrently-tracked YARA flows; `None` →
-    /// [`DEFAULT_NPRINT_MAX_FLOWS`].
+    /// [`DEFAULT_YARA_MAX_FLOWS`].
     #[cfg(feature = "yara")]
     yara_max_flows: Option<usize>,
+    /// #214: cap on the memory every YARA buffer holds together; `None` →
+    /// [`DEFAULT_YARA_MEMORY_BUDGET`].
+    #[cfg(feature = "yara")]
+    yara_memory_budget: Option<usize>,
     /// Issue #45: per-direction payload scan cap (bytes); `None` →
     /// [`DEFAULT_YARA_SCAN_BYTES`].
     #[cfg(feature = "yara")]
@@ -1084,18 +1157,6 @@ pub struct MonitorBuilder {
     /// [`BuildError::HandlerForUnregisteredProtocol`] when a
     /// handler requires a slot that was never installed.
     declared_protocols: rustc_hash::FxHashMap<std::any::TypeId, &'static str>,
-    /// Protocol markers whose parser slot is installed (by
-    /// [`Self::protocol`] or a successful [`Self::with_broadcast`]):
-    /// `protocol::<P>()` is a no-op for these. Narrower than
-    /// `declared_protocols`, which a `with_broadcast` that installed
-    /// nothing also records.
-    slotted_protocols: rustc_hash::FxHashSet<std::any::TypeId>,
-    /// 0.21 F: per-protocol broadcast handles keyed by
-    /// `TypeId::of::<P>()`. Populated by [`Self::with_broadcast`],
-    /// passed through to [`Monitor::broadcast_handles`] at
-    /// `build()` time.
-    broadcast_handles:
-        rustc_hash::FxHashMap<std::any::TypeId, Box<dyn std::any::Any + Send + Sync>>,
     /// 0.21 E.1: when `Some`, build() relaxes the [`Self::interface`]
     /// requirement (replay mode doesn't open AF_PACKET rings).
     /// The path itself is consumed by [`Monitor::replay`] /
@@ -1297,9 +1358,10 @@ impl MonitorBuilder {
 
     /// Set the capture interface(s). Phase F.1 enables N > 1 —
     /// each event is tagged with its source-interface index
-    /// (`SourceIdx(0)` for the first interface in registration
-    /// order, etc.). Handlers can branch on `ctx.source` if
-    /// per-interface behaviour is needed.
+    /// (`ctx.source == Some(SourceIdx(0))` for the first interface in
+    /// registration order, etc.; a flow ended by the idle sweep or the
+    /// shutdown drain keeps the source its packets came from). Handlers can
+    /// branch on `ctx.source` if per-interface behaviour is needed.
     ///
     /// All interfaces share the same driver, dispatcher, state,
     /// and sink — multi-interface is fan-in, not fan-out. For
@@ -1651,11 +1713,12 @@ impl MonitorBuilder {
     /// 0.24 Phase B: set the capture-backend error policy.
     ///
     /// Default [`BackendErrorPolicy::FailFast`] stops the monitor on a backend
-    /// error. [`BackendErrorPolicy::SkipSource`] logs + counts and keeps
-    /// servicing the other capture sources (useful for multi-interface monitors
-    /// where one NIC can fail independently). [`BackendErrorPolicy::Reopen`]
-    /// (0.25 W1e) additionally tries to **re-open** the failed source so a
-    /// transient error (e.g. an interface flap) self-heals.
+    /// error. [`BackendErrorPolicy::SkipSource`] retires the failed source and
+    /// keeps servicing the others (useful for multi-interface monitors where
+    /// one NIC can fail independently). [`BackendErrorPolicy::Reopen`]
+    /// (0.25 W1e) **re-opens** the failed source, retrying until it can, so an
+    /// interface that is removed and re-created self-heals. A down interface
+    /// is not an error under any of them.
     pub fn backend_error_policy(mut self, policy: BackendErrorPolicy) -> Self {
         self.backend_error_policy = policy;
         self
@@ -1838,7 +1901,10 @@ impl MonitorBuilder {
     ///     .interface("eth0")
     ///     .protocol::<Tcp>()
     ///     .export_flows(|rec: &netring::export::FlowRecord| {
-    ///         println!("{:?} {} ↔ {} : {} bytes", rec.proto, rec.a, rec.b, rec.total_bytes());
+    ///         println!(
+    ///             "{:?} {} → {} : {} bytes",
+    ///             rec.proto, rec.initiator, rec.responder, rec.total_bytes()
+    ///         );
     ///     })
     ///     .build()?;
     /// # let _ = monitor;
@@ -1981,10 +2047,23 @@ impl MonitorBuilder {
     }
 
     /// Issue #45: cap the number of concurrently-scanned YARA flows (default
-    /// [`DEFAULT_NPRINT_MAX_FLOWS`]). Past the cap, new flows are skipped.
+    /// [`DEFAULT_YARA_MAX_FLOWS`]). Past the cap, new flows are skipped —
+    /// counted in [`MonitorHealth::accumulator_flows_skipped`].
     #[cfg(feature = "yara")]
     pub fn max_tracked_yara_flows(mut self, max: usize) -> Self {
         self.yara_max_flows = Some(max);
+        self
+    }
+
+    /// #214: cap the memory all YARA payload buffers hold together (default
+    /// [`DEFAULT_YARA_MEMORY_BUDGET`], 256 MiB) — the bound that holds
+    /// whatever the flow count and the per-direction
+    /// [`max_scan_bytes`](Self::max_scan_bytes). Payload a full budget
+    /// refuses is not scanned; it is counted in
+    /// [`MonitorHealth::yara_bytes_skipped`].
+    #[cfg(feature = "yara")]
+    pub fn yara_memory_budget(mut self, bytes: usize) -> Self {
+        self.yara_memory_budget = Some(bytes);
         self
     }
 
@@ -2087,22 +2166,20 @@ impl MonitorBuilder {
     ///
     /// Idempotent: declaring `P` again — directly, or through sugar
     /// that declares it for you (`all_l4`, `on_icmp_error`, `on_dns`,
-    /// `flow_analysis`, …, or [`Self::with_broadcast`]) — keeps the one
-    /// slot. A second slot would deliver every message twice.
+    /// `flow_analysis`, …, or [`Self::with_broadcast`], before or after)
+    /// — keeps the one slot. A second slot would deliver every message
+    /// twice. The slot is installed at `build()`.
     pub fn protocol<P: Protocol>(mut self) -> Self {
-        if !self.slotted_protocols.insert(std::any::TypeId::of::<P>()) {
-            return self;
+        let type_id = std::any::TypeId::of::<P>();
+        if !self.slot_intents.iter().any(|i| i.type_id == type_id) {
+            self.slot_intents.push(SlotIntent {
+                type_id,
+                plain: install_plain::<P>,
+                broadcast: None,
+            });
         }
-        let builder = self
-            .driver_builder
-            .get_or_insert_with(|| Driver::builder(FiveTuple::bidirectional()));
-        if let Ok(handle) = P::register(builder) {
-            // 0.22 §2.5: the protocol chooses its slot type. Default is
-            // `TypedProtocolSlot<P>`; `Icmp` installs an `IcmpSlot`.
-            self.protocol_slots.push(P::make_slot(handle));
-        }
-        // Err(_) = lifecycle-only; nothing to register on the driver
-        // side. Still record the marker in `declared_protocols` so
+        // A lifecycle-only marker installs nothing on the driver side
+        // (its `register` errs). Still record the marker in `declared_protocols` so
         // 0.21 D.1's handler-protocol validation accepts handlers
         // typed on lifecycle markers when `.protocol::<Tcp>()` was
         // called for symmetry.
@@ -2157,15 +2234,27 @@ impl MonitorBuilder {
     /// `Tcp`. (Fixed `PayloadCtx` shape — like `on_ctx` — so untyped
     /// closures infer cleanly; for payload-only, ignore the `ctx` arg.)
     ///
-    /// ```ignore
-    /// Monitor::builder()
+    /// ```no_run
+    /// # use netring::anomaly::Severity;
+    /// # use netring::ctx::Ctx;
+    /// # use netring::monitor::Monitor;
+    /// # use netring::protocol::event_typed::TcpRst;
+    /// # fn main() -> Result<(), Box<dyn std::error::Error>> {
+    /// let monitor = Monitor::builder()
     ///     .interface("eth0")
-    ///     .on_tcp_reset(|rst, ctx| {
-    ///         ctx.emit("TcpReset", if rst.zero_payload { Severity::Info } else { Severity::Warning })
-    ///             .with_key(&rst.key)
-    ///             .emit();
+    ///     .on_tcp_reset(|rst: &TcpRst, ctx: &mut Ctx<'_>| {
+    ///         // No data moved either way: a refused or abandoned
+    ///         // connection, not a transfer cut short.
+    ///         let severity = if rst.zero_payload { Severity::Info } else { Severity::Warning };
+    ///         // The reset's flow is the handler's: the sink reads it
+    ///         // from the initiator.
+    ///         ctx.emit("TcpReset", severity).with_key(&rst.key).emit();
     ///         Ok(())
     ///     })
+    ///     .build()?;
+    /// # let _ = monitor;
+    /// # Ok(())
+    /// # }
     /// ```
     pub fn on_tcp_reset(
         self,
@@ -2400,8 +2489,17 @@ impl MonitorBuilder {
                         t.record_tx(src, len, ts);
                     }
                     if let Some(m) = st.matrix.as_mut() {
-                        // `key` is address-canonical, so the pair is stable.
-                        m.record_tx((key.a.ip(), key.b.ip()), len, ts);
+                        // The pair reads (initiator, responder) — both
+                        // directions of a flow count towards it (#215; it
+                        // was the address-sorted (a, b)). The initiator's
+                        // orientation is this packet's, or the opposite
+                        // when the responder sent it.
+                        let initiator = match evt.side {
+                            flowscope::FlowSide::Initiator => evt.orientation,
+                            flowscope::FlowSide::Responder => evt.orientation.flipped(),
+                        };
+                        let (i, r) = key.oriented(initiator);
+                        m.record_tx((i.ip(), r.ip()), len, ts);
                     }
                     Ok(())
                 });
@@ -2467,6 +2565,10 @@ impl MonitorBuilder {
         self.aggregate().tick(
             period,
             move |tick: &crate::protocol::event_typed::Tick, ctx: &mut Ctx<'_>| {
+                // Give back the buckets that left the window (#214): the
+                // tables otherwise only shrink when traffic arrives.
+                ctx.state_mut::<aggregate::AggregateState>()
+                    .evict_expired(tick.now);
                 if let Some(state) = ctx.state::<aggregate::AggregateState>() {
                     let report = aggregate::AggregateReport {
                         state,
@@ -2579,9 +2681,11 @@ impl MonitorBuilder {
     /// fragments (teardrop / RFC 5722) are dropped, so an evasion payload behind
     /// an overlap never reassembles.
     ///
-    /// Arming reassembly turns the automatic kernel prefilter off (capture
-    /// everything): its port checks can't see the ports of a non-first
-    /// fragment, so they would drop the fragments the reassembler needs.
+    /// Arming reassembly keeps the automatic kernel prefilter, but its port
+    /// checks let non-first IPv4 fragments through (they carry no ports; the
+    /// address and protocol checks still apply), so the reassembler gets
+    /// every fragment it needs. (0.31.2–0.31.3 turned the prefilter off
+    /// entirely instead.)
     pub fn reassemble_ip_fragments(self) -> Self {
         self.reassemble_ip_fragments_with(ip_frag::IpFragConfig::default())
     }
@@ -2965,23 +3069,25 @@ impl MonitorBuilder {
 
     /// 0.21 F: register `P` for broadcast delivery.
     ///
-    /// Calls [`Protocol::register_broadcast`] on the underlying
-    /// flowscope driver — only protocols that override the
-    /// default (currently [`crate::protocol::builtin::Http`])
-    /// accept this. The returned [`flowscope::driver::BroadcastSlotHandle`]
-    /// is cloned twice: one clone wraps a
-    /// [`TypedBroadcastProtocolSlot`] for the run loop's dispatch
-    /// drain; the other lives in the monitor's `broadcast_handles`
-    /// map so [`Monitor::subscribe`] can clone fresh subscribers.
+    /// Installs `P`'s parser through [`Protocol::register_broadcast`] —
+    /// only protocols that override the default (currently
+    /// [`crate::protocol::builtin::Http`]) accept this; for the others
+    /// this call registers nothing (a later [`Self::protocol::<P>`] still
+    /// does). The resulting [`flowscope::driver::BroadcastSlotHandle`]
+    /// serves twice: the run loop's slot drain dispatches every message to
+    /// the registered handlers, and [`Monitor::subscribe`] clones fresh
+    /// subscribers from it.
     ///
-    /// Mutually exclusive with [`Self::protocol::<P>`] — call ONE
-    /// or the other, not both. (Calling both would register two
-    /// slots for the same parser.)
+    /// Composes with [`Self::protocol::<P>`] in either order, and repeats
+    /// are idempotent: `P` gets one parser slot — the broadcast one — so
+    /// handlers see each message once (#216: `protocol` then
+    /// `with_broadcast` used to install two slots and deliver every
+    /// message twice).
     ///
     /// ```ignore
     /// let monitor = Monitor::builder()
     ///     .interface("eth0")
-    ///     .with_broadcast::<Http>()    // not `.protocol::<Http>()`
+    ///     .with_broadcast::<Http>()
     ///     .build()?;
     /// let mut stream = monitor.subscribe::<Http>()?;
     /// ```
@@ -2989,28 +3095,21 @@ impl MonitorBuilder {
     where
         P::Message: Send + Sync + Clone + 'static,
     {
-        let builder = self
-            .driver_builder
-            .get_or_insert_with(|| Driver::builder(FiveTuple::bidirectional()));
-        match P::register_broadcast(builder) {
-            Ok(handle) => {
-                // Clone twice: one for the dispatcher slot drain,
-                // one stored for subscribe() to clone from.
-                let dispatcher_clone = handle.clone();
-                self.protocol_slots
-                    .push(Box::new(TypedBroadcastProtocolSlot::<P>::new(
-                        dispatcher_clone,
-                    )));
-                self.broadcast_handles
-                    .insert(std::any::TypeId::of::<P>(), Box::new(handle));
-                self.slotted_protocols.insert(std::any::TypeId::of::<P>());
-            }
-            Err(_) => {
-                // The default `register_broadcast` returns Err for
-                // any Protocol that hasn't overridden it. Treat it
-                // as a quiet no-op here; the user will discover the
-                // mismatch when `monitor.subscribe::<P>()` fails
-                // with `BuildError::ProtocolNotBroadcast`.
+        // Whether `P` can broadcast at all: the default
+        // `register_broadcast` errs without touching the builder. Asked on
+        // a scratch builder — the real registration waits for `build()`.
+        let mut scratch = Driver::builder(FiveTuple::bidirectional());
+        if P::register_broadcast(&mut scratch).is_ok() {
+            let type_id = std::any::TypeId::of::<P>();
+            let broadcast = Some(install_broadcast::<P> as InstallBroadcast);
+            match self.slot_intents.iter_mut().find(|i| i.type_id == type_id) {
+                // Declared before (`protocol::<P>()`): upgrade its slot.
+                Some(intent) => intent.broadcast = broadcast,
+                None => self.slot_intents.push(SlotIntent {
+                    type_id,
+                    plain: install_plain::<P>,
+                    broadcast,
+                }),
             }
         }
         self.declared_protocols
@@ -3116,11 +3215,8 @@ impl MonitorBuilder {
                 let fp = TlsFingerprint::from_handshake(
                     hs,
                     ctx.flow,
-                    crate::monitor::fingerprint::server_port(
-                        ctx.flow,
-                        ctx.side(),
-                        ctx.orientation(),
-                    ),
+                    crate::monitor::fingerprint::server_port_of(ctx),
+                    ctx.initiator_responder(),
                 );
                 handler(&fp, ctx)
             },
@@ -3221,7 +3317,7 @@ impl MonitorBuilder {
             let fp = QuicFingerprint::from_initial(
                 initial,
                 ctx.flow,
-                crate::monitor::fingerprint::server_port(ctx.flow, ctx.side(), ctx.orientation()),
+                crate::monitor::fingerprint::server_port_of(ctx),
             );
             handler(&fp, ctx)
         })
@@ -3324,11 +3420,8 @@ impl MonitorBuilder {
                 let fp = TlsFingerprint::from_handshake(
                     hs,
                     ctx.flow,
-                    crate::monitor::fingerprint::server_port(
-                        ctx.flow,
-                        ctx.side(),
-                        ctx.orientation(),
-                    ),
+                    crate::monitor::fingerprint::server_port_of(ctx),
+                    ctx.initiator_responder(),
                 );
                 if !fp.app_protocol.is_encrypted_dns() {
                     return Ok(());
@@ -3360,11 +3453,7 @@ impl MonitorBuilder {
                 let fp = QuicFingerprint::from_initial(
                     qi,
                     ctx.flow,
-                    crate::monitor::fingerprint::server_port(
-                        ctx.flow,
-                        ctx.side(),
-                        ctx.orientation(),
-                    ),
+                    crate::monitor::fingerprint::server_port_of(ctx),
                 );
                 if !fp.app_protocol.is_encrypted_dns() {
                     return Ok(());
@@ -3552,7 +3641,7 @@ impl MonitorBuilder {
         }
         let s = Arc::clone(&set);
         self = self.on_ctx::<FlowStarted<Tcp>>(move |evt: &FlowStarted<Tcp>, ctx: &mut Ctx<'_>| {
-            ioc::check_flow_ip(&s.load(), evt.key, ctx);
+            ioc::check_flow_ip(&s.load(), evt.key, evt.orientation, ctx);
             Ok(())
         });
         if !self
@@ -3563,7 +3652,7 @@ impl MonitorBuilder {
         }
         let s = Arc::clone(&set);
         self = self.on_ctx::<FlowStarted<Udp>>(move |evt: &FlowStarted<Udp>, ctx: &mut Ctx<'_>| {
-            ioc::check_flow_ip(&s.load(), evt.key, ctx);
+            ioc::check_flow_ip(&s.load(), evt.key, evt.orientation, ctx);
             Ok(())
         });
 
@@ -3989,17 +4078,21 @@ impl MonitorBuilder {
                         return Ok(());
                     };
                     let ts = ctx.ts;
+                    // The query's sender: the orientation of the packet that
+                    // carried it (flowscope 0.26 reads the key from it).
+                    let sender = ctx.orientation().unwrap_or_default();
                     // Observe into the cell's buffer, then move the emitted
                     // anomalies out before re-borrowing ctx for the sink.
                     let emitted: Vec<flowscope::OwnedAnomaly> = {
                         let cell = ctx.state_mut::<detectors::DetectorCell>();
-                        cell.registry.observe_dns(&key, &qname, ts, &mut cell.out);
+                        cell.registry
+                            .observe_dns(&key, sender, &qname, ts, &mut cell.out);
                         cell.out.drain(..).collect()
                     };
                     if !emitted.is_empty() {
                         let sink = ctx.sink_mut();
                         for owned in &emitted {
-                            crate::anomaly::sink::publish_owned(sink, owned);
+                            crate::anomaly::sink::publish_detector_owned(sink, owned);
                         }
                     }
                     Ok(())
@@ -4275,15 +4368,18 @@ impl MonitorBuilder {
         let yara_armed = false;
         let wants_all = !self.flow_exporters.is_empty()
             || !self.tick_handlers.is_empty()
-            || !self.broadcast_handles.is_empty()
+            || self.slot_intents.iter().any(|i| i.broadcast.is_some())
             || self.bandwidth_registered
             || !self.ml_feature_handlers.is_empty()
             || nprint_armed
-            || yara_armed
-            // The IP-fragment reassembler needs every fragment of a datagram,
-            // but only fragment 0 carries the ports, and the port templates
-            // shed non-first fragments — a narrowed prefilter would starve it.
-            || self.ip_frag_config.is_some();
+            || yara_armed;
+        // The IP-fragment reassembler needs every fragment of a datagram, but
+        // only fragment 0 carries the ports: with it armed, non-first IPv4
+        // fragments pass the port terms (host / protocol terms still apply)
+        // instead of forcing capture-all (#217).
+        let opts = subscription::kernel_filter::KernelOpts {
+            pass_ip_fragments: self.ip_frag_config.is_some(),
+        };
 
         let interests = self
             .handlers
@@ -4313,22 +4409,31 @@ impl MonitorBuilder {
             .chain(self.p0f_interest())
             .chain(wants_all.then_some(subscription::Predicate::Always));
 
-        subscription::kernel_filter::compile_union(interests)
+        subscription::kernel_filter::compile_union(interests, opts)
     }
 
     /// Pre-register a `T: Default` state slot. Optional —
     /// `Ctx::state_mut::<T>()` lazy-creates on first access; this
     /// call surfaces typos at build time and lets you set
     /// non-default initial state by reaching through the builder
-    /// (see [`Self::state_with`]).
+    /// (see [`Self::state_with`]). A cross-shard merge
+    /// ([`ShardedRunner::merge_state`]) re-seeds the slot with
+    /// `T::default()` after each take.
     pub fn state<T: Default + Send + 'static>(mut self) -> Self {
         let _ = self.state_map.get_or_init_mut::<T>();
+        self.state_map.set_reseed(T::default);
         self
     }
 
     /// Pre-register `T` with a caller-supplied initial value.
     /// Replaces any prior `T` in the slot. 0.21 A.4: the `Default`
     /// bound is dropped — any `T: Send + 'static` works now.
+    ///
+    /// A value can't be re-created: for a type merged across shards
+    /// ([`ShardedRunner::merge_state`]) use [`Self::state`] or
+    /// [`Self::state_init`], whose seed the shard starts each interval
+    /// from. After a merge take, a `state_with` slot is gone until the
+    /// next `Ctx::state_mut::<T>()` re-creates `T::default()`.
     pub fn state_with<T: Send + 'static>(mut self, value: T) -> Self {
         self.state_map.insert(value);
         self
@@ -4337,16 +4442,19 @@ impl MonitorBuilder {
     /// Pre-register `T` via a factory closure. Lets you populate the
     /// state map with types that don't implement `Default` (e.g.
     /// `Arc<DashMap>`, `Mutex<X>`, anything wrapping a non-default
-    /// handle). Closure runs once at build time; the resulting `T` is
-    /// inserted via [`StateMap::insert`]. Equivalent to
-    /// `state_with(factory())` but reads cleaner when the factory has
-    /// side effects (opening a file, allocating an arena, etc.).
+    /// handle). The factory runs once at build time, its `T` inserted
+    /// via [`StateMap::insert`] — and again whenever the slot is reset:
+    /// a cross-shard merge ([`ShardedRunner::merge_state`]) takes the
+    /// slot each interval and re-seeds it with `factory()`, so the shard
+    /// starts every interval from your configuration rather than
+    /// `T::default()` (#216). Hence `Fn`, not `FnOnce`.
     pub fn state_init<T, F>(mut self, factory: F) -> Self
     where
         T: Send + 'static,
-        F: FnOnce() -> T,
+        F: Fn() -> T + Send + Sync + 'static,
     {
         self.state_map.insert(factory());
+        self.state_map.set_reseed(factory);
         self
     }
 
@@ -4653,9 +4761,25 @@ impl MonitorBuilder {
         }
         // Issue #34: apply the reassembler-hardening config (overlap policy,
         // memcap, active/idle threshold) to the central tracker before build.
-        let mut driver_builder = self
-            .driver_builder
-            .unwrap_or_else(|| Driver::builder(FiveTuple::bidirectional()));
+        let mut driver_builder = Driver::builder(FiveTuple::bidirectional());
+        // #216: install each declared protocol's parser slot, once — the
+        // broadcast slot when `with_broadcast` asked for one.
+        let mut protocol_slots: Vec<Box<dyn ProtocolSlot>> = Vec::new();
+        let mut broadcast_handles: rustc_hash::FxHashMap<
+            std::any::TypeId,
+            Box<dyn std::any::Any + Send + Sync>,
+        > = rustc_hash::FxHashMap::default();
+        for intent in &self.slot_intents {
+            match intent.broadcast {
+                Some(install) => {
+                    if let Some((slot, handle)) = install(&mut driver_builder) {
+                        protocol_slots.push(slot);
+                        broadcast_handles.insert(intent.type_id, handle);
+                    }
+                }
+                None => protocol_slots.extend((intent.plain)(&mut driver_builder)),
+            }
+        }
         driver_builder.config(self.tracker_config);
         let emit_anomalies = if self.emit_anomalies_set {
             self.emit_anomalies
@@ -4698,8 +4822,10 @@ impl MonitorBuilder {
             byte_accumulators.push(Box::new(yara::YaraAccumulator::new(
                 swap,
                 self.yara_handlers,
-                self.yara_max_flows.unwrap_or(DEFAULT_NPRINT_MAX_FLOWS),
+                self.yara_max_flows.unwrap_or(DEFAULT_YARA_MAX_FLOWS),
                 self.yara_max_bytes.unwrap_or(DEFAULT_YARA_SCAN_BYTES),
+                self.yara_memory_budget
+                    .unwrap_or(DEFAULT_YARA_MEMORY_BUDGET),
             )));
         }
 
@@ -4709,7 +4835,7 @@ impl MonitorBuilder {
             xdp_interfaces: self.xdp_interfaces,
             driver,
             dispatcher,
-            protocol_slots: self.protocol_slots,
+            protocol_slots,
             detector_names: self.detector_names,
             state_map: self.state_map,
             counters: self.counters,
@@ -4717,7 +4843,7 @@ impl MonitorBuilder {
             tick_handlers: self.tick_handlers,
             monitor_name: self.monitor_name,
             drain_timeout: self.drain_timeout.unwrap_or(Duration::from_secs(1)),
-            broadcast_handles: self.broadcast_handles,
+            broadcast_handles,
             #[cfg(all(feature = "pcap", feature = "tokio"))]
             pcap_source_path: self.pcap_source_path,
             #[cfg(all(feature = "pcap", feature = "tokio"))]
@@ -4735,7 +4861,7 @@ impl MonitorBuilder {
             label_table: self
                 .label_table
                 .unwrap_or_else(flowscope::well_known::LabelTable::new),
-            merge_rx: None,
+            merge_link: None,
             shard_stop: None,
             handler_error_policy: self.handler_error_policy,
             backend_error_policy: self.backend_error_policy,
@@ -4807,7 +4933,7 @@ impl std::fmt::Debug for MonitorBuilder {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("MonitorBuilder")
             .field("interfaces", &self.interfaces)
-            .field("protocol_slots", &self.protocol_slots.len())
+            .field("protocol_slots", &self.slot_intents.len())
             .field("handler_type_count", &self.handlers.type_count())
             .field("handler_count", &self.handlers.handler_count())
             .field("state_slots", &self.state_map.len())
@@ -4953,6 +5079,74 @@ mod tests {
         // State map carries Handle even though it has no Default.
         let h: &mut Handle = m.state_map.get_or_init_with::<Handle, _>(|| Handle(0));
         assert_eq!(h.0, 42);
+    }
+
+    /// #216: a merge take re-seeds a `state_init` slot from its factory —
+    /// it used to come back as `T::default()`, losing the configuration —
+    /// and a `state::<T>()` slot with `T::default()`.
+    /// #214: the aggregation tables keep their configured key cap when a
+    /// merge re-seeds them (the factory captures the config).
+    #[test]
+    fn aggregate_state_keeps_its_cap_across_a_reseed() {
+        let cfg = aggregate::AggregateConfig {
+            max_keys: 8,
+            ..aggregate::AggregateConfig::default()
+        };
+        let mut m = Monitor::builder()
+            .interface("lo")
+            .aggregate_with(cfg)
+            .build()
+            .unwrap();
+        let cap = |m: &Monitor| {
+            let st = m.state_map.get::<aggregate::AggregateState>().unwrap();
+            (
+                st.talkers.as_ref().unwrap().max_keys(),
+                st.domains.as_ref().map(|d| d.max_keys()),
+            )
+        };
+        assert_eq!(cap(&m).0, 8);
+        let _ = m
+            .state_map
+            .take_reset(std::any::TypeId::of::<aggregate::AggregateState>())
+            .unwrap();
+        assert_eq!(cap(&m).0, 8);
+        assert!(cap(&m).1.is_none_or(|k| k == 8));
+    }
+
+    #[test]
+    fn take_reset_reseeds_from_state_init() {
+        #[derive(Default)]
+        struct Limit {
+            max: u32,
+            seen: u32,
+        }
+        #[derive(Default)]
+        struct Hits(u32);
+        let mut m = Monitor::builder()
+            .interface("lo")
+            .state_init(|| Limit { max: 7, seen: 0 })
+            .state::<Hits>()
+            .build()
+            .unwrap();
+        m.state_map.get_or_init_mut::<Limit>().seen = 3;
+        m.state_map.get_or_init_mut::<Hits>().0 = 5;
+        let taken = m
+            .state_map
+            .take_reset(std::any::TypeId::of::<Limit>())
+            .unwrap()
+            .downcast::<Limit>()
+            .unwrap();
+        assert_eq!((taken.max, taken.seen), (7, 3));
+        let fresh = m.state_map.get::<Limit>().unwrap();
+        assert_eq!((fresh.max, fresh.seen), (7, 0));
+        let hits = m
+            .state_map
+            .take_reset(std::any::TypeId::of::<Hits>())
+            .unwrap()
+            .downcast::<Hits>()
+            .unwrap();
+        assert_eq!(hits.0, 5);
+        assert_eq!(m.state_map.get::<Hits>().map(|h| h.0), Some(0));
     }
 
     #[test]

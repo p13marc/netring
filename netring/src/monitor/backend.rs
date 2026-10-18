@@ -31,7 +31,7 @@ use flowscope::{PacketView, Timestamp};
 use crate::AsyncCapture;
 use crate::error::{Error, Result};
 use crate::packet::PacketDirection;
-use crate::stats::SourceCounters;
+use crate::stats::CaptureStats;
 
 /// Packets one [`AnyBackend::drain_batch`] call delivers before it returns
 /// to the run loop — checked between batches, which are never split (an
@@ -64,6 +64,22 @@ pub(crate) enum AnyBackend {
     /// 1-spec↔1-backend invariant (so `Reopen` rebuilds the whole capture).
     #[cfg(all(feature = "af-xdp", feature = "xdp-loader"))]
     XdpMq(crate::AsyncXdpCapture),
+    /// No backend: a source retired by `BackendErrorPolicy::SkipSource`, or
+    /// one between its old backend's drop and its re-open under `Reopen`
+    /// (#212). Never ready, delivers nothing, has no counters.
+    Closed,
+}
+
+/// What one [`AnyBackend::drain_batch`] call did.
+pub(crate) struct Drained {
+    /// The last delivered packet's timestamp; `None` when nothing was
+    /// delivered (a spurious wake, or an error before the first packet).
+    pub(crate) last_ts: Option<Timestamp>,
+    /// The budget cut the drain short: more is ready.
+    pub(crate) more_ready: bool,
+    /// The backend failed — after delivering what `last_ts` covers, which
+    /// the caller still dispatches.
+    pub(crate) error: Option<Error>,
 }
 
 impl AnyBackend {
@@ -85,7 +101,13 @@ impl AnyBackend {
             }),
             #[cfg(all(feature = "af-xdp", feature = "xdp-loader"))]
             AnyBackend::XdpMq(cap) => cap.poll_read_ready(cx),
+            AnyBackend::Closed => Poll::Pending,
         }
+    }
+
+    /// Whether this is the [`AnyBackend::Closed`] placeholder.
+    pub(crate) fn is_closed(&self) -> bool {
+        matches!(self, AnyBackend::Closed)
     }
 
     /// Drain the retired batches currently ready on this backend — up to
@@ -93,9 +115,11 @@ impl AnyBackend {
     /// `on_packet` with a borrowed [`PacketView`] per packet plus the
     /// frame's direction (AF_PACKET reports it; AF_XDP has none —
     /// `PacketDirection::Unknown(0)`, as the streams do — which is what
-    /// the direction-aware loopback dedup needs, #178). Returns the
-    /// last packet's timestamp, or `None` on a spurious wake (no data),
-    /// and whether the budget cut the drain short (more is ready).
+    /// the direction-aware loopback dedup needs, #178). Reports the
+    /// last packet's timestamp (`None` on a spurious wake), whether the
+    /// budget cut the drain short (more is ready), and a backend error —
+    /// after whatever was delivered before it, which the caller still
+    /// dispatches.
     ///
     /// The readiness guard is held only across the synchronous callback
     /// loop and dropped before this future resolves — no ring borrow
@@ -103,26 +127,36 @@ impl AnyBackend {
     pub(crate) async fn drain_batch(
         &mut self,
         mut on_packet: impl FnMut(PacketView<'_>, PacketDirection),
-    ) -> Result<(Option<Timestamp>, bool)> {
+    ) -> Drained {
         let mut last_ts: Option<Timestamp> = None;
         let mut delivered: usize = 0;
-        match self {
+        let error: Option<Error> = match self {
             AnyBackend::AfPacket(cap) => {
-                let mut guard = cap.readable().await?;
+                let mut guard = match cap.readable().await {
+                    Ok(g) => g,
+                    Err(e) => return Drained::failed(e),
+                };
                 while delivered < DRAIN_BUDGET
                     && let Some(batch) = guard.next_batch()
                 {
                     delivered += batch.len();
                     for pkt in &batch {
-                        let ts = pkt.timestamp();
-                        last_ts = Some(ts);
-                        on_packet(PacketView::new(pkt.data(), ts), pkt.direction());
+                        last_ts = Some(pkt.timestamp());
+                        // `view()` carries a stripped VLAN tag that is not
+                        // in the data (re-insertion off / impossible) and the
+                        // wire length (flowscope counts it and gaps what a
+                        // snap length cut).
+                        on_packet(pkt.view(), pkt.direction());
                     }
                 }
+                None
             }
             #[cfg(feature = "af-xdp")]
             AnyBackend::Xdp(xdp) => {
-                let mut guard = xdp.readable().await?;
+                let mut guard = match xdp.readable().await {
+                    Ok(g) => g,
+                    Err(e) => return Drained::failed(e),
+                };
                 while delivered < DRAIN_BUDGET
                     && let Some(batch) = guard.next_batch()
                 {
@@ -133,12 +167,20 @@ impl AnyBackend {
                         // fall back to now() for the timestamp.
                         let ts = pkt.timestamp().unwrap_or_else(now_ts);
                         last_ts = Some(ts);
+                        // Never cut: the wire length is the frame's. A tag
+                        // the NIC stripped into the metadata is not in it
+                        // (flowscope has no place for front bytes), so
+                        // tagged byte counts are 4 lower than re-inserted
+                        // AF_PACKET ones; see `Packet::view`, flowscope#222.
                         on_packet(
-                            PacketView::new(pkt.data(), ts).with_rx_metadata(pkt.rx_metadata()),
+                            PacketView::new(pkt.data(), ts)
+                                .with_wire_len(pkt.data().len())
+                                .with_rx_metadata(pkt.rx_metadata()),
                             PacketDirection::Unknown(0),
                         );
                     }
                 }
+                None
             }
             #[cfg(all(feature = "af-xdp", feature = "xdp-loader"))]
             AnyBackend::XdpMq(cap) => {
@@ -148,12 +190,21 @@ impl AnyBackend {
                 // (no blocking on idle queues).
                 let n = cap.socket_count();
                 let start = cap.next_cursor();
+                let mut error = None;
                 for off in 0..n {
                     let i = (start + off) % n;
                     if delivered >= DRAIN_BUDGET || !cap.socket_rx_ready(i) {
                         continue;
                     }
-                    let mut guard = cap.socket_readable(i).await?;
+                    let mut guard = match cap.socket_readable(i).await {
+                        Ok(g) => g,
+                        Err(e) => {
+                            // Earlier queues' packets were delivered: hand
+                            // them back with the error.
+                            error = Some(e);
+                            break;
+                        }
+                    };
                     while delivered < DRAIN_BUDGET
                         && let Some(batch) = guard.next_batch()
                     {
@@ -162,36 +213,58 @@ impl AnyBackend {
                             let ts = pkt.timestamp().unwrap_or_else(now_ts);
                             last_ts = Some(ts);
                             on_packet(
-                                PacketView::new(pkt.data(), ts).with_rx_metadata(pkt.rx_metadata()),
+                                PacketView::new(pkt.data(), ts)
+                                    .with_wire_len(pkt.data().len())
+                                    .with_rx_metadata(pkt.rx_metadata()),
                                 PacketDirection::Unknown(0),
                             );
                         }
                     }
                 }
+                error
             }
+            AnyBackend::Closed => None,
+        };
+        Drained {
+            last_ts,
+            more_ready: error.is_none() && delivered >= DRAIN_BUDGET,
+            error,
         }
-        Ok((last_ts, delivered >= DRAIN_BUDGET))
     }
 
-    /// Cumulative `u64` counters (delivered packets split from drops)
+    /// Cumulative [`CaptureStats`] (lifetime totals of the current backend)
     /// **plus** the per-source [`DropBreakdown`](crate::stats::DropBreakdown)
     /// — the un-collapsed "where did packets drop" detail (issue #39).
     /// Returns both from a single counter read so AF_PACKET's destructive
     /// `PACKET_STATISTICS` read isn't double-consumed.
-    pub(crate) fn counters(&self) -> Result<(SourceCounters, crate::stats::DropBreakdown)> {
+    pub(crate) fn counters(&self) -> Result<(CaptureStats, crate::stats::DropBreakdown)> {
         match self {
             AnyBackend::AfPacket(cap) => {
-                let c = cap.get_ref().cumulative_counters()?;
+                let c = cap.get_ref().stats()?;
                 let detail = crate::stats::DropBreakdown::AfPacket { freezes: c.freezes };
                 Ok((c, detail))
             }
             #[cfg(feature = "af-xdp")]
             AnyBackend::Xdp(xdp) => {
                 let s = xdp.statistics()?;
-                Ok((s.counters(xdp.get_ref().rx_received()), s.into()))
+                Ok((s.capture_stats(xdp.get_ref().rx_received()), s.into()))
             }
             #[cfg(all(feature = "af-xdp", feature = "xdp-loader"))]
             AnyBackend::XdpMq(cap) => cap.counters(),
+            AnyBackend::Closed => Err(Error::Io(std::io::Error::new(
+                std::io::ErrorKind::NotConnected,
+                "capture source closed",
+            ))),
+        }
+    }
+}
+
+impl Drained {
+    fn failed(error: Error) -> Self {
+        Self {
+            last_ts: None,
+            more_ready: false,
+            error: Some(error),
         }
     }
 }

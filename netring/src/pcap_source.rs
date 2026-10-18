@@ -79,7 +79,10 @@ pub struct AsyncPcapConfig {
     pub queue_depth: usize,
 
     /// At EOF, restart the reader from the beginning instead of
-    /// closing the stream. Default `false`.
+    /// closing the stream. Default `false`. A pass that yields no packet
+    /// (every frame of an unsupported link type —
+    /// [`packets_skipped`](AsyncPcapSource::packets_skipped)) ends the
+    /// stream instead of looping.
     pub loop_at_eof: bool,
 }
 
@@ -102,6 +105,7 @@ pub struct AsyncPcapSource {
     _task: tokio::task::JoinHandle<()>,
     format: PcapFormat,
     packets_yielded: Arc<AtomicU64>,
+    packets_skipped: Arc<AtomicU64>,
 }
 
 impl AsyncPcapSource {
@@ -119,10 +123,14 @@ impl AsyncPcapSource {
         let format = sniff_format(&path)?;
         let (tx, rx) = mpsc::channel(config.queue_depth.max(1));
         let packets_yielded = Arc::new(AtomicU64::new(0));
-        let task_yielded = packets_yielded.clone();
+        let packets_skipped = Arc::new(AtomicU64::new(0));
+        let counts = Counts {
+            yielded: Arc::clone(&packets_yielded),
+            skipped: Arc::clone(&packets_skipped),
+        };
 
         let task = tokio::task::spawn_blocking(move || {
-            if let Err(e) = run_reader(&path, config, &tx, task_yielded) {
+            if let Err(e) = run_reader(&path, config, &tx, counts) {
                 tracing::warn!(
                     target: "netring::pcap_source",
                     error = ?e,
@@ -139,6 +147,7 @@ impl AsyncPcapSource {
             _task: task,
             format,
             packets_yielded,
+            packets_skipped,
         })
     }
 
@@ -148,10 +157,20 @@ impl AsyncPcapSource {
     }
 
     /// Number of packets yielded so far (analog to
-    /// [`CaptureStats::packets`](crate::stats::CaptureStats) for live
-    /// captures).
+    /// [`CaptureStats::delivered`](crate::stats::CaptureStats::delivered)
+    /// for live captures).
     pub fn packets_yielded(&self) -> u64 {
         self.packets_yielded.load(Ordering::Relaxed)
+    }
+
+    /// Number of packets skipped so far because their link type can't be
+    /// turned into Ethernet (802.11, PPP, USB, …; see
+    /// [`CaptureReader`](flowscope::pcap::CaptureReader) for what can). A
+    /// capture holding only such packets replays as an empty stream; this
+    /// count says why. Counts every pass of a
+    /// [`loop_at_eof`](AsyncPcapConfig::loop_at_eof) replay.
+    pub fn packets_skipped(&self) -> u64 {
+        self.packets_skipped.load(Ordering::Relaxed)
     }
 }
 
@@ -207,14 +226,16 @@ fn run_reader(
     path: &Path,
     config: AsyncPcapConfig,
     tx: &mpsc::Sender<Result<OwnedPacket, Error>>,
-    packets_yielded: Arc<AtomicU64>,
+    counts: Counts,
 ) -> Result<(), Error> {
     let mut shift = Duration::ZERO;
-    let mut unsupported = 0u64;
     loop {
         let reader = flowscope::pcap::CaptureReader::open(path)
             .map_err(|e| Error::Config(format!("{path:?}: {e}")))?;
         let mut span: Option<(Duration, Duration)> = None;
+        // Packets this pass handed on: a pass of nothing but skipped
+        // frames ends a looping replay (it would re-read forever).
+        let mut pass_yielded = 0u64;
         let mut start_wall: Option<Instant> = None;
         let mut first_ts: Option<Timestamp> = None;
         for packet in reader {
@@ -240,14 +261,13 @@ fn run_reader(
             let frame = match p.into_ethernet() {
                 Ok(frame) => frame,
                 Err(datalink) => {
-                    if unsupported == 0 {
+                    if counts.skipped.fetch_add(1, Ordering::Relaxed) == 0 {
                         tracing::warn!(
                             target: "netring::pcap_source",
                             ?datalink,
                             "skipping packets of an unsupported link type"
                         );
                     }
-                    unsupported += 1;
                     continue;
                 }
             };
@@ -268,7 +288,8 @@ fn run_reader(
                 // Receiver dropped: nobody is reading any more.
                 return Ok(());
             }
-            packets_yielded.fetch_add(1, Ordering::Relaxed);
+            counts.yielded.fetch_add(1, Ordering::Relaxed);
+            pass_yielded += 1;
         }
         let Some((lo, hi)) = span else {
             // Nothing read: looping would spin on an empty file.
@@ -277,8 +298,21 @@ fn run_reader(
         if !config.loop_at_eof || tx.is_closed() {
             return Ok(());
         }
+        if pass_yielded == 0 {
+            tracing::warn!(
+                target: "netring::pcap_source",
+                "no packet of a supported link type in the capture: not looping"
+            );
+            return Ok(());
+        }
         shift += hi - lo + Duration::from_micros(1);
     }
+}
+
+/// The reader's counters, shared with its [`AsyncPcapSource`].
+struct Counts {
+    yielded: Arc<AtomicU64>,
+    skipped: Arc<AtomicU64>,
 }
 
 /// Longest single sleep of [`pace`]: how late it notices a dropped
@@ -346,8 +380,8 @@ fn owned_packet(
         // the capture did not record it.
         direction,
         rxhash: 0,
-        vlan_tci: 0,
-        vlan_tpid: 0,
+        // A pcap file keeps VLAN tags in the frame.
+        vlan: None,
         // EtherType is encoded in the frame itself; the wrapper
         // doesn't need a separate ll_protocol for parsing.
         ll_protocol: 0x0800,

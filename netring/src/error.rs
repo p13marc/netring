@@ -198,6 +198,19 @@ pub enum BuildError {
         what: &'static str,
     },
 
+    /// #227: `ShardedRunner::merge_state` / `state_auto_merge` registered
+    /// twice for the same state type. A merge takes each shard's whole `T`
+    /// every interval (take-and-reset), so a delta can feed one fold only:
+    /// a second merge for `T` would steal or miss deltas. Register one merge
+    /// per type; `on_merge` attaches observers to it.
+    #[error(
+        "merge_state / state_auto_merge registered twice for `{type_name}`: one merge per state type"
+    )]
+    DuplicateMergeState {
+        /// The state type, as `std::any::type_name` spells it.
+        type_name: &'static str,
+    },
+
     /// More capture sources (AF_PACKET + AF_XDP interfaces) than the
     /// monitor's `SourceIdx` — a `u8` — can number.
     #[error("too many capture sources: limit {limit}, found {actual}")]

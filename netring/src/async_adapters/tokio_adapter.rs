@@ -19,7 +19,7 @@ use std::os::fd::{AsFd, AsRawFd};
 
 use tokio::io::Interest;
 
-use crate::async_adapters::registered::{ReadyMut, Registered};
+use crate::async_adapters::registered::{ReadyMut, Registered, health_io};
 use crate::error::Error;
 use crate::packet::{OwnedPacket, PacketBatch};
 use crate::traits::PacketSource;
@@ -80,15 +80,28 @@ impl<S: PacketSource + AsRawFd> AsyncCapture<S> {
     /// Registers a duplicate of the source's fd with tokio's reactor, so the
     /// adapter holds one extra fd for its lifetime.
     ///
+    /// Read waits ([`readable`](Self::readable), [`recv`](Self::recv), the
+    /// stream) end with an error once the source is gone: when the kernel
+    /// reports an error on its fd, and every second of idle waiting, they
+    /// ask [`PacketSource::check_health`] — for a [`Capture`](crate::Capture),
+    /// a removed interface is `ENETDOWN`, a down one is waited out. The
+    /// idle check is clocked by a timerfd opened on the first idle wait (one
+    /// more fd); it needs no tokio time driver.
+    ///
     /// # Errors
     ///
     /// Returns [`Error::Io`] if duplicating the fd or the `AsyncFd`
     /// registration fails.
     pub fn new(source: S) -> Result<Self, Error> {
         let inner =
-            Registered::new(source, Interest::READABLE | Interest::WRITABLE).map_err(Error::Io)?;
+            Registered::new(source, Interest::READABLE, source_health::<S>).map_err(Error::Io)?;
         Ok(Self { inner })
     }
+}
+
+/// [`PacketSource::check_health`] for the registration's liveness checks.
+fn source_health<S: PacketSource>(source: &S) -> std::io::Result<()> {
+    health_io(source.check_health())
 }
 
 impl AsyncCapture<crate::Capture> {
@@ -201,6 +214,12 @@ impl<S: PacketSource + AsRawFd> AsyncCapture<S> {
     /// also clears tokio's readiness flag so the next `readable()` call
     /// re-arms via epoll.
     ///
+    ///
+    /// # Errors
+    ///
+    /// [`Error::Io`] when the source is gone — `ENETDOWN` once a
+    /// [`Capture`](crate::Capture)'s interface was removed (see
+    /// [`new`](Self::new)) — or the readiness wait fails.
     ///
     /// # Cancel safety
     ///
@@ -339,6 +358,15 @@ impl<S: PacketSource + AsRawFd> AsyncCapture<S> {
     /// Borrow the inner source mutably (e.g. for stats accessors). Most
     /// users want [`readable()`](AsyncCapture::readable) to
     /// call [`next_batch()`](PacketSource::next_batch) for zero-copy access.
+    ///
+    /// Reading packets through it with a [`Capture`](crate::Capture)
+    /// `packets()` loop that stops part-way through a ring block leaves the
+    /// rest of that block pending in the `Capture` (0.32, #211). The async
+    /// reads wait on the fd's readiness, which those packets don't raise:
+    /// a stream resumes with them only at the next readiness edge (the
+    /// kernel retiring another block). Drain them with
+    /// [`next_batch()`](PacketSource::next_batch) before going back to the
+    /// async reads.
     pub fn get_mut(&mut self) -> &mut S {
         self.inner.get_mut()
     }
@@ -367,20 +395,13 @@ impl<S: PacketSource + AsRawFd> AsyncCapture<S> {
         PacketStream::new(self)
     }
 
-    /// Capture statistics — passthrough to [`PacketSource::stats`].
+    /// Capture statistics: totals since the source was opened —
+    /// passthrough to [`PacketSource::stats`].
     ///
-    /// Saves `use netring::PacketSource;` at the call site. **Resets kernel
-    /// counters on each read** — see [`PacketSource::stats`] for the full
-    /// contract or [`cumulative_stats`](Self::cumulative_stats) for monotonic
-    /// totals.
+    /// Saves `use netring::PacketSource;` at the call site. Never resets;
+    /// see [`PacketSource::stats`] for the full contract.
     pub fn stats(&self) -> Result<crate::stats::CaptureStats, Error> {
         self.inner.get_ref().stats()
-    }
-
-    /// Accumulated statistics since the source was created — passthrough to
-    /// [`PacketSource::cumulative_stats`].
-    pub fn cumulative_stats(&self) -> Result<crate::stats::CaptureStats, Error> {
-        self.inner.get_ref().cumulative_stats()
     }
 }
 

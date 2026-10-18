@@ -48,6 +48,15 @@ pub enum BridgeDirection {
     BtoA,
 }
 
+/// The async loops' idle health check: every
+/// [`LIVENESS_PROBE`](crate::async_adapters::registered::LIVENESS_PROBE),
+/// on a timerfd (no tokio time driver needed).
+#[cfg(feature = "tokio")]
+fn liveness_probe() -> Result<crate::async_adapters::registered::ProbeTimer, Error> {
+    use crate::async_adapters::registered::{LIVENESS_PROBE, ProbeTimer};
+    ProbeTimer::new(LIVENESS_PROBE).map_err(Error::Io)
+}
+
 /// Forwarding statistics for both directions, plus per-cause drop counters.
 ///
 /// The drop counters track packets that were dropped *by the bridge itself*
@@ -56,15 +65,30 @@ pub enum BridgeDirection {
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 #[non_exhaustive]
 pub struct BridgeStats {
-    /// Statistics for A→B direction.
+    /// Ring statistics of the capture on A (the A→B direction): totals
+    /// since the bridge was created.
     pub a_to_b: CaptureStats,
-    /// Statistics for B→A direction.
+    /// Ring statistics of the capture on B (the B→A direction): totals
+    /// since the bridge was created.
     pub b_to_a: CaptureStats,
-    /// A→B packets dropped because the TX frame was too small.
+    /// A→B packets dropped because they didn't fit the TX frame, or were
+    /// longer than interface B accepts (its MTU + the Ethernet header, + 4
+    /// only for an outer 802.1Q tag — a re-inserted 802.1ad tag on a
+    /// full-size frame is too long). The second check is made only where
+    /// the kernel's limit is known exactly — the devices
+    /// [`Injector::max_frame_len`](crate::Injector::max_frame_len) answers
+    /// for: a plain Ethernet NIC, `veth`, `dummy`, `bridge`, … — against
+    /// the MTU as of the last second (re-read before a frame is dropped),
+    /// so the bridge never drops a frame the kernel would send. On other
+    /// devices (a VLAN sub-interface, a `macvlan` / `bond` stacked on one,
+    /// other link types), and right after the MTU was lowered, a frame the
+    /// kernel refuses is dropped by the kernel (`PACKET_LOSS`) without
+    /// being counted here.
     pub a_to_b_dropped_too_large: u64,
     /// A→B packets dropped because the TX ring was full.
     pub a_to_b_dropped_ring_full: u64,
-    /// B→A packets dropped because the TX frame was too small.
+    /// B→A packets dropped because they didn't fit the TX frame, or were
+    /// longer than interface A accepts (see `a_to_b_dropped_too_large`).
     pub b_to_a_dropped_too_large: u64,
     /// B→A packets dropped because the TX ring was full.
     pub b_to_a_dropped_ring_full: u64,
@@ -104,6 +128,12 @@ impl std::fmt::Display for BridgeStats {
 /// the bridge's own forwards and anything the host itself sends there — are
 /// skipped (and not shown to the filter), so the two directions cannot
 /// bounce a frame back and forth.
+///
+/// VLAN tags are forwarded (0.32, #209): the receiving kernel strips a
+/// frame's outer 802.1Q / 802.1ad tag before the capture sees it, and the
+/// RX captures re-insert it ([`CaptureBuilder::vlan_reinsert`], on by
+/// default), so the frame leaves the other side tagged, as it arrived.
+/// Before 0.32 the bridge forwarded every tagged frame untagged.
 #[must_use]
 pub struct Bridge {
     rx_a: Capture,
@@ -112,7 +142,7 @@ pub struct Bridge {
     tx_a: Injector,
     poll_timeout: Duration,
     /// Per-direction drop counters maintained by the bridge itself
-    /// (kernel-side drops live in stats() / cumulative_stats()).
+    /// (kernel-side drops live in stats()).
     drops: DropCounters,
 }
 
@@ -155,12 +185,26 @@ impl Bridge {
     /// allocations or heavy processing. Copy interesting packets via
     /// [`Packet::to_owned()`] and process them elsewhere.
     ///
+    /// # Backpressure
+    ///
+    /// Each forwarded batch is kicked with [`Injector::flush`], which waits
+    /// until the device has transmitted every frame it took — the loop's
+    /// backpressure: a slow side slows the bridge rather than overrunning
+    /// its TX ring. A device that **holds** frames (a queueing or shaping
+    /// qdisc with [`qdisc_bypass(false)`](BridgeBuilder::qdisc_bypass), a
+    /// stalled link) therefore blocks the whole loop — both directions —
+    /// for as long as it holds them. The default `qdisc_bypass(true)`
+    /// transmits directly and never waits on a qdisc; the async loops
+    /// ([`run_async`](Self::run_async)) never wait for the device.
+    ///
     /// # Errors
     ///
     /// Returns [`Error::Io`] if `poll(2)` or a `flush()` syscall fails, or
     /// with `ENETDOWN` when either interface is removed. A side that is
     /// merely down is waited out (with a warning) and forwarding resumes
-    /// when it comes back up.
+    /// when it comes back up: frames for it stay queued in its TX ring
+    /// (once that is full, more are counted ring-full) and leave when it
+    /// is up again.
     pub fn run<F>(&mut self, mut filter: F) -> Result<(), Error>
     where
         F: FnMut(&Packet<'_>, BridgeDirection) -> BridgeAction,
@@ -168,10 +212,13 @@ impl Bridge {
         loop {
             let [a_ready, b_ready] = self.poll_both(self.poll_timeout)?;
             if a_ready {
-                self.drain_direction(&mut filter, BridgeDirection::AtoB)?;
+                self.drain_direction(&mut filter, BridgeDirection::AtoB, Kick::Wait)?;
             }
             if b_ready {
-                self.drain_direction(&mut filter, BridgeDirection::BtoA)?;
+                self.drain_direction(&mut filter, BridgeDirection::BtoA, Kick::Wait)?;
+            }
+            if !a_ready && !b_ready {
+                self.kick_queued()?;
             }
         }
     }
@@ -187,10 +234,13 @@ impl Bridge {
         for _ in 0..iterations {
             let [a_ready, b_ready] = self.poll_both(self.poll_timeout)?;
             if a_ready {
-                self.drain_direction(&mut filter, BridgeDirection::AtoB)?;
+                self.drain_direction(&mut filter, BridgeDirection::AtoB, Kick::Wait)?;
             }
             if b_ready {
-                self.drain_direction(&mut filter, BridgeDirection::BtoA)?;
+                self.drain_direction(&mut filter, BridgeDirection::BtoA, Kick::Wait)?;
+            }
+            if !a_ready && !b_ready {
+                self.kick_queued()?;
             }
         }
         Ok(())
@@ -232,6 +282,15 @@ impl Bridge {
     /// runtime: it avoids the bridge's own poll loop and reuses the runtime's
     /// epoll registration.
     ///
+    /// The TX rings are kicked without waiting for the device (`MSG_DONTWAIT`,
+    /// 0.32 #228): [`run`](Self::run)'s kick waits until every frame it handed
+    /// over is transmitted, which on a device that holds frames (a qdisc that
+    /// queues or shapes, with [`qdisc_bypass`](BridgeBuilder::qdisc_bypass)
+    /// off) would block the runtime thread. Frames a full TX ring can't take
+    /// are dropped and counted, as in `run`; frames a kick could not hand over
+    /// (the socket's send buffer full) are kicked again on the next batch or
+    /// within a second.
+    ///
     /// # Examples
     ///
     /// ```no_run
@@ -250,7 +309,11 @@ impl Bridge {
     ///
     /// # Errors
     ///
-    /// Returns [`Error::Io`] if `AsyncFd` registration or a `flush()` fails.
+    /// Returns [`Error::Io`] if `AsyncFd` registration or a TX kick fails,
+    /// or with `ENETDOWN` when either interface is removed (noticed on the
+    /// kernel's error event, or within a second when the interface was
+    /// already down). A side that is merely down is waited out, as with
+    /// [`run`](Self::run).
     #[cfg(feature = "tokio")]
     pub async fn run_async<F>(&mut self, mut filter: F) -> Result<(), Error>
     where
@@ -261,32 +324,37 @@ impl Bridge {
 
         // Register dups of the RX fds: an `AsyncFd` must own what it
         // registers, and owning a dup keeps it from borrowing `self`, which
-        // the drain below needs mutably.
-        let async_a = register_dup(self.rx_a.as_fd(), Interest::READABLE).map_err(Error::Io)?;
-        let async_b = register_dup(self.rx_b.as_fd(), Interest::READABLE).map_err(Error::Io)?;
+        // the drain below needs mutably. `ERROR` too: a side whose
+        // interface goes down or away raises only an error event (#212).
+        let interest = Interest::READABLE | Interest::ERROR;
+        let async_a = register_dup(self.rx_a.as_fd(), interest).map_err(Error::Io)?;
+        let async_b = register_dup(self.rx_b.as_fd(), interest).map_err(Error::Io)?;
+        let probe = liveness_probe()?;
 
         loop {
             tokio::select! {
-                result = async_a.readable() => {
+                result = async_a.ready(interest) => {
                     let mut guard = result.map_err(Error::Io)?;
-                    // Re-arm tokio's readiness only once the ring is empty;
-                    // a capped drain leaves it set so the backlog is resumed
-                    // (epoll is edge-triggered: no new edge would come).
-                    if self.drain_direction(&mut filter, BridgeDirection::AtoB)? {
-                        guard.clear_ready();
-                    }
+                    self.serve_ready(&mut guard, &mut filter, BridgeDirection::AtoB)?;
                 }
-                result = async_b.readable() => {
+                result = async_b.ready(interest) => {
                     let mut guard = result.map_err(Error::Io)?;
-                    if self.drain_direction(&mut filter, BridgeDirection::BtoA)? {
-                        guard.clear_ready();
-                    }
+                    self.serve_ready(&mut guard, &mut filter, BridgeDirection::BtoA)?;
+                }
+                tick = probe.tick() => {
+                    tick.map_err(Error::Io)?;
+                    self.check_health()?;
+                    self.kick_queued()?;
                 }
             }
         }
     }
 
     /// Async version of [`run_iterations`](Self::run_iterations) for tokio runtimes.
+    ///
+    /// # Errors
+    ///
+    /// As [`run_async`](Self::run_async).
     #[cfg(feature = "tokio")]
     pub async fn run_iterations_async<F>(
         &mut self,
@@ -299,24 +367,27 @@ impl Bridge {
         use crate::async_adapters::registered::register_dup;
         use tokio::io::Interest;
 
-        let async_a = register_dup(self.rx_a.as_fd(), Interest::READABLE).map_err(Error::Io)?;
-        let async_b = register_dup(self.rx_b.as_fd(), Interest::READABLE).map_err(Error::Io)?;
+        let interest = Interest::READABLE | Interest::ERROR;
+        let async_a = register_dup(self.rx_a.as_fd(), interest).map_err(Error::Io)?;
+        let async_b = register_dup(self.rx_b.as_fd(), interest).map_err(Error::Io)?;
+        let probe = liveness_probe()?;
 
         for _ in 0..iterations {
             // Bound each iteration with poll_timeout so a quiet bridge still
             // returns control eventually (mirrors run_iterations semantics).
             tokio::select! {
-                result = async_a.readable() => {
+                result = async_a.ready(interest) => {
                     let mut guard = result.map_err(Error::Io)?;
-                    if self.drain_direction(&mut filter, BridgeDirection::AtoB)? {
-                        guard.clear_ready();
-                    }
+                    self.serve_ready(&mut guard, &mut filter, BridgeDirection::AtoB)?;
                 }
-                result = async_b.readable() => {
+                result = async_b.ready(interest) => {
                     let mut guard = result.map_err(Error::Io)?;
-                    if self.drain_direction(&mut filter, BridgeDirection::BtoA)? {
-                        guard.clear_ready();
-                    }
+                    self.serve_ready(&mut guard, &mut filter, BridgeDirection::BtoA)?;
+                }
+                tick = probe.tick() => {
+                    tick.map_err(Error::Io)?;
+                    self.check_health()?;
+                    self.kick_queued()?;
                 }
                 _ = tokio::time::sleep(self.poll_timeout) => {
                     // Idle iteration — fall through to next loop pass.
@@ -326,17 +397,74 @@ impl Bridge {
         Ok(())
     }
 
+    /// Serve one readiness event of the async loops on side `direction`'s
+    /// RX socket: an error event is checked (a removed interface ends the
+    /// run with `ENETDOWN`, a down one is waited out), then ready frames
+    /// are forwarded. Each readiness bit is cleared only once handled, so
+    /// the next wait re-arms via epoll.
+    #[cfg(feature = "tokio")]
+    fn serve_ready<F>(
+        &mut self,
+        guard: &mut tokio::io::unix::AsyncFdReadyGuard<'_, std::os::fd::OwnedFd>,
+        filter: &mut F,
+        direction: BridgeDirection,
+    ) -> Result<(), Error>
+    where
+        F: FnMut(&Packet<'_>, BridgeDirection) -> BridgeAction,
+    {
+        use tokio::io::Ready;
+
+        let ready = guard.ready();
+        if ready.is_error() {
+            guard.clear_ready_matching(Ready::ERROR);
+            let rx = match direction {
+                BridgeDirection::AtoB => &self.rx_a,
+                BridgeDirection::BtoA => &self.rx_b,
+            };
+            crate::afpacket::socket::check_health(rx.as_fd())?;
+        }
+        // Re-arm the read readiness only once the ring is empty; a capped
+        // drain leaves it set so the backlog is resumed (epoll is
+        // edge-triggered: no new edge would come).
+        if (ready.is_readable() || ready.is_read_closed())
+            && self.drain_direction(filter, direction, Kick::NoWait)?
+        {
+            guard.clear_ready_matching(Ready::READABLE | Ready::READ_CLOSED);
+        }
+        Ok(())
+    }
+
+    /// Both sides still usable? A removed interface raises no event when it
+    /// was already down, so the async loops ask once a second.
+    #[cfg(feature = "tokio")]
+    fn check_health(&self) -> Result<(), Error> {
+        crate::afpacket::socket::check_health(self.rx_a.as_fd())?;
+        crate::afpacket::socket::check_health(self.rx_b.as_fd())
+    }
+
+    /// Kick frames a kick left queued (a non-blocking one stops when the
+    /// socket's send buffer is full; an egress that was down keeps them) —
+    /// the async loops do this once a second, the blocking ones when a
+    /// poll times out, so a backlog doesn't wait for the next forwarded
+    /// batch.
+    fn kick_queued(&mut self) -> Result<(), Error> {
+        Kick::NoWait.kick(&mut self.tx_a)?;
+        Kick::NoWait.kick(&mut self.tx_b)
+    }
+
     /// Drain retired blocks from one direction, forwarding through the filter.
     ///
     /// Takes up to [`DRAIN_BATCHES`] blocks, then returns so the other
     /// direction gets its turn: draining until empty never ends while one
     /// side is under sustained load, starving the other. Returns `true` when
     /// the direction had nothing more retired. The leftover backlog keeps
-    /// the RX fd readable, so the next `poll(2)` returns at once.
+    /// the RX fd readable, so the next `poll(2)` returns at once. `kick`
+    /// says whether handing frames to the kernel waits for the device.
     fn drain_direction<F>(
         &mut self,
         filter: &mut F,
         direction: BridgeDirection,
+        kick: Kick,
     ) -> Result<bool, Error>
     where
         F: FnMut(&Packet<'_>, BridgeDirection) -> BridgeAction,
@@ -357,6 +485,9 @@ impl Bridge {
         };
 
         let tx_capacity = tx.frame_capacity();
+        // An MTU changed since the injector read it: follow it within a
+        // second (a raised one is also re-read before a frame is dropped).
+        tx.refresh_link_if_stale();
 
         for _ in 0..DRAIN_BATCHES {
             let Some(batch) = rx.next_batch() else {
@@ -383,7 +514,20 @@ impl Bridge {
                     );
                     continue;
                 }
-                if !queue_frame(tx, pkt.data())? {
+                // Longer than the egress device takes (e.g. a full-size
+                // frame whose re-inserted tag is 802.1ad): the kernel would
+                // refuse it. Its injector drops refused frames anyway
+                // (PACKET_LOSS) — counting them needs this check, which
+                // only Ethernet devices get (see `fits_device`).
+                if !tx.fits_device(pkt.data()) {
+                    *too_large += 1;
+                    tracing::debug!(
+                        pkt_len = pkt.len(),
+                        "Bridge: dropping packet — longer than the egress device accepts"
+                    );
+                    continue;
+                }
+                if !queue_frame(tx, pkt.data(), kick)? {
                     *ring_full += 1;
                     tracing::debug!(
                         pkt_len = pkt.len(),
@@ -391,19 +535,18 @@ impl Bridge {
                     );
                 }
             }
-            tx.flush()?;
+            kick.kick(tx)?;
         }
         Ok(false)
     }
 
-    /// Get forwarding statistics for both directions.
+    /// Forwarding statistics for both directions: each side's ring totals
+    /// since the bridge was created, plus the bridge's own drop counters.
     ///
-    /// # Reads are destructive
-    ///
-    /// Each call invokes [`Capture::stats()`] on both RX sockets, which
-    /// performs a `getsockopt(PACKET_STATISTICS)` — a destructive read that
-    /// resets kernel counters. To accumulate over time, sum the result of
-    /// periodic calls.
+    /// `a_to_b` is the capture on interface A (what was received for
+    /// forwarding to B), `b_to_a` the one on B. Reading never resets
+    /// anything — see [`Capture::stats`]; the counts of a window are
+    /// `later.a_to_b.delta_since(&earlier.a_to_b)`.
     ///
     /// # Errors
     ///
@@ -412,23 +555,6 @@ impl Bridge {
         Ok(BridgeStats {
             a_to_b: self.rx_a.stats()?,
             b_to_a: self.rx_b.stats()?,
-            a_to_b_dropped_too_large: self.drops.a_to_b_too_large,
-            a_to_b_dropped_ring_full: self.drops.a_to_b_ring_full,
-            b_to_a_dropped_too_large: self.drops.b_to_a_too_large,
-            b_to_a_dropped_ring_full: self.drops.b_to_a_ring_full,
-        })
-    }
-
-    /// Accumulated forwarding statistics since this bridge was created.
-    ///
-    /// Each direction's counters are monotonically non-decreasing across
-    /// calls (deltas accumulated via the underlying [`Capture::cumulative_stats`]).
-    /// **Do not mix with [`stats()`](Self::stats)** — see that method's
-    /// docstring for the reason.
-    pub fn cumulative_stats(&self) -> Result<BridgeStats, Error> {
-        Ok(BridgeStats {
-            a_to_b: self.rx_a.cumulative_stats()?,
-            b_to_a: self.rx_b.cumulative_stats()?,
             a_to_b_dropped_too_large: self.drops.a_to_b_too_large,
             a_to_b_dropped_ring_full: self.drops.a_to_b_ring_full,
             b_to_a_dropped_too_large: self.drops.b_to_a_too_large,
@@ -460,11 +586,50 @@ impl Bridge {
 /// Blocks one direction forwards before the other gets its turn.
 const DRAIN_BATCHES: usize = 4;
 
+/// How a drain hands its queued frames to the kernel.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Kick {
+    /// [`Injector::flush`]: wait until the device completed every frame —
+    /// the blocking loops' backpressure.
+    Wait,
+    /// [`Injector::flush_nonblocking`]: return once they are handed over.
+    /// The async loops must not block the runtime thread on a device that
+    /// holds frames (#228).
+    NoWait,
+}
+
+impl Kick {
+    /// Hand `tx`'s queued frames to the kernel. An egress that is down
+    /// (not removed) is waited out: the kick fails in tpacket_snd()'s
+    /// `IFF_UP` check with `ENETDOWN` while the socket is still bound, and
+    /// its frames stay queued — the ring fills and further frames are
+    /// counted ring-full — until a kick after the device is up sends them.
+    /// A removed egress ends the run with `ENETDOWN` (a kick on it fails
+    /// with `ENXIO`).
+    fn kick(self, tx: &mut Injector) -> Result<(), Error> {
+        let res = match self {
+            Kick::Wait => tx.flush(),
+            Kick::NoWait => tx.flush_nonblocking(),
+        };
+        match res {
+            Ok(_) => Ok(()),
+            Err(e) => {
+                crate::afpacket::socket::check_health(tx.as_fd())?;
+                match &e {
+                    Error::Io(io) if io.raw_os_error() == Some(libc::ENETDOWN) => Ok(()),
+                    _ => Err(e),
+                }
+            }
+        }
+    }
+}
+
 /// Copy `data` into a TX slot and queue it. A batch can hold more packets
 /// than the TX ring has frames, and queued frames only leave the ring on a
-/// kick (`tpacket_snd()` runs from `sendto()`), so a full ring is flushed
-/// and the allocation retried once. `false`: still no free frame.
-fn queue_frame(tx: &mut Injector, data: &[u8]) -> Result<bool, Error> {
+/// kick (`tpacket_snd()` runs from `sendto()`), so a full ring is kicked
+/// and the allocation retried once. `false`: still no free frame (with
+/// [`Kick::NoWait`], the frames handed over may not be transmitted yet).
+fn queue_frame(tx: &mut Injector, data: &[u8], kick: Kick) -> Result<bool, Error> {
     for attempt in 0..2 {
         if let Some(mut slot) = tx.allocate(data.len()) {
             slot.data_mut()[..data.len()].copy_from_slice(data);
@@ -473,7 +638,7 @@ fn queue_frame(tx: &mut Injector, data: &[u8]) -> Result<bool, Error> {
             return Ok(true);
         }
         if attempt == 0 {
-            tx.flush()?;
+            kick.kick(tx)?;
         }
     }
     Ok(false)
@@ -521,6 +686,7 @@ pub struct BridgeBuilder {
     profile: RingProfile,
     promiscuous: bool,
     qdisc_bypass: bool,
+    vlan_reinsert: bool,
     poll_timeout: Duration,
     // Per-direction overrides; None = inherit from profile / global setting.
     a_block_size: Option<usize>,
@@ -545,6 +711,7 @@ impl Default for BridgeBuilder {
             profile: RingProfile::Default,
             promiscuous: true,
             qdisc_bypass: true,
+            vlan_reinsert: true,
             poll_timeout: Duration::from_millis(100),
             a_block_size: None,
             a_block_count: None,
@@ -578,6 +745,17 @@ impl BridgeBuilder {
     /// Set the ring buffer profile for both interfaces. Default: [`RingProfile::Default`].
     pub fn profile(mut self, profile: RingProfile) -> Self {
         self.profile = profile;
+        self
+    }
+
+    /// Forward the VLAN tag the kernel stripped from a received frame
+    /// (the captures re-insert it — [`CaptureBuilder::vlan_reinsert`]).
+    /// Default: `true`. A re-inserted tag makes the frame 4 bytes longer: a
+    /// full-size frame with an outer 802.1ad (QinQ) tag is then longer than
+    /// the other side accepts and is dropped (counted too large); `false`
+    /// forwards frames untagged, as 0.31 did. New in 0.32.0.
+    pub fn vlan_reinsert(mut self, enable: bool) -> Self {
+        self.vlan_reinsert = enable;
         self
     }
 
@@ -712,6 +890,7 @@ impl BridgeBuilder {
             .frame_size(a_fs)
             .block_timeout_ms(a_to)
             .promiscuous(self.promiscuous)
+            .vlan_reinsert(self.vlan_reinsert)
             .build()?;
 
         let mut tx_b_builder = InjectorBuilder::default()
@@ -730,6 +909,7 @@ impl BridgeBuilder {
             .frame_size(b_fs)
             .block_timeout_ms(b_to)
             .promiscuous(self.promiscuous)
+            .vlan_reinsert(self.vlan_reinsert)
             .build()?;
 
         let mut tx_a_builder = InjectorBuilder::default()

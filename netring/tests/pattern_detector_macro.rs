@@ -54,15 +54,8 @@ struct Capture {
 }
 
 impl AnomalySink for Capture {
-    fn write(
-        &mut self,
-        kind: &'static str,
-        severity: netring::anomaly::Severity,
-        _ts: Timestamp,
-        _key: Option<&dyn netring::anomaly::Key>,
-        _observations: &[(&'static str, std::borrow::Cow<'_, str>)],
-        metrics: &[(&'static str, f64)],
-    ) {
+    fn write(&mut self, record: &netring::anomaly::sink::AnomalyRecord<'_>) {
+        let (kind, severity, metrics) = (record.kind, record.severity, record.metrics);
         let count = metrics
             .iter()
             .find(|(k, _)| *k == "count")
@@ -114,7 +107,7 @@ fn pattern_detector_macro_threads_through_publish_owned() {
     let mut ctx = Ctx::new(
         None,
         Timestamp::new(0, 0),
-        SourceIdx(0),
+        Some(SourceIdx(0)),
         &mut state,
         &mut sink,
         &mut counters,

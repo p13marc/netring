@@ -400,10 +400,11 @@ impl Dispatcher {
         }
 
         // PHASE 2 (await + write): no `&ctx`/`ptr` borrow is live here.
+        let flow = ctx.flow.zip(ctx.initiator());
         for fut in futures {
             let effects = fut.await?;
             if !effects.is_empty() {
-                effects.apply(&mut *ctx.sink);
+                effects.apply(&mut *ctx.sink, flow);
             }
         }
         Ok(())

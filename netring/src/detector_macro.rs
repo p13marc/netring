@@ -247,7 +247,7 @@ macro_rules! pattern_detector {
                 if let ::std::option::Option::Some(score) = score_opt {
                     let owned =
                         <_ as $crate::anomaly::DetectorScore>::into_anomaly(score, __ctx.ts);
-                    $crate::anomaly::sink::publish_owned(__ctx.sink_mut(), &owned);
+                    __ctx.publish_owned(&owned);
                 }
                 ::std::result::Result::Ok(())
             };

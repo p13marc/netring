@@ -2380,6 +2380,7 @@ pub fn netring::ctx::Ctx<'a>::lookup_icmp_flow(&self, inner: &flowscope::icmp::t
 pub fn netring::ctx::Ctx<'a>::names(&self, ip: core::net::ip_addr::IpAddr) -> alloc::vec::Vec<alloc::string::String>
 pub fn netring::ctx::Ctx<'a>::new_for_bench(ts: flowscope::timestamp::Timestamp, state_map: &'a mut netring::ctx::StateMap, sink: &'a mut dyn netring::anomaly::sink::AnomalySink, counters: &'a mut netring::ctx::CounterRegistry, flow_states: &'a mut netring::ctx::FlowStateRegistry) -> Self
 pub fn netring::ctx::Ctx<'a>::orientation(&self) -> core::option::Option<flowscope::extractor::Orientation>
+pub fn netring::ctx::Ctx<'a>::publish_owned(&mut self, owned: &flowscope::anomaly::OwnedAnomaly)
 pub fn netring::ctx::Ctx<'a>::side(&self) -> core::option::Option<flowscope::event::FlowSide>
 pub fn netring::ctx::Ctx<'a>::sink_mut(&mut self) -> &mut dyn netring::anomaly::sink::AnomalySink
 pub fn netring::ctx::Ctx<'a>::state<T: 'static>(&self) -> core::option::Option<&T>
@@ -5419,6 +5420,7 @@ pub fn netring::ctx::Ctx<'a>::lookup_icmp_flow(&self, inner: &flowscope::icmp::t
 pub fn netring::ctx::Ctx<'a>::names(&self, ip: core::net::ip_addr::IpAddr) -> alloc::vec::Vec<alloc::string::String>
 pub fn netring::ctx::Ctx<'a>::new_for_bench(ts: flowscope::timestamp::Timestamp, state_map: &'a mut netring::ctx::StateMap, sink: &'a mut dyn netring::anomaly::sink::AnomalySink, counters: &'a mut netring::ctx::CounterRegistry, flow_states: &'a mut netring::ctx::FlowStateRegistry) -> Self
 pub fn netring::ctx::Ctx<'a>::orientation(&self) -> core::option::Option<flowscope::extractor::Orientation>
+pub fn netring::ctx::Ctx<'a>::publish_owned(&mut self, owned: &flowscope::anomaly::OwnedAnomaly)
 pub fn netring::ctx::Ctx<'a>::side(&self) -> core::option::Option<flowscope::event::FlowSide>
 pub fn netring::ctx::Ctx<'a>::sink_mut(&mut self) -> &mut dyn netring::anomaly::sink::AnomalySink
 pub fn netring::ctx::Ctx<'a>::state<T: 'static>(&self) -> core::option::Option<&T>

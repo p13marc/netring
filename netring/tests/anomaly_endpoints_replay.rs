@@ -219,3 +219,63 @@ async fn eve_src_is_the_initiator() {
     assert_eq!(v["dest_ip"], "10.0.0.1");
     assert_eq!(v["dest_port"], 80);
 }
+
+/// Review r3: an async effect handler that builds its anomaly from
+/// `ctx.flow` (`OwnedAnomaly::new(..).with_key(&key)` — the address-sorted
+/// key) reached the sinks with the server as the source and
+/// `directional: true`. An owned anomaly whose 5-tuple is the dispatched
+/// flow is now read from that flow's initiator.
+#[tokio::test(flavor = "current_thread")]
+async fn an_effect_anomaly_on_the_flow_is_read_from_the_initiator() {
+    use std::sync::{Arc, Mutex};
+
+    use netring::anomaly::OwnedAnomaly;
+    use netring::anomaly::sink::{AnomalyRecord, AnomalySink};
+    use netring::monitor::Effects;
+    use netring::protocol::event_typed::FlowStarted;
+
+    type Seen = Arc<Mutex<Vec<(Option<SocketAddr>, Option<SocketAddr>, bool)>>>;
+    #[derive(Clone, Default)]
+    struct Recording(Seen);
+    impl AnomalySink for Recording {
+        fn write(&mut self, r: &AnomalyRecord<'_>) {
+            if let Some(e) = r.endpoints {
+                self.0
+                    .lock()
+                    .unwrap()
+                    .push((e.src(), e.dest(), e.directional));
+            }
+        }
+    }
+
+    let dir = tempfile::tempdir().unwrap();
+    let pcap = client_to_server_pcap(dir.path(), &[]);
+    let rec = Recording::default();
+    let seen = Arc::clone(&rec.0);
+    Monitor::builder()
+        .pcap_source(&pcap)
+        .protocol::<Tcp>()
+        .sink(rec)
+        .on_effect::<FlowStarted<Tcp>>(|_evt: &FlowStarted<Tcp>, ctx: &Ctx<'_>| {
+            let key = ctx.flow;
+            let ts = ctx.ts;
+            async move {
+                let mut a = OwnedAnomaly::new(
+                    flowscope::DetectorKind::Other("effect"),
+                    Severity::Warning.into(),
+                    ts,
+                );
+                if let Some(k) = key {
+                    a = a.with_key(&k);
+                }
+                Ok(Effects::emit(a))
+            }
+        })
+        .build()
+        .unwrap()
+        .replay()
+        .await
+        .unwrap();
+    let seen = seen.lock().unwrap();
+    assert_eq!(*seen, vec![(Some(CLIENT), Some(SERVER), true)]);
+}

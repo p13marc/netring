@@ -4080,7 +4080,7 @@ impl MonitorBuilder {
                     if !emitted.is_empty() {
                         let sink = ctx.sink_mut();
                         for owned in &emitted {
-                            crate::anomaly::sink::publish_owned(sink, owned);
+                            crate::anomaly::sink::publish_detector_owned(sink, owned);
                         }
                     }
                     Ok(())

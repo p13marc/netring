@@ -481,6 +481,19 @@ impl<'a> Ctx<'a> {
         Some(map.get_or_default(&key, ts))
     }
 
+    /// Publish an owned anomaly (a detector's
+    /// [`DetectorScore::into_anomaly`](flowscope::DetectorScore::into_anomaly),
+    /// an anomaly built with `OwnedAnomaly::new(..)`) through the sink chain,
+    /// like [`publish_owned`](crate::anomaly::sink::publish_owned) — and when
+    /// its 5-tuple is the current flow (either way round), read from the
+    /// flow's [initiator](Self::initiator) (directional); otherwise as
+    /// stored, not directional. New in 0.32.0.
+    pub fn publish_owned(&mut self, owned: &flowscope::OwnedAnomaly) {
+        let current = self.flow.zip(self.initiator());
+        let endpoints = crate::anomaly::sink::Endpoints::from_owned_in_flow(owned, current);
+        crate::anomaly::sink::publish_owned_with(self.sink, owned, endpoints);
+    }
+
     /// Shortcut: begin an anomaly emission keyed by `kind` + `severity`
     /// using `self.ts` as the timestamp. Equivalent to
     /// `self.sink_mut().begin(kind, severity, self.ts)` but reads

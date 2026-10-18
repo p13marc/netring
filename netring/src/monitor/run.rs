@@ -2111,7 +2111,7 @@ async fn dispatch_tracked_event(
         cell.registry.observe_event(&evt, &mut cell.out);
         if !cell.out.is_empty() {
             for owned in cell.out.drain(..) {
-                crate::anomaly::sink::publish_owned(sink, &owned);
+                crate::anomaly::sink::publish_detector_owned(sink, &owned);
             }
         }
     }

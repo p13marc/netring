@@ -209,6 +209,20 @@ impl AnomalySink for MySink {
 `ctx.emit(..).with_key(&flow_key)` needs no change: the writer knows the
 current flow and reads it initiator-first.
 
+**Owned anomalies.** An `OwnedAnomaly` doesn't say how its 5-tuple was
+filled, so `publish_owned` / `Endpoints::from_owned` keep it as stored and
+mark it `directional: false`. When it is the flow being dispatched (an
+effect's anomaly, a `pattern_detector!` score, `ctx.publish_owned(&a)`),
+the Monitor reads it from that flow's initiator. Build one for another
+flow — or to be sure — from the initiator yourself:
+
+```rust
+// 0.31
+let a = OwnedAnomaly::new(kind, sev, ts).with_key(&key);
+// 0.32 — the initiator first
+let a = OwnedAnomaly::new(kind, sev, ts).with_flow(&key, ctx.initiator().unwrap_or_default());
+```
+
 ### `Dedup::keep_raw` (#217)
 
 ```rust

@@ -127,15 +127,17 @@ impl Endpoints {
         Self::new(key.a, key.b, key.proto_str(), false)
     }
 
-    /// The 5-tuple fields of an owned anomaly, which flowscope's
-    /// detectors and [`flowscope::OwnedAnomaly::with_flow`] fill from the
-    /// initiator (directional). `None` when it carries no address.
+    /// The 5-tuple fields of an owned anomaly, as stored — **not**
+    /// directional: an `OwnedAnomaly` doesn't say how they were filled
+    /// (`OwnedAnomaly::with_key` copies an address-sorted flow key, `src`
+    /// being just the lower address; `with_flow` reads it from the
+    /// initiator). `None` when it carries no address.
     ///
-    /// Always `directional: true` — an `OwnedAnomaly` doesn't say how its
-    /// fields were filled. One built with `OwnedAnomaly::with_key` from an
-    /// address-sorted flow key (a custom detector) is therefore labelled
-    /// directional although its `src` is just the lower address; build it
-    /// with `with_flow(&key, initiator)` instead.
+    /// Where the flow is known, the Monitor does better: an owned
+    /// anomaly whose 5-tuple is the flow being dispatched (either way
+    /// round) is read from that flow's initiator
+    /// ([`Ctx::publish_owned`](crate::ctx::Ctx::publish_owned), effects),
+    /// and flowscope's own detectors fill it initiator-first.
     pub fn from_owned(anomaly: &flowscope::OwnedAnomaly) -> Option<Self> {
         if anomaly.src_ip.is_none() && anomaly.dest_ip.is_none() {
             return None;
@@ -146,8 +148,28 @@ impl Endpoints {
             dest_ip: anomaly.dest_ip,
             dest_port: anomaly.dest_port,
             proto: anomaly.proto,
-            directional: true,
+            directional: false,
         })
+    }
+
+    /// [`Self::from_owned`], read from the initiator when the anomaly's
+    /// 5-tuple is `flow` (either way round — the evidence that `src` /
+    /// `dest` are that flow's endpoints); as stored and not directional
+    /// otherwise.
+    pub(crate) fn from_owned_in_flow(
+        anomaly: &flowscope::OwnedAnomaly,
+        flow: Option<(FiveTupleKey, Orientation)>,
+    ) -> Option<Self> {
+        let stored = Self::from_owned(anomaly)?;
+        if let (Some((key, initiator)), Some(src), Some(dest)) = (flow, stored.src(), stored.dest())
+        {
+            let (i, r) = key.oriented(initiator);
+            let same_proto = stored.proto.is_none_or(|p| key.proto_str() == Some(p));
+            if same_proto && ((src, dest) == (i, r) || (src, dest) == (r, i)) {
+                return Some(Self::new(i, r, key.proto_str(), true));
+            }
+        }
+        Some(stored)
     }
 
     /// `src` as a socket address (both the address and the port known).
@@ -338,12 +360,33 @@ impl<T: AnomalySink + Sized> AnomalySinkExt for T {}
 /// - Observations and metrics are forwarded as borrowed slices —
 ///   no copy beyond the `Cow::Borrowed` re-wrap.
 /// - The record carries no `key`; the anomaly's 5-tuple fields become
-///   its [`Endpoints`] ([`Endpoints::from_owned`], directional — flowscope
-///   fills them from the flow's initiator, or the anomaly's subject). A
-///   custom detector that filled them with `OwnedAnomaly::with_key` on an
-///   address-sorted flow key is labelled directional all the same: fill
-///   them with `OwnedAnomaly::with_flow(&key, initiator)`.
+///   its [`Endpoints`] as stored, **not directional**
+///   ([`Endpoints::from_owned`]): nothing here says which endpoint opened
+///   the flow. From a handler, publish with
+///   [`Ctx::publish_owned`](crate::ctx::Ctx::publish_owned), which reads
+///   the anomaly from the current flow's initiator when its 5-tuple is
+///   that flow.
 pub fn publish_owned(sink: &mut dyn AnomalySink, owned: &flowscope::OwnedAnomaly) {
+    publish_owned_with(sink, owned, Endpoints::from_owned(owned));
+}
+
+/// [`publish_owned`] for an anomaly flowscope's own detectors emitted:
+/// they fill the 5-tuple from the flow's initiator (or the anomaly's
+/// subject), so its endpoints are directional.
+pub(crate) fn publish_detector_owned(sink: &mut dyn AnomalySink, owned: &flowscope::OwnedAnomaly) {
+    let endpoints = Endpoints::from_owned(owned).map(|e| Endpoints {
+        directional: true,
+        ..e
+    });
+    publish_owned_with(sink, owned, endpoints);
+}
+
+/// [`publish_owned`] with the endpoints decided by the caller.
+pub(crate) fn publish_owned_with(
+    sink: &mut dyn AnomalySink,
+    owned: &flowscope::OwnedAnomaly,
+    endpoints: Option<Endpoints>,
+) {
     // Translate the SmallVec<Cow<'static, str>> observations into the
     // borrowed slice shape AnomalySink::write expects. The internal
     // Cow stays borrowed so no clone happens here.
@@ -365,7 +408,7 @@ pub fn publish_owned(sink: &mut dyn AnomalySink, owned: &flowscope::OwnedAnomaly
     let mut record = AnomalyRecord::new(kind, owned.severity.into(), owned.ts)
         .with_observations(&observations)
         .with_metrics(&metrics);
-    record.endpoints = Endpoints::from_owned(owned);
+    record.endpoints = endpoints;
     sink.write(&record);
 }
 
@@ -790,13 +833,15 @@ mod tests {
             (owned.src_ip, owned.src_port),
             (Some(key.b.ip()), Some(key.b.port()))
         );
+        // Published on its own, the order is kept but not claimed
+        // directional: an OwnedAnomaly can't say how it was filled.
         let mut cap = CaptureSink::default();
         let calls = Rc::clone(&cap.calls);
         publish_owned(&mut cap, &owned);
         let e = calls.borrow()[0].endpoints.unwrap();
         assert_eq!(e.src(), Some(key.b));
         assert_eq!(e.dest(), Some(key.a));
-        assert!(e.directional);
+        assert!(!e.directional);
         // Nothing to say → no endpoints.
         let bare = flowscope::OwnedAnomaly::new(
             flowscope::DetectorKind::Other("x"),
@@ -804,6 +849,60 @@ mod tests {
             Timestamp::new(0, 0),
         );
         assert_eq!(Endpoints::from_owned(&bare), None);
+    }
+
+    /// Review r3: a non-directional record copied to an owned anomaly and
+    /// published again stays non-directional (it came back directional).
+    #[test]
+    fn a_non_directional_record_stays_so_through_an_owned_copy() {
+        let key = server_first_key();
+        let mut sink = NoopSink;
+        let owned = sink
+            .begin("K", Severity::Info, Timestamp::new(0, 0))
+            .with_key(&key)
+            .emit_owned();
+        let mut cap = CaptureSink::default();
+        let calls = Rc::clone(&cap.calls);
+        publish_owned(&mut cap, &owned);
+        let e = calls.borrow()[0].endpoints.unwrap();
+        assert_eq!(e.src(), Some(key.a));
+        assert!(!e.directional);
+    }
+
+    /// An owned anomaly whose 5-tuple is the dispatched flow — stored
+    /// either way round — is read from that flow's initiator; any other
+    /// is kept as stored, not directional.
+    #[test]
+    fn owned_endpoints_follow_the_flow_they_belong_to() {
+        let key = server_first_key();
+        let flow = Some((key, Orientation::Reverse));
+        let swapped = FiveTupleKey::new(key.proto, key.b, key.a);
+        for k in [key, swapped] {
+            let owned = flowscope::OwnedAnomaly::new(
+                flowscope::DetectorKind::Other("x"),
+                flowscope::event::Severity::Info,
+                Timestamp::new(0, 0),
+            )
+            .with_key(&k);
+            let e = Endpoints::from_owned_in_flow(&owned, flow).unwrap();
+            assert_eq!(e.src(), Some(key.b), "{k:?}");
+            assert!(e.directional);
+        }
+        let other = FiveTupleKey::new(key.proto, key.a, sock("10.0.0.9:40001"));
+        let owned = flowscope::OwnedAnomaly::new(
+            flowscope::DetectorKind::Other("x"),
+            flowscope::event::Severity::Info,
+            Timestamp::new(0, 0),
+        )
+        .with_key(&other);
+        let e = Endpoints::from_owned_in_flow(&owned, flow).unwrap();
+        assert_eq!(e.src(), Some(other.a));
+        assert!(!e.directional);
+        // flowscope's detectors: trusted initiator-first.
+        let mut cap = CaptureSink::default();
+        let calls = Rc::clone(&cap.calls);
+        publish_detector_owned(&mut cap, &owned);
+        assert!(calls.borrow()[0].endpoints.unwrap().directional);
     }
 
     /// A hand-built record: `with_key` fills canonical endpoints unless

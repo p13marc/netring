@@ -200,7 +200,12 @@ has an old → new snippet there.
   `src_*` filters, the IOC side label, the aggregate traffic matrix, Sigma
   events and `eve_tls_record` named the server as the source. Anomalies
   emitted with `ctx.emit(..).with_key(&flow)` are read from the current
-  flow's initiator; the others take it from the stats or `Ctx`.
+  flow's initiator; the others take it from the stats or `Ctx`. An owned
+  anomaly (an effect's, a `pattern_detector!` score's, one published with
+  the new `Ctx::publish_owned`) whose 5-tuple is the dispatched flow is
+  read from that flow's initiator; elsewhere an owned anomaly's 5-tuple is
+  kept as stored and not claimed directional (flowscope's own detectors
+  fill it initiator-first).
 - **IPFIX counted captured frame bytes** (#217): IE 1 / 85 are IP octets;
   the wire bytes go to IE 352 / 353.
 
@@ -215,7 +220,7 @@ has an old → new snippet there.
 - `PacketSource::check_health` (provided), `XdpSocket::check_health`,
   `Injector::flush_nonblocking` (returns the frames the kick handed over),
   `Injector::queued_count`, `InjectorBuilder::drop_rejected`,
-  `BridgeBuilder::vlan_reinsert`.
+  `BridgeBuilder::vlan_reinsert`, `Ctx::publish_owned`.
 - `UmemPlacement`, `RssGuard`, `RssState`, `RssConfig::state()`.
 - `AnomalyRecord`, `Endpoints`, `AnomalyWriter::{with_flow,
   with_initiator, with_endpoints}`, `Ctx::{initiator, endpoints}`,

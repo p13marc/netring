@@ -145,7 +145,11 @@ has an old → new snippet there.
   (the injector follows the kernel's TX position, reading only the slots
   each kick took — O(1) per frame, not a scan of the ring), and `send` on a
   full ring whose kick can hand nothing over waits for the device to free
-  room instead of kicking again.
+  room instead of kicking again. When the device drops the frame being
+  sent (`ENOBUFS`: no carrier, a qdisc or veth backlog at its limit), the
+  kernel keeps it queued and its freed skb raises a writability edge of
+  its own: `send` and `wait_drained` then kick again on a timer (1 ms,
+  doubling to 100 ms) rather than on writability.
 - **`Injector::allocate` skipped to any free slot further on** — past a
   slot handed out but not sent, or a frame still in flight — and the
   kernel, which sends strictly in ring order, then held every frame queued

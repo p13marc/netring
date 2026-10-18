@@ -317,3 +317,99 @@ async fn send_reuses_the_slot_of_a_refused_frame() {
         .await
         .expect("every frame leaves");
 }
+
+/// Review r3: when the device drops the frame at the kernel's TX position
+/// (`NET_XMIT_DROP`), tpacket_snd() frees its skb — whose destructor makes
+/// the socket writable — puts the frame back as queued and fails with
+/// `ENOBUFS`. The kick reported "nothing handed over", the writability
+/// wait returned at once on that self-made edge, and `send` / `wait_drained`
+/// kicked again at 100% CPU. They back off on a timer now (1 ms doubling to
+/// 100 ms). Here: a veth whose peer is down, with qdisc bypass (no
+/// carrier: every frame dropped).
+#[test]
+fn a_device_that_drops_frames_does_not_spin_send() {
+    let ok = |args: &[&str]| {
+        std::process::Command::new("ip")
+            .args(args)
+            .status()
+            .is_ok_and(|s| s.success())
+    };
+    let _ = std::process::Command::new("ip")
+        .args(["link", "delete", "nrtxnb0"])
+        .output();
+    if !ok(&[
+        "link", "add", "nrtxnb0", "type", "veth", "peer", "name", "nrtxnb1",
+    ]) || !ok(&["link", "set", "nrtxnb0", "up"])
+    {
+        eprintln!("skip: cannot create a veth pair (needs CAP_NET_ADMIN)");
+        return;
+    }
+    let rt = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .unwrap();
+    let used = rt.block_on(async {
+        let inj = Injector::builder()
+            .interface("nrtxnb0")
+            .frame_count(8)
+            .qdisc_bypass(true)
+            .build()
+            .expect("injector");
+        let mut tx = AsyncInjector::new(inj).expect("wrap");
+        for _ in 0..8 {
+            tx.send(&tx_frame(64)).await.expect("queue");
+        }
+        let c0 = thread_cpu();
+        let res = tokio::time::timeout(Duration::from_secs(1), tx.send(&tx_frame(64))).await;
+        assert!(res.is_err(), "every frame is dropped: no slot frees");
+        thread_cpu() - c0
+    });
+    let _ = ok(&["link", "delete", "nrtxnb0"]);
+    assert!(
+        used < Duration::from_millis(200),
+        "send spun: {used:?} CPU in 1 s"
+    );
+}
+
+/// The same with a qdisc that drops at its limit: a `plug` holding at most
+/// 100 bytes takes the first frame and drops the rest. `wait_drained` and
+/// `send` on the full ring wait without spinning.
+#[tokio::test(flavor = "current_thread")]
+async fn a_qdisc_at_its_limit_does_not_spin_the_waits() {
+    let Some(dummy) = PluggedDummy::create_with_limit("nrtxlim0", 100) else {
+        eprintln!("skip: cannot create a plugged dummy (needs CAP_NET_ADMIN, sch_plug)");
+        return;
+    };
+    let inj = Injector::builder()
+        .interface(&dummy.0)
+        .frame_count(8)
+        .build()
+        .expect("injector");
+    let mut tx = AsyncInjector::new(inj).expect("wrap");
+    for _ in 0..4 {
+        tx.send(&tx_frame(64)).await.expect("queue");
+    }
+    tx.flush().await.expect("kick");
+    let c0 = thread_cpu();
+    let res = tx.wait_drained(Duration::from_secs(1)).await;
+    let used = thread_cpu() - c0;
+    assert!(res.is_err(), "the plug holds one frame and drops the next");
+    assert!(
+        used < Duration::from_millis(200),
+        "wait_drained spun: {used:?} CPU in 1 s"
+    );
+    while tx.send(&tx_frame(64)).await.is_ok() && tx.get_ref().queued_count() < 7 {}
+    let c0 = thread_cpu();
+    let res = tokio::time::timeout(Duration::from_secs(1), tx.send(&tx_frame(64))).await;
+    let used = thread_cpu() - c0;
+    assert!(res.is_err(), "no slot frees");
+    assert!(
+        used < Duration::from_millis(200),
+        "send spun: {used:?} CPU in 1 s"
+    );
+    // Once the plug lets frames through, everything drains.
+    dummy.release().expect("release");
+    tx.wait_drained(Duration::from_secs(3))
+        .await
+        .expect("drains once the qdisc takes frames again");
+}

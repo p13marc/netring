@@ -1201,9 +1201,10 @@ impl XdpSocket {
         const KERNEL_TX_BATCH: u32 = 32;
         let max_kicks = self.tx.size() / KERNEL_TX_BATCH + 1;
         for _ in 0..max_kicks {
-            let again = crate::syscall::sendto_kick_status(self.fd.as_raw_fd(), libc::MSG_DONTWAIT)
-                .map_err(Error::Io)?;
-            if !again {
+            let status =
+                crate::syscall::sendto_kick_status(self.fd.as_raw_fd(), libc::MSG_DONTWAIT)
+                    .map_err(Error::Io)?;
+            if status != crate::syscall::KickStatus::Again {
                 break;
             }
         }

@@ -189,6 +189,12 @@ impl PluggedDummy {
 
     /// The interface `name` (≤ 15 bytes).
     pub fn create_named(name: &str) -> Option<Self> {
+        Self::create_with_limit(name, 1 << 20)
+    }
+
+    /// The interface `name`, whose plug holds at most `limit` bytes: it
+    /// drops what comes on top (`NET_XMIT_DROP`).
+    pub fn create_with_limit(name: &str, limit: u32) -> Option<Self> {
         use std::process::Command;
         let name = name.to_string();
         let _ = Command::new("ip").args(["link", "delete", &name]).output();
@@ -206,7 +212,13 @@ impl PluggedDummy {
             return None;
         }
         let ifindex = nix::net::if_::if_nametoindex(d.0.as_str()).ok()?;
-        add_plug_qdisc(ifindex).ok()?;
+        plug_qdisc_request(
+            ifindex,
+            0, // TCQ_PLUG_BUFFER
+            (libc::NLM_F_REQUEST | libc::NLM_F_ACK | libc::NLM_F_CREATE | libc::NLM_F_EXCL) as u16,
+            limit,
+        )
+        .ok()?;
         Some(d)
     }
 }
@@ -224,7 +236,12 @@ impl PluggedDummy {
     pub fn block(&self) -> std::io::Result<()> {
         let ifindex =
             nix::net::if_::if_nametoindex(self.0.as_str()).map_err(std::io::Error::from)?;
-        plug_qdisc_request(ifindex, 0, (libc::NLM_F_REQUEST | libc::NLM_F_ACK) as u16)
+        plug_qdisc_request(
+            ifindex,
+            0,
+            (libc::NLM_F_REQUEST | libc::NLM_F_ACK) as u16,
+            1 << 20,
+        )
     }
 }
 
@@ -244,6 +261,7 @@ pub fn add_plug_qdisc(ifindex: u32) -> std::io::Result<()> {
         ifindex,
         0, // TCQ_PLUG_BUFFER
         (libc::NLM_F_REQUEST | libc::NLM_F_ACK | libc::NLM_F_CREATE | libc::NLM_F_EXCL) as u16,
+        1 << 20,
     )
 }
 
@@ -254,12 +272,13 @@ pub fn release_plug_qdisc(ifindex: u32) -> std::io::Result<()> {
         ifindex,
         2, // TCQ_PLUG_RELEASE_INDEFINITE
         (libc::NLM_F_REQUEST | libc::NLM_F_ACK) as u16,
+        1 << 20,
     )
 }
 
 /// One RTM_NEWQDISC for the root `plug` qdisc of `ifindex`, with
-/// `tc_plug_qopt { action, limit: 1 MiB }`.
-fn plug_qdisc_request(ifindex: u32, action: i32, flags: u16) -> std::io::Result<()> {
+/// `tc_plug_qopt { action, limit }`.
+fn plug_qdisc_request(ifindex: u32, action: i32, flags: u16, limit: u32) -> std::io::Result<()> {
     use std::os::fd::{AsRawFd, FromRawFd, OwnedFd};
 
     fn attr(buf: &mut Vec<u8>, kind: u16, data: &[u8]) {
@@ -285,7 +304,7 @@ fn plug_qdisc_request(ifindex: u32, action: i32, flags: u16) -> std::io::Result<
     // struct tc_plug_qopt { action: i32, limit: u32 }
     let mut qopt = Vec::new();
     qopt.extend_from_slice(&action.to_ne_bytes());
-    qopt.extend_from_slice(&(1u32 << 20).to_ne_bytes());
+    qopt.extend_from_slice(&limit.to_ne_bytes());
     attr(&mut body, TCA_OPTIONS, &qopt);
 
     let mut msg = Vec::new();

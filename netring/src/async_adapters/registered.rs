@@ -106,6 +106,47 @@ pub(crate) struct ProbeTimer {
 }
 
 impl ProbeTimer {
+    /// A timer that doesn't fire until [`arm_once`](Self::arm_once). Must
+    /// be called in the context of a tokio runtime.
+    pub(crate) fn disarmed() -> io::Result<Self> {
+        let timer = Self::new(Duration::from_secs(1))?;
+        timer.set(Duration::ZERO, Duration::ZERO)?;
+        Ok(timer)
+    }
+
+    /// Fire once, `after` (at least 1 ns) from now; an expiry not yet
+    /// waited for is discarded.
+    pub(crate) fn arm_once(&self, after: Duration) -> io::Result<()> {
+        self.set(after.max(Duration::from_nanos(1)), Duration::ZERO)
+    }
+
+    /// `timerfd_settime`: first expiry `value` from now (zero disarms),
+    /// then every `interval` (zero: once). Resets the expiry count.
+    fn set(&self, value: Duration, interval: Duration) -> io::Result<()> {
+        let ts = |d: Duration| libc::timespec {
+            tv_sec: d.as_secs().min(libc::time_t::MAX as u64) as libc::time_t,
+            tv_nsec: d.subsec_nanos() as libc::c_long,
+        };
+        let spec = libc::itimerspec {
+            it_interval: ts(interval),
+            it_value: ts(value),
+        };
+        // SAFETY: `spec` is a valid itimerspec; a null old-value pointer is
+        // allowed; the fd is the timerfd this timer owns.
+        if unsafe {
+            libc::timerfd_settime(
+                self.fd.get_ref().as_raw_fd(),
+                0,
+                &spec,
+                std::ptr::null_mut(),
+            )
+        } < 0
+        {
+            return Err(io::Error::last_os_error());
+        }
+        Ok(())
+    }
+
     /// Fire every `every` (at least 1 ns), the first time one period from
     /// now. Must be called in the context of a tokio runtime.
     pub(crate) fn new(every: Duration) -> io::Result<Self> {

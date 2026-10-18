@@ -164,6 +164,22 @@ impl Drop for TxSlot<'_> {
 
 // ── Injector ───────────────────────────────────────────────────────────────
 
+/// What a non-blocking kick did ([`Injector::kick`]).
+#[derive(Debug, Clone, Copy, Default)]
+pub(crate) struct Kick {
+    /// Frames the kernel took: handed to the device, or dropped as
+    /// refused.
+    pub(crate) taken: usize,
+    /// The device (or its qdisc) dropped the frame at the kernel's TX
+    /// position (`ENOBUFS`: no carrier, a queue at its limit). The kernel
+    /// put it back as queued and tries it again on the next kick — but it
+    /// freed its skb, which wakes writability waiters: a wait for
+    /// writability after such a kick returns at once, so the next kick
+    /// must wait for time instead.
+    #[cfg_attr(not(feature = "tokio"), allow(dead_code))]
+    pub(crate) device_dropped: bool,
+}
+
 /// AF_PACKET packet injector (`TPACKET_V2` TX frame ring).
 ///
 /// Implements [`PacketSink`](crate::traits::PacketSink) and [`AsFd`].
@@ -580,15 +596,24 @@ impl Injector {
     /// Returns [`Error::Io`] if the underlying `sendto` syscall fails with
     /// a non-transient error.
     pub fn flush_nonblocking(&mut self) -> Result<usize, Error> {
+        self.kick().map(|k| k.taken)
+    }
+
+    /// [`flush_nonblocking`](Self::flush_nonblocking), saying whether the
+    /// device dropped the frame at the kernel's TX position (`ENOBUFS`).
+    pub(crate) fn kick(&mut self) -> Result<Kick, Error> {
         if self.queue.pending == 0 {
-            return Ok(0);
+            return Ok(Kick::default());
         }
         let res = crate::syscall::sendto_kick_status(self.fd.as_raw_fd(), libc::MSG_DONTWAIT);
         // From the ring, not from the return value: tpacket_snd() reports
         // a kick the send buffer cut short as a success (#228 review).
         let taken = self.advance_head();
-        res.map_err(Error::Io)?;
-        Ok(taken)
+        let status = res.map_err(Error::Io)?;
+        Ok(Kick {
+            taken,
+            device_dropped: status == crate::syscall::KickStatus::NoBufs,
+        })
     }
 }
 

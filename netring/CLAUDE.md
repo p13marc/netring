@@ -22,10 +22,8 @@ built on AF_PACKET with TPACKET_V3 (block-based mmap ring buffers) and AF_XDP.
 
 **0.32.0 — unreleased** (breaking; milestone "0.32" — the 0.31.2 audit
 follow-ups #186, #208–#217, #222–#228; CHANGELOG `## 0.32.0`,
-`docs/MIGRATING_0.31_TO_0.32.md`; adopts **flowscope 0.26** — until it is
-on crates.io the workspace and `netring/fuzz` carry a temporary
-`[patch.crates-io] flowscope = { path = … }` that must go before publishing;
-ships with **netring-exporters 0.9.0**). Built on two branches merged for
+`docs/MIGRATING_0.31_TO_0.32.md`; depends on **flowscope 0.26.0**
+(published 2026-10-18); ships with **netring-exporters 0.9.0**). Built on two branches merged for
 the release: the capture layer (`s2-capture`) and the Monitor / runtime
 (`s3-monitor`). Key design points when touching the code:
 
@@ -1406,12 +1404,6 @@ Cargo features unique to 0.21:
 
 For the `0.32.0` release (breaking; flowscope 0.26.0 must be on crates.io
 first; `netring-exporters` 0.9.0 is published after netring):
-
-0. Remove the temporary `[patch.crates-io] flowscope = { path = … }` from
-   the workspace `Cargo.toml` and from `netring/fuzz/Cargo.toml`, run
-   `cargo update -p flowscope` in both, bump netring to 0.32.0 and
-   netring-exporters to 0.9.0 (its `netring` dependency to `0.32`), and
-   regenerate the public-API locks.
 
 1. Merge the 0.32.0 PR once `ci.yml` and the integration lane are green
    (the integration lane posts failures as a PR comment).

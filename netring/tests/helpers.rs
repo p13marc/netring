@@ -132,6 +132,50 @@ impl Drop for VethPair {
     }
 }
 
+/// A dummy interface (`ip link add <name> type dummy`), deleted on drop.
+/// Requires `CAP_NET_ADMIN`; the constructors return `None` without it.
+pub struct Dummy(pub String);
+
+impl Dummy {
+    /// `name` (≤ 15 bytes), up, with `mtu` when given.
+    pub fn create(name: &str, mtu: Option<u32>) -> Option<Self> {
+        let _ = Command::new("ip").args(["link", "delete", name]).output();
+        let ok = |args: &[&str]| {
+            Command::new("ip")
+                .args(args)
+                .status()
+                .is_ok_and(|s| s.success())
+        };
+        if !ok(&["link", "add", name, "type", "dummy"]) {
+            return None;
+        }
+        let d = Self(name.to_string());
+        if let Some(mtu) = mtu
+            && !ok(&["link", "set", name, "mtu", &mtu.to_string()])
+        {
+            return None;
+        }
+        ok(&["link", "set", name, "up"]).then_some(d)
+    }
+
+    /// `ip link set <name> <args…>` (e.g. `["mtu", "3000"]`, `["down"]`).
+    pub fn set(&self, args: &[&str]) -> bool {
+        Command::new("ip")
+            .args(["link", "set", &self.0])
+            .args(args)
+            .status()
+            .is_ok_and(|s| s.success())
+    }
+}
+
+impl Drop for Dummy {
+    fn drop(&mut self) {
+        let _ = Command::new("ip")
+            .args(["link", "delete", &self.0])
+            .output();
+    }
+}
+
 /// A dummy interface, up, whose root qdisc is `plug` — it holds every frame
 /// until released, so the frames an injector sends stay in flight. Deleted
 /// on drop.

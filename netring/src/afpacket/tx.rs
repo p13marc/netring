@@ -398,6 +398,10 @@ impl Injector {
     /// slot in the ring is currently in `TP_STATUS_SEND_REQUEST` /
     /// `TP_STATUS_SENDING` (all frames pending kernel transmission).
     ///
+    /// A slot the kernel refused (`TP_STATUS_WRONG_FORMAT`, with
+    /// [`drop_rejected(false)`](InjectorBuilder::drop_rejected)) is reset
+    /// and handed out: the kernel's TX position waits on it.
+    ///
     /// Worst-case O(N) scan but typical O(1) on the happy path.
     pub fn allocate(&mut self, len: usize) -> Option<TxSlot<'_>> {
         if len > self.frame_size - self.data_offset {
@@ -405,11 +409,23 @@ impl Injector {
         }
 
         // Scan up to frame_count slots from current_frame.
-        let mut wrong_format_seen = 0u32;
         for _ in 0..self.frame_count {
             let status = self.read_frame_status(self.current_frame);
             match status {
-                ffi::TP_STATUS_AVAILABLE => {
+                ffi::TP_STATUS_AVAILABLE | ffi::TP_STATUS_WRONG_FORMAT => {
+                    if status == ffi::TP_STATUS_WRONG_FORMAT {
+                        // The kernel refused this frame
+                        // (`drop_rejected(false)`) and its TX position
+                        // stays on the slot: the frames queued after it
+                        // leave only once this slot is queued again. So
+                        // it is the one to fill — skipping it left a ring
+                        // whose kicks hand over nothing, and a `send` that
+                        // waited for a slot forever.
+                        tracing::warn!(
+                            "AF_PACKET TX: the kernel rejected a frame (WRONG_FORMAT) — reusing its slot"
+                        );
+                        self.reset_slot(self.current_frame);
+                    }
                     let slot = TxSlot {
                         frame_ptr: self.frame_ptr(self.current_frame),
                         data_offset: self.data_offset,
@@ -421,18 +437,6 @@ impl Injector {
                     self.current_frame = (self.current_frame + 1) % self.frame_count;
                     return Some(slot);
                 }
-                ffi::TP_STATUS_WRONG_FORMAT => {
-                    // Kernel rejected this slot; reset it and continue
-                    // scanning. We do not reuse the slot in this allocate()
-                    // call because the caller didn't ask to retry — they
-                    // called allocate() once and we should give them a
-                    // genuinely-available frame, not a recovered-rejected
-                    // one (which might trick them into thinking nothing
-                    // went wrong).
-                    self.reset_slot(self.current_frame);
-                    wrong_format_seen += 1;
-                    self.current_frame = (self.current_frame + 1) % self.frame_count;
-                }
                 _ => {
                     // SEND_REQUEST or SENDING — kernel hasn't reclaimed.
                     // Keep scanning in case a later slot is AVAILABLE
@@ -441,13 +445,6 @@ impl Injector {
                     self.current_frame = (self.current_frame + 1) % self.frame_count;
                 }
             }
-        }
-
-        if wrong_format_seen > 0 {
-            tracing::warn!(
-                count = wrong_format_seen,
-                "AF_PACKET TX: kernel rejected frames (WRONG_FORMAT) — check packet contents"
-            );
         }
         None
     }

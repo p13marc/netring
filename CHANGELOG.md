@@ -162,7 +162,10 @@ has an old → new snippet there.
   now let the kernel drop a refused frame and go on (`PACKET_LOSS`;
   `InjectorBuilder::drop_rejected(false)` for the old stop-and-report),
   and `Bridge` drops (and counts) frames longer than the egress device
-  accepts before queueing them.
+  accepts before queueing them. With `drop_rejected(false)`,
+  `Injector::allocate` hands out the refused slot it resets — where the
+  kernel's TX position waits — instead of skipping it (an `AsyncInjector`
+  `send` then waited forever with a free slot).
 
 ### Fixed — Monitor
 

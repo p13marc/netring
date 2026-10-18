@@ -377,7 +377,8 @@ header) is now dropped by the kernel and the kick goes on — 0.31's kick
 stopped there with `EMSGSIZE` / `EINVAL` and left the frames behind it
 queued. `InjectorBuilder::drop_rejected(false)` restores the
 stop-and-report behaviour (`Injector::rejected_slots()` counts the
-refused slots).
+refused slots until `allocate` hands the slot out again — it now reuses a
+refused slot first, since the kernel's TX position waits on it).
 
 ### Reads, statistics, timing
 

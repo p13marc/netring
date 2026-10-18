@@ -273,3 +273,47 @@ async fn tx_waits_dont_spin_with_tx_timestamps() {
         "send spun: {used:?} CPU in 1 s"
     );
 }
+
+/// Review r3: with `drop_rejected(false)` the kernel leaves a refused
+/// frame's slot `WRONG_FORMAT` and its TX position on it. `allocate` reset
+/// that slot but didn't hand it out, so the frames queued after it could
+/// never leave: `send` kicked (nothing to hand over: the kernel's position
+/// sits on a now-empty slot) and waited for a writability edge that never
+/// came — with a free slot in the ring. The reset slot is handed out now.
+#[tokio::test(flavor = "current_thread")]
+async fn send_reuses_the_slot_of_a_refused_frame() {
+    let Some(dummy) = helpers::Dummy::create("nrtxwf0", Some(68)) else {
+        eprintln!("skip: cannot create a dummy (needs CAP_NET_ADMIN)");
+        return;
+    };
+    let inj = Injector::builder()
+        .interface(&dummy.0)
+        .frame_count(4)
+        .drop_rejected(false)
+        .build()
+        .expect("injector");
+    let mut tx = AsyncInjector::new(inj).expect("wrap");
+    // 200 bytes don't fit a 68-byte MTU: the kick stops there.
+    for len in [60, 200, 60, 60] {
+        tx.send(&tx_frame(len)).await.expect("queue");
+    }
+    let err = tx.flush().await.expect_err("EMSGSIZE");
+    assert!(
+        matches!(&err, netring::Error::Io(e) if e.raw_os_error() == Some(libc::EMSGSIZE)),
+        "{err}"
+    );
+    assert_eq!(tx.get_ref().rejected_slots(), 1);
+    // The two frames after the refused one wait for its slot.
+    assert!(tx.wait_drained(Duration::from_millis(100)).await.is_err());
+    tx.send(&tx_frame(60))
+        .await
+        .expect("the first sent frame's slot");
+    let res = tokio::time::timeout(Duration::from_secs(2), tx.send(&tx_frame(60))).await;
+    res.expect("send waited for a slot the ring had")
+        .expect("send");
+    // Queued in the refused slot, they all leave on the next kick.
+    tx.flush().await.expect("kick");
+    tx.wait_drained(Duration::from_secs(2))
+        .await
+        .expect("every frame leaves");
+}

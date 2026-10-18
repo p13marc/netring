@@ -45,6 +45,9 @@ has an old → new snippet there.
 - `MonitorBuilder::state_init` takes `Fn` (re-run after each sharded
   merge); `StateMap::take_dyn` → `take_reset` (#216).
 - `Dedup::keep_raw` takes the wire length (#217).
+- `impl From<tpacket_stats_v3> for CaptureStats` is removed: a capture's
+  counts come from `stats()` (lifetime totals), not from the raw kernel
+  struct, whose `tp_packets` includes the drops (#186).
 - `RssConfig::set_symmetric()` returns an `RssGuard` that restores the NIC
   (#213); `XdpCaptureBuilder::numa_auto(bool)`.
 - `#[non_exhaustive]`: `MonitorHealthSnapshot`, `AggregateSnapshot`,
@@ -242,7 +245,9 @@ has an old → new snippet there.
   responder}`, `TlsFingerprint::{client, server}`,
   `FlowRecord::{from_stats, total_ip_bytes}`.
 - `AggregateConfig::max_keys`, `AggregateOverflow`, `AGG_MAX_KEYS`;
-  `MonitorBuilder::yara_memory_budget`; `MonitorHealth::{accumulator_flows_skipped,
+  `MonitorBuilder::yara_memory_budget`, `DEFAULT_YARA_MEMORY_BUDGET`,
+  `DEFAULT_YARA_MAX_FLOWS` (YARA's own flow cap; it was
+  `DEFAULT_NPRINT_MAX_FLOWS`); `MonitorHealth::{accumulator_flows_skipped,
   yara_bytes_skipped, accumulator_live_flows}`;
   `XdpShardedRunner::run_until_signal`; `BuildError::DuplicateMergeState`;
   `ProtocolSlot::next_key` (provided); `AsyncPcapSource::packets_skipped()`;

@@ -2416,7 +2416,6 @@ pub fn netring::ctx::StateMap::get_or_init_with<T, F>(&mut self, factory: F) -> 
 pub fn netring::ctx::StateMap::insert<T: core::marker::Send + 'static>(&mut self, value: T)
 pub fn netring::ctx::StateMap::is_empty(&self) -> bool
 pub fn netring::ctx::StateMap::len(&self) -> usize
-pub fn netring::ctx::StateMap::set_reseed<T, F>(&mut self, factory: F) where T: core::marker::Send + 'static, F: core::ops::function::Fn() -> T + core::marker::Send + core::marker::Sync + 'static
 pub fn netring::ctx::StateMap::take_reset(&mut self, type_id: core::any::TypeId) -> core::option::Option<alloc::boxed::Box<(dyn core::any::Any + core::marker::Send)>>
 impl core::default::Default for netring::ctx::StateMap
 pub fn netring::ctx::StateMap::default() -> netring::ctx::StateMap

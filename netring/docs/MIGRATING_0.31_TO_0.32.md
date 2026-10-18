@@ -34,6 +34,7 @@ was opened. Reading never resets anything.
 | `MultiSource::capture_stats()` (`fanin.source(i)?.capture_stats()`) | `ring_stats()` |
 | `metrics::record_capture_delta(iface, &cap.stats()?)` | one capture per `iface` label: `metrics::record_capture_stats(iface, &cap.stats()?)`; several under one label (fanout workers): `metrics::record_capture_delta(iface, &now.delta_since(&before))` — **feeding it `stats()` now double counts** |
 | `CaptureStats { packets, drops, freeze_count }` (tests, mocks) | `CaptureStats::new(delivered, drops, freezes)` |
+| `CaptureStats::from(raw_tpacket_stats_v3)` | `cap.stats()?` (the `From` impl is removed) |
 | `drops as f64 / packets as f64` | `stats.drop_ratio()` |
 
 ```rust

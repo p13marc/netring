@@ -22,7 +22,7 @@ use crate::correlate::TimeBucketedCounter;
 pub struct StateMap {
     by_type: FxHashMap<TypeId, Box<dyn Any + Send>>,
     /// How [`Self::take_reset`] re-creates a slot: registered by
-    /// [`Self::set_reseed`] (`MonitorBuilder::state` / `state_init`).
+    /// `set_reseed` (`MonitorBuilder::state` / `state_init`).
     reseed: FxHashMap<TypeId, Reseed>,
 }
 
@@ -96,7 +96,7 @@ impl StateMap {
     /// Remember how to re-create `T`'s slot: [`Self::take_reset`] calls
     /// `factory` for the fresh value. Replaces an earlier factory for `T`.
     /// Doesn't touch the slot itself.
-    pub fn set_reseed<T, F>(&mut self, factory: F)
+    pub(crate) fn set_reseed<T, F>(&mut self, factory: F)
     where
         T: Send + 'static,
         F: Fn() -> T + Send + Sync + 'static,
@@ -108,8 +108,8 @@ impl StateMap {
     }
 
     /// Take the slot keyed by `type_id` (boxed) and reset it: re-seeded
-    /// from its factory ([`Self::set_reseed`] — `T::default()` for
-    /// `MonitorBuilder::state::<T>()`, the closure for `state_init`), or
+    /// from its factory — `T::default()` for
+    /// `MonitorBuilder::state::<T>()`, the closure for `state_init` — or
     /// removed when it has none (the next `state_mut::<T>()` then
     /// re-creates `T::default()`). `None` when there was no slot.
     ///

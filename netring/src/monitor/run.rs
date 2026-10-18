@@ -344,7 +344,7 @@ pub(crate) async fn run_loop(monitor: Monitor, stop: StopCondition) -> Result<()
 
     let mut events: Vec<FsEvent<FlowKey>> = Vec::with_capacity(64);
     // #216: the flows a dispatched batch ends (reused across batches).
-    let mut flow_ctx_scratch = crate::monitor::flow_ctx::EndedFlows::default();
+    let mut flow_ctx_scratch = crate::monitor::flow_ctx::ended_flows();
     let mut shutdown = ShutdownSignal::new(stop);
     // Periodic sweep: idle flows end (FlowEnded), parsers' `on_tick`
     // runs, out-of-order holes expire, per-flow state is released.
@@ -1056,7 +1056,7 @@ pub(crate) async fn replay_loop(
     let mut source = crate::pcap_source::AsyncPcapSource::open_with_config(&path, config).await?;
     let mut events: Vec<FsEvent<FlowKey>> = Vec::with_capacity(64);
     // #216: the flows a dispatched batch ends (reused across batches).
-    let mut flow_ctx_scratch = crate::monitor::flow_ctx::EndedFlows::default();
+    let mut flow_ctx_scratch = crate::monitor::flow_ctx::ended_flows();
     // Replay sweeps on packet time, every `sweep_interval` of it.
     let sweep_interval = driver.tracker().config().sweep_interval;
     let mut last_sweep: Option<flowscope::Timestamp> = None;
@@ -1440,7 +1440,7 @@ async fn drain_phase(
         counters,
         &mut leftover,
         Origin::Housekeeping,
-        &mut crate::monitor::flow_ctx::EndedFlows::default(),
+        &mut crate::monitor::flow_ctx::ended_flows(),
         monitor_name,
         flow_states,
         label_table,

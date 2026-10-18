@@ -206,6 +206,8 @@ has an old → new snippet there.
   flows, parser ticks, ticks. Packets carry their capture leg into
   flowscope; housekeeping events — and the messages of a flow another
   packet ended (LRU eviction) — resolve the flow's leg; ticks have none.
+  The flows a batch ends are looked up in a randomly keyed hash map
+  (5-tuples are chosen by whoever sends the traffic).
 - **Packet-tier per-flow state leaked** (#216): `ctx.flow` was the
   packet's directional key, so one slot per direction was never freed.
 - **YARA / nPrint saw raw IP fragments and reported the wrong side**

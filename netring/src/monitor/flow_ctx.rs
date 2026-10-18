@@ -36,8 +36,35 @@ impl Origin {
 /// The flows a batch ends, by key (#216): looked up once per event and
 /// message of theirs dispatched after the tracker let them go — hashed, as
 /// a sweep or a drain can end tens of thousands at once. Cleared and
-/// refilled per batch; it keeps its allocation.
-pub(crate) type EndedFlows = rustc_hash::FxHashMap<FlowKey, FlowCtx>;
+/// refilled per batch; it keeps its allocation. Make one with
+/// [`ended_flows`].
+///
+/// The keys are 5-tuples anyone on the wire picks, so the hasher is keyed
+/// with random seeds: an unkeyed hash (FxHash) lets traffic crafted to
+/// collide turn each lookup into a scan.
+pub(crate) type EndedFlows = std::collections::HashMap<FlowKey, FlowCtx, ahash::RandomState>;
+
+/// An empty [`EndedFlows`], its hasher keyed from the kernel's random
+/// source (`getrandom`), or from ahash's own per-process seed if that
+/// fails. Allocates nothing until the first insert.
+pub(crate) fn ended_flows() -> EndedFlows {
+    let mut seeds = [0u64; 4];
+    // SAFETY: getrandom writes at most `size_of_val(&seeds)` bytes into the
+    // buffer we own.
+    let n = unsafe {
+        libc::getrandom(
+            seeds.as_mut_ptr().cast(),
+            std::mem::size_of_val(&seeds),
+            libc::GRND_NONBLOCK,
+        )
+    };
+    let hasher = if n == std::mem::size_of_val(&seeds) as isize {
+        ahash::RandomState::with_seeds(seeds[0], seeds[1], seeds[2], seeds[3])
+    } else {
+        ahash::RandomState::new()
+    };
+    EndedFlows::with_hasher(hasher)
+}
 
 /// What [`lookup`] found for a flow key.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -324,9 +351,23 @@ mod tests {
         assert_eq!(initiator_of(Responder, Reverse), Forward);
     }
 
+    /// Review r3: the ended-flow map hashed attacker-chosen 5-tuples with
+    /// FxHash — unkeyed, the same for every map and every process, so
+    /// colliding keys are easy to craft. Each map is keyed now.
+    #[test]
+    fn ended_flow_maps_are_keyed() {
+        let (a, b) = (ended_flows(), ended_flows());
+        let k = key();
+        assert_ne!(
+            a.hasher().hash_one(k),
+            b.hasher().hash_one(k),
+            "two maps hash a key alike"
+        );
+    }
+
     #[test]
     fn scan_ended_collects_each_ended_flow() {
-        let mut out = EndedFlows::default();
+        let mut out = ended_flows();
         out.insert(key(), FlowCtx::default());
         let s = stats(Some(2), None, Orientation::Forward);
         scan_ended(&[ended(s)], &mut out);

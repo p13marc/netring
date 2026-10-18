@@ -201,7 +201,10 @@ pub(crate) fn interface_kind(ifindex: i32) -> Result<Option<String>, Error> {
             ))));
         }
     }
-    let len = (u32::from_ne_bytes([msg[0], msg[1], msg[2], msg[3]]) as usize).min(msg.len());
+    // `nlmsg_len` bounded to the bytes received, and never below the two
+    // headers already checked (a shorter claim would make the slice below
+    // start past its end).
+    let len = (u32::from_ne_bytes([msg[0], msg[1], msg[2], msg[3]]) as usize).clamp(32, msg.len());
     // Walk `rtattr`s: u16 len, u16 type, payload, 4-byte aligned.
     let attrs = |b: &[u8]| {
         let mut out = Vec::new();

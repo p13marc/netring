@@ -202,3 +202,35 @@ async fn unsupported_link_type_frames_are_counted_as_skipped() {
     assert_eq!(source.packets_yielded(), 0);
     assert_eq!(source.packets_skipped(), 4);
 }
+
+/// Review r2: a looping replay (`loop_at_eof`) of a capture whose every
+/// frame is skipped re-read the file forever, yielding nothing — the
+/// stream never ended. A pass that yields no packet now ends the replay.
+#[tokio::test]
+async fn looping_replay_of_only_skipped_frames_ends() {
+    let frames: Vec<(Timestamp, Vec<u8>)> = (0..4u8)
+        .map(|i| {
+            let mut f = vec![0x08, 0x00, 0x00, 0x00];
+            f.extend_from_slice(&[i; 18]);
+            f.extend_from_slice(&[0, 0]);
+            (Timestamp::new(100 + u32::from(i), 0), f)
+        })
+        .collect();
+    let f = write_pcap_with_link(105, &frames);
+    let cfg = netring::AsyncPcapConfig {
+        loop_at_eof: true,
+        ..Default::default()
+    };
+    let mut source = AsyncPcapSource::open_with_config(f.path(), cfg)
+        .await
+        .expect("open");
+    let ended = tokio::time::timeout(std::time::Duration::from_secs(5), async {
+        while let Some(item) = source.next().await {
+            item.expect("skipping is not an error");
+        }
+    })
+    .await;
+    assert!(ended.is_ok(), "the looping replay never ended");
+    assert_eq!(source.packets_yielded(), 0);
+    assert_eq!(source.packets_skipped(), 4, "one pass, then stop");
+}

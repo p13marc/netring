@@ -79,7 +79,10 @@ pub struct AsyncPcapConfig {
     pub queue_depth: usize,
 
     /// At EOF, restart the reader from the beginning instead of
-    /// closing the stream. Default `false`.
+    /// closing the stream. Default `false`. A pass that yields no packet
+    /// (every frame of an unsupported link type —
+    /// [`packets_skipped`](AsyncPcapSource::packets_skipped)) ends the
+    /// stream instead of looping.
     pub loop_at_eof: bool,
 }
 
@@ -230,6 +233,9 @@ fn run_reader(
         let reader = flowscope::pcap::CaptureReader::open(path)
             .map_err(|e| Error::Config(format!("{path:?}: {e}")))?;
         let mut span: Option<(Duration, Duration)> = None;
+        // Packets this pass handed on: a pass of nothing but skipped
+        // frames ends a looping replay (it would re-read forever).
+        let mut pass_yielded = 0u64;
         let mut start_wall: Option<Instant> = None;
         let mut first_ts: Option<Timestamp> = None;
         for packet in reader {
@@ -283,12 +289,20 @@ fn run_reader(
                 return Ok(());
             }
             counts.yielded.fetch_add(1, Ordering::Relaxed);
+            pass_yielded += 1;
         }
         let Some((lo, hi)) = span else {
             // Nothing read: looping would spin on an empty file.
             return Ok(());
         };
         if !config.loop_at_eof || tx.is_closed() {
+            return Ok(());
+        }
+        if pass_yielded == 0 {
+            tracing::warn!(
+                target: "netring::pcap_source",
+                "no packet of a supported link type in the capture: not looping"
+            );
             return Ok(());
         }
         shift += hi - lo + Duration::from_micros(1);

@@ -102,6 +102,9 @@ has an old → new snippet there.
   cut as a gap; the pcap replay paths report each record's original
   length too. Packets a snap length cut are tracked (flowscope 0.25
   skipped them).
+- **`AsyncPcapSource` with `loop_at_eof` re-read forever** a capture with
+  no packet of a supported link type (802.11, PPP, …), yielding nothing;
+  a pass that yields no packet now ends the stream.
 - **AF_XDP NUMA binding didn't apply** (#213): the UMEM was faulted in
   (`MAP_POPULATE`) before `mbind`, and the nodemask dropped node 63. It is
   bound first and populated after; `XdpSocket::umem_placement()` /

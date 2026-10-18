@@ -1,6 +1,6 @@
 # Changelog
 
-## 0.32.0 — unreleased — capture that means what it says, initiator-first outputs, dead interfaces noticed
+## 0.32.0 — 2026-10-18 — capture that means what it says, initiator-first outputs, dead interfaces noticed
 
 Breaking release closing milestone "0.32" — the follow-ups of the 0.31.2
 audit. The capture layer now does what its knobs say: one meaning for

@@ -375,7 +375,9 @@ the blocking `Bridge::run` still does (its backpressure).
 A frame the kernel refuses (longer than the device accepts, a malformed
 header) is now dropped by the kernel and the kick goes on — 0.31's kick
 stopped there with `EMSGSIZE` / `EINVAL` and left the frames behind it
-queued. `InjectorBuilder::drop_rejected(false)` restores the
+queued. Nothing reports such a drop: compare frame lengths with
+`Injector::max_frame_len()` (`mtu + 14` on Ethernet, +4 for an outer
+802.1Q tag) before sending if you need to know. `InjectorBuilder::drop_rejected(false)` restores the
 stop-and-report behaviour (`Injector::rejected_slots()` counts the
 refused slots until `allocate` hands the slot out again — it now reuses a
 refused slot first, since the kernel's TX position waits on it).

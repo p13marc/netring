@@ -98,6 +98,7 @@ pub fn netring::afpacket::tx::Injector::flush(&mut self) -> core::result::Result
 pub fn netring::afpacket::tx::Injector::flush_nonblocking(&mut self) -> core::result::Result<usize, netring::error::Error>
 pub fn netring::afpacket::tx::Injector::frame_capacity(&self) -> usize
 pub fn netring::afpacket::tx::Injector::frame_count(&self) -> usize
+pub fn netring::afpacket::tx::Injector::max_frame_len(&self) -> core::result::Result<core::option::Option<usize>, netring::error::Error>
 pub fn netring::afpacket::tx::Injector::open(interface: &str) -> core::result::Result<Self, netring::error::Error>
 pub fn netring::afpacket::tx::Injector::pending_count(&self) -> usize
 pub fn netring::afpacket::tx::Injector::queued_count(&self) -> usize
@@ -9596,6 +9597,7 @@ pub fn netring::afpacket::tx::Injector::flush(&mut self) -> core::result::Result
 pub fn netring::afpacket::tx::Injector::flush_nonblocking(&mut self) -> core::result::Result<usize, netring::error::Error>
 pub fn netring::afpacket::tx::Injector::frame_capacity(&self) -> usize
 pub fn netring::afpacket::tx::Injector::frame_count(&self) -> usize
+pub fn netring::afpacket::tx::Injector::max_frame_len(&self) -> core::result::Result<core::option::Option<usize>, netring::error::Error>
 pub fn netring::afpacket::tx::Injector::open(interface: &str) -> core::result::Result<Self, netring::error::Error>
 pub fn netring::afpacket::tx::Injector::pending_count(&self) -> usize
 pub fn netring::afpacket::tx::Injector::queued_count(&self) -> usize

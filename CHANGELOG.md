@@ -267,7 +267,8 @@ has an old → new snippet there.
   re-exports, `BpfFilterBuilder::pass_ip_fragments`.
 - `PacketSource::check_health` (provided), `XdpSocket::check_health`,
   `Injector::flush_nonblocking` (returns the frames the kick handed over),
-  `Injector::queued_count`, `InjectorBuilder::drop_rejected`,
+  `Injector::queued_count`, `Injector::max_frame_len`,
+  `InjectorBuilder::drop_rejected`,
   `BridgeBuilder::vlan_reinsert`, `Ctx::publish_owned`.
 - `UmemPlacement`, `RssGuard`, `RssState`, `RssConfig::state()`.
 - `AnomalyRecord`, `Endpoints`, `AnomalyWriter::{with_flow,

@@ -323,13 +323,40 @@ impl Injector {
 
     /// Number of slots currently in `TP_STATUS_WRONG_FORMAT` (kernel rejection).
     ///
-    /// A non-zero value indicates the kernel rejected one or more frames —
-    /// typically because of a malformed header or unsupported feature flag.
+    /// Only with [`drop_rejected(false)`](InjectorBuilder::drop_rejected):
+    /// the kick that met the refused frame (longer than the device takes,
+    /// a malformed header) failed, and its slot stays `WRONG_FORMAT` until
+    /// [`allocate`](Self::allocate) hands it out again. With the default
+    /// `drop_rejected(true)` the kernel drops refused frames and this is
+    /// always 0 — nothing counts them; compare frame lengths with
+    /// [`max_frame_len`](Self::max_frame_len) before sending to know.
     /// O(frame_count); avoid in hot paths.
     pub fn rejected_slots(&self) -> usize {
         (0..self.frame_count)
             .filter(|&i| self.read_frame_status(i) == ffi::TP_STATUS_WRONG_FORMAT)
             .count()
+    }
+
+    /// The longest frame the kernel lets this socket send on the device, as
+    /// tpacket_snd() checks it, with the MTU read now: `mtu + 14` on an
+    /// Ethernet device — a frame whose outermost EtherType is 802.1Q
+    /// (`0x8100`) may be 4 bytes longer; an 802.1ad (`0x88a8`) tag gets no
+    /// allowance. `None` where the link-header length isn't known here
+    /// (other link types, VLAN sub-interfaces): the kernel decides.
+    /// Longer frames are refused: dropped silently by default, see
+    /// [`InjectorBuilder::drop_rejected`]. New in 0.32.0.
+    ///
+    /// # Errors
+    ///
+    /// [`Error::Io`] if the device's MTU can't be read (it was removed).
+    pub fn max_frame_len(&self) -> Result<Option<usize>, Error> {
+        const ETH_HLEN: usize = 14;
+        if !self.link.checked {
+            return Ok(None);
+        }
+        let fd = self.fd.as_fd();
+        let name = socket::interface_name(fd, self.link.ifindex)?;
+        Ok(Some(socket::interface_mtu(fd, &name)? as usize + ETH_HLEN))
     }
 
     /// Whether the kernel lets this socket send `frame` on the device —
@@ -602,13 +629,19 @@ impl Injector {
     ///
     /// Returns the number of frames that were *queued* (had
     /// `TP_STATUS_SEND_REQUEST` set) when this call started. **This is not
-    /// necessarily the number of frames transmitted** — the kernel may
-    /// reject frames with malformed headers (`TP_STATUS_WRONG_FORMAT`).
-    /// Inspect slot status afterward to distinguish queued from transmitted.
+    /// necessarily the number of frames transmitted**: the kernel drops a
+    /// frame it refuses (longer than the device takes, a malformed header)
+    /// without a trace under the default
+    /// [`drop_rejected(true)`](InjectorBuilder::drop_rejected) — check
+    /// lengths against [`max_frame_len`](Self::max_frame_len) — or, with
+    /// `drop_rejected(false)`, stops there with the error and leaves the
+    /// frame `TP_STATUS_WRONG_FORMAT` ([`rejected_slots`](Self::rejected_slots)).
+    /// A kick cut short leaves frames queued ([`queued_count`](Self::queued_count))
+    /// for the next one.
     ///
-    /// EINTR is handled internally; transient `EAGAIN` and `ENOBUFS` are
-    /// reported as success since the kernel will absorb the kick on the
-    /// next attempt.
+    /// EINTR is handled internally; transient `EAGAIN` and `ENOBUFS` (the
+    /// device dropped the frame being sent; it stays queued) are reported
+    /// as success: the next kick tries again.
     ///
     /// # Errors
     ///
@@ -766,7 +799,8 @@ impl InjectorBuilder {
     ///
     /// - `true` — the kernel **drops** it (`PACKET_LOSS`): its slot becomes
     ///   available again and the kick goes on with the next frame. Nothing
-    ///   reports the drop; check lengths before sending if you need to know.
+    ///   reports the drop; compare lengths with
+    ///   [`Injector::max_frame_len`] before sending if you need to know.
     /// - `false` — the kick **stops** at it with the error (`EMSGSIZE`, …)
     ///   and leaves its slot `TP_STATUS_WRONG_FORMAT`
     ///   ([`Injector::rejected_slots`]). The kernel's TX position stays on
@@ -1111,6 +1145,8 @@ mod tests {
         };
         // GRE (MTU 1476, a 24-byte link header): a full-size frame is 1500.
         assert!(gre.fits_device(&vec![0u8; 1476 + 24]));
+        assert_eq!(gre.max_frame_len().unwrap(), None, "the kernel's to say");
+        assert_eq!(eth.max_frame_len().unwrap(), Some(1514));
         // Ethernet: 1514, or 1518 with an outer 802.1Q tag; not 802.1ad.
         let tagged = |tpid: u16, len: usize| {
             let mut f = vec![0u8; len];

@@ -758,9 +758,9 @@ pub netring::anomaly::sink::Endpoints::proto: core::option::Option<&'static str>
 pub netring::anomaly::sink::Endpoints::src_ip: core::option::Option<core::net::ip_addr::IpAddr>
 pub netring::anomaly::sink::Endpoints::src_port: core::option::Option<u16>
 impl netring::anomaly::sink::Endpoints
-pub fn netring::anomaly::sink::Endpoints::canonical(key: &flowscope::extract::five_tuple::FiveTupleKey) -> Self
 pub fn netring::anomaly::sink::Endpoints::dest(&self) -> core::option::Option<core::net::socket_addr::SocketAddr>
 pub fn netring::anomaly::sink::Endpoints::from_flow(key: &flowscope::extract::five_tuple::FiveTupleKey, initiator: flowscope::extractor::Orientation) -> Self
+pub fn netring::anomaly::sink::Endpoints::from_key(key: &flowscope::extract::five_tuple::FiveTupleKey) -> Self
 pub fn netring::anomaly::sink::Endpoints::from_owned(anomaly: &flowscope::anomaly::OwnedAnomaly) -> core::option::Option<Self>
 pub fn netring::anomaly::sink::Endpoints::new(src: core::net::socket_addr::SocketAddr, dest: core::net::socket_addr::SocketAddr, proto: core::option::Option<&'static str>, directional: bool) -> Self
 pub fn netring::anomaly::sink::Endpoints::src(&self) -> core::option::Option<core::net::socket_addr::SocketAddr>
@@ -2372,9 +2372,9 @@ pub fn netring::ctx::Ctx<'a>::community_id(&self) -> core::option::Option<alloc:
 pub fn netring::ctx::Ctx<'a>::counter<K>(&self) -> core::option::Option<&flowscope::correlate::bucketed::TimeBucketedCounter<K>> where K: core::hash::Hash + core::cmp::Eq + core::clone::Clone + core::marker::Send + 'static
 pub fn netring::ctx::Ctx<'a>::counter_mut<K>(&mut self) -> &mut flowscope::correlate::bucketed::TimeBucketedCounter<K> where K: core::hash::Hash + core::cmp::Eq + core::clone::Clone + core::marker::Send + 'static
 pub fn netring::ctx::Ctx<'a>::emit(&mut self, kind: &'static str, severity: netring::Severity) -> netring::anomaly::sink::AnomalyWriter<'_>
-pub fn netring::ctx::Ctx<'a>::endpoints(&self) -> core::option::Option<(core::net::socket_addr::SocketAddr, core::net::socket_addr::SocketAddr)>
 pub fn netring::ctx::Ctx<'a>::flow_state_mut<T>(&mut self) -> core::option::Option<&mut T> where T: core::default::Default + core::marker::Send + 'static
 pub fn netring::ctx::Ctx<'a>::initiator(&self) -> core::option::Option<flowscope::extractor::Orientation>
+pub fn netring::ctx::Ctx<'a>::initiator_responder(&self) -> core::option::Option<(core::net::socket_addr::SocketAddr, core::net::socket_addr::SocketAddr)>
 pub fn netring::ctx::Ctx<'a>::label_table(&self) -> &flowscope::well_known::LabelTable
 pub fn netring::ctx::Ctx<'a>::lookup_icmp_flow(&self, inner: &flowscope::icmp::types::IcmpInner) -> core::option::Option<(netring::protocol::FlowKey, flowscope::event::FlowStats)>
 pub fn netring::ctx::Ctx<'a>::names(&self, ip: core::net::ip_addr::IpAddr) -> alloc::vec::Vec<alloc::string::String>
@@ -5413,9 +5413,9 @@ pub fn netring::ctx::Ctx<'a>::community_id(&self) -> core::option::Option<alloc:
 pub fn netring::ctx::Ctx<'a>::counter<K>(&self) -> core::option::Option<&flowscope::correlate::bucketed::TimeBucketedCounter<K>> where K: core::hash::Hash + core::cmp::Eq + core::clone::Clone + core::marker::Send + 'static
 pub fn netring::ctx::Ctx<'a>::counter_mut<K>(&mut self) -> &mut flowscope::correlate::bucketed::TimeBucketedCounter<K> where K: core::hash::Hash + core::cmp::Eq + core::clone::Clone + core::marker::Send + 'static
 pub fn netring::ctx::Ctx<'a>::emit(&mut self, kind: &'static str, severity: netring::Severity) -> netring::anomaly::sink::AnomalyWriter<'_>
-pub fn netring::ctx::Ctx<'a>::endpoints(&self) -> core::option::Option<(core::net::socket_addr::SocketAddr, core::net::socket_addr::SocketAddr)>
 pub fn netring::ctx::Ctx<'a>::flow_state_mut<T>(&mut self) -> core::option::Option<&mut T> where T: core::default::Default + core::marker::Send + 'static
 pub fn netring::ctx::Ctx<'a>::initiator(&self) -> core::option::Option<flowscope::extractor::Orientation>
+pub fn netring::ctx::Ctx<'a>::initiator_responder(&self) -> core::option::Option<(core::net::socket_addr::SocketAddr, core::net::socket_addr::SocketAddr)>
 pub fn netring::ctx::Ctx<'a>::label_table(&self) -> &flowscope::well_known::LabelTable
 pub fn netring::ctx::Ctx<'a>::lookup_icmp_flow(&self, inner: &flowscope::icmp::types::IcmpInner) -> core::option::Option<(netring::protocol::FlowKey, flowscope::event::FlowStats)>
 pub fn netring::ctx::Ctx<'a>::names(&self, ip: core::net::ip_addr::IpAddr) -> alloc::vec::Vec<alloc::string::String>
@@ -5486,9 +5486,9 @@ pub netring::prelude::Endpoints::proto: core::option::Option<&'static str>
 pub netring::prelude::Endpoints::src_ip: core::option::Option<core::net::ip_addr::IpAddr>
 pub netring::prelude::Endpoints::src_port: core::option::Option<u16>
 impl netring::anomaly::sink::Endpoints
-pub fn netring::anomaly::sink::Endpoints::canonical(key: &flowscope::extract::five_tuple::FiveTupleKey) -> Self
 pub fn netring::anomaly::sink::Endpoints::dest(&self) -> core::option::Option<core::net::socket_addr::SocketAddr>
 pub fn netring::anomaly::sink::Endpoints::from_flow(key: &flowscope::extract::five_tuple::FiveTupleKey, initiator: flowscope::extractor::Orientation) -> Self
+pub fn netring::anomaly::sink::Endpoints::from_key(key: &flowscope::extract::five_tuple::FiveTupleKey) -> Self
 pub fn netring::anomaly::sink::Endpoints::from_owned(anomaly: &flowscope::anomaly::OwnedAnomaly) -> core::option::Option<Self>
 pub fn netring::anomaly::sink::Endpoints::new(src: core::net::socket_addr::SocketAddr, dest: core::net::socket_addr::SocketAddr, proto: core::option::Option<&'static str>, directional: bool) -> Self
 pub fn netring::anomaly::sink::Endpoints::src(&self) -> core::option::Option<core::net::socket_addr::SocketAddr>

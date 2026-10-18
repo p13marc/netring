@@ -122,8 +122,10 @@ impl Endpoints {
         Self::new(src, dest, key.proto_str(), true)
     }
 
-    /// A flow key read as stored, `a` → `b`. Not directional.
-    pub fn canonical(key: &FiveTupleKey) -> Self {
+    /// A flow key read as stored, `a` → `b` (the address-sorted order of a
+    /// bidirectional key). Not directional: use [`Self::from_flow`] when
+    /// the initiator is known.
+    pub fn from_key(key: &FiveTupleKey) -> Self {
         Self::new(key.a, key.b, key.proto_str(), false)
     }
 
@@ -229,11 +231,11 @@ impl<'a> AnomalyRecord<'a> {
     }
 
     /// Attach a key. A [`FiveTupleKey`] also sets the endpoints, read as
-    /// stored ([`Endpoints::canonical`]), unless they are already set.
+    /// stored ([`Endpoints::from_key`]), unless they are already set.
     pub fn with_key(mut self, key: &'a dyn Key) -> Self {
         self.key = Some(key);
         if self.endpoints.is_none() {
-            self.endpoints = self.flow_key().map(Endpoints::canonical);
+            self.endpoints = self.flow_key().map(Endpoints::from_key);
         }
         self
     }
@@ -560,7 +562,7 @@ impl<'sink> AnomalyWriter<'sink> {
                 return Some(Endpoints::new(i, r, key.proto_str(), true));
             }
         }
-        Some(Endpoints::canonical(key))
+        Some(Endpoints::from_key(key))
     }
 
     /// Attach a textual observation. `&'static str` literals pass
@@ -788,7 +790,7 @@ mod tests {
                 .emit()
         })
         .unwrap();
-        assert_eq!(e, Endpoints::canonical(&other));
+        assert_eq!(e, Endpoints::from_key(&other));
         // No key → no endpoints, current flow or not.
         let none = endpoints_of(|s| {
             s.begin("K", Severity::Info, Timestamp::new(0, 0))
@@ -915,7 +917,7 @@ mod tests {
             .with_key(&key)
             .with_observations(&obs)
             .with_metrics(&[("m", 1.0)]);
-        assert_eq!(r.endpoints, Some(Endpoints::canonical(&key)));
+        assert_eq!(r.endpoints, Some(Endpoints::from_key(&key)));
         assert_eq!(r.flow_key(), Some(&key));
         let owned = r.to_owned_anomaly();
         assert_eq!(owned.src_ip, Some(key.a.ip()));

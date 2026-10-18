@@ -120,7 +120,7 @@ impl<P: MessageProtocol> std::fmt::Debug for SessionSubscription<P> {
 
 /// [`FieldSource`] over a parsed session message: L7 fields from the message
 /// (via [`L7Fields`]), 5-tuple from the flow carried on the [`Ctx`] — read
-/// from the flow's **initiator** ([`Ctx::endpoints`]: `src_*` is the endpoint
+/// from the flow's **initiator** ([`Ctx::initiator_responder`]: `src_*` is the endpoint
 /// that opened the connection, whichever side sent this message; 0.32, #215).
 /// Only when the initiator is unknown does it fall back to the address-sorted
 /// key's `a` / `b`.

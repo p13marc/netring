@@ -95,7 +95,7 @@ pub(crate) fn server_port_of(ctx: &crate::ctx::Ctx<'_>) -> u16 {
 impl TlsFingerprint {
     /// Build from a flowscope handshake event + the flow key; `port` is
     /// the server's (see [`server_port`]); `endpoints` the flow's
-    /// `(initiator, responder)` ([`Ctx::endpoints`](crate::ctx::Ctx::endpoints)).
+    /// `(initiator, responder)` ([`Ctx::initiator_responder`](crate::ctx::Ctx::initiator_responder)).
     pub(crate) fn from_handshake(
         hs: &flowscope::tls::TlsHandshake,
         key: Option<FlowKey>,

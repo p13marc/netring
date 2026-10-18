@@ -261,10 +261,13 @@ impl<'a> Ctx<'a> {
             })
     }
 
-    /// The current flow's endpoints as `(initiator, responder)` — the
+    /// The current flow's `(initiator, responder)` addresses — the
     /// address-sorted key turned the way the flow was opened. `None` when
-    /// there is no flow or [`Self::initiator`] is unknown. New in 0.32.0.
-    pub fn endpoints(&self) -> Option<(std::net::SocketAddr, std::net::SocketAddr)> {
+    /// there is no flow or [`Self::initiator`] is unknown. (An anomaly's
+    /// rendered endpoints are
+    /// [`Endpoints::from_flow`](crate::anomaly::sink::Endpoints::from_flow)
+    /// of the same flow; [`Self::emit`] fills them.) New in 0.32.0.
+    pub fn initiator_responder(&self) -> Option<(std::net::SocketAddr, std::net::SocketAddr)> {
         let key = self.flow?;
         Some(match self.initiator()? {
             flowscope::Orientation::Forward => (key.a, key.b),
@@ -567,9 +570,10 @@ mod tests {
     }
 
     /// #216: the initiator comes from the dispatch, else from the message
-    /// side; `endpoints()` turns the address-sorted key that way round.
+    /// side; `initiator_responder()` turns the address-sorted key that way
+    /// round.
     #[test]
-    fn initiator_and_endpoints() {
+    fn initiator_and_initiator_responder() {
         use flowscope::{FlowSide, Orientation};
         let mut state = StateMap::default();
         let mut counters = CounterRegistry::default();
@@ -582,17 +586,17 @@ mod tests {
         );
         ctx.flow = Some(FlowKey::new(flowscope::L4Proto::Tcp, a, b));
         assert_eq!(ctx.initiator(), None);
-        assert_eq!(ctx.endpoints(), None);
+        assert_eq!(ctx.initiator_responder(), None);
         // A responder's bytes going a → b: the initiator is b.
         ctx.side = Some(FlowSide::Responder);
         ctx.orientation = Some(Orientation::Forward);
         assert_eq!(ctx.initiator(), Some(Orientation::Reverse));
-        assert_eq!(ctx.endpoints(), Some((b, a)));
+        assert_eq!(ctx.initiator_responder(), Some((b, a)));
         // What the dispatch knew wins.
         ctx.initiator = Some(Orientation::Forward);
-        assert_eq!(ctx.endpoints(), Some((a, b)));
+        assert_eq!(ctx.initiator_responder(), Some((a, b)));
         ctx.flow = None;
-        assert_eq!(ctx.endpoints(), None);
+        assert_eq!(ctx.initiator_responder(), None);
     }
 
     #[test]

@@ -3216,7 +3216,7 @@ impl MonitorBuilder {
                     hs,
                     ctx.flow,
                     crate::monitor::fingerprint::server_port_of(ctx),
-                    ctx.endpoints(),
+                    ctx.initiator_responder(),
                 );
                 handler(&fp, ctx)
             },
@@ -3421,7 +3421,7 @@ impl MonitorBuilder {
                     hs,
                     ctx.flow,
                     crate::monitor::fingerprint::server_port_of(ctx),
-                    ctx.endpoints(),
+                    ctx.initiator_responder(),
                 );
                 if !fp.app_protocol.is_encrypted_dns() {
                     return Ok(());

@@ -147,7 +147,7 @@ index + 1; a replay is leg 1).
 A packet subscription's `ctx.flow` is the flow's canonical (address-sorted)
 key, the one `FlowEnded` carries. Take the packet's direction from
 `ctx.orientation()`, and the flow's `(initiator, responder)` from
-`ctx.endpoints()`:
+`ctx.initiator_responder()`:
 
 ```rust
 // 0.31: ctx.flow.a was this packet's source

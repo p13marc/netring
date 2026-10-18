@@ -65,7 +65,7 @@ the release: the capture layer (`s2-capture`) and the Monitor / runtime
 - **Source attribution** (`monitor/flow_ctx.rs`, #216): packets carry their
   capture leg (`PacketView::with_source_idx(i + 1)`) into flowscope;
   housekeeping events resolve the flow's leg; `Ctx.source:
-  Option<SourceIdx>`; `Ctx::initiator()` / `endpoints()`; packet-tier
+  Option<SourceIdx>`; `Ctx::initiator()` / `initiator_responder()`; packet-tier
   `ctx.flow` is the canonical key.
 - **Initiator-first outputs** (#215, #217): `AnomalySink::write(&AnomalyRecord)`
   with resolved `Endpoints` (`Ctx::emit` hands the writer the current flow +
@@ -1389,7 +1389,7 @@ Cargo features unique to 0.21:
   (#228)
 - Flow keys are address-sorted: anything that reports "source" must read
   the flow from its initiator (`FiveTupleKey::oriented(initiator)`,
-  `Endpoints`, `Ctx::endpoints`), never `key.a` (#215)
+  `Endpoints::from_flow`, `Ctx::initiator_responder`), never `key.a` (#215)
 - Integration tests must use deadline-based loops with `next_batch_blocking()`, NOT `packets()` (which blocks forever on timeout)
 - `xdp-loader` ships a vendored 1 KB ELF (`redirect_all.bpf.o`); regenerating
   needs `clang` but only the maintainer touches it

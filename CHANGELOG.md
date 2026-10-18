@@ -237,7 +237,7 @@ has an old → new snippet there.
   `BridgeBuilder::vlan_reinsert`, `Ctx::publish_owned`.
 - `UmemPlacement`, `RssGuard`, `RssState`, `RssConfig::state()`.
 - `AnomalyRecord`, `Endpoints`, `AnomalyWriter::{with_flow,
-  with_initiator, with_endpoints}`, `Ctx::{initiator, endpoints}`,
+  with_initiator, with_endpoints}`, `Ctx::{initiator, initiator_responder}`,
   `FlowStarted::{initiator, responder}`, `FlowEnded::{initiator,
   responder}`, `TlsFingerprint::{client, server}`,
   `FlowRecord::{from_stats, total_ip_bytes}`.

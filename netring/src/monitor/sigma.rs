@@ -267,10 +267,10 @@ fn base_event(ctx: &Ctx<'_>) -> Event {
     let mut e = Event::new();
     if let Some(k) = ctx.flow {
         // The key is address-sorted: `a` is the initiator only when it has
-        // the lower address. `Ctx::endpoints` turns it the way the flow was
+        // the lower address. `Ctx::initiator_responder` turns it the way the flow was
         // opened (from the dispatch, else the message's side and direction);
         // without that, the stored order.
-        let (src, dst) = ctx.endpoints().unwrap_or((k.a, k.b));
+        let (src, dst) = ctx.initiator_responder().unwrap_or((k.a, k.b));
         let proto = format!("{:?}", k.proto).to_ascii_lowercase();
         e.insert("src_ip", src.ip().to_string());
         e.insert("dst_ip", dst.ip().to_string());

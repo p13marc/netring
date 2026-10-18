@@ -107,7 +107,7 @@ where
         builder.on_ctx::<P>(move |msg: &P::Message, ctx: &mut crate::ctx::Ctx<'_>| {
             let fields = session::SessionFields {
                 key: ctx.flow,
-                endpoints: ctx.endpoints(),
+                endpoints: ctx.initiator_responder(),
                 msg,
             };
             if pred.eval(&fields) {

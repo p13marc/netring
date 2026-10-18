@@ -20,7 +20,7 @@
 use std::os::fd::{AsFd, AsRawFd, BorrowedFd};
 use std::time::Duration;
 
-use crate::afpacket::tx::{Injector, Kick};
+use crate::afpacket::tx::Injector;
 use crate::async_adapters::registered::{ProbeTimer, Registered, health_io};
 use crate::error::Error;
 
@@ -36,6 +36,15 @@ const BACKOFF_MIN: Duration = Duration::from_millis(1);
 /// The longest wait between two kicks of a frame the device keeps
 /// dropping.
 const BACKOFF_MAX: Duration = Duration::from_millis(100);
+
+/// What a kick of the adapter did.
+struct Kicked {
+    /// Frames the kernel took.
+    taken: usize,
+    /// No readiness event will say when to kick again: the device dropped
+    /// the frame at the kernel's TX position, or the interface is down.
+    retry_later: bool,
+}
 
 /// Waits between kicks that made no progress for a reason no readiness
 /// event reports the end of: the device dropping the frame at the kernel's
@@ -175,17 +184,29 @@ impl AsyncInjector {
     /// Kick the queued frames without waiting for the device
     /// ([`Injector::flush_nonblocking`]). A kick on a removed interface
     /// fails with `ENXIO` (no device): it reports the liveness check's
-    /// `ENETDOWN` then, as the waits do. Progress resets the backoff.
-    fn kick(&mut self) -> Result<Kick, Error> {
+    /// `ENETDOWN` then, as the waits do. One on an interface that is only
+    /// down fails with `ENETDOWN` too, but the socket is still bound: the
+    /// frames stay queued, and the kick is retried later — a down interface
+    /// is waited out. Progress resets the backoff.
+    fn kick(&mut self) -> Result<Kicked, Error> {
         match self.inner.get_mut().kick() {
             Ok(k) => {
                 if k.taken > 0 {
                     self.backoff.reset();
                 }
-                Ok(k)
+                Ok(Kicked {
+                    taken: k.taken,
+                    retry_later: k.device_dropped,
+                })
             }
             Err(e) => {
                 sink_health(self.inner.get_ref()).map_err(Error::Io)?;
+                if matches!(&e, Error::Io(io) if io.raw_os_error() == Some(libc::ENETDOWN)) {
+                    return Ok(Kicked {
+                        taken: 0,
+                        retry_later: true,
+                    });
+                }
                 Err(e)
             }
         }
@@ -254,7 +275,7 @@ impl AsyncInjector {
             if kick.taken > 0 {
                 continue;
             }
-            if kick.device_dropped {
+            if kick.retry_later {
                 self.backoff.wait().await?;
             } else {
                 self.wait_tx().await?;
@@ -272,8 +293,8 @@ impl AsyncInjector {
     ///
     /// Returns the number of frames the kick handed to the kernel; frames
     /// it could not (the socket's send buffer is full) stay queued for the
-    /// next `flush` / `send`. Fails with `ENETDOWN` once the interface was
-    /// removed.
+    /// next `flush` / `send` — `0` too while the interface is down. Fails
+    /// with `ENETDOWN` once the interface was removed.
     pub async fn flush(&mut self) -> Result<usize, Error> {
         self.kick().map(|k| k.taken)
     }
@@ -289,7 +310,8 @@ impl AsyncInjector {
     ///
     /// [`Error::Io`] with `TimedOut` when `timeout` elapses first, with
     /// `ENETDOWN` once the interface was removed (frames still queued can
-    /// never drain then), or when the readiness wait fails.
+    /// never drain then), or when the readiness wait fails. An interface
+    /// that is down is waited out: its frames leave once it is up.
     pub async fn wait_drained(&mut self, timeout: Duration) -> Result<(), Error> {
         let deadline = tokio::time::Instant::now() + timeout;
         loop {
@@ -310,7 +332,7 @@ impl AsyncInjector {
             let mut dropped = false;
             if self.inner.get_ref().queued_count() > 0 {
                 let kick = self.kick()?;
-                dropped = kick.taken == 0 && kick.device_dropped;
+                dropped = kick.taken == 0 && kick.retry_later;
             }
             // Cap each wait so we re-check pending_count even on partial
             // reclamation events.

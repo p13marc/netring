@@ -382,6 +382,35 @@ async fn async_injector_wait_drained_reports_removed_interface() {
     assert!(elapsed < Duration::from_secs(3), "took {elapsed:?}");
 }
 
+/// Review r3: on an interface that is only down, a kick fails with
+/// ENETDOWN — `wait_drained` and `flush` returned it at once, though the
+/// interface still exists and ENETDOWN is documented to mean "removed".
+/// They wait it out now: the frames leave once the interface is up.
+#[cfg(feature = "tokio")]
+#[tokio::test(flavor = "current_thread")]
+async fn async_injector_waits_out_a_down_interface() {
+    let Some(dummy) = DownDummy::create_tagged("tw") else {
+        eprintln!("skip: cannot create a dummy interface (need CAP_NET_ADMIN)");
+        return;
+    };
+    let mut tx = async_injector_on(&dummy.0);
+    let frame = marker_frame(b"netring-tx-down");
+    for _ in 0..3 {
+        tx.send(&frame).await.expect("queue a frame");
+    }
+    assert_eq!(tx.flush().await.expect("a down interface is waited out"), 0);
+    let name = dummy.0.clone();
+    let up = std::thread::spawn(move || {
+        std::thread::sleep(Duration::from_millis(300));
+        assert!(ip(&["link", "set", &name, "up"]));
+    });
+    let start = Instant::now();
+    let res = tx.wait_drained(Duration::from_secs(3)).await;
+    up.join().unwrap();
+    res.unwrap_or_else(|e| panic!("{e:?} after {:?}", start.elapsed()));
+    assert!(start.elapsed() >= Duration::from_millis(250));
+}
+
 /// A `send` that has to wait for a free slot after the interface was
 /// removed fails at once with ENETDOWN, like the waits: the kick it makes
 /// first (`sendto`) finds no device (ENXIO), and the liveness check says

@@ -135,7 +135,10 @@ has an old → new snippet there.
   of idle waiting (a `timerfd` on the IO reactor — no tokio time driver
   needed); a removed interface ends the wait with `Error::Io(ENETDOWN)`,
   a down one is waited out. `AsyncInjector` kicks (`flush`, `send` on a
-  full ring) report the same `ENETDOWN`, not the `sendto`'s `ENXIO`.
+  full ring) report the same `ENETDOWN`, not the `sendto`'s `ENXIO`; on a
+  down interface their kick's own `ENETDOWN` is waited out too (`flush`
+  returns 0, `send` / `wait_drained` retry on a backoff and drain once it
+  is up).
 - **Async kicks blocked the runtime thread on a device that holds frames**
   (#228): `AsyncInjector::flush` / `send` / `send_stream` and the async
   `Bridge` loops kicked with a blocking `sendto`, which on a TX ring waits

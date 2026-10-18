@@ -374,7 +374,11 @@ refused slots).
 - `KafkaSink` / `OtlpAnomalySink`: the messages gain the anomaly's
   endpoints — Kafka `src_ip` / `src_port` / `dest_ip` / `dest_port` /
   `proto` / `directional`, OTLP `source.address` / `source.port` /
-  `destination.address` / `destination.port` / `network.transport`.
+  `destination.address` / `destination.port` / `network.transport` and
+  `netring.endpoints.directional`. OTLP names `source` / `destination`
+  only directional endpoints (the initiator, or the anomaly's subject); a
+  bare flow key read as stored goes to `netring.flow.a.*` /
+  `netring.flow.b.*`.
 - `ParquetFlowExporter`: `source.*` is the initiator, `destination.*` the
   responder (0.8: the key's `a` / `b`); new `source.ip_bytes` /
   `destination.ip_bytes` columns; `*.bytes` are wire bytes. Queries that

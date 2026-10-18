@@ -276,7 +276,10 @@ has an old → new snippet there.
   `OtlpAnomalySink` implement the new `AnomalySink::write(&AnomalyRecord)`;
   Kafka messages gain `src_ip` / `src_port` / `dest_ip` / `dest_port` /
   `proto` / `directional`, OTLP log records the `source.*` /
-  `destination.*` / `network.transport` attributes.
+  `destination.*` / `network.transport` attributes —
+  `netring.flow.a.*` / `netring.flow.b.*` instead of `source.*` /
+  `destination.*` when the endpoints are a key read as stored (not
+  directional), and `netring.endpoints.directional`.
 - **Breaking:** `ParquetFlowExporter`'s `source.*` columns are the flow's
   initiator and `destination.*` the responder (they were the
   address-sorted key's `a` / `b`), with new `source.ip_bytes` /

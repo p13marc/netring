@@ -383,8 +383,9 @@ async fn async_injector_wait_drained_reports_removed_interface() {
 }
 
 /// A `send` that has to wait for a free slot after the interface was
-/// removed fails at once: the kick it makes first (`sendto`) finds no
-/// device (ENXIO). Never a hang.
+/// removed fails at once with ENETDOWN, like the waits: the kick it makes
+/// first (`sendto`) finds no device (ENXIO), and the liveness check says
+/// why. Never a hang.
 #[cfg(feature = "tokio")]
 #[tokio::test(flavor = "current_thread")]
 async fn async_injector_send_fails_on_removed_interface() {
@@ -403,5 +404,9 @@ async fn async_injector_send_fails_on_removed_interface() {
     let res = tokio::time::timeout(Duration::from_secs(3), tx.send(&frame))
         .await
         .expect("send still waiting 3 s after the interface was removed");
-    assert!(res.is_err(), "the ring is full and the device gone");
+    let err = res.expect_err("the ring is full and the device gone");
+    assert!(is_enetdown(&err), "{err:?}");
+    // An explicit kick says the same.
+    let err = tx.flush().await.expect_err("no device to kick");
+    assert!(is_enetdown(&err), "{err:?}");
 }

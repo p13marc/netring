@@ -127,6 +127,20 @@ impl AsyncInjector {
         Ok(())
     }
 
+    /// Kick the queued frames without waiting for the device
+    /// ([`Injector::flush_nonblocking`]). A kick on a removed interface
+    /// fails with `ENXIO` (no device): it reports the liveness check's
+    /// `ENETDOWN` then, as the waits do.
+    fn kick(&mut self) -> Result<usize, Error> {
+        match self.inner.get_mut().flush_nonblocking() {
+            Ok(n) => Ok(n),
+            Err(e) => {
+                sink_health(self.inner.get_ref()).map_err(Error::Io)?;
+                Err(e)
+            }
+        }
+    }
+
     /// Open an async injector on `interface` with default settings.
     ///
     /// One-liner shortcut for `AsyncInjector::new(Injector::open(interface)?)`.
@@ -185,7 +199,7 @@ impl AsyncInjector {
             // nothing (the send buffer is full of frames the device still
             // holds) would fail again: wait for the device instead, so the
             // task yields.
-            if self.inner.get_mut().flush_nonblocking()? > 0 {
+            if self.kick()? > 0 {
                 continue;
             }
             self.wait_tx().await?;
@@ -202,9 +216,10 @@ impl AsyncInjector {
     ///
     /// Returns the number of frames the kick handed to the kernel; frames
     /// it could not (the socket's send buffer is full) stay queued for the
-    /// next `flush` / `send`.
+    /// next `flush` / `send`. Fails with `ENETDOWN` once the interface was
+    /// removed.
     pub async fn flush(&mut self) -> Result<usize, Error> {
-        self.inner.get_mut().flush_nonblocking()
+        self.kick()
     }
 
     /// Wait until every queued frame has been transmitted.
@@ -236,7 +251,7 @@ impl AsyncInjector {
             // Frames a kick could not hand over (the send buffer was full)
             // are kicked as the device frees room.
             if self.inner.get_ref().queued_count() > 0 {
-                self.inner.get_mut().flush_nonblocking()?;
+                self.kick()?;
             }
             // Cap each wait so we re-check pending_count even on partial
             // reclamation events.

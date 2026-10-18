@@ -328,7 +328,7 @@ address.
 
 Async reads (`AsyncCapture::readable` / `recv`, `PacketStream`, every
 flow / session / datagram stream, `AsyncXdpSocket`, `AsyncXdpCapture`,
-`AsyncInjector` waits, `Bridge::run_async`) now end with
+`AsyncInjector` waits and kicks, `Bridge::run_async`) now end with
 `Error::Io(ENETDOWN)` when the interface is **removed** — 0.31 waited
 forever. A down interface is still waited out. To survive an interface
 being re-created, re-open on `ENETDOWN`:

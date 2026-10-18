@@ -399,16 +399,35 @@ fn send_one(tx: &mut Injector, len: usize) -> Result<usize, netring::Error> {
 /// Review r5: a device stacked on a VLAN without VLAN TX offload (a
 /// macvlan on a VLAN on a dummy) inherits the VLAN's 18-byte header
 /// length, so the kernel takes `mtu + 18`; `max_frame_len` said
-/// `mtu + 14` (and the bridge dropped what lay between). Such devices are
-/// the kernel's to judge now; a plain device keeps its exact limit.
+/// `mtu + 14` (and the bridge dropped what lay between). Whether the
+/// header is 18 or 14 bytes depends on the lower device's VLAN offload,
+/// so it's the kernel's to judge: `max_frame_len` is `None` there, and a
+/// 1518-byte frame reaches the kernel, which takes it or refuses it
+/// itself — never netring. A plain device keeps its exact limit.
 #[test]
 fn max_frame_len_is_none_on_a_device_stacked_on_a_vlan() {
-    let _ = sh("ip link del nrr5d0");
-    if !sh("ip link add nrr5d0 type dummy && ip link set nrr5d0 up \
-         && ip link add link nrr5d0 name nrr5d0.7 type vlan id 7 && ip link set nrr5d0.7 up \
-         && ip link add link nrr5d0.7 name nrr5mv0 type macvlan mode bridge && ip link set nrr5mv0 up")
-    {
-        let _ = sh("ip link del nrr5d0");
+    // Below the VLAN: a dummy (no VLAN TX offload: the VLAN's header is
+    // 18 bytes), then a veth (offload: 14). The test passes either way the
+    // kernel goes; the two lower devices make it go both ways here.
+    for (lower, create) in [
+        ("nrr5d0", "ip link add nrr5d0 type dummy"),
+        ("nrr5v0", "ip link add nrr5v0 type veth peer name nrr5v1"),
+    ] {
+        stacked_on_a_vlan(lower, create);
+    }
+}
+
+/// The macvlan-on-a-VLAN-on-`lower` case of
+/// [`max_frame_len_is_none_on_a_device_stacked_on_a_vlan`].
+fn stacked_on_a_vlan(lower: &str, create: &str) {
+    let _ = sh(&format!("ip link del {lower}"));
+    let (vlan_dev, mv) = (format!("{lower}.7"), format!("{lower}m"));
+    if !sh(&format!(
+        "{create} && ip link set {lower} up \
+         && ip link add link {lower} name {vlan_dev} type vlan id 7 && ip link set {vlan_dev} up \
+         && ip link add link {vlan_dev} name {mv} type macvlan mode bridge && ip link set {mv} up"
+    )) {
+        let _ = sh(&format!("ip link del {lower}"));
         eprintln!("skip: needs CAP_NET_ADMIN and the 8021q / macvlan modules");
         return;
     }
@@ -420,20 +439,27 @@ fn max_frame_len_is_none_on_a_device_stacked_on_a_vlan() {
             .build()
             .expect("injector")
     };
-    let mut macvlan = build("nrr5mv0");
+    let mut macvlan = build(&mv);
     let mfl = macvlan.max_frame_len().unwrap();
     let took = send_one(&mut macvlan, 1518);
     let rejected = macvlan.rejected_slots();
-    let vlan = build("nrr5d0.7").max_frame_len().unwrap();
-    let plain = build("nrr5d0").max_frame_len().unwrap();
-    let _ = sh("ip link del nrr5d0");
-    assert!(
-        took.is_ok() && rejected == 0,
-        "the kernel takes 1518 bytes: {took:?}"
-    );
+    let vlan = build(&vlan_dev).max_frame_len().unwrap();
+    let plain = build(lower).max_frame_len().unwrap();
+    let _ = sh(&format!("ip link del {lower}"));
+    // The frame reached the kernel, which decided: sent (an 18-byte header:
+    // no VLAN TX offload below), or refused with EMSGSIZE and its slot
+    // left WRONG_FORMAT (a 14-byte header). Never netring.
+    match &took {
+        Ok(_) => assert_eq!(rejected, 0, "sent: nothing refused"),
+        Err(netring::Error::Io(e)) if e.raw_os_error() == Some(libc::EMSGSIZE) => {
+            assert_eq!(rejected, 1, "refused by the kernel, which marked the slot");
+        }
+        Err(e) => panic!("the kernel neither took nor refused the frame: {e}"),
+    }
+    eprintln!("1518 bytes on a macvlan over a VLAN over {lower}: {took:?}");
     assert_eq!(mfl, None, "a macvlan over a VLAN is the kernel's to judge");
     assert_eq!(vlan, None, "so is the VLAN");
-    assert_eq!(plain, Some(1514), "a dummy has the plain Ethernet limit");
+    assert_eq!(plain, Some(1514), "{lower} has the plain Ethernet limit");
 }
 
 /// Review r5: the VLAN check read `/proc/net/vlan` through `/proc/self`

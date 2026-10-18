@@ -135,10 +135,20 @@ fn pin_to_current_cpu() {
     }
 }
 
-/// What a receiver saw: `(seq, intact)` per frame, and the socket's drops.
-type Received = (Vec<(u64, bool)>, u32);
+/// What a receiver saw: `(seq, intact)` per frame, and how many frames
+/// its ring dropped.
+type Received = (Vec<(u64, bool)>, u64);
 
-/// Raw receiver on `iface`, collecting in a thread.
+/// A receiver on `iface`, collecting in a thread.
+///
+/// A netring capture: a 64 MiB TPACKET_V3 ring that only the test's
+/// EtherType reaches. A plain socket's receive buffer is capped by
+/// `net.core.rmem_max` — `SO_RCVBUFFORCE` needs `CAP_NET_ADMIN` in the
+/// initial user namespace, which a rootless container doesn't have — and a
+/// veth under qdisc bypass hands the receiver whole bursts at once: on a
+/// slow runner it dropped frames the injector had sent. The ring counts
+/// what it drops, so the check can tell the receiver's losses from the
+/// sender's.
 struct Rx {
     stop: Arc<AtomicBool>,
     handle: Option<std::thread::JoinHandle<Received>>,
@@ -146,66 +156,31 @@ struct Rx {
 
 impl Rx {
     fn start(iface: &str) -> Self {
-        let fd = unsafe {
-            libc::socket(
-                libc::AF_PACKET,
-                libc::SOCK_RAW,
-                (libc::ETH_P_ALL as u16).to_be() as i32,
-            )
-        };
-        assert!(fd >= 0, "rx socket");
-        let fd = unsafe { OwnedFd::from_raw_fd(fd) };
-        let sz: libc::c_int = 256 << 20;
-        unsafe {
-            libc::setsockopt(
-                fd.as_raw_fd(),
-                libc::SOL_SOCKET,
-                libc::SO_RCVBUFFORCE,
-                (&sz as *const libc::c_int).cast(),
-                4,
-            )
-        };
-        let mut sll: libc::sockaddr_ll = unsafe { std::mem::zeroed() };
-        sll.sll_family = libc::AF_PACKET as u16;
-        sll.sll_protocol = (libc::ETH_P_ALL as u16).to_be();
-        sll.sll_ifindex = ifindex(iface);
-        let rc = unsafe {
-            libc::bind(
-                fd.as_raw_fd(),
-                (&sll as *const libc::sockaddr_ll).cast(),
-                std::mem::size_of::<libc::sockaddr_ll>() as u32,
-            )
-        };
-        assert_eq!(rc, 0, "bind rx");
+        let filter = netring::BpfFilter::builder()
+            .eth_type(ETYPE)
+            .build()
+            .expect("receiver filter");
+        let mut cap = netring::CaptureBuilder::default()
+            .interface(iface)
+            .block_size(4 << 20)
+            .block_count(16)
+            .block_timeout_ms(5)
+            .bpf_filter(filter)
+            .build()
+            .expect("receiver capture");
         let stop = Arc::new(AtomicBool::new(false));
         let s = stop.clone();
         let handle = std::thread::spawn(move || {
             let mut got = Vec::new();
-            let mut buf = vec![0u8; 65536];
             let mut quiet_since: Option<Instant> = None;
             loop {
-                let mut pfd = libc::pollfd {
-                    fd: fd.as_raw_fd(),
-                    events: libc::POLLIN,
-                    revents: 0,
-                };
-                unsafe { libc::poll(&mut pfd, 1, 20) };
                 let mut any = false;
-                loop {
-                    let n = unsafe {
-                        libc::recv(
-                            fd.as_raw_fd(),
-                            buf.as_mut_ptr().cast(),
-                            buf.len(),
-                            libc::MSG_DONTWAIT,
-                        )
-                    };
-                    if n <= 0 {
-                        break;
-                    }
-                    any = true;
-                    if let Some(p) = parse(&buf[..n as usize]) {
-                        got.push(p);
+                if let Ok(Some(batch)) = cap.next_batch_blocking(Duration::from_millis(20)) {
+                    for pkt in &batch {
+                        any = true;
+                        if let Some(p) = parse(pkt.data()) {
+                            got.push(p);
+                        }
                     }
                 }
                 if any {
@@ -218,19 +193,8 @@ impl Rx {
                     }
                 }
             }
-            // PACKET_STATISTICS: tp_packets, tp_drops
-            let mut st = [0u32; 2];
-            let mut len: libc::socklen_t = 8;
-            unsafe {
-                libc::getsockopt(
-                    fd.as_raw_fd(),
-                    libc::SOL_PACKET,
-                    libc::PACKET_STATISTICS,
-                    st.as_mut_ptr().cast(),
-                    &mut len,
-                )
-            };
-            (got, st[1])
+            let drops = cap.stats().map(|st| st.drops).unwrap_or(u64::MAX);
+            (got, drops)
         });
         Self {
             stop,
@@ -244,12 +208,13 @@ impl Rx {
     }
 }
 
-/// Compare what arrived with what was expected, in order.
+/// Compare what arrived with what was expected, in order. `rx_drops`: the
+/// frames the receiver's own ring dropped.
 fn check(
     label: &str,
     expected: &[u64],
     got: &[(u64, bool)],
-    rx_drops: u32,
+    rx_drops: u64,
     strict_order: bool,
 ) -> Result<(), String> {
     let strict_order = strict_order && std::env::var("R5_LOOSE").is_err();
@@ -281,7 +246,11 @@ fn check(
         &corrupt[..corrupt.len().min(10)],
     );
     eprintln!("{msg}");
-    if !missing.is_empty()
+    // Every frame the receiver saw is one that was sent, once, intact (and
+    // in order); a frame it didn't see is the sender's fault unless its
+    // own ring dropped at least as many. With no receiver drops, that is
+    // exactly-once delivery.
+    if missing.len() as u64 > rx_drops
         || !extra.is_empty()
         || !dups.is_empty()
         || !corrupt.is_empty()

@@ -357,12 +357,24 @@ fn restore_state(dev: &dyn RssDevice, previous: &RssState, mode: RssMode) -> Res
     match mode {
         RssMode::SymXor => dev.set(ffi::ETH_RSS_HASH_NO_CHANGE, previous.input_xfrm, None),
         RssMode::SymmetricKey => {
+            // The key path set Toeplitz: ask for the previous hash function
+            // only when it was another one. A driver already on Toeplitz may
+            // refuse every hash-function request (the key-only class
+            // `set_symmetric` supports) — restore it with the key alone.
             let hfunc = match previous.hfunc {
-                0 => ffi::ETH_RSS_HASH_NO_CHANGE,
+                0 | ffi::ETH_RSS_HASH_TOP => ffi::ETH_RSS_HASH_NO_CHANGE,
                 h => h,
             };
             let key = (!previous.key.is_empty()).then_some(previous.key.as_slice());
-            dev.set(hfunc, ffi::RXH_XFRM_NO_CHANGE, key)
+            match dev.set(hfunc, ffi::RXH_XFRM_NO_CHANGE, key) {
+                Err(e) if unsupported(&e) && hfunc != ffi::ETH_RSS_HASH_NO_CHANGE => {
+                    // The previous hash function can't be asked for: put the
+                    // key back at least, and say so.
+                    dev.set(ffi::ETH_RSS_HASH_NO_CHANGE, ffi::RXH_XFRM_NO_CHANGE, key)?;
+                    Err(e)
+                }
+                res => res,
+            }
         }
     }
 }
@@ -720,15 +732,22 @@ mod tests {
     }
 
     /// A driver already on Toeplitz that refuses any hash-function request:
-    /// the key alone makes it symmetric.
+    /// the key alone makes it symmetric — and the key alone restores it
+    /// (review r1: the restore asked for the previous hash function, which
+    /// such a driver refuses, and left the symmetric key in place).
     #[test]
     fn toeplitz_nic_refusing_hfunc_requests_takes_the_key_alone() {
         let nic = FakeNic::new(ffi::ETH_RSS_HASH_TOP, false, 0);
+        let before = nic.state();
         let g = set_symmetric(&nic).expect("key only");
         assert_eq!(g.mode(), RssMode::SymmetricKey);
         assert_eq!(nic.state().key, symmetric_key(52));
         assert_eq!(nic.state().hfunc, ffi::ETH_RSS_HASH_TOP);
-        drop(g);
+        assert_eq!(g.restore().map_err(|e| e.to_string()), Ok(()));
+        assert_eq!(nic.state(), before, "the key is restored");
+        // The drop path too.
+        drop(set_symmetric(&nic).expect("key only"));
+        assert_eq!(nic.state(), before);
     }
 
     #[test]

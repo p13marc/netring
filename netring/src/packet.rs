@@ -384,7 +384,12 @@ impl<'a> Packet<'a> {
     /// stripped tag, and whether it is back in [`data`](Self::data). For a
     /// classic filter `f` installed on the capture,
     /// `f.matches_with(pkt.data(), &pkt.bpf_ancillary())` is the verdict
-    /// the kernel gave this packet.
+    /// the kernel gave this packet — when the packet was captured whole
+    /// (`len() == original_len()`, not
+    /// [`truncated`](crate::PacketStatus::truncated)). The kernel ran the
+    /// filter on the whole packet; a load past the captured bytes fails
+    /// here (no match). A re-inserted tag takes 4 of a snap length's bytes:
+    /// the data keeps the tag and loses its last 4 captured bytes.
     #[inline]
     pub fn bpf_ancillary(&self) -> BpfAncillary {
         ancillary(self.vlan(), self.vlan_reinserted())
@@ -484,6 +489,15 @@ impl<'a> Packet<'a> {
     /// The view's wire length is [`original_len`](Self::original_len) (the
     /// re-inserted tag included), so flowscope counts what was on the wire
     /// and gaps the bytes a snap length cut (0.32, #223).
+    ///
+    /// A tag that is **not** in the frame (re-insertion off or not
+    /// possible; [`stripped_vlan`](Self::stripped_vlan)) is not counted:
+    /// flowscope's wire length is the frame plus what was cut from its
+    /// *end*, so it has no place for 4 bytes missing from the front — they
+    /// would read as a snap cut and every such packet as truncated. Byte
+    /// counts of tagged traffic are then 4 bytes per packet lower than with
+    /// re-insertion, as on AF_XDP, where the NIC strips the tag into the RX
+    /// metadata.
     ///
     /// # Examples
     ///

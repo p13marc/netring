@@ -985,6 +985,11 @@ impl CaptureBuilder {
     /// way; [`Packet::stripped_vlan`](crate::Packet::stripped_vlan) is the
     /// tag when it is *not* in the data.
     ///
+    /// Byte counts follow the data: with re-insertion off, a tagged
+    /// packet's [`view`](crate::Packet::view) — and every flow count built
+    /// on it — is 4 bytes shorter than what was on the wire (the same as
+    /// an AF_XDP capture whose NIC strips the tag).
+    ///
     /// Re-insertion needs 4 bytes of headroom in front of each frame, which
     /// the builder reserves with `PACKET_RESERVE`. Packets of non-Ethernet
     /// devices, and packets with fewer than 12 bytes captured, are left as

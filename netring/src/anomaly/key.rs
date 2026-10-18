@@ -1,23 +1,26 @@
 //! `Key` — the anomaly-key trait.
 //!
-//! `AnomalySink::write` and `AnomalyWriter::with_key` accept
-//! `&dyn Key`. Combines `Any + Debug + Send + Sync`:
+//! [`AnomalyWriter::with_key`](crate::anomaly::sink::AnomalyWriter::with_key)
+//! takes any `Key`; a sink gets it as `&dyn Key` in
+//! [`AnomalyRecord::key`](crate::anomaly::sink::AnomalyRecord::key).
+//! Combines `Any + Debug + Send + Sync`:
 //!
-//! - `Debug` powers the human-readable `key={k:?}` log line used by
-//!   `StdoutSink` and `TracingSink`.
-//! - `Any` (via the `std::any::Any` trait object) lets structured
-//!   sinks downcast to a specific key type. `EveSink` and `MetricsSink`
-//!   try downcasting to `flowscope::extract::FiveTupleKey` first to
-//!   pull `src_ip`/`dest_port`/etc. via [`flowscope::KeyFields`];
-//!   keys that aren't `FiveTupleKey` fall through to `Debug` rendering.
-//! - `Send + Sync` are required by `AnomalySink: Send` and by Phase C
-//!   sharding's cross-thread handler storage.
+//! - `Any` lets the writer recognise a flow key
+//!   (`flowscope::extract::FiveTupleKey`) and resolve the record's
+//!   [`Endpoints`](crate::anomaly::sink::Endpoints) — read from the flow's
+//!   initiator when it is known — which sinks render as source and
+//!   destination (EVE `src_ip` / `dest_port`, OCSF `src_endpoint`, the text
+//!   sinks' `src=… dst=…`).
+//!   [`AnomalyRecord::flow_key`](crate::anomaly::sink::AnomalyRecord::flow_key)
+//!   gives the key back.
+//! - `Debug` renders any other key (a host `IpAddr`, a counter key):
+//!   `key=<Debug>` in the text sinks, `"key"` in the JSON ones.
+//! - `Send + Sync` are required by `AnomalySink: Send` and by sharding's
+//!   cross-thread handler storage.
 //!
 //! Blanket-impl'd for every type satisfying the bounds — users never
-//! implement `Key` directly. `FiveTupleKey` satisfies all four
-//! (flowscope 0.13 ships `Debug + Send + Sync`; `Any` is automatic
-//! for any `'static` type). Primitive keys (`u32`, `IpAddr`) also
-//! work — `EveSink` falls back to `Debug` rendering for them.
+//! implement `Key` directly. `FiveTupleKey` satisfies all four; so do
+//! primitive keys (`u32`, `IpAddr`).
 
 pub use flowscope::KeyFields;
 

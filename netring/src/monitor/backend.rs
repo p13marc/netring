@@ -167,6 +167,11 @@ impl AnyBackend {
                         // fall back to now() for the timestamp.
                         let ts = pkt.timestamp().unwrap_or_else(now_ts);
                         last_ts = Some(ts);
+                        // Never cut: the wire length is the frame's. A tag
+                        // the NIC stripped into the metadata is not in it
+                        // (flowscope has no place for front bytes), so
+                        // tagged byte counts are 4 lower than re-inserted
+                        // AF_PACKET ones; see `Packet::view`.
                         on_packet(
                             PacketView::new(pkt.data(), ts)
                                 .with_wire_len(pkt.data().len())

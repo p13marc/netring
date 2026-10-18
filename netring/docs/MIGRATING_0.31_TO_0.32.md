@@ -99,6 +99,11 @@ forwards untagged as 0.31 did.
 | `filter.matches(pkt.data())` to predict the kernel's verdict | `filter.matches_with(pkt.data(), &pkt.bpf_ancillary())`; `matches(frame)` is the offline (tcpdump-on-a-file) verdict |
 | `.vlan()` / `.vlan_id(n)` matched nothing live; workarounds with `eth_type(0x8100)` | use `.vlan()` / `.vlan_id(n)` — they match the stripped tag |
 
+Flow byte counts follow the frame: a tagged packet counts its tag when it
+was re-inserted, not when it stays stripped (`vlan_reinsert(false)`, a
+kernel before 3.14, AF_XDP with the NIC stripping it) — 4 bytes per packet
+apart.
+
 `BpfAncillary` is `#[non_exhaustive]`: build it with `BpfAncillary::NONE`,
 `stripped(tag)` or `reinserted(tag)`. Code reading the raw ring through
 `Capture::ring_ptr()` must use `tp_mac`: a 4-byte `PACKET_RESERVE` moves
@@ -210,6 +215,13 @@ impl AnomalySink for MySink {
 `ctx.emit(..).with_key(&flow_key)` needs no change: the writer knows the
 current flow and reads it initiator-first.
 
+**Forwarding layers.** A sink that wraps another one (a filter, a tee, a
+rate limiter) passes `record` on as it is: `self.inner.write(record)`. The
+endpoints were resolved when the record was built — rebuilding it with
+`AnomalyRecord::new(..).with_key(..)` loses the initiator (the key alone
+reads as stored, `directional: false`); if you must rebuild, copy them
+with `.with_endpoints(e)` for `Some(e) = record.endpoints`.
+
 **Owned anomalies.** An `OwnedAnomaly` doesn't say how its 5-tuple was
 filled, so `publish_owned` / `Endpoints::from_owned` keep it as stored and
 mark it `directional: false`. When it is the flow being dispatched (an
@@ -272,13 +284,30 @@ wire bytes.
 
 | Output | 0.31 (key `a` / `b`) | 0.32 |
 |---|---|---|
-| EVE / OCSF / syslog / stdout / JSON / tracing anomaly `src` | lower address | the initiator (or the anomaly's subject) |
+| EVE `src_ip` / OCSF `src_endpoint` | lower address | the initiator (or the anomaly's subject) |
 | `ChannelSink` / `emit_owned` `OwnedAnomaly::src_*` | lower address | the initiator |
 | `eve_tls_record` `src_ip` | lower address | the TLS client (`TlsFingerprint::client`) |
 | `flow::<P>()` / `session::<P>()` `.src_port()` / `.src_host()` filters | lower address | the initiator |
 | IOC host match `side` observation | `src` = lower address | `src` = initiator, `dst` = responder |
 | `AggregateReport::top_pairs` / `AggregateSnapshot::pairs` | `(lower, higher)` | `(initiator, responder)` — two hosts opening flows to each other form two pairs |
 | YARA `ScanDirection` | the lower address's bytes were `Initiator` | the side that sent them (#215) |
+
+### Text anomaly sinks: `src=` / `dst=` instead of `key=`
+
+0.31's `StdoutSink`, `TracingSink`, `SyslogSink` and `StdoutJsonSink` had
+no source field: they printed the key's `Debug` text. In 0.32 a record
+with endpoints prints them, initiator first when known — log parsers
+matching `key=FiveTupleKey { … }` need updating:
+
+| Sink | 0.31 | 0.32 |
+|---|---|---|
+| `StdoutSink` line, `TracingSink` message | `key=FiveTupleKey { proto: Tcp, a: …, b: … }` | `src=10.0.0.9:40000 dst=10.0.0.1:80 proto=TCP` |
+| `SyslogSink` structured data | `key="FiveTupleKey { … }"` | `src="10.0.0.9:40000" dst="10.0.0.1:80" proto="TCP"` |
+| `StdoutJsonSink` | `"key"` only | `"key"` plus `src_ip`, `src_port`, `dest_ip`, `dest_port`, `proto`, `directional` |
+
+A key that is not a flow (a host `IpAddr`, a counter key) still prints as
+`key=…`. `directional: false` (JSON) means `src` is only the key's lower
+address.
 
 ## 7. flowscope 0.26
 

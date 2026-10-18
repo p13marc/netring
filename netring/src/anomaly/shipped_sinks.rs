@@ -203,8 +203,9 @@ impl AnomalySink for StdoutJsonSink {
 /// - `Error`    → `tracing::Level::ERROR`
 /// - `Critical` → `tracing::Level::ERROR` (tracing has no separate "critical")
 ///
-/// The event carries `kind`, the formatted key (if any), and the
-/// observations + metrics as message-string fields. Compatible
+/// The event carries `kind`, and a message with the endpoints
+/// (`src=… dst=… proto=…`, the flow's initiator first when known) or else
+/// the formatted key (`key=…`), then the observations + metrics. Compatible
 /// with any `tracing::Subscriber` (JSON, OTLP, stdout, …).
 pub struct TracingSink {
     msg_buf: String,

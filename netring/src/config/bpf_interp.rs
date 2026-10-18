@@ -71,7 +71,13 @@ impl BpfFilter {
     /// ran on before the tag was put back. So for a packet `p` from a
     /// [`Capture`](crate::Capture),
     /// `filter.matches_with(p.data(), &p.bpf_ancillary())` is the verdict
-    /// the socket filter gave it.
+    /// the socket filter gave it — for a packet captured whole
+    /// (`p.len() == p.original_len()`). The kernel ran the filter before a
+    /// [snap length](crate::CaptureBuilder::snap_len) cut the packet, so on
+    /// a cut one a load past `frame` fails here (no match) where the kernel
+    /// read the byte; a filter whose loads stay within the captured headers
+    /// still agrees. With re-insertion the cut also drops the frame's last
+    /// 4 captured bytes to make room for the tag.
     pub fn matches_with(&self, frame: &[u8], anc: &BpfAncillary) -> bool {
         self.verdict_with(frame, anc) != 0
     }

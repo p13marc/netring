@@ -159,11 +159,13 @@ impl FlowRecord {
     /// flowscope IE-writer other than netring's [`IpfixExporter`]. The mapping is
     /// the same one `IpfixExporter` uses on the wire: the initiator as the
     /// source, per-direction delta counts (IE 1/2) + both-direction totals
-    /// (IE 85/86) in IP octets, the wire (layer-2) octets in IE 352 / 353, `flowEndReason` (IE 136)
+    /// (IE 85/86) in IP octets, `flowEndReason` (IE 136)
     /// **plus** the un-collapsed `original_end_reason` shadow, and the Community
     /// ID. `tcpControlBits` is left unset — flowscope's `FlowStats` does not
     /// accumulate per-flow TCP flags, so there is no source for it (a flowscope
-    /// dependency, not a netring gap).
+    /// dependency, not a netring gap). This record also carries the wire
+    /// (layer-2) octets in IE 352 / 353, which `IpfixExporter`'s templates
+    /// don't.
     pub fn to_ipfix_record(&self) -> IeFlowRecord {
         to_ie_record(self)
     }

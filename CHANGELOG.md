@@ -36,7 +36,11 @@ has an old → new snippet there.
   typed filters accept whole packets (`ret #4294967295`, #222);
   `PacketStatus::losing` → `PacketBatch::losing()`.
 - **`AnomalySink::write(&AnomalyRecord)`** replaces the six positional
-  arguments (#215); `export::FlowRecord` has `key` / `initiator` /
+  arguments (#215), and the text sinks print the endpoints: `StdoutSink` /
+  `TracingSink` `src=… dst=… proto=…` and `SyslogSink` `src="…" dst="…"
+  proto="…"` replace `key=<Debug>` for a flow key; `StdoutJsonSink` adds
+  `src_ip` / `src_port` / `dest_ip` / `dest_port` / `proto` /
+  `directional`; `export::FlowRecord` has `key` / `initiator` /
   `responder` (and `ip_bytes_*`) instead of `a` / `b` and is
   `#[non_exhaustive]`; IPFIX's source is the initiator and IE 1 / 85 are
   IP octets (#217).
@@ -104,7 +108,9 @@ has an old → new snippet there.
   so flowscope counts what was on the wire and treats what a snap length
   cut as a gap; the pcap replay paths report each record's original
   length too. Packets a snap length cut are tracked (flowscope 0.25
-  skipped them).
+  skipped them). A VLAN tag that is not in the frame — re-insertion off,
+  AF_XDP with the NIC stripping it — is not counted (4 bytes per tagged
+  packet; flowscope's wire length only extends a frame at its end).
 - **`AsyncPcapSource` with `loop_at_eof` re-read forever** a capture with
   no packet of a supported link type (802.11, PPP, …), yielding nothing;
   a pass that yields no packet now ends the stream.
@@ -223,8 +229,10 @@ has an old → new snippet there.
   read from that flow's initiator; elsewhere an owned anomaly's 5-tuple is
   kept as stored and not claimed directional (flowscope's own detectors
   fill it initiator-first).
-- **IPFIX counted captured frame bytes** (#217): IE 1 / 85 are IP octets;
-  the wire bytes go to IE 352 / 353.
+- **IPFIX counted captured frame bytes** (#217): IE 1 / 85 are IP octets.
+  The wire (layer-2) bytes are IE 352 / 353 on the canonical record
+  (`FlowRecord::to_ipfix_record()`); `IpfixExporter`'s templates don't
+  carry them.
 
 ### Added
 

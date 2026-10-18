@@ -164,6 +164,32 @@ impl Drop for TxSlot<'_> {
 
 // ── Injector ───────────────────────────────────────────────────────────────
 
+/// How often [`Injector::refresh_link_if_stale`] re-reads the MTU.
+const LINK_REFRESH: std::time::Duration = std::time::Duration::from_secs(1);
+/// The least time between two re-reads for frames that don't fit.
+const LINK_RECHECK: std::time::Duration = std::time::Duration::from_millis(50);
+
+/// The egress device's length limit, as tpacket_snd() applies it.
+#[derive(Debug, Clone, Copy)]
+struct LinkLimit {
+    ifindex: i32,
+    mtu: usize,
+    /// An Ethernet device whose header length is known (14): not another
+    /// link type, not a VLAN sub-interface.
+    checked: bool,
+    read_at: std::time::Instant,
+}
+
+impl LinkLimit {
+    fn fits(&self, frame: &[u8]) -> bool {
+        const ETH_HLEN: usize = 14;
+        const VLAN_HLEN: usize = 4;
+        let len = frame.len();
+        len <= self.mtu + ETH_HLEN
+            || (len <= self.mtu + ETH_HLEN + VLAN_HLEN && frame.get(12..14) == Some(&[0x81, 0x00]))
+    }
+}
+
 /// What a non-blocking kick did ([`Injector::kick`]).
 #[derive(Debug, Clone, Copy, Default)]
 pub(crate) struct Kick {
@@ -218,8 +244,8 @@ pub struct Injector {
     frames_per_block: usize,
     data_offset: usize,
     queue: TxQueue,
-    /// The device's MTU when the injector was built (`SIOCGIFMTU`).
-    mtu: usize,
+    /// What the egress device takes ([`Self::fits_device`]).
+    link: LinkLimit,
     /// Slot status reads (tests: a kick must not scan the ring).
     #[cfg(test)]
     status_reads: std::cell::Cell<u64>,
@@ -306,17 +332,44 @@ impl Injector {
             .count()
     }
 
-    /// Whether the kernel lets this socket send `frame` on the device as it
-    /// was when the injector was built: at most `mtu + 14` bytes (the
-    /// Ethernet header), or `mtu + 18` when the outermost tag is 802.1Q —
-    /// tpacket_snd()'s limit (`dev->mtu + hard_header_len`, +`VLAN_HLEN`
-    /// only for `ETH_P_8021Q`, packet_extra_vlan_len_allowed()).
-    pub(crate) fn fits_device(&self, frame: &[u8]) -> bool {
-        const ETH_HLEN: usize = 14;
-        const VLAN_HLEN: usize = 4;
-        let len = frame.len();
-        len <= self.mtu + ETH_HLEN
-            || (len <= self.mtu + ETH_HLEN + VLAN_HLEN && frame.get(12..14) == Some(&[0x81, 0x00]))
+    /// Whether the kernel lets this socket send `frame` on the device —
+    /// tpacket_snd()'s limit: `dev->mtu + dev->hard_header_len`, plus
+    /// `VLAN_HLEN` for an outer 802.1Q tag on an Ethernet device
+    /// (packet_extra_vlan_len_allowed()). Checked only where that length
+    /// is known — an Ethernet device (14-byte header) that isn't a VLAN
+    /// sub-interface (which may take 4 more); elsewhere `true`, and the
+    /// kernel decides. The MTU is re-read when a frame doesn't fit (not
+    /// more than every 50 ms) and by [`Self::refresh_link_if_stale`].
+    pub(crate) fn fits_device(&mut self, frame: &[u8]) -> bool {
+        if !self.link.checked || self.link.fits(frame) {
+            return true;
+        }
+        // It may have grown since it was read.
+        if self.link.read_at.elapsed() >= LINK_RECHECK {
+            self.refresh_mtu();
+            return self.link.fits(frame);
+        }
+        false
+    }
+
+    /// Re-read the device's MTU if the last read is a second old — the
+    /// bridge does this on each drain, so a lowered MTU is noticed.
+    pub(crate) fn refresh_link_if_stale(&mut self) {
+        if self.link.checked && self.link.read_at.elapsed() >= LINK_REFRESH {
+            self.refresh_mtu();
+        }
+    }
+
+    /// Re-read the MTU, by ifindex (the device may have been renamed).
+    fn refresh_mtu(&mut self) {
+        self.link.read_at = std::time::Instant::now();
+        let fd = self.fd.as_fd();
+        match socket::interface_name(fd, self.link.ifindex)
+            .and_then(|name| socket::interface_mtu(fd, &name))
+        {
+            Ok(mtu) => self.link.mtu = mtu as usize,
+            Err(e) => tracing::debug!(error = %e, "TX: could not re-read the device MTU"),
+        }
     }
 
     /// Number of frames queued with [`TxSlot::send`] that no kick has handed
@@ -802,6 +855,19 @@ impl InjectorBuilder {
         let ifindex = socket::resolve_interface(&interface)?;
         socket::bind_to_interface_proto(fd.as_fd(), ifindex, 0)?;
         let mtu = socket::interface_mtu(fd.as_fd(), &interface)? as usize;
+        // A VLAN sub-interface may count its tag in the header length; its
+        // limit is the kernel's to apply.
+        let vlan_dev = std::path::Path::new("/proc/net/vlan")
+            .join(&interface)
+            .exists();
+        let ether = socket::interface_link_type(fd.as_fd(), &interface)
+            .is_ok_and(|t| t == libc::ARPHRD_ETHER);
+        let link = LinkLimit {
+            ifindex,
+            mtu,
+            checked: ether && !vlan_dev,
+            read_at: std::time::Instant::now(),
+        };
 
         if self.qdisc_bypass {
             // PACKET_QDISC_BYPASS sets a function pointer on the packet_sock
@@ -857,7 +923,7 @@ impl InjectorBuilder {
                 head_rejected: false,
                 frame_count: geometry.frame_nr as usize,
             },
-            mtu,
+            link,
             #[cfg(test)]
             status_reads: std::cell::Cell::new(0),
         })
@@ -1004,6 +1070,58 @@ mod tests {
         assert_eq!(tx.flush_nonblocking().unwrap(), 3, "no hole stops the kick");
         assert_eq!(tx.queued_count(), 0);
         tx.wait_drained(std::time::Duration::from_secs(2)).unwrap();
+    }
+
+    /// `ip …`; `false` when it fails (no privilege).
+    fn ip(args: &[&str]) -> bool {
+        std::process::Command::new("ip")
+            .args(args)
+            .stderr(std::process::Stdio::null())
+            .status()
+            .is_ok_and(|s| s.success())
+    }
+
+    /// Review r3: the egress check applied the Ethernet header length and
+    /// the 802.1Q allowance to every device type; the kernel allows `mtu +
+    /// hard_header_len` (24 on a GRE device with a remote), +4 for 802.1Q
+    /// only on Ethernet. Non-Ethernet devices are the kernel's to check.
+    /// Needs `CAP_NET_ADMIN` + `CAP_NET_RAW` (skips without).
+    #[test]
+    fn the_egress_check_follows_the_device_type() {
+        let _ = ip(&["link", "delete", "nrtxgre0"]);
+        if !ip(&[
+            "link", "add", "nrtxgre0", "type", "gre", "remote", "10.9.9.2", "local", "10.9.9.1",
+        ]) || !ip(&["link", "set", "nrtxgre0", "up"])
+        {
+            eprintln!("skip: cannot create a GRE device (needs CAP_NET_ADMIN, ip_gre)");
+            return;
+        }
+        let gre = InjectorBuilder::default().interface("nrtxgre0").build();
+        let _ = ip(&["link", "add", "nrtxeth0", "type", "dummy"]);
+        let _ = ip(&["link", "set", "nrtxeth0", "mtu", "1500", "up"]);
+        let eth = InjectorBuilder::default().interface("nrtxeth0").build();
+        let _ = ip(&["link", "delete", "nrtxgre0"]);
+        let (mut gre, mut eth) = match (gre, eth) {
+            (Ok(g), Ok(e)) => (g, e),
+            (g, e) => {
+                let _ = ip(&["link", "delete", "nrtxeth0"]);
+                eprintln!("skip (needs CAP_NET_RAW): {:?} {:?}", g.err(), e.err());
+                return;
+            }
+        };
+        // GRE (MTU 1476, a 24-byte link header): a full-size frame is 1500.
+        assert!(gre.fits_device(&vec![0u8; 1476 + 24]));
+        // Ethernet: 1514, or 1518 with an outer 802.1Q tag; not 802.1ad.
+        let tagged = |tpid: u16, len: usize| {
+            let mut f = vec![0u8; len];
+            f[12..14].copy_from_slice(&tpid.to_be_bytes());
+            f
+        };
+        assert!(eth.fits_device(&vec![0u8; 1514]));
+        assert!(!eth.fits_device(&vec![0u8; 1515]));
+        assert!(eth.fits_device(&tagged(0x8100, 1518)));
+        assert!(!eth.fits_device(&tagged(0x88a8, 1518)));
+        let _ = ip(&["link", "delete", "nrtxeth0"]);
     }
 
     /// frame_capacity should equal frame_size minus the tpacket2_hdr alignment.

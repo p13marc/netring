@@ -565,3 +565,122 @@ fn bridge_drops_frames_the_egress_refuses_and_keeps_forwarding() {
         "the refused frame is counted: {stats}"
     );
 }
+
+/// Set `iface`'s MTU.
+fn set_mtu(iface: &str, mtu: u32) {
+    let ok = std::process::Command::new("ip")
+        .args(["link", "set", iface, "mtu", &mtu.to_string()])
+        .status()
+        .is_ok_and(|s| s.success());
+    assert!(ok, "set {iface} mtu {mtu}");
+}
+
+/// A 2500-byte frame carrying `marker`.
+fn big_frame(marker: &[u8]) -> Vec<u8> {
+    let mut f = marked_frame(marker, 0);
+    f.resize(2500, 0x5a);
+    f
+}
+
+/// Run a bridge x1 ⇄ y1 (TX frames big enough for 2500 bytes) in a
+/// thread for `iterations` 20 ms polls.
+fn spawn_big_bridge(
+    x: &VethPair,
+    y: &VethPair,
+    iterations: usize,
+) -> std::thread::JoinHandle<(Result<(), String>, Option<netring::bridge::BridgeStats>)> {
+    let (a, b) = (x.b.clone(), y.b.clone());
+    let (ready_tx, ready_rx) = std::sync::mpsc::channel();
+    let handle = std::thread::spawn(move || {
+        let mut bridge = Bridge::builder()
+            .interface_a(&a)
+            .interface_b(&b)
+            .tx_b_frame_size(4096)
+            .poll_timeout(Duration::from_millis(20))
+            .build()
+            .expect("build bridge");
+        ready_tx.send(()).expect("ready");
+        let res = bridge.run_iterations(iterations, |_pkt, _dir| BridgeAction::Forward);
+        (res.map_err(|e| e.to_string()), bridge.stats().ok())
+    });
+    ready_rx
+        .recv_timeout(Duration::from_secs(10))
+        .expect("bridge never came up");
+    handle
+}
+
+/// Review r3: the bridge checked frames against the egress MTU read when
+/// it was built. Raised afterwards (1500 → 3000), a legitimate 2500-byte
+/// frame was dropped as too large; the MTU is re-read before a frame is
+/// dropped now.
+#[test]
+fn bridge_follows_an_egress_mtu_raised_after_build() {
+    let Some((x, y)) = veth_pairs("m") else {
+        eprintln!("skipping: needs CAP_NET_ADMIN to create veth");
+        return;
+    };
+    for iface in [&x.a, &x.b, &y.a] {
+        set_mtu(iface, 3000);
+    }
+    let marker = format!("netring_bridge_mtu_up_{}", helpers::unique_port());
+    let mut sink = netring::CaptureBuilder::default()
+        .interface(&y.a)
+        .block_timeout_ms(10)
+        .build()
+        .expect("capture on y0");
+    let bridge = spawn_big_bridge(&x, &y, 100);
+    set_mtu(&y.b, 3000);
+    std::thread::sleep(Duration::from_millis(100));
+    inject_frames(&x.a, &[big_frame(marker.as_bytes())]);
+    let seen = count_marked(&mut sink, marker.as_bytes(), Duration::from_secs(1));
+    let (res, stats) = bridge.join().expect("bridge thread");
+    assert_eq!(res, Ok(()));
+    let stats = stats.expect("stats");
+    assert_eq!(seen, 1, "the 2500-byte frame fits the raised MTU: {stats}");
+    assert_eq!(stats.a_to_b_dropped_too_large, 0, "{stats}");
+}
+
+/// Review r3: lowered after build (3000 → 1500), the stale MTU let a
+/// 2500-byte frame through to the kernel, which refused it, and the
+/// injector dropped it uncounted — the stats claim refused frames are
+/// counted too large. The bridge re-reads the MTU at least once a second.
+#[test]
+fn bridge_counts_frames_an_egress_mtu_lowered_after_build_refuses() {
+    let Some((x, y)) = veth_pairs("l") else {
+        eprintln!("skipping: needs CAP_NET_ADMIN to create veth");
+        return;
+    };
+    for iface in [&x.a, &x.b, &y.a, &y.b] {
+        set_mtu(iface, 3000);
+    }
+    let marker = format!("netring_bridge_mtu_down_{}", helpers::unique_port());
+    let bridge = spawn_big_bridge(&x, &y, 120);
+    set_mtu(&y.b, 1500);
+    std::thread::sleep(Duration::from_millis(1200));
+    inject_frames(&x.a, &[big_frame(marker.as_bytes())]);
+    let (res, stats) = bridge.join().expect("bridge thread");
+    assert_eq!(res, Ok(()));
+    let stats = stats.expect("stats");
+    assert_eq!(
+        stats.a_to_b_dropped_too_large, 1,
+        "the refused frame is counted: {stats}"
+    );
+}
+
+/// Send `frames` on `iface` and wait until they left.
+fn inject_frames(iface: &str, frames: &[Vec<u8>]) {
+    let mut tx = netring::Injector::builder()
+        .interface(iface)
+        .frame_size(4096)
+        .frame_count(frames.len().max(1))
+        .build()
+        .expect("injector");
+    for f in frames {
+        let mut slot = tx.allocate(f.len()).expect("allocate");
+        slot.data_mut()[..f.len()].copy_from_slice(f);
+        slot.set_len(f.len());
+        slot.send();
+    }
+    tx.flush().expect("flush");
+    tx.wait_drained(Duration::from_secs(2)).expect("drained");
+}

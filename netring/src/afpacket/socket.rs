@@ -77,6 +77,60 @@ pub(crate) fn interface_mtu(fd: BorrowedFd<'_>, name: &str) -> Result<u32, Error
     Ok(req.mtu.max(0) as u32)
 }
 
+/// A `struct ifreq` (40 bytes): the interface name, then the 24-byte
+/// union each ioctl reads or writes its own way.
+#[repr(C)]
+struct Ifreq {
+    name: [libc::c_char; libc::IFNAMSIZ],
+    data: [u8; 24],
+}
+const _: () = assert!(std::mem::size_of::<Ifreq>() == 40);
+
+/// The name of interface `ifindex` (`SIOCGIFNAME`), in `fd`'s namespace.
+pub(crate) fn interface_name(fd: BorrowedFd<'_>, ifindex: i32) -> Result<String, Error> {
+    let mut req = Ifreq {
+        name: [0; libc::IFNAMSIZ],
+        data: [0; 24],
+    };
+    req.data[..4].copy_from_slice(&ifindex.to_ne_bytes());
+    // SAFETY: SIOCGIFNAME reads `ifr_ifindex` from and writes the name into
+    // a full-size `struct ifreq` we own.
+    let rc = unsafe { libc::ioctl(fd.as_raw_fd(), libc::SIOCGIFNAME, &mut req) };
+    if rc < 0 {
+        return Err(Error::Io(std::io::Error::last_os_error()));
+    }
+    let bytes: Vec<u8> = req
+        .name
+        .iter()
+        .take_while(|&&c| c != 0)
+        .map(|&c| c as u8)
+        .collect();
+    Ok(String::from_utf8_lossy(&bytes).into_owned())
+}
+
+/// The link type (`ARPHRD_*`, `dev->type`) of interface `name`: the
+/// `sa_family` of its hardware address (`SIOCGIFHWADDR`).
+pub(crate) fn interface_link_type(fd: BorrowedFd<'_>, name: &str) -> Result<u16, Error> {
+    let bytes = name.as_bytes();
+    if bytes.len() >= libc::IFNAMSIZ {
+        return Err(Error::InterfaceNotFound(name.to_string()));
+    }
+    let mut req = Ifreq {
+        name: [0; libc::IFNAMSIZ],
+        data: [0; 24],
+    };
+    for (d, s) in req.name.iter_mut().zip(bytes) {
+        *d = *s as libc::c_char;
+    }
+    // SAFETY: SIOCGIFHWADDR reads the name from and writes a `sockaddr`
+    // into a full-size `struct ifreq` we own.
+    let rc = unsafe { libc::ioctl(fd.as_raw_fd(), libc::SIOCGIFHWADDR, &mut req) };
+    if rc < 0 {
+        return Err(Error::Io(std::io::Error::last_os_error()));
+    }
+    Ok(u16::from_ne_bytes([req.data[0], req.data[1]]))
+}
+
 // ── setsockopt wrappers ────────────────────────────────────────────────────
 
 /// Set `PACKET_VERSION` (`ffi::TPACKET_V3_INT` for RX, `ffi::TPACKET_V2_INT`

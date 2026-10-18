@@ -74,7 +74,12 @@ pub struct BridgeStats {
     /// A→B packets dropped because they didn't fit the TX frame, or were
     /// longer than interface B accepts (its MTU + the Ethernet header, + 4
     /// only for an outer 802.1Q tag — a re-inserted 802.1ad tag on a
-    /// full-size frame is too long).
+    /// full-size frame is too long). The second check is made on Ethernet
+    /// devices (not VLAN sub-interfaces, whose header length the kernel
+    /// alone knows), against the MTU as of the last second (re-read before
+    /// a frame is dropped). On other devices, and right after the MTU was
+    /// lowered, a frame the kernel refuses is dropped by the kernel
+    /// (`PACKET_LOSS`) without being counted here.
     pub a_to_b_dropped_too_large: u64,
     /// A→B packets dropped because the TX ring was full.
     pub a_to_b_dropped_ring_full: u64,
@@ -468,6 +473,9 @@ impl Bridge {
         };
 
         let tx_capacity = tx.frame_capacity();
+        // An MTU changed since the injector read it: follow it within a
+        // second (a raised one is also re-read before a frame is dropped).
+        tx.refresh_link_if_stale();
 
         for _ in 0..DRAIN_BATCHES {
             let Some(batch) = rx.next_batch() else {
@@ -497,7 +505,8 @@ impl Bridge {
                 // Longer than the egress device takes (e.g. a full-size
                 // frame whose re-inserted tag is 802.1ad): the kernel would
                 // refuse it. Its injector drops refused frames anyway
-                // (PACKET_LOSS) — counting them needs this check.
+                // (PACKET_LOSS) — counting them needs this check, which
+                // only Ethernet devices get (see `fits_device`).
                 if !tx.fits_device(pkt.data()) {
                     *too_large += 1;
                     tracing::debug!(

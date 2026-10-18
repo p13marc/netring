@@ -202,7 +202,9 @@ impl Bridge {
     /// Returns [`Error::Io`] if `poll(2)` or a `flush()` syscall fails, or
     /// with `ENETDOWN` when either interface is removed. A side that is
     /// merely down is waited out (with a warning) and forwarding resumes
-    /// when it comes back up.
+    /// when it comes back up: frames for it stay queued in its TX ring
+    /// (once that is full, more are counted ring-full) and leave when it
+    /// is up again.
     pub fn run<F>(&mut self, mut filter: F) -> Result<(), Error>
     where
         F: FnMut(&Packet<'_>, BridgeDirection) -> BridgeAction,
@@ -214,6 +216,9 @@ impl Bridge {
             }
             if b_ready {
                 self.drain_direction(&mut filter, BridgeDirection::BtoA, Kick::Wait)?;
+            }
+            if !a_ready && !b_ready {
+                self.kick_queued()?;
             }
         }
     }
@@ -233,6 +238,9 @@ impl Bridge {
             }
             if b_ready {
                 self.drain_direction(&mut filter, BridgeDirection::BtoA, Kick::Wait)?;
+            }
+            if !a_ready && !b_ready {
+                self.kick_queued()?;
             }
         }
         Ok(())
@@ -434,14 +442,14 @@ impl Bridge {
         crate::afpacket::socket::check_health(self.rx_b.as_fd())
     }
 
-    /// Kick frames a non-blocking kick left queued (it stops when the
-    /// socket's send buffer is full) — the async loops do this once a
-    /// second, so a backlog doesn't wait for the next forwarded batch.
-    #[cfg(feature = "tokio")]
+    /// Kick frames a kick left queued (a non-blocking one stops when the
+    /// socket's send buffer is full; an egress that was down keeps them) —
+    /// the async loops do this once a second, the blocking ones when a
+    /// poll times out, so a backlog doesn't wait for the next forwarded
+    /// batch.
     fn kick_queued(&mut self) -> Result<(), Error> {
-        self.tx_a.flush_nonblocking()?;
-        self.tx_b.flush_nonblocking()?;
-        Ok(())
+        Kick::NoWait.kick(&mut self.tx_a)?;
+        Kick::NoWait.kick(&mut self.tx_b)
     }
 
     /// Drain retired blocks from one direction, forwarding through the filter.
@@ -587,17 +595,32 @@ enum Kick {
     /// [`Injector::flush_nonblocking`]: return once they are handed over.
     /// The async loops must not block the runtime thread on a device that
     /// holds frames (#228).
-    #[cfg_attr(not(feature = "tokio"), allow(dead_code))]
     NoWait,
 }
 
 impl Kick {
+    /// Hand `tx`'s queued frames to the kernel. An egress that is down
+    /// (not removed) is waited out: the kick fails in tpacket_snd()'s
+    /// `IFF_UP` check with `ENETDOWN` while the socket is still bound, and
+    /// its frames stay queued — the ring fills and further frames are
+    /// counted ring-full — until a kick after the device is up sends them.
+    /// A removed egress ends the run with `ENETDOWN` (a kick on it fails
+    /// with `ENXIO`).
     fn kick(self, tx: &mut Injector) -> Result<(), Error> {
-        match self {
-            Kick::Wait => tx.flush()?,
-            Kick::NoWait => tx.flush_nonblocking()?,
+        let res = match self {
+            Kick::Wait => tx.flush(),
+            Kick::NoWait => tx.flush_nonblocking(),
         };
-        Ok(())
+        match res {
+            Ok(_) => Ok(()),
+            Err(e) => {
+                crate::afpacket::socket::check_health(tx.as_fd())?;
+                match &e {
+                    Error::Io(io) if io.raw_os_error() == Some(libc::ENETDOWN) => Ok(()),
+                    _ => Err(e),
+                }
+            }
+        }
     }
 }
 

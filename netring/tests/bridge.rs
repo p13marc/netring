@@ -684,3 +684,112 @@ fn inject_frames(iface: &str, frames: &[Vec<u8>]) {
     tx.flush().expect("flush");
     tx.wait_drained(Duration::from_secs(2)).expect("drained");
 }
+
+/// `ip link set <iface> <state>`.
+fn link_set(iface: &str, state: &str) {
+    let ok = std::process::Command::new("ip")
+        .args(["link", "set", iface, state])
+        .status()
+        .is_ok_and(|s| s.success());
+    assert!(ok, "ip link set {iface} {state}");
+}
+
+/// Review r5: with the egress side merely down and traffic arriving on
+/// the other side, the A→B kick failed with ENETDOWN (tpacket_snd()'s
+/// `IFF_UP` check) and the bridge loop ended — though the docs say a down
+/// side is waited out. It keeps running now, and forwards once B is up.
+#[test]
+fn bridge_waits_out_a_down_egress_with_traffic() {
+    let Some((x, y)) = veth_pairs("d") else {
+        eprintln!("skipping: needs CAP_NET_ADMIN to create veth");
+        return;
+    };
+    let marker = format!("netring_bridge_down_{}", helpers::unique_port());
+    let mut sink = netring::CaptureBuilder::default()
+        .interface(&y.a)
+        .block_timeout_ms(10)
+        .build()
+        .expect("capture on y0");
+    let (a, b) = (x.b.clone(), y.b.clone());
+    let (ready_tx, ready_rx) = std::sync::mpsc::channel();
+    let bridge = std::thread::spawn(move || {
+        let mut bridge = Bridge::builder()
+            .interface_a(&a)
+            .interface_b(&b)
+            .poll_timeout(Duration::from_millis(20))
+            .build()
+            .expect("build bridge");
+        ready_tx.send(()).expect("ready");
+        let res = bridge.run_iterations(150, |_pkt, _dir| BridgeAction::Forward);
+        (res.map_err(|e| e.to_string()), bridge.stats().ok())
+    });
+    ready_rx
+        .recv_timeout(Duration::from_secs(10))
+        .expect("bridge never came up");
+    link_set(&y.b, "down");
+    inject_marked(&x.a, format!("{marker}_while_down").as_bytes(), 5);
+    std::thread::sleep(Duration::from_millis(200));
+    link_set(&y.b, "up");
+    std::thread::sleep(Duration::from_millis(300));
+    let after = format!("{marker}_after_up");
+    inject_marked(&x.a, after.as_bytes(), 5);
+    let seen = count_marked(&mut sink, after.as_bytes(), Duration::from_secs(1));
+    let (res, stats) = bridge.join().expect("bridge thread");
+    assert_eq!(res, Ok(()), "the bridge keeps running while B is down");
+    assert_eq!(seen, 5, "forwarding resumes once B is up: {stats:?}");
+}
+
+/// The same with the async loop.
+#[cfg(feature = "tokio")]
+#[test]
+fn async_bridge_waits_out_a_down_egress_with_traffic() {
+    let Some((x, y)) = veth_pairs("e") else {
+        eprintln!("skipping: needs CAP_NET_ADMIN to create veth");
+        return;
+    };
+    let marker = format!("netring_abridge_down_{}", helpers::unique_port());
+    let mut sink = netring::CaptureBuilder::default()
+        .interface(&y.a)
+        .block_timeout_ms(10)
+        .build()
+        .expect("capture on y0");
+    let (a, b) = (x.b.clone(), y.b.clone());
+    let (ready_tx, ready_rx) = std::sync::mpsc::channel();
+    let bridge = std::thread::spawn(move || {
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        rt.block_on(async move {
+            let mut bridge = Bridge::builder()
+                .interface_a(&a)
+                .interface_b(&b)
+                .poll_timeout(Duration::from_millis(20))
+                .build()
+                .expect("build bridge");
+            ready_tx.send(()).expect("ready");
+            let res = bridge
+                .run_iterations_async(150, |_pkt, _dir| BridgeAction::Forward)
+                .await;
+            res.map_err(|e| e.to_string())
+        })
+    });
+    ready_rx
+        .recv_timeout(Duration::from_secs(10))
+        .expect("bridge never came up");
+    link_set(&y.b, "down");
+    inject_marked(&x.a, format!("{marker}_while_down").as_bytes(), 5);
+    std::thread::sleep(Duration::from_millis(200));
+    link_set(&y.b, "up");
+    std::thread::sleep(Duration::from_millis(300));
+    let after = format!("{marker}_after_up");
+    inject_marked(&x.a, after.as_bytes(), 5);
+    let seen = count_marked(&mut sink, after.as_bytes(), Duration::from_secs(1));
+    let res = bridge.join().expect("bridge thread");
+    assert_eq!(
+        res,
+        Ok(()),
+        "the async bridge keeps running while B is down"
+    );
+    assert_eq!(seen, 5, "forwarding resumes once B is up");
+}

@@ -138,7 +138,9 @@ has an old → new snippet there.
   full ring) report the same `ENETDOWN`, not the `sendto`'s `ENXIO`; on a
   down interface their kick's own `ENETDOWN` is waited out too (`flush`
   returns 0, `send` / `wait_drained` retry on a backoff and drain once it
-  is up).
+  is up). So is a down egress of a `Bridge` (sync and async): its frames
+  stay queued — counted ring-full once the TX ring is full — and leave once
+  it is up; the loop ended with the kick's `ENETDOWN` before.
 - **Async kicks blocked the runtime thread on a device that holds frames**
   (#228): `AsyncInjector::flush` / `send` / `send_stream` and the async
   `Bridge` loops kicked with a blocking `sendto`, which on a TX ring waits

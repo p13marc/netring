@@ -365,6 +365,9 @@ refused slots).
   everything.
 - `with_broadcast::<P>()` and `protocol::<P>()` compose in any order
   (0.31 delivered messages twice after `protocol` then `with_broadcast`).
+- `TcpRst::zero_payload` is `true` for a reset flow that moved no data
+  (0.31: never). Handlers that ranked resets by it now see refused
+  connections.
 
 ## 9. netring-exporters 0.9.0
 

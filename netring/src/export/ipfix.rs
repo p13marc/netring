@@ -36,7 +36,7 @@
 //!   reports only what is new in each interim and final record, so a
 //!   collector summing deltas gets the flow's total; IE 85/86 stay running
 //!   totals. The exporter keeps the last exported counters of each ongoing
-//!   flow until its final record (an hour without a record drops them).
+//!   flow until its final record (a day without a record drops them).
 //! - `tcpControlBits` (IE 6) is emitted as `0`: flowscope's `FlowStats` does
 //!   not accumulate per-flow TCP control flags, so there is no source to fill
 //!   it (a flowscope dependency, not a netring gap). The IE stays in the

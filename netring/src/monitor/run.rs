@@ -2574,9 +2574,9 @@ async fn dispatch_lifecycle_async(
             key,
             reason,
             stats,
+            history,
             ts,
             l4,
-            ..
         } => match l4 {
             Some(L4Proto::Tcp) => {
                 // 0.22 §2.6: async TcpRst synthesis mirrors the sync arm.
@@ -2586,7 +2586,7 @@ async fn dispatch_lifecycle_async(
                     .await?;
                 if is_rst {
                     dispatcher
-                        .dispatch_async(&TcpRst::new(key, stats, ts))
+                        .dispatch_async(&TcpRst::new(key, stats, &history, ts))
                         .await?;
                 }
             }
@@ -3406,9 +3406,9 @@ fn dispatch_lifecycle(
             key,
             reason,
             stats,
+            history,
             ts,
             l4,
-            ..
         } => match l4 {
             Some(L4Proto::Tcp) => {
                 // 0.22 §2.6: synthesise a TcpRst alongside FlowEnded<Tcp>
@@ -3423,7 +3423,7 @@ fn dispatch_lifecycle(
                     ts
                 );
                 if is_rst {
-                    dispatch_one!(TcpRst, TcpRst::new(key, stats, ts), Some(key), ts);
+                    dispatch_one!(TcpRst, TcpRst::new(key, stats, &history, ts), Some(key), ts);
                 }
             }
             Some(L4Proto::Udp) => {
@@ -3685,9 +3685,9 @@ async fn dispatch_lifecycle_effects(
             key,
             reason,
             stats,
+            history,
             ts,
             l4,
-            ..
         } => match l4 {
             Some(L4Proto::Tcp) => {
                 let is_rst = reason == flowscope::EndReason::Rst;
@@ -3698,7 +3698,7 @@ async fn dispatch_lifecycle_effects(
                     ts
                 );
                 if is_rst {
-                    dispatch_one!(TcpRst, TcpRst::new(key, stats, ts), Some(key), ts);
+                    dispatch_one!(TcpRst, TcpRst::new(key, stats, &history, ts), Some(key), ts);
                 }
             }
             Some(L4Proto::Udp) => {

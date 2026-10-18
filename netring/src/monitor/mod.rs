@@ -2234,15 +2234,27 @@ impl MonitorBuilder {
     /// `Tcp`. (Fixed `PayloadCtx` shape — like `on_ctx` — so untyped
     /// closures infer cleanly; for payload-only, ignore the `ctx` arg.)
     ///
-    /// ```ignore
-    /// Monitor::builder()
+    /// ```no_run
+    /// # use netring::anomaly::Severity;
+    /// # use netring::ctx::Ctx;
+    /// # use netring::monitor::Monitor;
+    /// # use netring::protocol::event_typed::TcpRst;
+    /// # fn main() -> Result<(), Box<dyn std::error::Error>> {
+    /// let monitor = Monitor::builder()
     ///     .interface("eth0")
-    ///     .on_tcp_reset(|rst, ctx| {
-    ///         ctx.emit("TcpReset", if rst.zero_payload { Severity::Info } else { Severity::Warning })
-    ///             .with_key(&rst.key)
-    ///             .emit();
+    ///     .on_tcp_reset(|rst: &TcpRst, ctx: &mut Ctx<'_>| {
+    ///         // No data moved either way: a refused or abandoned
+    ///         // connection, not a transfer cut short.
+    ///         let severity = if rst.zero_payload { Severity::Info } else { Severity::Warning };
+    ///         // The reset's flow is the handler's: the sink reads it
+    ///         // from the initiator.
+    ///         ctx.emit("TcpReset", severity).with_key(&rst.key).emit();
     ///         Ok(())
     ///     })
+    ///     .build()?;
+    /// # let _ = monitor;
+    /// # Ok(())
+    /// # }
     /// ```
     pub fn on_tcp_reset(
         self,

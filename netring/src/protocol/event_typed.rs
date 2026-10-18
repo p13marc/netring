@@ -426,9 +426,12 @@ pub struct TcpRst {
     pub stats: FlowStats,
     /// Timestamp of the reset.
     pub ts: Timestamp,
-    /// `true` when the RST landed before any payload moved
-    /// (`stats.total_bytes() == 0`) — typically "connection refused"
-    /// at the application layer rather than a mid-transfer abort.
+    /// `true` when no segment of the flow carried payload — no `D`/`d`
+    /// in its TCP history — typically a refused or abandoned connection
+    /// rather than a mid-transfer abort. `false` when data moved, and
+    /// when the history (16 marks) filled up before any data showed: it
+    /// cannot tell then. (Before 0.32 it read `stats.total_bytes() == 0`,
+    /// which counts headers too and was never true on a real flow.)
     pub zero_payload: bool,
 }
 
@@ -442,10 +445,11 @@ impl TcpRst {
     }
 
     /// Constructor exposed for integration tests / dispatch
-    /// translation. Not part of the documented public API.
+    /// translation. Not part of the documented public API. `history` is
+    /// the flow's TCP history (`FlowEvent::Ended::history`).
     #[doc(hidden)]
-    pub fn new(key: FlowKey, stats: FlowStats, ts: Timestamp) -> Self {
-        let zero_payload = stats.total_bytes() == 0;
+    pub fn new(key: FlowKey, stats: FlowStats, history: &str, ts: Timestamp) -> Self {
+        let zero_payload = no_payload_in(history);
         Self {
             key,
             stats,
@@ -453,6 +457,14 @@ impl TcpRst {
             zero_payload,
         }
     }
+}
+
+/// Whether a TCP history shows that no segment carried payload: no `D`
+/// (initiator data) or `d` (responder data) mark, and room left in the
+/// history — a full one may have dropped the marks that came later.
+fn no_payload_in(history: &str) -> bool {
+    let full = history.len() >= flowscope::HistoryString::new().capacity();
+    !full && !history.contains(['D', 'd'])
 }
 
 impl Event for TcpRst {

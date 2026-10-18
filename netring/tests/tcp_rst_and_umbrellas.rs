@@ -26,14 +26,19 @@ fn key() -> flowscope::extract::FiveTupleKey {
 }
 
 #[test]
-fn tcp_rst_zero_payload_reflects_total_bytes() {
-    let empty = TcpRst::new(key(), FlowStats::default(), Timestamp::new(0, 0));
-    assert!(empty.zero_payload, "no bytes → zero_payload");
-
+fn tcp_rst_zero_payload_reads_the_history() {
+    let rst =
+        |history: &str| TcpRst::new(key(), FlowStats::default(), history, Timestamp::new(0, 0));
+    // Headers count toward the bytes: a refused connection moved some.
     let mut stats = FlowStats::default();
     stats.bytes_initiator = 120;
-    let moved = TcpRst::new(key(), stats, Timestamp::new(0, 0));
-    assert!(!moved.zero_payload, "bytes moved → not zero_payload");
+    let refused = TcpRst::new(key(), stats, "Sr", Timestamp::new(0, 0));
+    assert!(refused.zero_payload, "no data marks → zero_payload");
+    assert!(rst("SsR").zero_payload);
+    assert!(!rst("SsDR").zero_payload, "initiator data");
+    assert!(!rst("Ssdr").zero_payload, "responder data");
+    // A full history may have dropped the data marks: cannot tell.
+    assert!(!rst("SSSSSSSSSSSSSSSS").zero_payload);
 }
 
 #[test]
@@ -63,7 +68,7 @@ fn tcp_rst_dispatches_to_handler() {
         &mut flow_states,
     );
 
-    let rst = TcpRst::new(key(), FlowStats::default(), Timestamp::new(0, 0));
+    let rst = TcpRst::new(key(), FlowStats::default(), "Sr", Timestamp::new(0, 0));
     disp.dispatch::<TcpRst>(&rst, &mut ctx).unwrap();
     assert_eq!(hits.load(Ordering::Relaxed), 1);
 }

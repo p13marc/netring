@@ -199,6 +199,11 @@ has an old → new snippet there.
   lengths on every path but `keep(&Packet)` (#217).
 - The TLS / QUIC server port (DoT / DoQ classification) follows
   `Ctx::initiator()`.
+- `TcpRst::zero_payload` was never true: it read
+  `stats.total_bytes() == 0`, and the byte counts include the headers. It
+  now reads the flow's TCP history — no data mark (`D` / `d`) — so a
+  refused connection is told from a transfer cut short (`false` when a full
+  history can't tell). The hidden `TcpRst::new` takes the history.
 
 ### Fixed — outputs name the initiator
 

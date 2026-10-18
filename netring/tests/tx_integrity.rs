@@ -116,6 +116,25 @@ fn ifindex(name: &str) -> i32 {
     unsafe { libc::if_nametoindex(c.as_ptr()) as i32 }
 }
 
+/// Keep the sending thread on one CPU. A veth hands each frame to the
+/// peer through the backlog of the CPU that transmits it (`netif_rx`), and
+/// two CPUs' backlogs drain independently: a sender that migrates between
+/// frames — or a qdisc dequeuing from a timer on another CPU — can have the
+/// receiver see them out of order, whatever the ring did.
+fn pin_to_current_cpu() {
+    // SAFETY: sched_getcpu / sched_setaffinity on the calling thread with a
+    // cpu_set_t we own.
+    unsafe {
+        let cpu = libc::sched_getcpu();
+        if cpu < 0 {
+            return;
+        }
+        let mut set: libc::cpu_set_t = std::mem::zeroed();
+        libc::CPU_SET(cpu as usize, &mut set);
+        libc::sched_setaffinity(0, std::mem::size_of::<libc::cpu_set_t>(), &set);
+    }
+}
+
 /// What a receiver saw: `(seq, intact)` per frame, and the socket's drops.
 type Received = (Vec<(u64, bool)>, u32);
 
@@ -288,6 +307,7 @@ struct Cfg {
 /// Sync Injector op mix.
 fn run_sync(tx_if: &str, rx_if: &str, cfg: Cfg) -> Result<(), String> {
     let rx = Rx::start(rx_if);
+    pin_to_current_cpu();
     std::thread::sleep(Duration::from_millis(50));
     let mut tx = Injector::builder()
         .interface(tx_if)
@@ -455,6 +475,7 @@ fn r5_sync_noqueue_bypass() {
 /// Async adapter op mix: send / flush / dropped slots via get_mut.
 async fn run_async(tx_if: &str, rx_if: &str, cfg: Cfg) -> Result<(), String> {
     let rx = Rx::start(rx_if);
+    pin_to_current_cpu();
     tokio::time::sleep(Duration::from_millis(50)).await;
     let inj = Injector::builder()
         .interface(tx_if)

@@ -83,6 +83,18 @@ impl TxQueue {
             index + 1
         }
     }
+
+    /// The invariant every mutation keeps (debug builds): the next slot to
+    /// fill is right after the queued frames — which start at `head`, or
+    /// at `head + 1` behind a refused frame.
+    fn check(&self) {
+        debug_assert_eq!(
+            self.cursor,
+            (self.head + self.pending as usize + usize::from(self.head_rejected))
+                % self.frame_count,
+            "TX ring bookkeeping out of step: {self:?}"
+        );
+    }
 }
 
 impl<'a> TxSlot<'a> {
@@ -142,9 +154,14 @@ impl<'a> TxSlot<'a> {
         self.queue.pending += 1;
         if self.queue.head_rejected && self.index == self.queue.head {
             // The refused frame's slot is queued again: the kernel's next
-            // kick starts with it.
+            // kick starts with it. `allocate` reaches that slot only once
+            // every other slot is queued, so the ring is full now, and the
+            // next slot to fill is this one again (once the kernel frees
+            // it) — not the one after it.
             self.queue.head_rejected = false;
+            self.queue.cursor = self.index;
         }
+        self.queue.check();
     }
 }
 
@@ -158,6 +175,7 @@ impl Drop for TxSlot<'_> {
             // SAFETY: frame_ptr points to a valid tpacket2_hdr, tp_status at offset 0.
             unsafe { &*status_ptr }.store(self.prev_status, Ordering::Release);
             self.queue.cursor = self.index;
+            self.queue.check();
         }
     }
 }
@@ -429,6 +447,7 @@ impl Injector {
             self.queue.head = self.queue.next(self.queue.head);
             taken += 1;
         }
+        self.queue.check();
         taken
     }
 

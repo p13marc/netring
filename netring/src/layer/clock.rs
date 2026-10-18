@@ -13,6 +13,14 @@
 //! window of their own time. Until then a step back is bounded by the
 //! window it lands in.
 //!
+//! What this holds and what it doesn't: clocks that both keep sending
+//! read as the later one, and their records share windows. A clock that
+//! sends only now and then — one record ahead, then silent for longer
+//! than a window — can't be told from a step forward and back: its record
+//! moves the clock ahead (a new window), and once the other clock has run
+//! a window behind it, the clock follows that one back (state cleared,
+//! another new window). So each such record may reopen windows twice.
+//!
 //! [`DedupeAnomalies`]: crate::layer::DedupeAnomalies
 //! [`RateLimitAnomalies`]: crate::layer::RateLimitAnomalies
 

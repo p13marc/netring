@@ -21,10 +21,11 @@ use crate::layer::clock::{Reading, SteadyClock};
 /// suppresses exactly what a live run over the same traffic would. Time
 /// is the high-water mark of those timestamps: an anomaly stamped earlier
 /// than the latest (another capture queue's or NIC's clock, a reorder)
-/// reads as that, so interleaved clocks don't reopen the window. A clock
-/// that steps back for good — its anomalies still more than a window
-/// behind after a window of their own time — is followed, and the
-/// suppression starts afresh.
+/// reads as that, so clocks that interleave steadily don't reopen the
+/// window. A clock that steps back for good — its anomalies still more
+/// than a window behind after a window of their own time — is followed,
+/// and the suppression starts afresh; a clock ahead that only sends now
+/// and then may reopen the window twice per record it sends.
 ///
 /// Each `(kind, key)` pair is remembered as a 64-bit hash of `kind` and
 /// the key's `Debug` text (written straight into the hasher — no `String`

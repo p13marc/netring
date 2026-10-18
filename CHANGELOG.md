@@ -226,9 +226,11 @@ has an old → new snippet there.
 - **`DedupeAnomalies` / `RateLimitAnomalies` measured wall-clock windows**
   (#216), so a fast replay collapsed an hour into one window; they use
   packet time — the high-water mark of the anomalies' timestamps, so
-  interleaved clocks (NICs or queues whose clocks disagree) don't reopen
-  windows, and a clock that steps back for good is followed once its
-  anomalies have stayed behind for a window. `DedupeAnomalies` also told keyless anomalies — a
+  clocks that interleave steadily (NICs or queues whose clocks disagree)
+  don't reopen windows (a clock ahead that sends only now and then still
+  can, twice per record), and a clock that steps back for good is
+  followed once its anomalies have stayed behind for a window.
+  `DedupeAnomalies` also told keyless anomalies — a
   `pattern_detector!` score, an owned anomaly — of different flows apart
   only by their kind; it now uses their endpoints.
 - `with_broadcast::<P>()` after `protocol::<P>()` delivered every message

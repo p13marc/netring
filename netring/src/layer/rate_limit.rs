@@ -20,9 +20,12 @@ use crate::layer::clock::{Reading, SteadyClock};
 /// live run over the same traffic would be. Time is the high-water mark of
 /// those timestamps: an anomaly stamped earlier than the latest (another
 /// capture queue's or NIC's clock, a reorder) counts toward the current
-/// window, so interleaved clocks don't refill the budget. A clock that
-/// steps back for good — its anomalies still more than a period behind
-/// after a period of their own time — is followed, with fresh budgets.
+/// window, so clocks that interleave steadily don't refill the budget. A
+/// clock that steps back for good — its anomalies still more than a
+/// period behind after a period of their own time — is followed, with
+/// fresh budgets; a clock ahead that only sends now and then may refill
+/// them twice per record it sends (see the packet clock's notes in
+/// `layer/clock.rs`).
 ///
 /// `Clone` (0.22): the per-kind buckets live in the per-`wrap()` sink,
 /// so the config clones cleanly for

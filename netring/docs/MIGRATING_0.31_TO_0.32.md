@@ -377,10 +377,14 @@ header) is now dropped by the kernel and the kick goes on — 0.31's kick
 stopped there with `EMSGSIZE` / `EINVAL` and left the frames behind it
 queued. Nothing reports such a drop: compare frame lengths with
 `Injector::max_frame_len()` (`mtu + 14` on Ethernet, +4 for an outer
-802.1Q tag) before sending if you need to know. `InjectorBuilder::drop_rejected(false)` restores the
-stop-and-report behaviour (`Injector::rejected_slots()` counts the
-refused slots until `allocate` hands the slot out again — it now reuses a
-refused slot first, since the kernel's TX position waits on it).
+802.1Q tag) before sending if you need to know.
+
+`InjectorBuilder::drop_rejected(false)` restores the stop-and-report
+behaviour, with its cost: the frames queued behind the refused one are held
+until its slot is refilled — `allocate` hands it out when its turn in the
+ring comes, once `frame_count - 1` frames wait behind it — and the refill
+then leaves first, ahead of them. `Injector::rejected_slots()` counts the
+refused slot until it is handed out again.
 
 `Injector::allocate` hands out slots in ring order — the order the kernel
 sends them in — and returns `None` while the next slot is still in flight,

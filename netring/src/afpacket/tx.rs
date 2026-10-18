@@ -243,6 +243,19 @@ pub(crate) struct Kick {
 /// # Ok::<(), netring::Error>(())
 /// ```
 ///
+/// # Qdiscs that let go of frames early
+///
+/// The kernel sends ring frames without copying their data: the packet
+/// keeps pointing at the frame's slot until the device is done with it,
+/// and only then hands the slot back. A qdisc that **orphans** packets
+/// when it queues them — `netem` with a delay, jitter or rate
+/// (`skb_orphan_partial()` in its enqueue) — hands the slot back at once
+/// while the packet still waits in the qdisc: the next frame queued in
+/// that slot overwrites one not sent yet. Don't inject through such a
+/// qdisc (shape on the receiving side, or use
+/// [`qdisc_bypass`](InjectorBuilder::qdisc_bypass)); a plain socket
+/// `send` copies the data and is not affected.
+///
 /// # Drop semantics
 ///
 /// `Drop` performs a best-effort [`flush()`](Self::flush) to push any pending
@@ -823,8 +836,15 @@ impl InjectorBuilder {
     /// - `false` — the kick **stops** at it with the error (`EMSGSIZE`, …)
     ///   and leaves its slot `TP_STATUS_WRONG_FORMAT`
     ///   ([`Injector::rejected_slots`]). The kernel's TX position stays on
-    ///   that slot, so the frames queued after it wait until that slot is
-    ///   queued again — what 0.31 did.
+    ///   that slot — what 0.31 did — so the frames queued after it are
+    ///   **held**: kicks hand over nothing ([`flush`](Injector::flush)
+    ///   keeps returning `Ok`, [`wait_drained`](Injector::wait_drained)
+    ///   times out) until the slot is filled again, and
+    ///   [`allocate`](Injector::allocate) hands it out only when its turn
+    ///   in the ring comes — once `frame_count - 1` frames wait behind it,
+    ///   the held ones included. The frame that refills it
+    ///   then leaves **first**, ahead of the frames that waited behind
+    ///   the refused one: they are reordered.
     ///
     /// New in 0.32.0.
     pub fn drop_rejected(mut self, enable: bool) -> Self {

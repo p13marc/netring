@@ -310,6 +310,11 @@ has an old → new snippet there.
   sync-`packets()`-then-async-stream pending-block edge case
   (`AsyncCapture::get_mut`); emits through `Ctx::sink_mut()` don't know
   the current flow; `AggregateReport::overflow()` is cumulative.
+- `InjectorBuilder::drop_rejected(false)` holds the frames queued behind a
+  refused one until the ring wraps, and reorders them; a `netem` qdisc
+  with a delay hands an injector's ring slots back while their frames
+  still wait in it (`skb_orphan_partial`), so a reused slot overwrites an
+  unsent frame — `Injector` docs.
 
 ### netring-exporters 0.9.0
 

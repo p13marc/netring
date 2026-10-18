@@ -77,7 +77,12 @@ async fn isolate_policy_covers_capture_stats_handlers() {
         .build()
         .unwrap();
     let health = monitor.health();
-    if let Err(e) = monitor.run_for(Duration::from_millis(400)).await {
+    // The window includes the Monitor's start-up (ring mmap, socket
+    // setup), which a loaded CI runner can stretch past a few hundred
+    // milliseconds; 3 s leaves room for that and still asks for only 3
+    // of ~60 samples. A monitor that stopped after the first failed
+    // handler would show exactly 1.
+    if let Err(e) = monitor.run_for(Duration::from_secs(3)).await {
         if calls.load(Ordering::SeqCst) == 0 {
             eprintln!("run_for errored before any sample (likely no CAP_NET_RAW): {e}");
             return;
@@ -85,7 +90,7 @@ async fn isolate_policy_covers_capture_stats_handlers() {
         panic!("Isolate must keep the monitor running: {e}");
     }
     let n = calls.load(Ordering::SeqCst);
-    assert!(n >= 3, "sampled every 50 ms for 400 ms: {n}");
+    assert!(n >= 3, "sampled every 50 ms for 3 s: {n}");
     assert_eq!(health.handler_errors(), n as u64);
 }
 

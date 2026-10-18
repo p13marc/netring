@@ -99,3 +99,68 @@ fn sharded_state_auto_merge_aggregates_lo_traffic() {
         merged_total.load(Ordering::Relaxed)
     );
 }
+
+/// Review r2: when the merge worker died (here its fold panics), every
+/// shard's merge-request channel resolved at once, forever, and the run
+/// loop's biased `select!` took that branch before the capture's: the
+/// shards spun and stopped processing packets for the rest of the run.
+/// A shard now stops polling a gone worker.
+#[test]
+fn shards_keep_capturing_after_the_merge_worker_died() {
+    let closed = {
+        let s = UdpSocket::bind("127.0.0.1:0").unwrap();
+        let p = s.local_addr().unwrap().port();
+        drop(s);
+        p
+    };
+    let stop = Arc::new(AtomicBool::new(false));
+    let stop_gen = Arc::clone(&stop);
+    let gen_task = std::thread::spawn(move || {
+        let sock = UdpSocket::bind("127.0.0.1:0").expect("bind sender");
+        while !stop_gen.load(Ordering::Relaxed) {
+            let _ = sock.send_to(b"netring-merge-dead", ("127.0.0.1", closed));
+            std::thread::sleep(Duration::from_millis(2));
+        }
+    });
+    let packets = Arc::new(AtomicU64::new(0));
+    let seen = Arc::clone(&packets);
+    let runner = ShardedRunner::new("lo", FanoutMode::Cpu, 0xBEF0, 2, move |_cpu| {
+        let seen = Arc::clone(&seen);
+        Monitor::builder()
+            .interface("lo")
+            .fanout(FanoutMode::Cpu, 0xBEF0)
+            .all_l4()
+            .state::<PktCount>()
+            .on_ctx::<FlowPacket>(move |_e: &FlowPacket, ctx: &mut Ctx<'_>| {
+                ctx.state_mut::<PktCount>().0 += 1;
+                seen.fetch_add(1, Ordering::Relaxed);
+                Ok(())
+            })
+            .build()
+    })
+    .merge_state::<PktCount, _>(Duration::from_millis(100), |_primary, _shard| {
+        panic!("merge fold fails (test)");
+    });
+    // Count what the shards handle after the worker died (its first
+    // merge pass, at ~100 ms).
+    let probe = Arc::clone(&packets);
+    let sampler = std::thread::spawn(move || {
+        std::thread::sleep(Duration::from_millis(600));
+        probe.load(Ordering::Relaxed)
+    });
+    let res = runner.run_for(Duration::from_millis(1500));
+    stop.store(true, Ordering::Relaxed);
+    let _ = gen_task.join();
+    let at_600ms = sampler.join().unwrap();
+    let end = packets.load(Ordering::Relaxed);
+    if let Err(e) = &res
+        && end == 0
+    {
+        eprintln!("skip (needs CAP_NET_RAW): {e}");
+        return;
+    }
+    assert!(
+        end > at_600ms + 50,
+        "shards stopped capturing after the merge worker died: {at_600ms} at 600 ms, {end} at the end ({res:?})"
+    );
+}

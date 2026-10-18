@@ -506,8 +506,17 @@ pub(crate) async fn run_loop(monitor: Monitor, stop: StopCondition) -> Result<()
                 // monitors never poll it (zero cost, like the tick branch).
                 // Out-of-band — doesn't touch the idle timer.
                 req = recv_merge(&mut merge_link), if merge_link.is_some() => {
-                    if let (Some(req), Some(link)) = (req, merge_link.as_ref()) {
-                        link.reply(&mut state_map, req.type_id);
+                    match (req, merge_link.as_ref()) {
+                        (Some(req), Some(link)) => link.reply(&mut state_map, req.type_id),
+                        // The merge worker is gone (it panicked, or the
+                        // runner tore it down): its channel now resolves at
+                        // once, forever — stop polling it, or this branch
+                        // would starve the capture.
+                        (None, _) => {
+                            tracing::warn!("merge worker gone: this shard stops answering merges");
+                            merge_link = None;
+                        }
+                        (Some(_), None) => {}
                     }
                     continue;
                 }

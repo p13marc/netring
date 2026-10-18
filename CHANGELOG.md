@@ -84,7 +84,8 @@ has an old → new snippet there.
   VLANs with the same 5-tuple merged, pcaps lacked the tags tcpdump shows,
   and `Bridge` stripped every tag it forwarded. The capture re-inserts the
   tag in place in the ring, as libpcap does (`vlan_reinsert(false)` keeps
-  the kernel's layout). AF_XDP `OwnedPacket`s carry the NIC-stripped tag.
+  the kernel's layout; it needs Linux 3.14+ and stays off, with a warning,
+  on older kernels). AF_XDP `OwnedPacket`s carry the NIC-stripped tag.
   `Bridge` forwards the tag; a frame the other side can't take with it (a
   full-size frame with an outer 802.1ad tag: longer than `mtu + 14`, the
   kernel's limit without an outer 802.1Q tag) is dropped and counted too

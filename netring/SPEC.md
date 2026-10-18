@@ -22,7 +22,7 @@ built on AF_PACKET with TPACKET_V3 (block-based mmap ring buffers). It exposes b
 
 - Packet parsing (use `etherparse`, `pnet_packet`, etc.)
 - Built-in async runtime
-- Cross-platform — Linux only (kernel 3.2+)
+- Cross-platform — Linux only (kernel 3.2+ for TPACKET_V3 capture; 3.14+ for VLAN tag re-insertion, which is turned off on older kernels; AF_XDP needs 4.18+)
 
 ### Rust 2026 Features Leveraged
 

@@ -988,7 +988,10 @@ impl CaptureBuilder {
     /// Re-insertion needs 4 bytes of headroom in front of each frame, which
     /// the builder reserves with `PACKET_RESERVE`. Packets of non-Ethernet
     /// devices, and packets with fewer than 12 bytes captured, are left as
-    /// they are.
+    /// they are. It needs Linux 3.14 or later (it marks a rewritten packet
+    /// in a header field older kernels don't reset); on an older kernel it
+    /// stays off, with a warning — [`Capture::vlan_reinsert`] says what
+    /// applies.
     pub fn vlan_reinsert(mut self, enable: bool) -> Self {
         self.vlan_reinsert = enable;
         self
@@ -1278,9 +1281,17 @@ fn build_inner(b: &CaptureBuilder, block_count: usize) -> Result<Capture, Error>
     // Set TPACKET_V3
     socket::set_packet_version(fd.as_fd(), ffi::TPACKET_V3_INT)?;
 
+    // Re-insertion marks rewritten packets in `tp_padding`, which the
+    // kernel zeroes per packet only since 3.14: off on older kernels.
+    let vlan_reinsert = b.vlan_reinsert && crate::afpacket::vlan_reinsert_supported();
+    if b.vlan_reinsert && !vlan_reinsert {
+        tracing::warn!(
+            "VLAN re-insertion needs Linux 3.14+: off; tags stay in Packet::stripped_vlan()"
+        );
+    }
     // Headroom for re-inserting a stripped VLAN tag. Only before the ring
     // exists: the kernel answers PACKET_RESERVE with EBUSY afterwards.
-    if b.vlan_reinsert {
+    if vlan_reinsert {
         socket::set_packet_reserve(fd.as_fd(), ffi::VLAN_TAG_LEN as u32)?;
     }
 
@@ -1378,7 +1389,7 @@ fn build_inner(b: &CaptureBuilder, block_count: usize) -> Result<Capture, Error>
         busy_poll,
         stop: None,
         snap_len: b.snap_len,
-        vlan_mode: if b.vlan_reinsert {
+        vlan_mode: if vlan_reinsert {
             VlanMode::Reinsert {
                 snap_cap: b.snap_len.unwrap_or(u32::MAX),
             }

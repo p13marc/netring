@@ -104,7 +104,8 @@ fn sharded_state_auto_merge_aggregates_lo_traffic() {
 /// shard's merge-request channel resolved at once, forever, and the run
 /// loop's biased `select!` took that branch before the capture's: the
 /// shards spun and stopped processing packets for the rest of the run.
-/// A shard now stops polling a gone worker.
+/// A shard now stops polling a gone worker, and the run returns the
+/// worker's panic as its error (it was swallowed: `Ok(())`).
 #[test]
 fn shards_keep_capturing_after_the_merge_worker_died() {
     let closed = {
@@ -162,5 +163,12 @@ fn shards_keep_capturing_after_the_merge_worker_died() {
     assert!(
         end > at_600ms + 50,
         "shards stopped capturing after the merge worker died: {at_600ms} at 600 ms, {end} at the end ({res:?})"
+    );
+    // The worker's panic is the run's error, not swallowed.
+    let err = res.expect_err("the merge worker panicked");
+    assert!(
+        err.to_string()
+            .contains("netring-merge thread panicked: merge fold fails (test)"),
+        "{err}"
     );
 }

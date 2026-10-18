@@ -395,6 +395,8 @@ refused slots).
   everything.
 - `with_broadcast::<P>()` and `protocol::<P>()` compose in any order
   (0.31 delivered messages twice after `protocol` then `with_broadcast`).
+- `ShardedRunner::run_*` returns `Err` when a `merge_state` / `on_merge`
+  closure panicked (0.31: `Ok`, the panic only logged by the thread).
 - `TcpRst::zero_payload` is `true` for a reset flow that moved no data
   (0.31: never). Handlers that ranked resets by it now see refused
   connections.

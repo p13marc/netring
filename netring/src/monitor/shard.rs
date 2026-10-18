@@ -174,6 +174,18 @@ where
     first_err.map_or(Ok(()), Err)
 }
 
+/// Join the merge worker: `Err` naming its panic when it panicked. The
+/// shards keep running without it (each warns once it finds it gone), so
+/// the panic surfaces when the run ends.
+fn join_merge_worker(h: std::thread::JoinHandle<()>) -> Result<()> {
+    h.join().map_err(|panic| {
+        Error::Io(std::io::Error::other(format!(
+            "netring-merge thread panicked: {}",
+            panic_message(panic.as_ref())
+        )))
+    })
+}
+
 /// A panic payload's message, when it has one.
 fn panic_message(panic: &(dyn std::any::Any + Send)) -> &str {
     panic
@@ -351,6 +363,10 @@ impl ShardedRunner {
     /// every shard hands over its last delta and the primary is observed
     /// once more, so the grand total covers the whole run (#216).
     ///
+    /// A panic in `merge` (or an `on_merge` observer) ends the merge
+    /// worker: the shards keep running unmerged, and the run returns that
+    /// panic as its error.
+    ///
     /// Register `T` in `build_shard` with `MonitorBuilder::state::<T>()` or
     /// `state_init`: a `state_with(value)` slot can't be re-seeded.
     /// **flowscope follow-up:** `RollingRate::merge_into` would let a
@@ -426,8 +442,11 @@ impl ShardedRunner {
     }
 
     /// Run all shards until each individual `deadline` fires.
-    /// Returns the first error from any shard, or `Ok(())` if
-    /// every shard returned cleanly.
+    /// Returns the first error from any shard (a panic included), else the
+    /// merge worker's panic — a [`merge_state`](Self::merge_state) /
+    /// [`on_merge`](Self::on_merge) closure that panicked; the shards keep
+    /// capturing without merges until the run ends — or `Ok(())` if
+    /// everything returned cleanly.
     pub fn run_until(self, deadline: Instant) -> Result<()> {
         self.run_inner(RunMode::Deadline(deadline))
     }
@@ -521,12 +540,12 @@ impl ShardedRunner {
 
         // Every shard was joined: their final deltas are queued. Join the
         // merge worker (it sees `stop` — or every reply sender gone — folds
-        // what is queued, observes once more, and exits).
+        // what is queued, observes once more, and exits). Its panic (a
+        // merge or observe closure that panicked) is the run's error,
+        // unless a shard failed: the first error in join order wins.
         stop.store(true, Ordering::Relaxed);
-        if let Some(h) = merge_handle {
-            let _ = h.join();
-        }
-        res
+        let merged = merge_handle.map_or(Ok(()), join_merge_worker);
+        res.and(merged)
     }
 }
 
@@ -769,5 +788,18 @@ mod tests {
         });
         let err = super::run_shard_threads(2, "panic-test", None, body).unwrap_err();
         assert!(err.to_string().contains("shard 0 panicked"), "{err}");
+    }
+
+    /// The merge worker's panic is an error, not swallowed.
+    #[test]
+    fn a_panicked_merge_worker_is_an_error() {
+        let worker = std::thread::spawn(|| panic!("merge fold fails (test)"));
+        let err = super::join_merge_worker(worker).unwrap_err();
+        assert!(
+            err.to_string()
+                .contains("netring-merge thread panicked: merge fold fails (test)"),
+            "{err}"
+        );
+        assert!(super::join_merge_worker(std::thread::spawn(|| ())).is_ok());
     }
 }

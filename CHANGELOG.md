@@ -179,7 +179,9 @@ has an old → new snippet there.
 - **Sharded merges lost data** (#216): a reply after the 500 ms timeout,
   the last partial interval, and the configuration of a `state_init`
   slot; two `merge_state` for one type now fail at build
-  (`BuildError::DuplicateMergeState`, #227).
+  (`BuildError::DuplicateMergeState`, #227). A `merge_state` /
+  `on_merge` closure's panic was swallowed (`ShardedRunner::run_*`
+  returned `Ok`); it is the run's error now, after any shard's.
 - **Events no packet drove claimed capture source 0** (#216): idle-ended
   flows, parser ticks, ticks. Packets carry their capture leg into
   flowscope; housekeeping events — and the messages of a flow another

@@ -80,6 +80,13 @@ pub const GAUGE_ACTIVE_FLOWS: &str = "netring_monitor_active_flows";
 /// calling this on every scrape or timer tick never double counts, however
 /// often it runs.
 ///
+/// **One capture per `iface` label.** The `metrics` crate's counters apply
+/// `absolute` as "at least" (`fetch_max`): several captures publishing their
+/// totals under one label (fanout workers on one interface) leave the
+/// counter at the largest of them, not their sum, and a capture re-opened
+/// with fresh totals leaves it frozen until the new totals pass the old.
+/// For those, add each capture's window with [`record_capture_delta`].
+///
 /// All three counters use the standard `netring_capture_*_total` naming
 /// (Prometheus convention: `_total` suffix on monotonic counters).
 pub fn record_capture_stats(iface: &str, totals: &CaptureStats) {
@@ -87,6 +94,31 @@ pub fn record_capture_stats(iface: &str, totals: &CaptureStats) {
     metrics::counter!(COUNTER_PACKETS, "iface" => iface_label.clone()).absolute(totals.received());
     metrics::counter!(COUNTER_DROPS, "iface" => iface_label.clone()).absolute(totals.drops);
     metrics::counter!(COUNTER_FREEZES, "iface" => iface_label).absolute(totals.freezes);
+}
+
+/// Add a window's counts to the same counters as [`record_capture_stats`]
+/// (incremented): for an `iface` label several captures share — fanout
+/// workers, a capture that is re-opened — each capture adds its own
+/// windows. Feed it the counts since the previous call,
+/// `now.delta_since(&before)` of two [`stats()`](crate::Capture::stats)
+/// readings — **not** `stats()` itself, which since 0.32 returns lifetime
+/// totals (0.31's `stats()` was a delta).
+///
+/// ```no_run
+/// # #[cfg(feature = "metrics")]
+/// # fn _ex(cap: &netring::Capture) -> Result<(), netring::Error> {
+/// let mut before = cap.stats()?;
+/// // … every tick:
+/// let now = cap.stats()?;
+/// netring::metrics::record_capture_delta("eth0", &now.delta_since(&before));
+/// before = now;
+/// # let _ = before; Ok(()) }
+/// ```
+pub fn record_capture_delta(iface: &str, delta: &CaptureStats) {
+    let iface_label = iface.to_string();
+    metrics::counter!(COUNTER_PACKETS, "iface" => iface_label.clone()).increment(delta.received());
+    metrics::counter!(COUNTER_DROPS, "iface" => iface_label.clone()).increment(delta.drops);
+    metrics::counter!(COUNTER_FREEZES, "iface" => iface_label).increment(delta.freezes);
 }
 
 #[cfg(test)]
@@ -110,28 +142,16 @@ mod tests {
         record_capture_stats("test_iface", &CaptureStats::new(1234, 5, 0));
     }
 
-    /// A counter that applies `increment` as an add and `absolute` as a
-    /// store — what a Prometheus-style recorder does.
+    /// Records every counter by `name{labels}` in the `metrics` crate's own
+    /// counter type (`AtomicU64`: `increment` = add, `absolute` =
+    /// `fetch_max`), as the shipped recorders do.
     #[derive(Default)]
-    struct TestCounter(AtomicU64);
-
-    impl metrics::CounterFn for TestCounter {
-        fn increment(&self, value: u64) {
-            self.0.fetch_add(value, Ordering::Relaxed);
-        }
-        fn absolute(&self, value: u64) {
-            self.0.store(value, Ordering::Relaxed);
-        }
-    }
-
-    /// Records every counter by `name{labels}`.
-    #[derive(Default)]
-    struct TestRecorder(Mutex<HashMap<String, Arc<TestCounter>>>);
+    struct TestRecorder(Mutex<HashMap<String, Arc<AtomicU64>>>);
 
     impl TestRecorder {
         fn value(&self, name: &str) -> u64 {
             let key = format!("{name}{{iface=eth9}}");
-            self.0.lock().unwrap()[&key].0.load(Ordering::Relaxed)
+            self.0.lock().unwrap()[&key].load(Ordering::Relaxed)
         }
     }
 
@@ -168,7 +188,7 @@ mod tests {
                 .map(|l| format!("{}={}", l.key(), l.value()))
                 .collect();
             let name = format!("{}{{{}}}", key.name(), labels.join(","));
-            let c = Arc::clone(self.0.lock().unwrap().entry(name).or_default());
+            let c: Arc<AtomicU64> = Arc::clone(self.0.lock().unwrap().entry(name).or_default());
             metrics::Counter::from_arc(c)
         }
 
@@ -207,5 +227,37 @@ mod tests {
         });
         assert_eq!(rec.value(COUNTER_PACKETS), 1_530);
         assert_eq!(rec.value(COUNTER_DROPS), 30);
+    }
+
+    /// Review r1: two captures under one label (fanout workers) — the
+    /// absolute counters keep only the larger total (`fetch_max`), the
+    /// deltas add up.
+    #[test]
+    fn shared_labels_add_deltas() {
+        let (a, b) = (
+            CaptureStats::new(1_000, 0, 0),
+            CaptureStats::new(500, 10, 0),
+        );
+        let absolute = TestRecorder::default();
+        metrics::with_local_recorder(&absolute, || {
+            record_capture_stats("eth9", &a);
+            record_capture_stats("eth9", &b);
+        });
+        assert_eq!(
+            absolute.value(COUNTER_PACKETS),
+            1_000,
+            "fetch_max: not a sum"
+        );
+
+        let deltas = TestRecorder::default();
+        metrics::with_local_recorder(&deltas, || {
+            let zero = CaptureStats::default();
+            record_capture_delta("eth9", &a.delta_since(&zero));
+            record_capture_delta("eth9", &b.delta_since(&zero));
+            // A second window of the first capture.
+            record_capture_delta("eth9", &CaptureStats::new(1_200, 0, 0).delta_since(&a));
+        });
+        assert_eq!(deltas.value(COUNTER_PACKETS), 1_000 + 510 + 200);
+        assert_eq!(deltas.value(COUNTER_DROPS), 10);
     }
 }

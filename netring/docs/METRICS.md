@@ -47,9 +47,15 @@ Emitted by
 for callers driving a raw `Capture` (no `Monitor`). These are
 **counters** set to the *absolute* lifetime totals `Capture::stats()`
 returns (`Counter::absolute`), so recording on every tick never double
-counts. (Before 0.32 the function was `record_capture_delta` and
-incremented by a delta read, which a second reader of the same capture
-silently stole from.)
+counts — for **one capture per `iface` label**: the `metrics` crate's
+counters apply `absolute` as "at least" (`fetch_max`), so several captures
+under one label (fanout workers) show only the largest total, and a
+re-opened capture leaves the counter frozen until its new totals pass the
+old. For a shared label, each capture adds its windows with
+[`metrics::record_capture_delta`](https://docs.rs/netring/latest/netring/metrics/fn.record_capture_delta.html)
+(`now.delta_since(&before)` of two `stats()` readings — not `stats()`
+itself, which since 0.32 is a lifetime total; in 0.31 it was a delta read
+that a second reader of the same capture silently stole from).
 
 | Metric | Type | Labels | Meaning |
 |--------|------|--------|---------|

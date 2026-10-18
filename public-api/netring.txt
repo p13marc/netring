@@ -2791,6 +2791,7 @@ pub const netring::metrics::GAUGE_DROP_RATE: &str
 pub const netring::metrics::GAUGE_FREEZES: &str
 pub const netring::metrics::GAUGE_HANDLER_ERRORS: &str
 pub const netring::metrics::GAUGE_PACKETS: &str
+pub fn netring::metrics::record_capture_delta(iface: &str, delta: &netring::stats::CaptureStats)
 pub fn netring::metrics::record_capture_stats(iface: &str, totals: &netring::stats::CaptureStats)
 pub mod netring::monitor
 pub mod netring::monitor::aggregate

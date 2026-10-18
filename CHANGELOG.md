@@ -23,8 +23,10 @@ has an old → new snippet there.
   `delivered` / `drops` / `freezes` (`packets` and `freeze_count` are
   gone), and every `stats()` / `capture_stats()` accessor returns lifetime
   totals and never resets; `cumulative_stats()` is removed,
-  `MultiSource::capture_stats` is renamed `ring_stats`,
-  `metrics::record_capture_delta` becomes `record_capture_stats`.
+  `MultiSource::capture_stats` is renamed `ring_stats`; the new
+  `metrics::record_capture_stats` publishes lifetime totals (one capture
+  per label) and `metrics::record_capture_delta` takes a window's counts
+  (`delta_since`), not `stats()`.
 - **VLAN tags are re-inserted into captured frames** (#209), so byte
   counts grow by 4 on tagged traffic; `Packet::vlan_tci()` / `vlan_tpid()`
   → `Packet::vlan()`, `OwnedPacket::vlan_tci` / `vlan_tpid` →

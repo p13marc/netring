@@ -32,7 +32,7 @@ was opened. Reading never resets anything.
 | `cap.cumulative_stats()` | `cap.stats()` (removed) |
 | `stream.capture_cumulative_stats()` | `stream.capture_stats()` (removed) |
 | `MultiSource::capture_stats()` (`fanin.source(i)?.capture_stats()`) | `ring_stats()` |
-| `metrics::record_capture_delta(iface, &delta)` | `metrics::record_capture_stats(iface, &totals)` |
+| `metrics::record_capture_delta(iface, &cap.stats()?)` | one capture per `iface` label: `metrics::record_capture_stats(iface, &cap.stats()?)`; several under one label (fanout workers): `metrics::record_capture_delta(iface, &now.delta_since(&before))` — **feeding it `stats()` now double counts** |
 | `CaptureStats { packets, drops, freeze_count }` (tests, mocks) | `CaptureStats::new(delivered, drops, freezes)` |
 | `drops as f64 / packets as f64` | `stats.drop_ratio()` |
 

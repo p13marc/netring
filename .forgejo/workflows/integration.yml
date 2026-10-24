@@ -57,8 +57,13 @@ jobs:
       # flow / multi-capture test (12 files) was compiled out, and two of
       # them had been broken for months unseen (#144). `xdp-loader` stays
       # out: it needs init-namespace CAP_BPF (see xdp-smoke below).
+      # Logged like the test run below: a build that dies (the runner's OOM
+      # killer surfaces as "signal 9") reports itself too.
       - name: Build test binaries
-        run: cargo test -p netring --features "integration-tests,tokio,channel,af-xdp,flow,parse,pcap,http,icmp" --no-run
+        run: |
+          set -o pipefail
+          cargo test -p netring --features "integration-tests,tokio,channel,af-xdp,flow,parse,pcap,http,icmp" \
+            --no-run 2>&1 | tee integration-build.log
       - name: Run capability tests
         run: |
           for bin in $(cargo test -p netring --features "integration-tests,tokio,channel,af-xdp,flow,parse,pcap,http,icmp" \
@@ -76,38 +81,54 @@ jobs:
             --no-fail-fast -- --test-threads=1 --nocapture 2>&1 | tee integration-test.log
       # Neither job logs nor artifacts can be fetched from outside this
       # Forgejo with an API token, so on failure the run reports the failing
-      # sections itself, as a comment on the pull request.
-      - name: Report the failing tests on the pull request
-        if: failure() && github.event_name == 'pull_request'
+      # sections itself: a comment on the pull request, or a new issue for a
+      # push or a manual run. A red master push used to say nothing at all
+      # (02f0367, 2026-10-21).
+      - name: Report the failing tests
+        if: failure()
         env:
           API: ${{ github.api_url }}
           REPO: ${{ github.repository }}
+          EVENT: ${{ github.event_name }}
+          REF: ${{ github.ref_name }}
           PR: ${{ github.event.pull_request.number }}
           SHA: ${{ github.sha }}
           TOKEN: ${{ github.token }}
         run: |
+          log=integration-test.log
+          [ -f "$log" ] || log=integration-build.log
+          if [ ! -f "$log" ]; then
+            log=no-log.txt
+            echo "The job failed before the build step (checkout, toolchain, cache or apt)." > "$log"
+          fi
           {
-            echo "### \`test-integration\` failed on \`${SHA:0:8}\`"
+            echo "### \`test-integration\` failed on \`${SHA:0:8}\` (${EVENT}, \`${REF}\`)"
             echo
             echo '```'
-            grep -E "^test .* FAILED$|^failures:$|^---- |panicked at|^error(\[E[0-9]+\])?:|^thread .* panicked" -A 14 integration-test.log | head -400
+            grep -E "^test .* FAILED$|^failures:$|^---- |panicked at|^error(\[E[0-9]+\])?:|^thread .* panicked|signal 9" -A 14 "$log" | head -400
             echo '```'
             echo
-            echo '<details><summary>last 120 lines</summary>'
+            echo "<details><summary>last 120 lines of $log</summary>"
             echo
             echo '```'
-            tail -120 integration-test.log
+            tail -120 "$log"
             echo '```'
             echo '</details>'
           } > comment.md
           python3 - <<'EOF'
           import json, os, urllib.request
+          env = os.environ
           body = open('comment.md').read()
-          url = f"{os.environ['API']}/repos/{os.environ['REPO']}/issues/{os.environ['PR']}/comments"
-          req = urllib.request.Request(url, data=json.dumps({"body": body}).encode(), method="POST",
-              headers={"Authorization": "token " + os.environ['TOKEN'], "Content-Type": "application/json"})
+          if env['EVENT'] == 'pull_request':
+              url = f"{env['API']}/repos/{env['REPO']}/issues/{env['PR']}/comments"
+              payload = {"body": body}
+          else:
+              url = f"{env['API']}/repos/{env['REPO']}/issues"
+              payload = {"title": f"test-integration failed on {env['REF']} at {env['SHA'][:8]}", "body": body}
+          req = urllib.request.Request(url, data=json.dumps(payload).encode(), method="POST",
+              headers={"Authorization": "token " + env['TOKEN'], "Content-Type": "application/json"})
           with urllib.request.urlopen(req) as r:
-              print("comment posted:", r.status)
+              print("report posted:", r.status)
           EOF
 
   # INFORMATIONAL: bpf(BPF_MAP_CREATE) requires init-namespace CAP_BPF, which

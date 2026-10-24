@@ -57,57 +57,103 @@ jobs:
       # flow / multi-capture test (12 files) was compiled out, and two of
       # them had been broken for months unseen (#144). `xdp-loader` stays
       # out: it needs init-namespace CAP_BPF (see xdp-smoke below).
+      # Logged like the test run below: a build that dies (the runner's OOM
+      # killer surfaces as "signal 9") reports itself too.
       - name: Build test binaries
-        run: cargo test -p netring --features "integration-tests,tokio,channel,af-xdp,flow,parse,pcap,http,icmp" --no-run
-      - name: Run capability tests
         run: |
-          for bin in $(cargo test -p netring --features "integration-tests,tokio,channel,af-xdp,flow,parse,pcap,http,icmp" \
-                       --no-run --message-format=json 2>/dev/null \
-                       | jq -r 'select(.profile.test == true) | .executable' | sort -u); do
-            sudo setcap cap_net_raw,cap_net_admin+ep "$bin"
-          done
-          # --no-fail-fast so one failing binary does not mask the rest: this
-          # lane has had multiple independent failures at once, and stopping at
-          # the first turns a two-bug run into two more red runs.
-          # The job log is not retrievable from outside this Forgejo, so the
-          # run keeps its own output for the failure report below.
           set -o pipefail
           cargo test -p netring --features "integration-tests,tokio,channel,af-xdp,flow,parse,pcap,http,icmp" \
-            --no-fail-fast -- --test-threads=1 --nocapture 2>&1 | tee integration-test.log
+            --no-run 2>&1 | tee integration-build.log
+      - name: Run capability tests
+        # The job log is not retrievable from outside this Forgejo, so the
+        # run keeps its own output, setcap included, for the failure report
+        # below.
+        run: |
+          set -o pipefail
+          {
+            for bin in $(cargo test -p netring --features "integration-tests,tokio,channel,af-xdp,flow,parse,pcap,http,icmp" \
+                         --no-run --message-format=json 2>/dev/null \
+                         | jq -r 'select(.profile.test == true) | .executable' | sort -u); do
+              sudo setcap cap_net_raw,cap_net_admin+ep "$bin"
+            done
+            # --no-fail-fast so one failing binary does not mask the rest: this
+            # lane has had multiple independent failures at once, and stopping
+            # at the first turns a two-bug run into two more red runs.
+            cargo test -p netring --features "integration-tests,tokio,channel,af-xdp,flow,parse,pcap,http,icmp" \
+              --no-fail-fast -- --test-threads=1 --nocapture
+          } 2>&1 | tee integration-test.log
       # Neither job logs nor artifacts can be fetched from outside this
       # Forgejo with an API token, so on failure the run reports the failing
-      # sections itself, as a comment on the pull request.
-      - name: Report the failing tests on the pull request
-        if: failure() && github.event_name == 'pull_request'
+      # sections itself: a comment on the pull request, or for a push or a
+      # manual run an issue per ref (later failures comment on it while it is
+      # open). A red master push used to say nothing at all (02f0367,
+      # 2026-10-21).
+      - name: Report the failing tests
+        if: failure()
         env:
           API: ${{ github.api_url }}
           REPO: ${{ github.repository }}
+          EVENT: ${{ github.event_name }}
+          REF: ${{ github.ref_name }}
           PR: ${{ github.event.pull_request.number }}
           SHA: ${{ github.sha }}
           TOKEN: ${{ github.token }}
         run: |
+          log=integration-test.log
+          [ -f "$log" ] || log=integration-build.log
+          if [ ! -f "$log" ]; then
+            log=no-log.txt
+            echo "The job failed before the build step (checkout, toolchain, cache or apt)." > "$log"
+          fi
           {
-            echo "### \`test-integration\` failed on \`${SHA:0:8}\`"
+            echo "### \`test-integration\` failed on \`${SHA:0:8}\` (${EVENT}, \`${REF}\`)"
             echo
             echo '```'
-            grep -E "^test .* FAILED$|^failures:$|^---- |panicked at|^error(\[E[0-9]+\])?:|^thread .* panicked" -A 14 integration-test.log | head -400
+            grep -E "^test .* FAILED$|^failures:$|^---- |panicked at|^error(\[E[0-9]+\])?:|^thread .* panicked|signal 9" -A 14 "$log" | head -400
             echo '```'
             echo
-            echo '<details><summary>last 120 lines</summary>'
+            echo "<details><summary>last 120 lines of $log</summary>"
             echo
             echo '```'
-            tail -120 integration-test.log
+            tail -120 "$log"
             echo '```'
             echo '</details>'
           } > comment.md
           python3 - <<'EOF'
-          import json, os, urllib.request
+          import json, os, sys, urllib.error, urllib.parse, urllib.request
+          env = os.environ
+          repo = f"{env['API']}/repos/{env['REPO']}"
+
+          def call(method, url, payload=None):
+              req = urllib.request.Request(url, method=method,
+                  data=None if payload is None else json.dumps(payload).encode(),
+                  headers={"Authorization": "token " + env['TOKEN'], "Content-Type": "application/json"})
+              try:
+                  with urllib.request.urlopen(req) as r:
+                      return r.status, json.load(r)
+              except urllib.error.HTTPError as e:
+                  sys.exit(f"{method} {url}: HTTP {e.code}: {e.read().decode(errors='replace')[:2000]}")
+
           body = open('comment.md').read()
-          url = f"{os.environ['API']}/repos/{os.environ['REPO']}/issues/{os.environ['PR']}/comments"
-          req = urllib.request.Request(url, data=json.dumps({"body": body}).encode(), method="POST",
-              headers={"Authorization": "token " + os.environ['TOKEN'], "Content-Type": "application/json"})
-          with urllib.request.urlopen(req) as r:
-              print("comment posted:", r.status)
+          if env['EVENT'] == 'pull_request':
+              status, _ = call("POST", f"{repo}/issues/{env['PR']}/comments", {"body": body})
+          else:
+              # One open issue per ref: a master that stays red comments on it
+              # instead of opening an issue per push.
+              # Forgejo's q= match is loose, so the title prefix decides.
+              prefix = f"test-integration failed on {env['REF']}"
+              q = urllib.parse.quote(prefix)
+              same = []
+              for page in range(1, 11):
+                  _, found = call("GET", f"{repo}/issues?state=open&type=issues&limit=50&page={page}&q={q}")
+                  same += [i for i in found if i["title"].startswith(prefix)]
+                  if same or len(found) < 50:
+                      break
+              if same:
+                  status, _ = call("POST", f"{repo}/issues/{same[0]['number']}/comments", {"body": body})
+              else:
+                  status, _ = call("POST", f"{repo}/issues", {"title": f"{prefix} at {env['SHA'][:8]}", "body": body})
+          print("report posted:", status)
           EOF
 
   # INFORMATIONAL: bpf(BPF_MAP_CREATE) requires init-namespace CAP_BPF, which

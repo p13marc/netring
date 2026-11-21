@@ -4,9 +4,10 @@ name: Integration
 # myserver docs/vm-runner.md). Kept separate from ci.yml so the main
 # pipeline stays green if that runner is offline.
 on:
-  push:
-    branches: [main, master]
-    paths-ignore: ['**.md', 'docs/**', 'LICENSE*']
+  # No push trigger for the default branch (since 2026-11-21). Branch
+  # protection blocks merging a PR that is behind it, so the PR run has
+  # already tested the exact tree that lands. myserver:
+  # docs/services/ci-templates/README.md §No second run after a merge.
   pull_request:
     paths-ignore: ['**.md', 'docs/**', 'LICENSE*']
   # manual re-run path (privileged runner was offline, flaky suite)

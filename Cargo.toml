@@ -21,7 +21,7 @@ tokio = { version = "1.53.3", features = ["io-util", "net", "macros", "rt-multi-
 futures-core = { version = "0.3", default-features = false, features = ["std"] }
 crossbeam-channel = "0.5"
 etherparse = "0.21"
-pcap-file = "2"
+pcap-file = "3"
 metrics = "0.24"
 
 # Flow & session tracking lives in the flowscope crate

@@ -1539,7 +1539,7 @@ dependencies = [
  "ldap-parser",
  "lru",
  "md-5",
- "pcap-file",
+ "pcap-file 2.0.0",
  "quic-parser",
  "radius-parser",
  "serde",
@@ -2337,7 +2337,7 @@ dependencies = [
  "libc",
  "metrics",
  "nix",
- "pcap-file",
+ "pcap-file 3.0.0",
  "proptest",
  "rustc-hash 2.1.3",
  "serde",
@@ -2640,6 +2640,18 @@ dependencies = [
  "byteorder_slice",
  "derive-into-owned",
  "thiserror 1.0.69",
+]
+
+[[package]]
+name = "pcap-file"
+version = "3.0.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "3900579bc38e335a54d52a21470bb62bf59609cd9dd45306573a3598320c0429"
+dependencies = [
+ "byteorder_slice",
+ "derive-into-owned",
+ "once_cell",
+ "thiserror 2.0.21",
 ]
 
 [[package]]
@@ -3528,7 +3540,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "32497e9a4c7b38532efcdebeef879707aa9f794296a4f0244f6f69e9bc8574bd"
 dependencies = [
  "fastrand",
- "getrandom 0.3.4",
+ "getrandom 0.4.3",
  "once_cell",
  "rustix",
  "windows-sys 0.61.2",
